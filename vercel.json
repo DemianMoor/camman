@@ -127,6 +127,14 @@
     {
       "path": "/api/cron/delivery-rollup-reconcile",
       "schedule": "44 7 * * *"
+    },
+    {
+      "path": "/api/cron/refresh-contact-engagement",
+      "schedule": "10,25,40,55 * * * *"
+    },
+    {
+      "path": "/api/cron/refresh-contact-engagement?mode=full",
+      "schedule": "35 6 * * *"
     }
   ]
 }

@@ -4,6 +4,7 @@ import { db } from "@/db/client";
 import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { watchIngestHeartbeat } from "@/lib/conversions/monitor";
+import { watchEngagementHeartbeat } from "@/lib/engagement/monitor";
 import { can } from "@/lib/permissions";
 import { HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 import {
@@ -76,6 +77,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // read throws, the stamp below is skipped and tells-monitors reports THIS
     // job stale, instead of the watch silently stopping.
     await watchIngestHeartbeat(db);
+    // Contact lifecycle job dead-man (HEARTBEAT_JOBS.contactEngagement). Silent
+    // while no org has the engine on, and inside the first-run grace. Not
+    // try/caught, for the same reason as above: a throw here skips the stamp
+    // below, so tells-monitors reports THIS job stale instead of the watch
+    // going quiet unnoticed.
+    await watchEngagementHeartbeat(db, "incremental");
     // Stamp AFTER the work, so a run that threw does not look healthy.
     await recordHeartbeat(db, HEARTBEAT_JOBS.trackingMonitors.job_name);
   }

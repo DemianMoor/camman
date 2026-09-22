@@ -226,6 +226,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/lead-enrichment": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/lookup-worker": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/propagate-clickers": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/refresh-contact-engagement": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-contact-stats": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-audience-pools": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-creative-lifetime": null, // cron / webhook / import machinery -- no operator session reaches these

@@ -301,10 +301,10 @@ volume grew; nothing re-measured it until the Overview reached 30 s.
 1. Apply migration 0186 on prod (manual).
 2. Run `npx tsx scripts/backfill-delivery-rollup.ts --apply`. It's idempotent; took 2.6 min for 2,122 cells, ending with the `sent` foot against `stage_sends`.
 3. Deploy.
-4. **Trigger `/api/cron/delivery-rollup` FIRST, then `/api/cron/delivery-rollup-reconcile`**, both before the first scheduled tick.
+4. Trigger `/api/cron/delivery-rollup`, then `/api/cron/delivery-rollup-reconcile`, to get a first reconciliation result straight away.
 5. Watch pgss for the two new statements. The retired `report-rollup` became the #1 DB consumer by rewriting unchanged rows; this one must not.
 
-⚠️ **The mutual watch has a bootstrap order in BOTH directions.** The refresh pages if the reconciliation has never run, and the reconciliation pages if the refresh has never run. On 2026-09-22 the reconciliation was triggered first, and it sent one "rollup is not refreshing — never ran" message (cleared a minute later, once the refresh ran and the reconciliation re-checked). Seed the refresh heartbeats first, then run the reconciliation.
+⚠️ **The mutual watch paged on its first deploy.** The refresh pages if the reconciliation has never run, and the reconciliation pages if the refresh has never run. On 2026-09-22 the reconciliation was triggered first and sent one "rollup is not refreshing — never ran" message (cleared a minute later). **Fixed in #210:** every delivery-rollup heartbeat now has a first-run grace of 2× its interval (20 min / 6 h / 48 h), so "never ran" pages only if a job stays missing that long (see the first-run-grace section of [07-conventions.md](../07-conventions.md)). Running the refresh first is still the quickest way to get a first reconciliation result, but it's no longer what prevents the page.
 
 ## 6. Counting traps
 

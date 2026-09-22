@@ -2,6 +2,20 @@
 
 _Last updated: 2026-09-22_
 
+## A watched job's "never ran" gets a first-run grace, not a deploy-order ritual (2026-09-22)
+
+A dead-man watch (`checkHeartbeats`, [lib/reporting/cron-heartbeat.ts](../lib/reporting/cron-heartbeat.ts)) treats a job with **no heartbeat at all** as stale, because a job that never ran looks exactly like one that stopped. On the deploy that introduces a *mutual* pair, that is a false page in whichever direction runs first. On 2026-09-22 the delivery rollup's reconciliation ran before its refresh and sent one "rollup is not refreshing — never ran" alert. Writing the right order into the deploy steps was not enough: the next deploy forgets it.
+
+**The mechanism.** `HeartbeatExpectation.first_run_grace_hours`, set to **2× the watched job's interval**:
+
+- the watcher stamps when it FIRST sees the job missing, in `cron_locks` under `<job_name>:awaiting-first-run`, with `ON CONFLICT DO NOTHING` so a later check never resets it;
+- "never ran" becomes stale only once the job has stayed missing longer than the grace;
+- once the job has run, `max_age_hours` decides, exactly as before.
+
+It is **opt-in**. Today only the three delivery-rollup jobs carry it (20 min / 6 h / 48 h); the other 12 expectations are unchanged. Give it to any new watched job, especially one in a mutual pair.
+
+"Registered" is measured as *first seen missing by a watcher*, so the alert can arrive up to one watcher interval after the grace ends. A daily watcher of a never-run job pages at its first run after the grace. That is the same latency class as the ordinary "stopped running" case. Tested by [scripts/test-heartbeat-grace-db.ts](../scripts/test-heartbeat-grace-db.ts) (11 bars, red-proved both ways).
+
 ## A rollup that replaces a live query is derived from it, never re-derived beside it (2026-09-22)
 
 `stage_delivery_rollup` (migration 0186) replaces the Delivered % query's request-time scan. Four rules came out of building it, and they apply to any pre-aggregate that stands in for a live query:
@@ -13,7 +27,7 @@ _Last updated: 2026-09-22_
 
 Also: pick the freeze horizon from a **measured** late-arrival distribution (0 of 2.64M receipts arrived ≥ 6 days late), and let the reconciliation be what notices if that ever changes.
 
-**A mutual heartbeat watch has a bootstrap order.** Two jobs that each page when the other has "never run" will page on first deploy, whichever you start first, unless the FIRST one you run is the one whose own check is satisfied by nothing. For the rollup that means seeding the refresh heartbeats, then running the reconciliation. The reverse order sent one false "not refreshing" message on 2026-09-22. Write the order into the deploy steps, not just the design.
+**A mutual heartbeat watch pages on its first deploy unless it has a first-run grace.** Two jobs that each page when the other has "never run" will page whichever you start first; the rollup's did on 2026-09-22. A documented start order didn't make it safe. The fix is the first-run grace (the section at the top of this file, #210).
 
 ## A new index on a write-hot table must report its HOT-update rate before and after (2026-09-22)
 

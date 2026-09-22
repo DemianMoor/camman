@@ -4038,6 +4038,50 @@ export const counted_clickers = pgTable(
 
 export type CountedClicker = typeof counted_clickers.$inferSelect;
 
+// Pre-aggregated Delivered % cells (migration 0186, ClickUp 869f5q5au). One row
+// per (stage, number, SEND ET day) holding the live delivery query's four
+// counts — same definitions, computed by the same SQL fragments
+// (lib/reporting/delivery.ts). Written ONLY by the refresh job
+// (lib/reporting/delivery-rollup.ts); cells older than 7 ET days are final.
+// The day is part of the key so a stage that sent across ET midnight still
+// matches the live query, which windows individual sends.
+export const stage_delivery_rollup = pgTable(
+  "stage_delivery_rollup",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "cascade" }),
+    // Mirrors stage_sends.provider_phone_id's FK, so a deleted number degrades
+    // the same way in the rollup and in the live query.
+    provider_phone_id: integer("provider_phone_id").references(() => provider_phones.id, {
+      onDelete: "set null",
+    }),
+    sent_date_et: date("sent_date_et").notNull(),
+    sent: integer("sent").notNull(),
+    delivered: integer("delivered").notNull(),
+    undelivered: integer("undelivered").notNull(),
+    no_receipt: integer("no_receipt").notNull(),
+    refreshed_at: timestamp("refreshed_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    unique("stage_delivery_rollup_cell_uniq")
+      .on(table.stage_id, table.provider_phone_id, table.sent_date_et)
+      .nullsNotDistinct(),
+    index("stage_delivery_rollup_org_day_idx").on(table.org_id, table.sent_date_et),
+    check(
+      "stage_delivery_rollup_foots",
+      sql`sent >= 0 AND delivered >= 0 AND undelivered >= 0 AND no_receipt >= 0 AND delivered + undelivered + no_receipt = sent`,
+    ),
+  ],
+);
+
+export type StageDeliveryRollup = typeof stage_delivery_rollup.$inferSelect;
+
 // Q4/Q5 — per-NUMBER carrier policy (migration 0142). One row per
 // (number, carrier); an ABSENT row means allowed and uncapped, which is what
 // makes the empty table a no-op against today's behaviour.

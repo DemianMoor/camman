@@ -119,6 +119,14 @@
     {
       "path": "/api/cron/refresh-creative-lifetime",
       "schedule": "14 * * * *"
+    },
+    {
+      "path": "/api/cron/delivery-rollup",
+      "schedule": "3,13,23,33,43,53 * * * *"
+    },
+    {
+      "path": "/api/cron/delivery-rollup-reconcile",
+      "schedule": "44 7 * * *"
     }
   ]
 }

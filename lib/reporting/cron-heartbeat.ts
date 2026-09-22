@@ -114,6 +114,24 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 52, // daily cadence, ~2 missed runs
     label: "counted-clicker full rebuild (daily)",
   },
+  // ---- Delivered % rollup (migration 0186) — MUTUAL WATCH. The refresh job
+  // (every 10 min) watches the nightly reconciliation; the reconciliation
+  // watches both refresh tiers. Neither vouches for itself.
+  deliveryRollup: {
+    job_name: "delivery-rollup",
+    max_age_hours: 1, // every 10 min; 1h is ~5 missed runs
+    label: "Delivered % rollup refresh (every 10 min)",
+  },
+  deliveryRollupSettle: {
+    job_name: "delivery-rollup-settle",
+    max_age_hours: 7, // every 3h; ~2 missed settles
+    label: "Delivered % rollup 7-day settle (every 3 h)",
+  },
+  deliveryRollupReconcile: {
+    job_name: "delivery-rollup-reconcile",
+    max_age_hours: 50, // daily; ~2 missed runs
+    label: "Delivered % rollup reconciliation (nightly)",
+  },
   // ---- Tells (spec §4.5) — MUTUAL WATCH, because these two are the sole
   // detection layer for broken STOP intake and a dead job cannot report itself
   // dead. tellsMonitors (hourly) checks tellsSweep; tellsSweep (*/5) checks

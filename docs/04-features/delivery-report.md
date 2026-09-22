@@ -254,6 +254,45 @@ volume grew; nothing re-measured it until the Overview reached 30 s.
 
 ---
 
+## 5b. The stage delivery rollup (migration 0186) — SHADOW until cutover
+
+**Status (2026-09-22):** built and running in **shadow**. `/reports/delivery`, the Overview column and the tripwire still read the live query (`getDeliveryByStage` → `queryDeliveryByStage`). A separate cutover PR switches the two report surfaces to the rollup and adds the "as of" label and staleness flag. Cutover waits for the backfill, a clean snapshot gate and one clean nightly reconciliation. ClickUp `869f5q5au`.
+
+**Why.** Past ~1 day the live query is I/O-bound on both sides (§5). `stage_delivery_rollup` stores the same four counts per (stage, number, **send ET day**). A report window is then a sum over a few hundred rows: measured on a prototype built from prod data, **22–29 ms for 1, 7 and 14 days** (live: 0.5 s / 16.5 s / 20.2 s), with identical row counts and send totals.
+
+**One definition.** The cells are computed by `refreshDeliveryRollup` ([lib/reporting/delivery-rollup.ts](../../lib/reporting/delivery-rollup.ts)) using the live query's own exported fragments, `terminalCte` and `DELIVERY_COUNTS`. So the per-source fold before the join, `lower()`, delivered-wins, `no_receipt = NOT (d OR u)`, `sent = status 'sent'` and the 1-hour early-arrival margin are shared text, not a copy. Counts are stored for every provider; the `DLR_SOURCES` null-gate stays in the read layer.
+
+**Why the ET day is in the key.** 6 of 2,110 stages ever sent have sent across ET midnight (max span 15 h 40 m, all six in the last month). The live query windows individual *sends*, so without the day those stages couldn't match it whenever a report edge falls between their days. `readDeliveryRollup` sums a day range back to exactly the live (stage, number) rows.
+
+**Refresh — the only writer** (`/api/cron/delivery-rollup`, every 10 min at `:x3`):
+
+| Tier | Cells recomputed | When | Measured cost |
+|---|---|---|---|
+| A (fresh) | today + yesterday (ET) | every run | ~0.6 s warm / 2.2 s cold per day of stages |
+| B (settle) | the last 7 ET days | when the last settle is ≥ 3 h old | ~10 s |
+
+- **Scope is the SEND's day, not the stage.** `campaign_stages.sent_at` is NULL on 3 stages that really sent, and has been re-stamped up to 4 h 12 m after a stage's first send.
+- **Cells older than 7 ET days are final.** 0 of 2.64M terminal receipts ever arrived ≥ 6 days after their send (max 5 d 00:02). 99.1% of txr receipts land within a day, so tier B only picks up the late ~1%.
+- **One statement per org:** compute, upsert only the cells whose counts changed, delete the ones that vanished (e.g. a send left `sent`).
+- Nothing on `stage_sends` or the DLR intake path is written.
+
+**Correctness gates:**
+
+1. [scripts/test-delivery-rollup-db.ts](../../scripts/test-delivery-rollup-db.ts) runs on camman-v2 against a throwaway world. Its expected cells are **derived by hand** from the fixture, not read off the live query, so a defect the two share still fails. It covers: txr dedup, delivered-wins, mixed case, the tls `sent` / `inbound` exclusions, a receipt that lands before its send *and* before the window opens, a midnight straddle, a NULL number, a failed send, skip-unchanged, range isolation, a late receipt, a vanished cell, the foots CHECK and the tier logic.
+2. [scripts/verify-delivery-rollup.ts](../../scripts/verify-delivery-rollup.ts), the **snapshot gate**. In ONE `REPEATABLE READ` transaction it refreshes, reads back through the report path, diffs every row against the live query, then **rolls back**. Windows: yesterday, the 7 and 14 days ending yesterday, and 2026-08-15..21 (tls + ahi + txr all live). It prints its scope; zero rows fail. `--persisted` compares what is stored: strictly on frozen windows, informationally on recent ones.
+3. `/api/cron/delivery-rollup-reconcile`, **nightly**. It compares the stored rollup with the live query for the 7 frozen ET days ending 7 days ago, in one snapshot, and any diff pages Telegram. Recent days can't be reconciled exactly (receipts land and get matched between the two snapshots), which is why the nightly check uses the frozen window and the gate uses a single snapshot.
+4. The refresh job and the reconciliation watch each other's heartbeats (`lib/reporting/cron-heartbeat.ts`). Neither vouches for itself.
+
+**The tripwire stays on the live query** (owner decision, 2026-09-22). It needs a rolling 6 h window, sends at least 10 min old, and fresh data, none of which a day-grain rollup refreshed every 10 min can express. Since #206 the live version is cheap: bounded by `received_at` and restricted to tls stages.
+
+**Deploy order:**
+
+1. Apply migration 0186 on prod (manual).
+2. Run `npx tsx scripts/backfill-delivery-rollup.ts --apply`. It's idempotent; ~2 min, ~2.1K cells; it ends with a foot of Σ stored `sent` against `stage_sends` for every day before today.
+3. Deploy.
+4. Trigger `/api/cron/delivery-rollup-reconcile` once **before the first 10-minute tick**. The refresh job treats "the reconciliation has never run" as stale and would otherwise page.
+5. Watch pgss for the two new statements. The retired `report-rollup` became the #1 DB consumer by rewriting unchanged rows; this one must not.
+
 ## 6. Counting traps
 
 Each of these produced a plausible, wrong number during development.

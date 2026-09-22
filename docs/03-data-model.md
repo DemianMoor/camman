@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-09-19_
+_Last updated: 2026-09-22_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -175,6 +175,9 @@ erDiagram
   campaign_stages ||--o{ report_stage_hour : "hourly rollup (send-hour ET)"
   campaign_stages ||--o{ report_group_hour : "hourly rollup × group"
   contact_groups ||--o{ report_group_hour : "group dimension"
+  campaign_stages ||--o{ stage_delivery_rollup : "Delivered % cells (send ET day)"
+  provider_phones |o--o{ stage_delivery_rollup : "number (set null)"
+  organizations ||--o{ stage_delivery_rollup : "org"
 
   offers ||--o{ offer_payouts : "effective-dated CPA history"
 
@@ -400,6 +403,12 @@ erDiagram
 | `conversion_events` | UNIQUE(`keitaro_event_id`); `tid`, `stage_send_id`/`contact_id`/`campaign_id`/`stage_id`/`offer_id` (all **SET NULL**), `event_type_id` (locked once set) + `status` (NULL = unmapped), `conflicting_event_type_id` + `event_type_conflict_at` (a later type mapped to a different event), `revenue numeric(12,4)`, `occurred_at` (original time, never updated), `last_postback_at`, `keitaro_status`/`keitaro_type`/`keitaro_version`, `status_history`, `raw_params jsonb` | one row per Keitaro conversion (several per click). Written by `lib/conversions/ingest.ts`; **no reader until Phase 3**. Indexes: (campaign, event, contact), (contact, event), (offer, event, occurred_at), (stage, occurred_at), (stage_send), partial unmapped (org, created_at), partial type-conflict (org, event_type_conflict_at) |
 
 > RLS: all three tables enable RLS with an own-org `SELECT` policy (pattern `0178`); writes go through the server connection.
+
+### Stage delivery rollup (migration 0186)
+
+| Table | Grain / keys | Notes |
+|---|---|---|
+| `stage_delivery_rollup` | `id` bigserial; UNIQUE **NULLS NOT DISTINCT** (`stage_id`, `provider_phone_id`, `sent_date_et`); INDEX (`org_id`, `sent_date_et`) | The live delivery query's four counts — `sent`, `delivered`, `undelivered`, `no_receipt` — per (stage, number, **SEND's ET calendar day**), plus `refreshed_at` (last time the cell's counts moved) and `created_at`. **CHECK `stage_delivery_rollup_foots`**: all ≥ 0 and `delivered + undelivered + no_receipt = sent`. The day is in the key because 6 of 2,110 stages have sent across ET midnight; summing a day range reproduces the live query's (stage, number) rows exactly. `stage_id` cascades; `provider_phone_id` is **SET NULL**, mirroring `stage_sends.provider_phone_id`. Counts are stored for every provider; the `DLR_SOURCES` null-gate stays in the read layer. **Only writer:** `refreshDeliveryRollup` ([lib/reporting/delivery-rollup.ts](../lib/reporting/delivery-rollup.ts)), called by `/api/cron/delivery-rollup` and the one-off [scripts/backfill-delivery-rollup.ts](../scripts/backfill-delivery-rollup.ts). It computes cells with the live query's own `terminalCte` + `DELIVERY_COUNTS` and rewrites only cells whose counts changed. Cells older than 7 ET days are final. ~2.1K rows for all history. RLS: own-org `SELECT` only. See [04-features/delivery-report.md §5b](04-features/delivery-report.md). |
 
 ### Reports rollup (migration 0112)
 

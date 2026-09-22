@@ -182,8 +182,9 @@ const DLR_EARLY_ARRIVAL_MARGIN = sql`interval '1 hour'`;
 // passes new Date()).
 //
 // sql.raw() is used for the table/key/filter fragments: they come from the
-// DLR_SOURCES constant above and never from request input.
-function terminalCte(fromUtc: SQL) {
+// DLR_SOURCES constant above and never from request input. Exported for the
+// rollup refresh — see DELIVERY_COUNTS below.
+export function terminalCte(fromUtc: SQL) {
   const blocks = Object.values(DLR_SOURCES).map(
     (s) => sql`
       SELECT ${sql.raw(s.key)} AS ss_id,
@@ -198,6 +199,20 @@ function terminalCte(fromUtc: SQL) {
   );
   return sql.join(blocks, sql` UNION ALL `);
 }
+
+// The four counts, over `sends s LEFT JOIN terminal t ON t.ss_id = s.id`.
+// EXPORTED so the stage_delivery_rollup refresh (lib/reporting/delivery-rollup.ts)
+// computes its cells with THIS text rather than a retyped copy — the rollup and
+// the live query it is reconciled against must not be able to drift.
+export const DELIVERY_COUNTS = sql`
+  count(*)::int                                                 AS sent,
+  count(*) FILTER (WHERE t.d)::int                              AS delivered,
+  count(*) FILTER (WHERE t.u AND NOT COALESCE(t.d, false))::int AS undelivered,
+  -- ⚠️ NOT "no joined row". A tls message emits a non-terminal 'sent'
+  -- event before 'delivered', so a message can HAVE an event row and
+  -- still have NO receipt. Defining this as a missing join reported 0
+  -- where the truth was 14.
+  count(*) FILTER (WHERE NOT COALESCE(t.d OR t.u, false))::int  AS no_receipt`;
 
 // PERF (prod, 2026-09-22: 5.45M-row stage_sends, 2.5M-row textrequest_dlr_events,
 // Small compute / 512 MB shared_buffers). Wall-clock, no EXPLAIN instrumentation,
@@ -282,15 +297,7 @@ export async function queryDeliveryByStage(
         }
     ),
     terminal AS (${terminalCte(ts(b.fromUtc))})
-    SELECT s.stage_id, s.provider_phone_id,
-           count(*)::int                                                 AS sent,
-           count(*) FILTER (WHERE t.d)::int                              AS delivered,
-           count(*) FILTER (WHERE t.u AND NOT COALESCE(t.d, false))::int AS undelivered,
-           -- ⚠️ NOT "no joined row". A tls message emits a non-terminal 'sent'
-           -- event before 'delivered', so a message can HAVE an event row and
-           -- still have NO receipt. Defining this as a missing join reported 0
-           -- where the truth was 14.
-           count(*) FILTER (WHERE NOT COALESCE(t.d OR t.u, false))::int  AS no_receipt
+    SELECT s.stage_id, s.provider_phone_id, ${DELIVERY_COUNTS}
     FROM sends s
     LEFT JOIN terminal t ON t.ss_id = s.id
     GROUP BY 1, 2

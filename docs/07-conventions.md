@@ -2,6 +2,17 @@
 
 _Last updated: 2026-09-22_
 
+## A rollup that replaces a live query is derived from it, never re-derived beside it (2026-09-22)
+
+`stage_delivery_rollup` (migration 0186) replaces the Delivered % query's request-time scan. Four rules came out of building it, and they apply to any pre-aggregate that stands in for a live query:
+
+- **Compute with the live query's own fragments.** The refresh imports `terminalCte` and `DELIVERY_COUNTS` from [lib/reporting/delivery.ts](../lib/reporting/delivery.ts) rather than retyping them. A rollup with its own copy of the definitions drifts silently the first time someone edits one side.
+- **Never rewrite an unchanged row.** The retired `report-rollup` became the #1 and #2 query by total DB time by re-upserting ~3.9K live rows 1.7M times. The refresh's upsert carries `WHERE (…) IS DISTINCT FROM (EXCLUDED.…)`, so an unchanged cell costs no write, no dead tuple and no WAL.
+- **Reconcile on a FROZEN window, and exactly.** Recent cells can't be compared exactly with a live read: events land and get matched between the two snapshots. So the nightly check covers cells past the recompute horizon, where any difference is a defect. The pre-cutover gate covers recent windows by refreshing and comparing inside ONE transaction and rolling back.
+- **Anchor the fixture test by hand.** When the rollup and the live query share fragments, "rollup == live" cannot catch a defect in the shared part. [scripts/test-delivery-rollup-db.ts](../scripts/test-delivery-rollup-db.ts) asserts hand-derived cell values first, then compares with the live query as a second check.
+
+Also: pick the freeze horizon from a **measured** late-arrival distribution (0 of 2.64M receipts arrived ≥ 6 days late), and let the reconciliation be what notices if that ever changes.
+
 ## A new index on a write-hot table must report its HOT-update rate before and after (2026-09-22)
 
 **The rule.** A PR or migration that adds an index to a table written continuously states that table's HOT-update rate over a comparable window **before** the index and **after** it, in the PR body and the CHANGELOG entry. A drop is a finding to explain, not a detail. It is part of the index's cost, like its size and build time. Write-hot tables include `stage_sends`, `textrequest_dlr_events`, `ahoi_dlr_events`, `tells_webhook_events`, `campaign_stages`, `clicks`, `links`, `contacts`, `lookup_queue` and `cron_locks`.

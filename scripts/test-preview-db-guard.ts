@@ -93,6 +93,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "backfill-content-dedup-exposures.ts", why: "one-shot production backfill of the content-dedup ledgers" },
   { file: "backfill-conversion-events.ts", viaLibrary: true, why: "one-shot production backfill; writes only behind --apply (writes via lib/conversions/ingest, so it carries no write token of its own)" },
   { file: "backfill-creative-spam-scores.ts", why: "one-shot production backfill of creatives.spam_score" },
+  { file: "backfill-delivery-rollup.ts", viaLibrary: true, why: "one-shot production backfill of stage_delivery_rollup (migration 0186); dry-run default, writes only behind --apply, through lib/reporting/delivery-rollup (so it carries no write token of its own)" },
   { file: "backfill-drip-journey-lifecycle.ts", why: "one-shot production backfill; closes journeys already terminal in fact" },
   { file: "backfill-guidekn-destinations.ts", why: "one-shot production repair; writes only behind --apply" },
   { file: "backfill-optout-attributions.ts", why: "one-shot production backfill of opt_out_attributions" },
@@ -114,6 +115,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "set-textrequest-phone-config.ts", why: "one-off production data repair; writes only behind --apply" },
 
   // ── deliberate production proofs: preview cannot prove the deployed system ─
+  { file: "verify-delivery-rollup.ts", viaLibrary: true, why: "production gate for stage_delivery_rollup: its refresh (via lib/reporting/delivery-rollup) runs inside a REPEATABLE READ tx that always rolls back; --persisted is read-only" },
   { file: "verify-drip-enrichment-production.ts", why: "production proof of the deployed enrichment sweeper; synthetic +1999 numbers, self-cleaning" },
   { file: "verify-drip-routing-production.ts", why: "production proof of the deployed routing rules; synthetic fixtures, self-cleaning" },
   { file: "verify-intake-production.ts", why: "production proof of the deployed intake endpoint; sandbox leads through a sandbox key" },

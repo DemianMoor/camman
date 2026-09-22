@@ -118,6 +118,13 @@ npx tsx --conditions=react-server scripts/engagement-backfill.ts --apply
 sets `engine_mode = 'write'` and writes an `org_setting_events` audit row — all
 in one transaction. It refuses if the org already has `contact_engagement` rows.
 
+**Who may flip it.** `engine_mode` is part of the lifecycle configuration, so
+the Settings screen that edits it (PR 2) is gated on **`lifecycle.configure`**
+(manager and above), and every change is audited in `org_setting_events` under
+the key `lifecycle.engine_mode`. The permission constant exists from PR 1 so
+nothing can move the switch through the app before a gate exists for it; in PR 1
+the only writer is the backfill script above, which writes the same audit row.
+
 ## 6. Monitoring
 
 Heartbeats `contact-engagement` (every 15 min) and `contact-engagement-full`

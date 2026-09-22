@@ -124,6 +124,11 @@ export type Permission =
   | "spam.score"
   | "lookup.run"
   | "lookup.admin"
+  // Contact lifecycle (migration 0187): edit the org thresholds and the
+  // per-contact-group overrides, and flip lifecycle_settings.engine_mode. The
+  // Settings screen that uses it ships in PR 2; the constant exists from PR 1 so
+  // nothing can move the switch through the app before a gate exists for it.
+  | "lifecycle.configure"
   | "segment_rules.view"
   | "segment_rules.create"
   | "segment_rules.update"
@@ -366,6 +371,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "contact_groups.restore",
   "contacts.delete",
   "lookup.admin",
+  "lifecycle.configure",
   "opt_outs.delete",
   "opt_ins.delete",
   "clickers.delete",

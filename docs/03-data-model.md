@@ -178,6 +178,13 @@ erDiagram
   campaign_stages ||--o{ stage_delivery_rollup : "Delivered % cells (send ET day)"
   provider_phones |o--o{ stage_delivery_rollup : "number (set null)"
   organizations ||--o{ stage_delivery_rollup : "org"
+  contacts ||--o| contact_engagement : "lifecycle status (0187)"
+  contacts ||--o{ contact_engagement_transitions : "status history"
+  contacts ||--o{ contact_offer_campaigns : "exposure per offer x campaign"
+  offers ||--o{ contact_offer_campaigns : "offer"
+  campaigns ||--o{ contact_offer_campaigns : "campaign"
+  stage_sends ||--o| stage_send_lifecycle : "status at send"
+  organizations ||--o| lifecycle_settings : "lifecycle thresholds"
 
   offers ||--o{ offer_payouts : "effective-dated CPA history"
 
@@ -409,6 +416,20 @@ erDiagram
 | Table | Grain / keys | Notes |
 |---|---|---|
 | `stage_delivery_rollup` | `id` bigserial; UNIQUE **NULLS NOT DISTINCT** (`stage_id`, `provider_phone_id`, `sent_date_et`); INDEX (`org_id`, `sent_date_et`) | The live delivery query's four counts — `sent`, `delivered`, `undelivered`, `no_receipt` — per (stage, number, **SEND's ET calendar day**), plus `refreshed_at` (last time the cell's counts moved) and `created_at`. **CHECK `stage_delivery_rollup_foots`**: all ≥ 0 and `delivered + undelivered + no_receipt = sent`. The day is in the key because 6 of 2,110 stages have sent across ET midnight; summing a day range reproduces the live query's (stage, number) rows exactly. `stage_id` cascades; `provider_phone_id` is **SET NULL**, mirroring `stage_sends.provider_phone_id`. Counts are stored for every provider; the `DLR_SOURCES` null-gate stays in the read layer. **Only writer:** `refreshDeliveryRollup` ([lib/reporting/delivery-rollup.ts](../lib/reporting/delivery-rollup.ts)), called by `/api/cron/delivery-rollup` and the one-off [scripts/backfill-delivery-rollup.ts](../scripts/backfill-delivery-rollup.ts). It computes cells with the live query's own `terminalCte` + `DELIVERY_COUNTS` and rewrites only cells whose counts changed. Cells older than 7 ET days are final. ~2.1K rows for all history. RLS: own-org `SELECT` only. See [04-features/delivery-report.md §5b](04-features/delivery-report.md). |
+
+### Contact lifecycle / engagement (migration 0187)
+
+Per-contact lifecycle status, computed from the contact's own send and click history. **Only writer:** `refreshContactEngagement` ([lib/engagement/refresh.ts](../lib/engagement/refresh.ts)), run by `/api/cron/refresh-contact-engagement` and the one-off [scripts/engagement-backfill.ts](../scripts/engagement-backfill.ts). Nothing on `stage_sends`, `clicks` or the send path changes, and no trigger is added. See [04-features/contact-lifecycle.md](04-features/contact-lifecycle.md).
+
+| Table | Grain / keys | Notes |
+|---|---|---|
+| `contact_engagement` | `contact_id` PK (cascade); INDEX (`org_id`, `status`) and partial (`org_id`, `time_due_at`) `WHERE time_due_at IS NOT NULL` | One row per contact: `status` (CHECK `new`/`cold`/`hot`/`warm`/`freeze`/`suppressed`) + `status_changed_at`; the facts `msgs_total`, `msgs_since_click` (messages after the last human click — this, not `msgs_total`, is what `freeze_after_messages` is compared against), `msgs_7d/14d/30d/90d`, `first_sent_at`, `last_sent_at`, `first_click_at`, `last_click_at`; the freeze clock `freeze_entered_at` / `freeze_started_at` / `freeze_msgs` (only messages sent AFTER entering freeze count, which is why a backfilled contact cannot be suppressed at launch); the effective `freeze_cadence_days` and the `thresholds` jsonb that produced the row; `time_due_at` = the earliest instant the status can change with no new send or click (the incremental run's work list). **A missing row reads as `new` everywhere.** RLS: own-org `SELECT` only. |
+| `contact_engagement_transitions` | `id` bigserial; INDEX (`contact_id`, `created_at`) and (`org_id`, `created_at`) | One row per status change: `from_status` (NULL for a contact's first row), `to_status`, `reason` (CHECK: `backfill`, `first_seen`, `first_message`, `freeze_threshold`, `threshold_change`, `freeze_expired`, `human_click`, `click_aged_warm`, `click_aged_cold`, `recount`) and the `thresholds` in effect at the time, so a history row can be read later without guessing which settings were live. RLS: own-org `SELECT` only. |
+| `lifecycle_settings` | `org_id` PK (cascade) | Org singleton, `notification_settings` pattern: a missing row means the defaults in [lib/engagement/constants.ts](../lib/engagement/constants.ts). Holds `hot_days` (30), `warm_days` (120), `freeze_after_messages` (10), `freeze_cadence_days` (14), `suppress_after_days` (60), `suppress_min_freeze_messages` (2) under one range CHECK (`warm_days > hot_days`), plus **`engine_mode`** (`off` / `write` — the job skips an org until this is `write`), `reevaluate_requested_at`, `updated_at`, `updated_by`. RLS: own-org `SELECT` only. |
+| `contact_offer_campaigns` | PK (`contact_id`, `offer_id`, `campaign_id`); INDEX (`org_id`, `offer_id`, `contact_id`) | `first_sent_at`, `last_sent_at`, `messages` per (contact, offer, campaign) — the grain `offer_exposures` does NOT have (it is UNIQUE per contact x offer and keeps only the FIRST exposure), and the one ClickUp 869f53efz's "Y days since / N times" rule needs. Maintained by the engagement job, so the send path gains no work. RLS: own-org `SELECT` only. |
+| `stage_send_lifecycle` | `stage_send_id` PK → `stage_sends` (cascade) | The contact's status when the message went out, stamped at Prepare (PR 2) or rebuilt by the 60-day backfill (`reconstructed = true`). Send records are never rewritten to carry it; it cascades with the send, so the planned retention job carries it away too. RLS: own-org `SELECT` only. |
+
+Columns added to existing tables: `contact_groups.{freeze_after_messages, freeze_cadence_days, suppress_after_days, suppress_min_freeze_messages}` (per-group overrides, NULL = inherit, one range CHECK) and `campaigns.lifecycle_rules` (false for every campaign that existed before 0187; gates the lifecycle eligibility layers so a frozen audience can never change under an activated campaign).
 
 ### Reports rollup (migration 0112)
 

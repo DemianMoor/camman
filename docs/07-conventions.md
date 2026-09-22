@@ -2,6 +2,16 @@
 
 _Last updated: 2026-09-22_
 
+## Contact lifecycle status has exactly one definition (2026-09-22)
+
+The statuses (`new`/`cold`/`hot`/`warm`/`freeze`/`suppressed`, migration 0187) are computed in ONE place and read everywhere else.
+
+- **Evaluate only through `evaluationSelectSql`** ([lib/engagement/status-sql.ts](../lib/engagement/status-sql.ts)). The job, the settings preview and the tests all compose that one builder; a threshold comparison written anywhere else is a second definition that will drift. A "human click" is likewise `HUMAN_CLICK` from [lib/reporting/counted-clickers.ts](../lib/reporting/counted-clickers.ts), never retyped.
+- **Read status from `contact_engagement`, and treat a MISSING ROW as `new`.** The incremental run deliberately does not create rows for contacts nothing has happened to, so `coalesce(ce.status, 'new')` is the contract — a `JOIN` that drops row-less contacts silently drops every brand-new contact.
+- **Never compute status in the send path.** The drain and Prepare only ever read it, and no trigger is added to `stage_sends`. Status is maintained by `/api/cron/refresh-contact-engagement`; anything that needs fresher facts reads the live tables itself (as the send-time freeze-cadence check does in PR 4).
+- **`lifecycle_settings.engine_mode` gates the job per org.** It ships `'off'`, so the cron is a no-op until the one-off backfill has been approved and run. A watcher that pages for a switched-off job is wrong, which is why [lib/engagement/monitor.ts](../lib/engagement/monitor.ts) checks the switch before the heartbeat.
+- **The freeze clock counts only messages sent after `freeze_entered_at`.** That is what makes the backfill safe: existing freeze contacts start their clock at the backfill instant, so nobody is suppressed at launch on the strength of history nobody reviewed.
+
 ## A watched job's "never ran" gets a first-run grace, not a deploy-order ritual (2026-09-22)
 
 A dead-man watch (`checkHeartbeats`, [lib/reporting/cron-heartbeat.ts](../lib/reporting/cron-heartbeat.ts)) treats a job with **no heartbeat at all** as stale, because a job that never ran looks exactly like one that stopped. On the deploy that introduces a *mutual* pair, that is a false page in whichever direction runs first. On 2026-09-22 the delivery rollup's reconciliation ran before its refresh and sent one "rollup is not refreshing — never ran" alert. Writing the right order into the deploy steps was not enough: the next deploy forgets it.

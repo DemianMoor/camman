@@ -107,6 +107,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "cleanup-stage-test-fixtures.ts", why: "exists to delete test fixtures left in PRODUCTION; --apply, hardcoded reviewed ids" },
   { file: "delete-orphan-test-offers.ts", why: "exists to delete orphan test rows left in PRODUCTION" },
   { file: "drain-texthub-inbox.ts", why: "ingests real STOPs from the live provider inbox into production; --apply" },
+  { file: "engagement-backfill.ts", why: "production dry-run report + one-off backfill of contact_engagement (migration 0187); the dry run always rolls back, and --apply writes only after the owner approves the numbers" },
   { file: "import-texthub-optouts.ts", why: "imports real opt-outs from a provider export into production; --apply" },
   { file: "resync-stage-day-conversions.ts", viaLibrary: true, why: "one-shot production re-derive of the stage-day conversion columns; dry-run default, writes only behind --apply (writes via lib/keitaro/stage-day-conversions, so it carries no write token of its own)" },
   { file: "seed-ahoi-number-credential.ts", why: "seeds the real Ahoi sending number + credential in production" },

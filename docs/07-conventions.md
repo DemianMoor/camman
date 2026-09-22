@@ -2,6 +2,17 @@
 
 _Last updated: 2026-09-22_
 
+## A test never carries a production third-party key, and deletes only the rows it created (2026-09-22)
+
+`_env-preload` loads `.env.local`, which holds the **production** third-party keys as well as the production database. The preview-DB guard stops the database write, but it does nothing about the keys. [`scripts/test-lookup-uploads.ts`](../scripts/test-lookup-uploads.ts) was preview-guarded, and its header said "No Telnyx HTTP", yet every run sent the production `TELNYX_API_KEY` to `api.telnyx.com`, because `previewLookup` calls the balance endpoint.
+
+- **A test that reaches a third-party API mocks the HTTP call, and neutralises the key before the client module loads.** Overwrite the env var with an obviously fake value, then wrap `fetch`. Return canned JSON for the one expected request, and only when it carries the fake key. Make any other request to that host record itself and throw. Then assert the value the code returned is the canned one: that bar proves the mock is the path taken, and a mismatch turns it red with no network at all. Don't rely on "the client has no key, so it no-ops". In a test, the key is always loaded.
+- **Prove it with a dns/net trace, not by reading code.** A `--require` preload that logs `dns.lookup` and `net.Socket#connect` shows every host the run touched. Reading the code was how "No Telnyx HTTP" survived.
+- **Clean up by the key the test captured, never by a value a real row could share.** `phone_lookups` (PK = phone) and `lookup_queue` are global, and `csv_import` upserts on phone. So a teardown `DELETE … WHERE phone = ANY(<fixed test numbers>)` deletes a real row with that number, and the upsert overwrites it first. On camman-v2 the old lookup tests did both to seeded rows, and one of them still went green. The rule has three parts:
+  - draw collision-proof values: [`scripts/_fictional-phones.ts`](../scripts/_fictional-phones.ts) uses NANP 555-01XX with a random area code and last two digits;
+  - refuse to start if any drawn value already exists in a table the test writes;
+  - delete only by the PKs captured with `RETURNING`, or by the exact key set the test inserted where the PK is the value itself.
+
 ## A tracker-mirrored counter follows the tracker only while it still holds the tracker's value (2026-09-21)
 
 A stage counter that both a person and a tracker write has no provenance column, so **its value is its provenance**. If the counter still **equals the tracker's previous value** (the tracker's sum as it stood *before* this run wrote anything), the tracker owns it: mirror the new value **exactly**, so a downward correction reaches it, 0 included. If it **differs**, someone typed it (manual-results form, CSV): mirror it **guarded**, so a positive tracker value may still overwrite it but a **tracker 0 never does**.
@@ -306,7 +317,7 @@ DDL into the test would only ever test the copy. Two rules fall out of it:
   - **Narrowing is caught by the sample; DELETION is caught by the roster.** The per-needle bars iterate the surviving list, so removing a row outright leaves them green. The two roster assertions spell every id out, making a dropped or renamed needle a two-place edit a reviewer sees.
   - **Two second-order bars watch the controls themselves**: an exclusion that stops carrying a write signal, or stops reaching a database at all, is either a stale entry or the tell of a dead needle. 16 exclusions reach a database *only* through the `postgres` needle, which is where that needle's death lands. `viaLibrary: true` marks the entries that deliberately have no write token of their own.
 
-⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself**. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
+⚠️ **The known hole: a script whose writes happen only inside an app library it calls** (`ingestKeitaroConversions(db, …)`, say) carries no write token of its own and the scan cannot see it. Those are handled by being named in `EXCLUSIONS` anyway, but if you add one, **add the guard import yourself AND name the script in `GUARDED_VIA_LIBRARY`** (2026-09-22). Without the entry, a guard import in a script with no write token is only ordering-checked while it is there: delete it and the script silently leaves every bar. The entry makes the import **required**. The first entry is [`test-lookup-stats.ts`](../scripts/test-lookup-stats.ts), whose cache write happens inside `refreshLookupGroupStats`. Red-proved: the pre-change file (no guard, no write token) passes the population bar and fails only the new one. Transitive import analysis would close it and was measured: it flags ~39 more scripts, nearly all read-only diagnostics that merely import a write-capable module, which trades a crisp signal for a noisy one.
 
 ## "Selectable" and "selected" are FOUR separate registries for a behavioural lane tier (2026-09-18)
 

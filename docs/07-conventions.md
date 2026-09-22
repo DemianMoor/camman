@@ -2,6 +2,18 @@
 
 _Last updated: 2026-09-22_
 
+## A new index on a write-hot table must report its HOT-update rate before and after (2026-09-22)
+
+**The rule.** A PR or migration that adds an index to a table written continuously states that table's HOT-update rate over a comparable window **before** the index and **after** it, in the PR body and the CHANGELOG entry. A drop is a finding to explain, not a detail. It is part of the index's cost, like its size and build time. Write-hot tables include `stage_sends`, `textrequest_dlr_events`, `ahoi_dlr_events`, `tells_webhook_events`, `campaign_stages`, `clicks`, `links`, `contacts`, `lookup_queue` and `cron_locks`.
+
+**Why.** An UPDATE is HOT (heap-only: no index entries written, dead versions pruned in-page) only if **no column referenced by ANY index changes**. That covers key columns, expression inputs and partial-index predicate columns alike. One new index can therefore turn a table's cheap updates into full-cost ones: a new heap tuple, plus a new entry in **every** index on the table. Measured 2026-09-22: a partial index on `coalesce(matched_stage_send_id, stage_send_id)` took `textrequest_dlr_events` from **91% HOT to 0%** within minutes, because `lib/sends/textrequest-dlr.ts` sets `matched_stage_send_id` in a post-insert UPDATE. That meant every receipt update now writing into all six of the table's indexes. Nothing errored and no query got slower; the cost only shows in these counters. The index was dropped the same day (the event-aggregation section below).
+
+**How to measure.**
+
+- The counters are cumulative, so compare **deltas**: `n_tup_upd` and `n_tup_hot_upd` from `pg_stat_user_tables`, read at the start and end of a window before the index and of a similar window after it (same time of day, similar send volume). Minutes are enough on a busy table; say how many updates the window held.
+- Before building, answer it on paper: list the columns the table's writers UPDATE after insert (`git grep "UPDATE <table>"`). If the new index references any of them, expect HOT to go to ~0 for those updates.
+- Tables that are already ~0% HOT (`stage_sends`: 8 HOT of 11.8M updates) lose nothing on this axis. Say so rather than skipping the line.
+
 ## Event/DLR aggregations are driven from the windowed send set — never aggregate the full event table first (2026-09-22)
 
 A report that joins a window of sends to an event table (DLRs, clicks, conversions, webhooks) must **bound the event side by the same window before aggregating it**. Aggregating the whole event table and then joining the window's sends makes the cost grow with the table's *history*, not with the question asked, and nothing announces it: it was fine when written and got slower every day.

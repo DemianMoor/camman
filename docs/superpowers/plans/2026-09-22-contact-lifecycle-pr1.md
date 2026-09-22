@@ -2206,14 +2206,14 @@ Expected: the guards pass, eslint is clean and tsc prints nothing. Do NOT run th
 
 ```bash
 cd /c/AFF/camman/.claude/worktrees/lifecycle-recon
-DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx --conditions=react-server scripts/engagement-backfill.ts --org "$(DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx -e "import('./db/client').then(async ({db})=>{const {sql}=await import('drizzle-orm');const r:any=await db.execute(sql\`SELECT id FROM organizations WHERE name = 'CamMan Demo'\`);console.log(r[0].id);process.exit(0)})")"
+DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx --conditions=react-server scripts/engagement-backfill.ts --org <demo-org-uuid>
 ```
 Expected:
 - a report with 6 status rows and a group table;
 - `DRY RUN — nothing was written`;
 - then, via MCP on camman-v2, `SELECT count(*) FROM contact_engagement` = 0.
 
-If the inline org lookup is awkward, look the id up with the MCP (`SELECT id FROM organizations WHERE name = 'CamMan Demo'`) and pass it literally.
+Look the demo org id up first with the Supabase MCP on camman-v2: `SELECT id FROM organizations WHERE name = 'CamMan Demo'`.
 
 - [ ] **Step 5: Commit.**
 

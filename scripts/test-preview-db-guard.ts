@@ -44,7 +44,9 @@ import { readdirSync, readFileSync, existsSync } from "node:fs";
 // this tree it flags ~39 more scripts, nearly all read-only diagnostics that
 // merely import a write-capable module, and it trades a crisp signal for a
 // noisy one. If you add a script that writes ONLY through a library, add the
-// guard import yourself — see docs/07-conventions.md.
+// guard import yourself AND name the script in GUARDED_VIA_LIBRARY below, which
+// makes the import REQUIRED instead of merely checked while present — see
+// docs/07-conventions.md.
 
 const HELPER = "_require-preview-db";
 const HELPER_FILE = `${HELPER}.ts`;
@@ -131,6 +133,18 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "verify-conversion-events.ts", viaLibrary: true, why: "read-only conversion verification against production; every statement is a SELECT, so it carries no write token (the entry is belt-and-braces)" },
   { file: "verify-migration-integrity.ts", why: "read-only diagnostic (CLAUDE.md §11); the match is createHash().update()" },
   { file: "verify-send-state-perf.ts", why: "read-only: EXPLAIN ANALYZE over a SELECT" },
+];
+
+/**
+ * Preview-only scripts whose defining write happens inside an app library, so
+ * the source scan cannot see it. A script that imports the guard without a
+ * write token of its own is only ordering-checked WHILE the import is there:
+ * delete the import and it silently leaves every bar. Naming it here makes the
+ * import REQUIRED — the bar below goes red without it. Each entry names the
+ * library write.
+ */
+const GUARDED_VIA_LIBRARY: ReadonlyArray<{ file: string; why: string }> = [
+  { file: "test-lookup-stats.ts", why: "refreshLookupGroupStats (lib/telnyx/lookup-stats) upserts lookup_group_stats_cache" },
 ];
 
 let failures = 0;
@@ -318,7 +332,8 @@ function main() {
   console.log(`scripts scanned:            ${files.length}`);
   console.log(`write-capable (derived):    ${writers.length}`);
   console.log(`deliberate exclusions:      ${EXCLUSIONS.length}`);
-  console.log(`must carry the guard:       ${population.length}\n`);
+  console.log(`must carry the guard:       ${population.length}`);
+  console.log(`  + named via a library:    ${GUARDED_VIA_LIBRARY.length}\n`);
 
   // An empty population would make every check below vacuously true.
   check("the derived population is non-empty", population.length > 0, `${population.length} scripts`);
@@ -364,6 +379,12 @@ function main() {
         outOfOrder.length === 0, outOfOrder.join("; "));
   check("no module-scope query runs before the guard import",
         queriesFirst.length === 0, queriesFirst.join(", "));
+  // The scripts the scan cannot see writing: present AND guarded, by name.
+  const viaLibraryBad = GUARDED_VIA_LIBRARY.filter(
+    (e) => !sources.has(e.file) || !verdictFor(sources.get(e.file)!).importsHelper,
+  ).map((e) => (sources.has(e.file) ? `${e.file} (no guard import)` : `${e.file} (gone)`));
+  check(`⭐ every script named in GUARDED_VIA_LIBRARY exists and imports ${HELPER} (${GUARDED_VIA_LIBRARY.length} scripts)`,
+        viaLibraryBad.length === 0, viaLibraryBad.join(", "));
 
   // ── 5. the exclusion list cannot rot ───────────────────────────────────────
   const goneExclusions = EXCLUSIONS.filter((e) => !existsSync(`scripts/${e.file}`)).map((e) => e.file);

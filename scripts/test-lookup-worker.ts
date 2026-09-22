@@ -3,9 +3,23 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 
 import { createRequire } from "node:module";
 
+import { fictionalPhones, refuseIfPhonesInUse } from "./_fictional-phones";
+
+// No production third-party key in a test (docs/07-conventions.md): `_env-preload`
+// loads `.env.local`, whose TELNYX_API_KEY is the PRODUCTION key. This run makes no
+// Telnyx call (see below), but it must not carry the key either — if a regression
+// ever let it reach the client, the request would fail on a fake key instead of
+// reaching Telnyx. Set before main()'s dynamic lib/telnyx imports.
+const FAKE_TELNYX_KEY = "test-not-a-real-telnyx-key";
+process.env.TELNYX_API_KEY = FAKE_TELNYX_KEY;
+delete process.env.TELNYX_API_URL;
+
 // Phase 3 worker tests: pure (Warsaw midnight, summary) + live-DB (lease single-
 // runner + crash recovery, attempt-summed daily cap, enqueue dedup, worker lease
-// guard). All DB writes are test rows, cleaned up in finally. No Telnyx HTTP.
+// guard). All DB writes are test rows, deleted by key in finally. No Telnyx HTTP:
+// runLookupWorker is only called while this run holds the lease, so it returns
+// `no_lease` before its first Telnyx call (a dns/net trace of a full run on
+// 2026-09-22 showed no connection to any Telnyx host).
 //
 // ⚠️ PREVIEW-ONLY, AND IT WRITES. `.env.local` IS PRODUCTION. Run it as:
 //   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
@@ -18,6 +32,15 @@ import { createRequire } from "node:module";
 // ⭐ `lookup_settings` IS ONE GLOBAL ROW, and the lease bars rewrite it. The
 // whole row is read first; `finally` puts `worker_lease_until` back to exactly
 // what it was, then reads the row again and fails the run unless it matches.
+//
+// ⭐ CLEANUP BY KEY, NEVER BY A SHARED NUMBER (2026-09-22). phone_lookups
+// (PK = phone) and lookup_queue are global. The numbers used to be fixed
+// (+12128675309…) and teardown deleted from both tables by them, so a real row
+// with one of those numbers would have gone too. Now the numbers come from
+// _fictional-phones, the run refuses to start if any is in use, and teardown
+// deletes only: the lookup_queue rows of the batches this run created (every
+// row in them is this run's), those batches by id, and the phone_lookups keys
+// this run inserted.
 
 // Neutralize the `server-only` import guard for this node/tsx test (tsx runs CJS
 // here) without a global export condition — a condition would also alter how other
@@ -33,6 +56,9 @@ try {
 }
 
 async function main() {
+  if (process.env.TELNYX_API_KEY !== FAKE_TELNYX_KEY) {
+    throw new Error("TELNYX_API_KEY is not the fake test key; refusing to load lib/telnyx");
+  }
   const { warsawMidnightUtc, countAttemptsToday } = await import("@/lib/telnyx/daily-cap");
   const { formatBatchSummary } = await import("@/lib/telnyx/summary");
   const { claimWorkerLease, renewWorkerLease, releaseWorkerLease } = await import("@/lib/telnyx/lease");
@@ -48,11 +74,12 @@ async function main() {
   };
   const ok = (c: boolean, m: string) => eq(!!c, true, m);
 
-  const testPhones = ["+12128675309", "+13128675309", "+14088675309"];
-  const cachePhone = "+16468675309";
-  const capPhone = "+19998880000";
-  const batchIds: string[] = [];
-  const allPhones = [...testPhones, cachePhone, capPhone];
+  const allPhones = fictionalPhones(5);
+  const [cachePhone, capPhone, ...testPhones] = allPhones;
+  // Before the first write: nothing real can be overwritten or deleted.
+  await refuseIfPhonesInUse(db, allPhones);
+  const batchIds: string[] = []; // lookup_batches PKs THIS run created
+  const insertedLookups: string[] = []; // phone_lookups PKs THIS run inserted
 
   // The global row as it stood before any bar touched it (undefined = no row).
   const settingsRow = async () =>
@@ -125,9 +152,10 @@ async function main() {
     batchIds.push(r2.batchId);
     eq(r2.enqueued, 0, "re-enqueue same numbers: 0 (already pending)");
     // cache hit: a phone already complete in phone_lookups
-    await db.execute(sql`
+    const cached = await db.execute<{ phone: string }>(sql`
       INSERT INTO phone_lookups (phone, line_type, carrier_norm, source, lookup_status)
-      VALUES (${cachePhone}, 'mobile', 'Verizon', 'telnyx', 'complete')`);
+      VALUES (${cachePhone}, 'mobile', 'Verizon', 'telnyx', 'complete') RETURNING phone`);
+    insertedLookups.push(...cached.map((r) => r.phone));
     const r3 = await enqueueNormalized(orgId, [cachePhone], "upload");
     batchIds.push(r3.batchId);
     eq([r3.cacheHits, r3.enqueued], [1, 0], "already-looked-up number: 1 cache hit, 0 enqueued (free)");
@@ -140,11 +168,23 @@ async function main() {
       console.log(`\nlookup_settings: ${same ? "✓ row identical to before the run" : "✗ ROW DIFFERS from before the run"} (worker_lease_until=${settingsBefore.lease ?? "NULL"})`);
       if (!same) failures++;
     }
-    // cleanup — remove all test data from the global tables
+    // cleanup — only what this run created, by key; never by phone number
     const { pgArray } = await import("@/lib/telnyx/pg-array");
-    if (batchIds.length) await db.execute(sql`DELETE FROM lookup_batches WHERE id = ANY(${pgArray(batchIds, "uuid")})`);
-    await db.execute(sql`DELETE FROM phone_lookups WHERE phone = ANY(${pgArray(allPhones, "text")})`);
-    await db.execute(sql`DELETE FROM lookup_queue WHERE phone = ANY(${pgArray(allPhones, "text")})`);
+    const batches = pgArray(batchIds, "uuid");
+    if (batchIds.length) {
+      await db.execute(sql`DELETE FROM lookup_queue WHERE batch_id = ANY(${batches})`);
+      await db.execute(sql`DELETE FROM lookup_batches WHERE id = ANY(${batches})`);
+    }
+    if (insertedLookups.length) {
+      await db.execute(sql`DELETE FROM phone_lookups WHERE phone = ANY(${pgArray(insertedLookups, "text")})`);
+    }
+    const phones = pgArray(allPhones, "text");
+    const left = await db.execute<{ n: number }>(sql`
+      SELECT ((SELECT count(*) FROM lookup_batches WHERE id = ANY(${batches}))
+            + (SELECT count(*) FROM lookup_queue WHERE batch_id = ANY(${batches}) OR phone = ANY(${phones}))
+            + (SELECT count(*) FROM phone_lookups WHERE phone = ANY(${phones})))::int AS n`);
+    console.log(`teardown: ${left[0].n} row(s) from this run left behind (expected 0)`);
+    if (left[0].n !== 0) failures++;
     await sqlEnd();
   }
 

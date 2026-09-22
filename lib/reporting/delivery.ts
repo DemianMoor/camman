@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
@@ -56,7 +56,11 @@ import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 // 'ahoi'). Getting this wrong silently yields a provider that never matches.
 
 export interface DlrSource {
-  /** Capture table holding this provider's delivery receipts. */
+  /**
+   * Capture table holding this provider's delivery receipts. MUST have a
+   * `received_at` column stamped at INSERT (wall-clock, never a provider
+   * timestamp) and an index on it — the query bounds every source by it.
+   */
   table: string;
   /** SQL expression yielding the stage_sends id this event belongs to. */
   key: string;
@@ -152,14 +156,34 @@ function addOneDay(d: string): string {
   return new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
 }
 
+// How long BEFORE a send's sent_at its receipt can be written. Not zero: the
+// provider's callback can land before our own post-send UPDATE stamps sent_at.
+// Measured 2026-09-22 over every tls/ahi receipt and two weeks of txr: earliest
+// tls −14.3 s (256 rows), txr −4.3 s (51 rows), ahi never early, and nothing
+// more than a minute early. One hour is ~250× the worst case observed.
+// scripts/verify-delivery-received-bound.ts re-checks it against the unbounded
+// query — a zero margin would silently drop those early receipts.
+const DLR_EARLY_ARRIVAL_MARGIN = sql`interval '1 hour'`;
+
 // One terminal row per MESSAGE, per registered source, UNION ALL'd.
 //
 // ⚠️ The GROUP BY must happen HERE, before the join to sends. Folding after the
 // join reintroduces the txr 3.2× row inflation documented above.
 //
+// ⚠️ BOUNDED BELOW BY THE WINDOW. A receipt cannot precede its send (beyond the
+// margin above), so receipts received before the window opened can never join a
+// send in it. Without this bound every call aggregated the WHOLE receipt
+// history — 1,004,973 txr groups to report on one day's 60,886 sends, 12.9–13.9 s
+// and ~1.3 GB read per Overview load (2026-09-22), growing every day. Every
+// source table has a received_at index and its heap is in insert order, so the
+// scan now covers the window's slice of history. NO upper bound: receipts land
+// up to 5 days after the send (txr reconcile poll). Requires every DLR source
+// to stamp received_at at INSERT time — all three do (DB default now(); tells
+// passes new Date()).
+//
 // sql.raw() is used for the table/key/filter fragments: they come from the
 // DLR_SOURCES constant above and never from request input.
-function terminalCte() {
+function terminalCte(fromUtc: SQL) {
   const blocks = Object.values(DLR_SOURCES).map(
     (s) => sql`
       SELECT ${sql.raw(s.key)} AS ss_id,
@@ -168,22 +192,32 @@ function terminalCte() {
       FROM ${sql.raw(s.table)}
       WHERE lower(status) IN ('delivered', 'undelivered')
         AND ${sql.raw(s.key)} IS NOT NULL
+        AND received_at >= ${fromUtc} - ${DLR_EARLY_ARRIVAL_MARGIN}
         ${s.filter ? sql`AND ${sql.raw(s.filter)}` : sql``}
       GROUP BY 1`,
   );
   return sql.join(blocks, sql` UNION ALL `);
 }
 
-// PERF (measured against prod, 3.07M-row / 2601 MB stage_sends). The `sends`
-// scan is the entire cost — the DLR side is ~6 ms against a ~540-row build side.
-//   7-day window:  ~832 ms WARM (stable over 4 identical runs), ~2.5 s COLD
-//   30-day window: 11.0 s  ⇒ the route caps the range at 14 days
-// ⚠️ Size decisions off the COLD figure. An earlier note here read "473 ms",
-// which was one warm measurement on a smaller window and made the 14-day cap
-// look roomier than it is.
-// stage_sends_org_sent_at_idx is (org_id, sent_at), so status/stage_id/
-// provider_phone_id are heap fetches; a covering index would fix it but is a
-// migration (ClickUp 869ehwae3).
+// PERF (prod, 2026-09-22: 5.45M-row stage_sends, 2.5M-row textrequest_dlr_events,
+// Small compute / 512 MB shared_buffers). Wall-clock, no EXPLAIN instrumentation,
+// median of 3 alternating runs on windows ending yesterday:
+//   1 day   (60,886 sends):   523 ms  (was 10.4 s — the unbounded receipt scan)
+//   7 days  (419,108 sends):  16.5 s  (was 22.3 s)
+//   14 days (852,251 sends):  20.2 s  (was 25.4 s)
+// First-touch ("cold") runs on untouched historical windows: 1 day 16.1 s,
+// 7 days 22.2 s — a lower bound only, so an OLD window scans every receipt
+// received since it opened, not just its own.
+// Past ~1 day BOTH sides are I/O-bound on this instance and no query shape fixes
+// that (tried 2026-09-22: a semi-join and a LATERAL per-send probe over new
+// send-key indexes — worse at 7 days, 20 s and 42 s, and the indexes turned
+// every DLR processor UPDATE non-HOT; dropped). The sends side is heap fetches
+// off stage_sends_org_sent_at_idx (status/stage_id/provider_phone_id are not
+// in it — ClickUp 869ehwae3); the receipt side is the window's share of the
+// txr heap. The structural fix is a per-send delivery-state table — see
+// docs/04-features/delivery-report.md.
+// ⚠️ Size decisions off the COLD figure, and never off an EXPLAIN ANALYZE
+// timing: per-node instrumentation inflated the per-send variants 2–5×.
 export async function getDeliveryByStage(
   orgId: string,
   range: DeliveryRange,
@@ -247,7 +281,7 @@ export async function queryDeliveryByStage(
             : sql``
         }
     ),
-    terminal AS (${terminalCte()})
+    terminal AS (${terminalCte(ts(b.fromUtc))})
     SELECT s.stage_id, s.provider_phone_id,
            count(*)::int                                                 AS sent,
            count(*) FILTER (WHERE t.d)::int                              AS delivered,

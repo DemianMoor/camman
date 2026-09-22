@@ -1,6 +1,6 @@
 # Delivery Report
 
-_Last updated: 2026-08-14_
+_Last updated: 2026-09-22_
 
 Delivery-rate visibility across every provider. Three surfaces read from **one**
 query layer — [lib/reporting/delivery.ts](../../lib/reporting/delivery.ts) — so
@@ -160,36 +160,97 @@ register a source whose receipts you have not validated against reality.
 
 ## 5. Cost — and why the window is capped at 14 days
 
-Measured against prod 2026-08-13 (`stage_sends`: 3.07M rows / 2601 MB):
+### The receipt side is bounded by the window (2026-09-22)
 
-| Window | Sends scanned | Server-side |
-|---|---|---|
-| 7 days | ~560,000 | **~832 ms warm** (stable over 4 identical runs) · **~2.5 s cold** |
-| 30 days | 2,198,888 | **11.0 s** |
+Every DLR branch of the `terminal` CTE carries
+`received_at >= <window start> − DLR_EARLY_ARRIVAL_MARGIN` (1 hour). Before
+that, every call aggregated the **whole receipt history** and only then joined
+the window's sends. Text Request went live on 2026-08-20 at ~150K receipt rows
+a day, so the cost grew daily. On 2026-09-22 one day's Overview (60,886 sends)
+built **1,004,973** txr aggregate groups to use 34,624 of them: 12.9–13.9 s,
+~1.3 GB read per load (more than `shared_buffers`, so every load also evicted
+the cache), and an 87 MB sort spill.
 
-> ⚠️ **Corrected 2026-08-14.** This table previously read "473 ms" for 7 days —
-> a single favorable measurement. Repeated runs put the full query at **832 ms
-> warm and ~2.5 s cold**; the 473 ms figure was a warm buffer cache on a
-> slightly smaller window. Size decisions off the COLD figure. Widening the
-> grain to `(stage, phone)` was **not** the cause: measured same-session on
-> identical runs, that costs **+8.4%** (238 ms → 258 ms on the bare aggregate).
+Why the bound is safe, and why it has a margin and no upper bound:
 
-The whole cost is the `stage_sends` scan: `stage_sends_org_sent_at_idx` is
-`(org_id, sent_at) WHERE sent_at IS NOT NULL`, so `status` and `stage_id` are
-heap fetches. The DLR side is ~3 ms against a ~490-row hash.
+- **Receipts can land before `sent_at`.** The provider's callback can beat our
+  own post-send `UPDATE`. Measured over every tls/ahi receipt and two weeks of
+  txr: earliest tls **−14.3 s** (256 rows, 218 terminal), txr **−4.3 s** (51),
+  ahi never early, nothing more than a minute early. A zero margin would have
+  silently dropped those receipts; 1 hour is ~250× the worst case seen.
+- **Receipts arrive late** — txr up to 5 days (reconcile poll), tls 3 days. So
+  the bound is lower-only.
+- **It relies on `received_at` being stamped at INSERT.** All three sources do
+  (column default `now()`; tells passes `new Date()`); `DlrSource` documents the
+  requirement for the next one.
+
+`scripts/verify-delivery-received-bound.ts` runs the unbounded reference and the
+live query in **one REPEATABLE READ snapshot** and diffs every row. Identical on
+2026-09-22 for 1 day, 7 days, 14 days, a 7-day window with all three sources
+live (08-15..21), and the tripwire's shape. Re-run it if a provider's timing
+behaviour changes.
+
+### Measured cost (prod, 2026-09-22)
+
+Wall-clock, no `EXPLAIN` instrumentation, median of 3 alternating runs on
+windows ending yesterday (`stage_sends` 5.45M rows; Small compute, 512 MB
+`shared_buffers`):
+
+| Window | Sends | Bounded (now) | Unbounded (before) |
+|---|---|---|---|
+| 1 day | 60,886 | **523 ms** | 10.4 s |
+| 7 days | 419,108 | **16.5 s** | 22.3 s |
+| 14 days | 852,251 | **20.2 s** | 25.4 s |
+
+First-touch ("cold") runs on untouched historical windows: 1 day 16.1 s, 7 days
+22.2 s. The bound is lower-only, so an **old** window scans every receipt
+received since it opened. Windows ending today, which is how the Overview is
+used, scan their own slice only.
+
+**Past ~1 day both sides are I/O-bound on this instance, and no query shape
+fixes that.** Two alternatives were built and measured on 2026-09-22, then
+rejected:
+
+- **Semi-join / `LATERAL` per-send probe over new send-key indexes.** The
+  semi-join never used the indexes: for 61K probes the planner prices a
+  sequential read lower. `LATERAL` did use them, but it scales with sends:
+  7 days took **42 s**. Worse, `textrequest-dlr.ts` and `ahoi-dlr.ts` set
+  `matched_stage_send_id` in a post-insert `UPDATE`. Indexing that column made
+  **every one of those updates non-HOT** (txr 91% HOT → 0%). The indexes were
+  dropped the same day.
+- **`EXPLAIN ANALYZE` timings misled.** Per-node instrumentation inflated the
+  per-send variants 2–5×. Compare shapes on wall-clock.
+
+The remaining cost is two I/O-bound reads, each sized by the window:
+
+- **Sends:** heap fetches off `stage_sends_org_sent_at_idx`, which doesn't
+  carry `status` / `stage_id` / `provider_phone_id` (ClickUp `869ehwae3`).
+- **Receipts:** the window's share of the txr heap.
+
+The structural fix for 7–14 day windows is a per-send delivery-state table,
+maintained incrementally the way `counted_clickers` is, plus that covering
+index. It's tracked as its own card, together with the compute-tier flag.
 
 Therefore:
 
 - `/api/reports/delivery` caps the range at **14 days** (`MAX_RANGE_DAYS`).
 - The Overview route permits **92** days, so its `Delivered %` column is
   **computed only when the range is ≤ 14 days**. Beyond that the column reports
-  `null` and the UI says why — otherwise a wide Overview range would inherit the
-  11 s cost and time out.
+  `null` and the UI says why. The Overview now reads delivery **in parallel**
+  with the funnel instead of after it.
 
 `campaign_stages.sms_count` is **not** a shortcut: it is `0` on all 882 stages
 with API sends (a manual-mode field), so `Sent` cannot come from a pre-aggregate.
 
-**Raising either cap requires the covering index first** — ClickUp `869ehwae3`.
+**Raising either cap requires the structural change first.** Don't widen it on
+the assumption that the query scales.
+
+<details><summary>Superseded 2026-08-13 measurement (kept for the record)</summary>
+
+7 days ~832 ms warm / ~2.5 s cold, 30 days 11.0 s — taken when Text Request had
+50 sends in total, so the receipt side was ~3 ms. It stopped being true as txr
+volume grew; nothing re-measured it until the Overview reached 30 s.
+</details>
 
 ---
 

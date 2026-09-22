@@ -1,3 +1,8 @@
+import "./_env-preload";
+import "./_require-preview-db"; // second — refuses any target but the preview DB
+
+import { createRequire } from "node:module";
+
 // Phase 4 verification: the messaging_status='eligible' gate. Two parts:
 //  (1) FUNCTIONAL (rolled-back txn): a contact in a segment's manual membership is
 //      returned by buildSegmentAudienceClause when eligible, and DISAPPEARS once it
@@ -6,11 +11,15 @@
 //      With all rows currently eligible the planner may seqscan broad reads, so we
 //      also (a) prove usability via SET enable_seqscan=off and (b) test a SELECTIVE
 //      scan that should pick the partial index naturally today.
-// Run: npx tsx scripts/test-eligible-gate.ts
-import { config } from "dotenv";
-import { createRequire } from "node:module";
-import { resolve } from "node:path";
-config({ path: resolve(process.cwd(), ".env.local") });
+//
+// ⚠️ PREVIEW-ONLY, AND IT WRITES (inside a rolled-back txn). `.env.local` IS
+// PRODUCTION. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
+//     npx tsx scripts/test-eligible-gate.ts
+// The `_require-preview-db` import above is the refusal; it runs before
+// db/client is evaluated. (Until 2026-09-22 this file loaded `.env.local` with
+// dotenv and reached db/client only through a dynamic import, which
+// `check:guards` could not see — so a bare run wrote to production.)
 const req = createRequire(import.meta.url);
 try {
   const p = req.resolve("server-only");
@@ -76,16 +85,22 @@ async function main() {
 
   // ---- (2) index selection ----
   console.log("\n(2) index selection (EXPLAIN):");
-  const planText = async (setup: string, query: ReturnType<typeof sql>) => {
-    if (setup) await raw.unsafe(setup);
-    const rows = await db.execute<{ "QUERY PLAN": string }>(sql`EXPLAIN ${query}`);
-    if (setup) await raw.unsafe("RESET enable_seqscan");
-    return rows.map((r) => r["QUERY PLAN"]).join("\n");
-  };
+  // The SET LOCAL and the EXPLAIN run in ONE transaction. They used to be two
+  // pool calls (`raw.unsafe(SET)`, then `db.execute(EXPLAIN)`), and with a pool
+  // of 5 they can land on different connections: the setting never reached the
+  // plan, and a session-level SET stayed behind on a pooled connection. On
+  // production that was masked because the natural plan already used the index;
+  // on camman-v2 (one org owns every contact) it made the forced bar red.
+  const planText = (setup: string, query: ReturnType<typeof sql>) =>
+    db.transaction(async (tx) => {
+      if (setup) await tx.execute(sql.raw(setup));
+      const rows = await tx.execute<{ "QUERY PLAN": string }>(sql`EXPLAIN ${query}`);
+      return rows.map((r) => r["QUERY PLAN"]).join("\n");
+    });
 
   // is_not universe scan (whole org, all eligible now → likely seqscan; prove usable)
   const uniPlanForced = await planText(
-    "SET enable_seqscan=off",
+    "SET LOCAL enable_seqscan=off",
     sql`SELECT id FROM contacts WHERE org_id=${orgId}::uuid AND messaging_status='eligible'`,
   );
   ok(/contacts_org_eligible_idx/.test(uniPlanForced),
@@ -97,7 +112,7 @@ async function main() {
     sql`SELECT id FROM contacts WHERE org_id=${orgId}::uuid AND messaging_status='eligible' AND created_at >= now() - interval '2 days'`,
   );
   const addedPlanForced = await planText(
-    "SET enable_seqscan=off",
+    "SET LOCAL enable_seqscan=off",
     sql`SELECT id FROM contacts WHERE org_id=${orgId}::uuid AND messaging_status='eligible' AND created_at >= now() - interval '2 days'`,
   );
   const addedUsesIdx = /contacts_org_created_eligible_idx/.test(addedPlanNatural);

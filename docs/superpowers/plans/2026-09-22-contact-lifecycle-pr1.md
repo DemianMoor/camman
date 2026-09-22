@@ -1778,14 +1778,24 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
       if (hb.length > 0 && hb[0].watermark != null) {
         bar("C2 precondition: preview has no contact-engagement heartbeat", false, "a heartbeat exists — skipping");
       } else {
+        // PR #210's first-run grace: a job that has never run is not stale until
+        // it has been missing for first_run_grace_hours (0.5 h here), so a deploy
+        // cannot page. The watcher stamps when it first saw it missing.
         const s1 = await watchEngagementHeartbeat(db, "incremental", { send });
+        bar("C2a engine on + never ran, inside the grace ⇒ not stale, no alert",
+          s1?.stale === false && sent.length === 0, `stale=${s1?.stale} sent=${sent.length}`);
+        await db.execute(sql`
+          UPDATE cron_locks SET watermark = now() - interval '1 hour'
+          WHERE job_name = 'contact-engagement:awaiting-first-run'`);
         const s2 = await watchEngagementHeartbeat(db, "incremental", { send });
-        bar("C2 engine on + never ran ⇒ stale, one alert, latched on the second check",
-          s1?.stale === true && s2?.stale === true && sent.length === 1, `sent=${sent.length}`);
+        const s3 = await watchEngagementHeartbeat(db, "incremental", { send });
+        bar("C2b missing past the grace ⇒ stale, one alert, latched on the second check",
+          s2?.stale === true && s3?.stale === true && sent.length === 1, `sent=${sent.length}`);
       }
     } finally {
       await db.execute(sql`DELETE FROM organizations WHERE id = ${monitorOrg}::uuid AND name LIKE '__ENGAGEMENT_TEST__%'`);
       await watchEngagementHeartbeat(db, "incremental", { send }); // engine off again ⇒ clears the latch
+      await db.execute(sql`DELETE FROM cron_locks WHERE job_name = 'contact-engagement:awaiting-first-run'`);
     }
   }
 ```
@@ -1822,11 +1832,13 @@ export async function orgsWithEngineOn(dbc: DbOrTx): Promise<string[]> {
   contactEngagement: {
     job_name: "contact-engagement",
     max_age_hours: 0.75, // spec §5: alert when the last successful run is > 45 min old
+    first_run_grace_hours: 0.5, // 2x the 15-min interval (PR #210)
     label: "Contact lifecycle refresh (every 15 min)",
   },
   contactEngagementFull: {
     job_name: "contact-engagement-full",
     max_age_hours: 50, // nightly; ~2 missed runs
+    first_run_grace_hours: 48, // 2x the nightly interval
     label: "Contact lifecycle full recount (nightly)",
   },
 ```

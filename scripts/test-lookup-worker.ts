@@ -5,6 +5,15 @@ import { createRequire } from "node:module";
 
 import { fictionalPhones, refuseIfPhonesInUse } from "./_fictional-phones";
 
+// No production third-party key in a test (docs/07-conventions.md): `_env-preload`
+// loads `.env.local`, whose TELNYX_API_KEY is the PRODUCTION key. This run makes no
+// Telnyx call (see below), but it must not carry the key either — if a regression
+// ever let it reach the client, the request would fail on a fake key instead of
+// reaching Telnyx. Set before main()'s dynamic lib/telnyx imports.
+const FAKE_TELNYX_KEY = "test-not-a-real-telnyx-key";
+process.env.TELNYX_API_KEY = FAKE_TELNYX_KEY;
+delete process.env.TELNYX_API_URL;
+
 // Phase 3 worker tests: pure (Warsaw midnight, summary) + live-DB (lease single-
 // runner + crash recovery, attempt-summed daily cap, enqueue dedup, worker lease
 // guard). All DB writes are test rows, deleted by key in finally. No Telnyx HTTP:
@@ -47,6 +56,9 @@ try {
 }
 
 async function main() {
+  if (process.env.TELNYX_API_KEY !== FAKE_TELNYX_KEY) {
+    throw new Error("TELNYX_API_KEY is not the fake test key; refusing to load lib/telnyx");
+  }
   const { warsawMidnightUtc, countAttemptsToday } = await import("@/lib/telnyx/daily-cap");
   const { formatBatchSummary } = await import("@/lib/telnyx/summary");
   const { claimWorkerLease, renewWorkerLease, releaseWorkerLease } = await import("@/lib/telnyx/lease");

@@ -1,6 +1,6 @@
 # Contact lifecycle status + segmentation for the clickers / non-clickers plan — design
 
-_Date: 2026-09-22 · Status: approved in chat (decisions 2026-09-22), pending spec review_
+_Date: 2026-09-22 · Status: approved 2026-09-22 (decisions + spec review changes to §7.1, §9, §14)_
 _Recon read at `origin/main` 8ed1ee7 (re-checked at 4067c87: the 6 newer commits touch only lookup tests + test-safety conventions). Prod figures measured read-only on 2026-09-21 ~22:00 UTC._
 _Related: ClickUp 869f53efz (per-offer repeat rule, Y days / N times) — separate card, same eligibility path (§11)._
 
@@ -91,7 +91,7 @@ Consequences, stated so nobody has to derive them:
   - A threshold edit sets `lifecycle_settings.reevaluate_requested_at`. The next 15-minute run then re-evaluates every contact from the stored facts, which takes seconds.
   - A group membership change or a group archive/restore takes effect on the next nightly run.
 
-## 4. Data model — migration 0186 (one migration; SQL shown for approval before prod)
+## 4. Data model — migration 0187 (one migration; SQL shown for approval before prod; 0186 was taken on main by 0186_stage_delivery_rollup)
 
 All new tables have `org_id` and RLS enabled, with a SELECT policy restricted to the user's own org (`current_org_id()`).
 
@@ -212,10 +212,14 @@ All new tables have `org_id` and RLS enabled, with a SELECT policy restricted to
 - **Multi-select, combined with OR.** Hot/Warm is one chip that selects both statuses.
 - **At least one chip is required to save or activate.** Otherwise the save is blocked with "Select at least one lifecycle status."
   - This is a deliberate exception to "drafts save with zero required fields" (CLAUDE.md §10b).
-  - New campaigns start with **all four chips selected**, which matches today's default of everyone.
+  - New campaigns start with **Cold selected only** (owner decision, 2026-09-22 spec review).
 - **Suppressed and opted-out contacts are always excluded** and are never shown as chips.
 - **No-status, Opt-in, Clickers and Not-clicked are removed** from the UI.
-- The Freeze chip carries a helper note, verbatim: _"Only contacts whose last message is 14+ days ago (or the group's cadence) are eligible at Prepare."_
+- The Freeze chip carries a helper note showing the **effective cadence of the selected contact groups**: _"Only contacts whose last message is N+ days ago are eligible at Prepare."_
+  - N is each selected group's effective `freeze_cadence_days` (its override, else the org default).
+  - If the selected groups differ, the note shows the range, e.g. "14–21 days, depending on the contact's groups".
+  - With no group selected, N is the org default.
+  - The note is informational. A contact's own cadence is the strictest across *all* its active groups, so a contact also in a non-selected group can have a longer one.
 - **Stored shape:** `audience_filters.lifecycle_statuses: ('new'|'hot'|'warm'|'cold'|'freeze')[]`, validated in `audienceFiltersSchema`.
   - The chip writes both `hot` and `warm`, so splitting the chip later needs no migration.
   - The old keys stay in the schema so legacy campaigns still parse.
@@ -330,6 +334,11 @@ Every type follows the existing convention: the direction is part of the type na
   `scripts/test-segment-rule-type-registration.ts` guards items 1, 6 and 7.
 - Existing rule types and existing segments are untouched.
 - **Weekly caps** (decision 5) are built by the operator as segments toggled **Excl** on the campaign. Excl segments are evaluated at **activation** and frozen, as today. A campaign activated long before its first stage therefore applies the cap as of activation (see §14).
+- **Activate-dialog warning** (owner decision, 2026-09-22 spec review):
+  - Shown when a lifecycle campaign has at least one Excl segment and its earliest scheduled stage is more than 24 hours after the moment of activation.
+  - Text: _"Excl segments are applied now, not at send."_
+  - It is a warning, not a block; activation still proceeds on confirm.
+  - With no stage scheduled yet, there is nothing to compare, so no warning.
 
 ## 10. Cohort report
 
@@ -369,7 +378,7 @@ Legacy campaigns with the toggle on keep today's "ever got" behaviour, as the ca
 
 ## 12. Backfill and launch sequence
 
-1. Apply migration 0186 to prod, **after the SQL has been approved**. The migration adds tables and columns only, so it is applied before the code that uses it.
+1. Apply migration 0187 to prod, **after the SQL has been approved**. The migration adds tables and columns only, so it is applied before the code that uses it.
 2. Deploy PR 1 with the job in **dry-run** mode. It computes everything and writes nothing.
 3. **Dry-run report:**
    - counts per status, org-wide and per active contact group (a contact in several groups is counted in each, noted on the report);
@@ -445,7 +454,7 @@ Legacy campaigns with the toggle on keep today's "ever got" behaviour, as the ca
   - The `msgs_Nd` windows can be up to 1 day stale.
   - Group-membership changes apply nightly.
   - `contact_offer_campaigns` is also up to 15 minutes old. An offer sent in the last 15 minutes may be missed at Prepare; the in-use exclusion usually covers this.
-- **Checks that are not repeated at send time:** Excl-segment caps and 869f53efz's rule are evaluated at activation and Prepare only. Freeze, suppressed and buyer are re-checked at send.
+- **Checks that are not repeated at send time:** Excl-segment caps and 869f53efz's rule are evaluated at activation and Prepare only. Freeze, suppressed and buyer are re-checked at send. The activate dialog warns when Excl segments meet a first stage more than 24 hours out (§9).
 - **CSV/manual sends are invisible** to the facts. Contacts messaged only that way read as New, and those messages never count toward freeze.
 - **The cohort report is per recipient** and does not add up to Overview.
 - **`export-all-phones` bypasses all eligibility**, both today and after this change.
@@ -457,17 +466,17 @@ Each PR updates `docs/` per CLAUDE.md, including a new `docs/04-features/contact
 
 | PR | Contents | Merge gate |
 |---|---|---|
-| 1 | Migration 0186, the `lib/engagement` job (dry-run switch), dry-run report, heartbeat + alert | SQL approval → prod apply; dry-run approval → write mode (a data write — asks first) |
+| 1 | Migration 0187, the `lib/engagement` job (dry-run switch), dry-run report, heartbeat + alert | SQL approval → prod apply; dry-run approval → write mode (a data write — asks first) |
 | 2 | Contacts column + filter, contact detail panel, Settings → Lifecycle, group overrides, preview counts, status-at-send stamping at Prepare, "Global suppression" relabel | ship on green |
 | 3 | The 8 segment rule types | ship on green |
-| 4 | Audience block redesign, lifecycle chips + shared predicate, labelled layers, send-time re-check, exclusion reasons (Prepare dialog / stage preview / preflight / send panel), `lifecycle_rules` gating, draft conversion | **ask before merge** (changes who is sent) |
+| 4 | Audience block redesign, lifecycle chips + shared predicate, Freeze note with effective cadence, activate-dialog Excl warning, labelled layers, send-time re-check, exclusion reasons (Prepare dialog / stage preview / preflight / send panel), `lifecycle_rules` gating, draft conversion | **ask before merge** (changes who is sent) |
 | 5 | Lifecycle report tab + 60-day reconstruction script | reconstruction `--apply` asks first (data write, off-peak) |
 | — | 869f53efz on top of PR 4 | its own card |
 
 ## 16. Choices made in this spec — override any of them
 
 1. Never-messaged or never-clicked contacts match neither direction of the "last message" or "last click" rules (§9).
-2. New campaigns start with all four chips selected (§7.1).
+2. ~~New campaigns start with all four chips selected~~ — superseded at spec review: **Cold only** (§7.1).
 3. The one-chip minimum applies to drafts too, an exception to the draft rule (§7.1).
 4. Raising a threshold moves freeze → cold. Suppressed is sticky; only a click leaves it (§3.2).
 5. A human click is `HUMAN_CLICK` only. Conversion-only "rescued" clickers don't count (§3.1).

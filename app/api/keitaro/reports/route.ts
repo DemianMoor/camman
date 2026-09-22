@@ -47,8 +47,8 @@ function lifetimeEpc(revenue: number, clickers: number): number {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_RANGE_DAYS = 92;
 // The Delivered % column only. MUST stay <= the cap in
-// app/api/reports/delivery/route.ts — both are bounded by the same measured
-// stage_sends scan (473 ms at 7 days, 11.0 s at 30).
+// app/api/reports/delivery/route.ts — both are bounded by the same query,
+// whose cost grows with the window (lib/reporting/delivery.ts, PERF).
 const DELIVERY_MAX_RANGE_DAYS = 14;
 
 export const SORTABLE = new Set([
@@ -147,10 +147,23 @@ export async function GET(req: NextRequest) {
   // grouped read of a 2-rows-per-org table and depends on nothing the funnel
   // produces, so awaiting it at the response literal only added its latency to
   // a request that already carries a multi-second aggregate.
-  const [{ stages, grand, grandOptOuts, grandTotalSent, clickers }, eventTypes] = await Promise.all([
-    getStageMetricsInRange(auth.orgId, from, to),
-    loadEventTypes(db, auth.orgId),
-  ]);
+  //
+  // The Delivered % reads ride alongside too, for the same reason: they depend
+  // on the range and nothing else. They used to start only after the funnel had
+  // resolved, which added their whole latency to every Overview load.
+  const deliveryAvailable = spanDays <= DELIVERY_MAX_RANGE_DAYS;
+  const [{ stages, grand, grandOptOuts, grandTotalSent, clickers }, eventTypes, delivery] =
+    await Promise.all([
+      getStageMetricsInRange(auth.orgId, from, to),
+      loadEventTypes(db, auth.orgId),
+      deliveryAvailable
+        ? Promise.all([
+            getDeliveryByStage(auth.orgId, { from, to }),
+            getStageDirectory(auth.orgId),
+            getPhoneDirectory(auth.orgId),
+          ])
+        : null,
+    ]);
 
   // ⭐ manual_topup NEEDS NO ROLL-UP HERE ANY MORE. It is a field of FunnelTally
   // (lib/keitaro/funnel.ts), so it rides mergeFunnel into the per-campaign tally
@@ -444,25 +457,21 @@ export async function GET(req: NextRequest) {
   // ---- Delivered % (lib/reporting/delivery.ts — the shared layer) ----------
   //
   // ⚠️ CONDITIONAL ON THE RANGE, and that is not an optimisation. This route
-  // permits 92 days; the delivery query costs 473 ms over 7 days but 11.0 s over
-  // 30 (it scans stage_sends, which has no covering index — ClickUp 869ehwae3).
-  // Running it unconditionally would make a wide Overview range time out. Past
-  // the cap the column reports null and the UI says why, rather than silently
-  // showing "—" that reads as "no delivery data".
+  // permits 92 days, and the delivery query's cost grows with the window: it
+  // reads every send in it from stage_sends (no covering index — ClickUp
+  // 869ehwae3) and every receipt received since it opened. Running it
+  // unconditionally would make a wide Overview range time out. Past the cap
+  // the column reports null and the UI says why, rather than silently showing
+  // "—" that reads as "no delivery data".
   //
-  // Computed AFTER paging is decided but over the FULL row set, then attached —
-  // each grain aggregates the shared stage rows ITSELF (campaign rows via
-  // rollupByCampaign, stage rows via rollupByStage). No grain reads another's
-  // output.
-  const deliveryAvailable = spanDays <= DELIVERY_MAX_RANGE_DAYS;
+  // Read in parallel with the funnel (top of the handler) over the FULL row
+  // set, then attached — each grain aggregates the shared stage rows ITSELF
+  // (campaign rows via rollupByCampaign, stage rows via rollupByStage). No
+  // grain reads another's output.
   let deliveryByCampaign = new Map<number, DeliveryCell>();
   let deliveryByStage = new Map<number, DeliveryCell>();
-  if (deliveryAvailable) {
-    const [deliveryRows, stageDir, phoneDir] = await Promise.all([
-      getDeliveryByStage(auth.orgId, { from, to }),
-      getStageDirectory(auth.orgId),
-      getPhoneDirectory(auth.orgId),
-    ]);
+  if (delivery) {
+    const [deliveryRows, stageDir, phoneDir] = delivery;
     // Campaign comes via the stage (structural); capability via the send's own
     // number (a stage's number can change between materialization windows).
     deliveryByCampaign = rollupByCampaign(deliveryRows, stageDir, phoneDir);

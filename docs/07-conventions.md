@@ -2,6 +2,27 @@
 
 _Last updated: 2026-09-22_
 
+## Event/DLR aggregations are driven from the windowed send set — never aggregate the full event table first (2026-09-22)
+
+A report that joins a window of sends to an event table (DLRs, clicks, conversions, webhooks) must **bound the event side by the same window before aggregating it**. Aggregating the whole event table and then joining the window's sends makes the cost grow with the table's *history*, not with the question asked, and nothing announces it: it was fine when written and got slower every day.
+
+**Measured 2026-09-22.** The Overview's `Delivered %` query aggregated every delivery receipt ever received, then joined one day's sends. That built 1,004,973 txr groups to use 34,624 of them: 12.9–13.9 s and ~1.3 GB read per page load, larger than `shared_buffers`, so every load also evicted the cache for everything else. The query was written on 2026-08-13, when Text Request had 50 sends in total; its receipt side cost 3 ms then.
+
+**How to bound it: by the event's own insert timestamp, with a measured margin.**
+
+- Bound with a lower limit only: `received_at >= <window start> − <margin>`. An event can arrive days after its send, so an upper bound is only safe if that latency is itself bounded.
+- The margin is **not** zero. A provider callback can land before our own post-send `UPDATE` stamps `sent_at`: tls −14.3 s, txr −4.3 s. Measure the earliest arrival before choosing the margin, and keep a check that diffs bounded against unbounded in ONE snapshot. [scripts/verify-delivery-received-bound.ts](../scripts/verify-delivery-received-bound.ts) is the template.
+- It only works if the timestamp is written at INSERT (wall-clock, never a provider-supplied time) and indexed.
+
+**What does NOT work, measured the same day:**
+
+- **Per-send probes (`key IN (SELECT id FROM sends)` or `LATERAL`) over a new send-key index.** The semi-join form was never chosen by the planner: it prices ~61K probes above one sequential read. `LATERAL` is forced to probe, and its cost scales with sends: 1 day 0.97 s, but 7 days **42 s**.
+- **Indexing a column that a post-insert `UPDATE` sets.** The DLR processors fill `matched_stage_send_id` after insert. Indexing it turned **every one of those updates non-HOT** (txr 91% HOT → 0% in the first 6,219 updates), with each one now writing into all six of the table's indexes. Before adding an index on an event table, read who UPDATEs which column (`pg_stat_user_tables.n_tup_hot_upd` shows the effect within minutes).
+- **An expression index is invisible to the planner until `ANALYZE`.** With no statistics it assumes 0.5% selectivity (12,527 rows per key instead of ~1). Autoanalyze waits for 10% of rows to change, which is days on a 2.5M-row table. `ANALYZE` right after building one.
+- **`EXPLAIN ANALYZE` timings for comparing shapes.** Per-node instrumentation inflated the per-send variants 2–5× (a 1.1 s query read 5.7 s). Compare on wall-clock; use `EXPLAIN (ANALYZE, BUFFERS, TIMING OFF)` for the plan and buffers.
+
+Bounding by the window is necessary but not sufficient: past ~1 day, both halves of this particular query stay I/O-bound on Small compute (see [04-features/delivery-report.md §5](04-features/delivery-report.md)).
+
 ## A test never carries a production third-party key, and deletes only the rows it created (2026-09-22)
 
 `_env-preload` loads `.env.local`, which holds the **production** third-party keys as well as the production database. The preview-DB guard stops the database write, but it does nothing about the keys. [`scripts/test-lookup-uploads.ts`](../scripts/test-lookup-uploads.ts) was preview-guarded, and its header said "No Telnyx HTTP", yet every run sent the production `TELNYX_API_KEY` to `api.telnyx.com`, because `previewLookup` calls the balance endpoint.
@@ -1495,7 +1516,8 @@ the same row.
 - **"No receipt" is `NOT (delivered OR undelivered)`, not "no matching event row".** A Tells message emits a non-terminal `sent` before `delivered`, so it can have an event row and no receipt. The wrong definition reported 0 where the truth was 14.
 - **⚠️ Attribute the NUMBER from the send, not from the stage.** `stage_sends.provider_phone_id` is stamped from the stage row read once per materialization INVOCATION, materialization is RESUMABLE across invocations, and nothing guards `campaign_stages.provider_phone_id` against being edited in between (the stage PATCH locks `scheduled_at` only). Partially-materialized stages genuinely occur. So a stage CAN legitimately send from two numbers — 0 of 882 today, but incidentally, not structurally. Deriving the number from the stage would silently credit all of that stage's sends to whichever number the stage holds now, precisely on the number under investigation. The CAMPAIGN, by contrast, is safe to derive from the stage — that link is a FK. Cost of the wider `(stage, phone)` grain: +8.4%.
 - **A campaign can span providers.** Campaign-grain percentages are computed over DLR-capable sends only **and labelled with their coverage** (`91.4% (of 4% of sends)`) — a 4%-coverage figure is otherwise indistinguishable from a 100% one. Capability is per-provider, so every number under a provider inherits it: two numbers can differ in deliverability, never in measurability.
-- **The window cap is a measured constraint, not a preference.** 7 days = 473 ms; 30 days = 11.0 s (the `stage_sends` scan; `stage_sends_org_sent_at_idx` doesn't cover `status`/`stage_id`). `/api/reports/delivery` caps at 14 days and the Overview column is skipped past that cap. `campaign_stages.sms_count` is `0` on every API-send stage, so there is no pre-aggregate shortcut. Raising either cap needs the covering index first.
+- **The window cap is a measured constraint, not a preference.** Measured 2026-09-22, after the receipt side was bounded by the window: 1 day 0.5 s, 7 days 16.5 s, 14 days 20.2 s. The earlier 473 ms / 832 ms figures predate Text Request's volume. The cost is heap fetches off `stage_sends_org_sent_at_idx` (it doesn't cover `status` / `stage_id` / `provider_phone_id`) plus the window's share of the txr heap. `/api/reports/delivery` caps at 14 days, and the Overview column is skipped past that cap. `campaign_stages.sms_count` is `0` on every API-send stage, so there is no pre-aggregate shortcut. Raising either cap needs a structural change first: the covering index plus a per-send delivery-state table.
+- **Every DLR source is bounded by `received_at >= window start − 1 hour`** (`DLR_EARLY_ARRIVAL_MARGIN`). A new source table must stamp `received_at` at INSERT and index it; see the dated section on event aggregations at the top of this file.
 - **Monitor thresholds are per-number, not per-platform.** The 8% undelivered tripwire is calibrated to the `tls` toll-free number's observed 5.8% baseline. A provider with no baseline gets **no** threshold rather than inheriting 8% — an uncalibrated monitor is a muted monitor.
 
 ## Verification — a passing check is not evidence until you know what it ran against

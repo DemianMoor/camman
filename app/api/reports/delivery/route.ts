@@ -17,12 +17,13 @@ export const dynamic = "force-dynamic";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// ⚠️ HARD CAP, and lower than the other reports' 92 days on purpose. MEASURED
-// against prod (3.07M-row stage_sends): a 7-day window is ~832 ms warm and
-// ~2.5 s COLD; a 30-day window is 11.0 s, which would exceed the function limit. The cost is
-// the stage_sends scan — stage_sends_org_sent_at_idx is (org_id, sent_at), so
-// status/stage_id are heap fetches. Raising this cap REQUIRES the covering index
-// first (ClickUp 869ehwae3); do not widen it on the assumption that it scales.
+// ⚠️ HARD CAP, and lower than the other reports' 92 days on purpose. The cost
+// grows with the window on both sides — every send in it (heap fetches off
+// stage_sends_org_sent_at_idx) and every receipt received since it opened.
+// Measured on prod 2026-09-22: 1 day ~0.5 s warm, 7 days ~16.5 s, 14 days
+// ~20 s (lib/reporting/delivery.ts, PERF). Raising this cap needs a structural
+// change first (ClickUp 869ehwae3 + the per-send delivery-state follow-up); do
+// not widen it on the assumption that it scales.
 const MAX_RANGE_DAYS = 14;
 
 export async function GET(req: NextRequest) {

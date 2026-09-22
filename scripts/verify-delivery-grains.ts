@@ -19,9 +19,9 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
+import { getDeliveryByStage } from "@/lib/reporting/delivery-rollup";
 import {
   DLR_SOURCES,
-  getDeliveryByStage,
   getPhoneDirectory,
   getProviderRegistry,
   getStageDirectory,
@@ -56,6 +56,9 @@ async function main() {
   console.log(`org            ${orgs[0].name} (${orgId})`);
   console.log(`window         ${from} .. ${today} ET  (${days} day(s))`);
   console.log(`DLR sources    ${Object.keys(DLR_SOURCES).join(", ")}`);
+  // The surfaces now read stage_delivery_rollup (migration 0186) — so this
+  // checks the ROLLUP-backed rows every report consumes, not the live query.
+  console.log(`row source     stage_delivery_rollup (getDeliveryByStage, lib/reporting/delivery-rollup.ts)`);
 
   const t0 = Date.now();
   const rows = await getDeliveryByStage(orgId, { from, to: today });

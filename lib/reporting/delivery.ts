@@ -1,14 +1,19 @@
 import { sql, type SQL } from "drizzle-orm";
-import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
-import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 
-// SINGLE SOURCE OF TRUTH for delivery-receipt (DLR) metrics. The /reports/delivery
-// page, the Delivered % column on the Overview report, and the undelivered
-// tripwire in lib/sends/tells-monitors.ts ALL read from here — so the human view
-// and the automated alert cannot disagree. That is the whole point; do not add a
-// second delivery query elsewhere.
+// SINGLE SOURCE OF TRUTH for delivery-receipt (DLR) metrics — the DEFINITIONS
+// (DLR_SOURCES, terminalCte, DELIVERY_COUNTS) and the live query built from them.
+// Do not add a second delivery query elsewhere.
+//
+// Who reads what (since the stage_delivery_rollup cutover, migration 0186):
+//   · /reports/delivery and the Overview's Delivered % column read the ROLLUP
+//     (getDeliveryByStage in lib/reporting/delivery-rollup.ts), whose cells are
+//     computed by the fragments below — so they are the same definitions;
+//   · the undelivered tripwire (lib/sends/tells-monitors.ts) reads the LIVE
+//     queryDeliveryByStage: rolling hours and matured sends, which a day-grain
+//     rollup cannot express;
+//   · the nightly reconciliation diffs the two, on frozen days.
 //
 // Design + the measured recon this is built on:
 // docs/superpowers/specs/2026-08-13-delivery-report-design.md
@@ -16,7 +21,7 @@ import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 // ---------------------------------------------------------------------------
 // GRAIN (stated in code, per the EPC workstream's lesson)
 // ---------------------------------------------------------------------------
-// getDeliveryByStage() returns (STAGE, PHONE) grain and nothing else. Every
+// getDeliveryByStage() (rollup) and queryDeliveryByStage() (live) return (STAGE, PHONE) grain and nothing else. Every
 // surface aggregates those rows at its OWN display grain — provider, number,
 // campaign, stage, or one batch for the tripwire; no surface consumes another
 // surface's aggregated output.
@@ -152,10 +157,6 @@ export interface DeliveryRange {
   to: string;
 }
 
-function addOneDay(d: string): string {
-  return new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
-}
-
 // How long BEFORE a send's sent_at its receipt can be written. Not zero: the
 // provider's callback can land before our own post-send UPDATE stamps sent_at.
 // Measured 2026-09-22 over every tls/ahi receipt and two weeks of txr: earliest
@@ -233,15 +234,9 @@ export const DELIVERY_COUNTS = sql`
 // docs/04-features/delivery-report.md.
 // ⚠️ Size decisions off the COLD figure, and never off an EXPLAIN ANALYZE
 // timing: per-node instrumentation inflated the per-send variants 2–5×.
-export async function getDeliveryByStage(
-  orgId: string,
-  range: DeliveryRange,
-): Promise<DeliveryStageRow[]> {
-  return queryDeliveryByStage(db, orgId, {
-    fromUtc: fromZonedTime(`${range.from}T00:00:00`, CAMPAIGN_TIMEZONE),
-    toExclusiveUtc: fromZonedTime(`${addOneDay(range.to)}T00:00:00`, CAMPAIGN_TIMEZONE),
-  });
-}
+// The report surfaces no longer call the live query directly: they read
+// getDeliveryByStage in lib/reporting/delivery-rollup.ts (the stored cells).
+// The measurements above are why.
 
 /** Any drizzle executor — the top-level client or a transaction handle. */
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];

@@ -2,6 +2,14 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-09-22 - **Cutover: `/reports/delivery` and the Overview's Delivered % column now read `stage_delivery_rollup`** (ClickUp 869f5q5au).
+  - **Read path:** the rollup-backed `getDeliveryByStage` moves to `lib/reporting/delivery-rollup.ts` (the live wrapper in `delivery.ts` is removed). The live `queryDeliveryByStage` stays for the undelivered tripwire (rolling hours and matured sends, which a day-grain rollup can't express) and for the nightly reconciliation.
+  - **Freshness in the UI:** both surfaces show "as of" from the two refresh heartbeats — the older stamp the window depends on, "final" for windows past the 7-day horizon — and an amber **stale** flag when a stamp is missing or older than 30 min (refresh) or 7 h (settle). This is the new pure `deliveryFreshness`, with test bars F1–F6.
+  - **Hardening:** `rollupScope` treats an unparseable settle stamp as "settle now" (bar P6). drizzle's `execute()` returns `cron_locks.watermark` as a *string*, so a bad stamp would otherwise have stopped the settle silently.
+  - **Caps:** the 14-day caps stay, but are now product limits, not cost limits.
+  - **Docs:** a bootstrap-order note — the mutual heartbeat watch pages in both directions, so run the refresh first, then the reconciliation. The reverse order sent one false "not refreshing" alert on 2026-09-22.
+  — docs updated: docs/04-features/delivery-report.md (§5, §5b), docs/07-conventions.md, docs/CHANGELOG.md
+
 2026-09-22 - **Migration 0186 adds `stage_delivery_rollup`, the pre-aggregated Delivered % cells, running in SHADOW** (ClickUp 869f5q5au). There is no reader change yet: `/reports/delivery`, the Overview column and the tripwire still read the live query until a separate cutover PR.
   - **Table:** one row per (stage, number, send ET day) with the live query's four counts. A CHECK enforces that every row foots, and the unique key treats NULL numbers as equal.
   - **Refresh:** new `lib/reporting/delivery-rollup.ts`, computed with the live query's exported `terminalCte` + `DELIVERY_COUNTS`, so the definitions are shared text. Only changed cells are written and vanished cells are deleted.

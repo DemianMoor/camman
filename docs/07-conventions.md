@@ -13,6 +13,8 @@ _Last updated: 2026-09-22_
 
 Also: pick the freeze horizon from a **measured** late-arrival distribution (0 of 2.64M receipts arrived ≥ 6 days late), and let the reconciliation be what notices if that ever changes.
 
+**A mutual heartbeat watch has a bootstrap order.** Two jobs that each page when the other has "never run" will page on first deploy, whichever you start first, unless the FIRST one you run is the one whose own check is satisfied by nothing. For the rollup that means seeding the refresh heartbeats, then running the reconciliation. The reverse order sent one false "not refreshing" message on 2026-09-22. Write the order into the deploy steps, not just the design.
+
 ## A new index on a write-hot table must report its HOT-update rate before and after (2026-09-22)
 
 **The rule.** A PR or migration that adds an index to a table written continuously states that table's HOT-update rate over a comparable window **before** the index and **after** it, in the PR body and the CHANGELOG entry. A drop is a finding to explain, not a detail. It is part of the index's cost, like its size and build time. Write-hot tables include `stage_sends`, `textrequest_dlr_events`, `ahoi_dlr_events`, `tells_webhook_events`, `campaign_stages`, `clicks`, `links`, `contacts`, `lookup_queue` and `cron_locks`.

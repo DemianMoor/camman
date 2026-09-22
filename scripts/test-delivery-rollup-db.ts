@@ -64,6 +64,23 @@ async function main() {
   bar("P4 reconcile = the 7 frozen days ending 7 days ago", rec.from === "2026-09-09" && rec.to === "2026-09-15", JSON.stringify(rec));
   const lateEt = R.rollupScope(new Date("2026-09-23T03:30:00Z"), null); // 23:30 ET on 09-22
   bar("P5 'today' is the ET day, not the UTC day", lateEt.range.to === "2026-09-22", JSON.stringify(lateEt));
+  const bad = R.rollupScope(now, new Date("not a date"));
+  bar("P6 an unparseable settle stamp settles (never silently stops)", bad.settle, JSON.stringify(bad));
+
+  // Freshness: what the Overview's "as of" and stale flag are computed from.
+  const min = (m: number) => new Date(now.getTime() - m * 60_000);
+  const f1 = R.deliveryFreshness({ from: "2026-09-22", to: "2026-09-22" }, min(5), min(170), now);
+  bar("F1 today only ⇒ as of the 10-min refresh, not stale", !f1.final && !f1.stale && f1.as_of === min(5).toISOString(), JSON.stringify(f1));
+  const f2 = R.deliveryFreshness({ from: "2026-09-16", to: "2026-09-22" }, min(5), min(170), now);
+  bar("F2 7 days ⇒ as of the OLDER stamp (the settle)", !f2.stale && f2.as_of === min(170).toISOString(), JSON.stringify(f2));
+  const f3 = R.deliveryFreshness({ from: "2026-09-22", to: "2026-09-22" }, min(45), min(10), now);
+  bar("F3 10-min refresh 45 min old ⇒ stale", f3.stale, JSON.stringify(f3));
+  const f4 = R.deliveryFreshness({ from: "2026-09-18", to: "2026-09-19" }, min(5), min(8 * 60), now);
+  bar("F4 days 3–4 back depend on the settle only; 8 h old ⇒ stale", f4.stale && f4.as_of === min(8 * 60).toISOString(), JSON.stringify(f4));
+  const f5 = R.deliveryFreshness({ from: "2026-09-01", to: "2026-09-15" }, null, null, now);
+  bar("F5 window entirely past the horizon ⇒ final, never stale", f5.final && !f5.stale && f5.as_of === null, JSON.stringify(f5));
+  const f6 = R.deliveryFreshness({ from: "2026-09-22", to: "2026-09-22" }, null, null, now);
+  bar("F6 refresh never ran ⇒ stale, no as-of", f6.stale && f6.as_of === null && !f6.final, JSON.stringify(f6));
 
   const tag = `dr-${Date.now()}`;
   let orgId = "";

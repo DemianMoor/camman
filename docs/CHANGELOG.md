@@ -2,6 +2,12 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-09-22 - **Heartbeat watches get an opt-in first-run grace** (ClickUp 869f5q5au, owner decision after the 15:56 UTC false alert). New `HeartbeatExpectation.first_run_grace_hours` in `lib/reporting/cron-heartbeat.ts`:
+  - a watcher that finds a job with NO heartbeat stamps when it first saw it missing (`cron_locks` key `<job>:awaiting-first-run`, first stamp kept);
+  - it reports "never ran" only once that is older than the grace;
+  - once the job has run, `max_age_hours` decides as before.
+  Set on the three delivery-rollup jobs at 2× their interval (20 min / 6 h / 48 h); the other 12 expectations are unchanged. It fixes the false page the mutual refresh ↔ reconciliation watch sent on its first deploy. New preview test `scripts/test-heartbeat-grace-db.ts`: 11/11, teardown 0; red-proved by resetting the stamp on every check (4 red) and by ignoring the grace (2 red). No migration. — docs updated: docs/07-conventions.md, docs/04-features/crons.md, docs/CHANGELOG.md
+
 2026-09-22 - **Migration 0186 adds `stage_delivery_rollup`, the pre-aggregated Delivered % cells, running in SHADOW** (ClickUp 869f5q5au). There is no reader change yet: `/reports/delivery`, the Overview column and the tripwire still read the live query until a separate cutover PR.
   - **Table:** one row per (stage, number, send ET day) with the live query's four counts. A CHECK enforces that every row foots, and the unique key treats NULL numbers as equal.
   - **Refresh:** new `lib/reporting/delivery-rollup.ts`, computed with the live query's exported `terminalCte` + `DELIVERY_COUNTS`, so the definitions are shared text. Only changed cells are written and vanished cells are deleted.

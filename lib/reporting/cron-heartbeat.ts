@@ -30,6 +30,21 @@ export interface HeartbeatExpectation {
   // two in a row does.
   max_age_hours: number;
   label: string;
+  // GRACE FOR "NEVER RAN" (opt-in). Without it, a job with no heartbeat at all
+  // is stale the first time anyone looks — which pages on the deploy that
+  // introduces a watched pair, whichever of the two runs first (2026-09-22: the
+  // delivery rollup's reconciliation ran before the refresh and sent one false
+  // "never ran" alert). With it, the WATCHER stamps when it first sees the job
+  // missing (cron_locks row `<job_name>:awaiting-first-run`) and reports it
+  // stale only once it has stayed missing for longer than this. Set it to 2x
+  // the watched job's interval. It changes nothing once the job has run: from
+  // then on max_age_hours decides, exactly as before.
+  first_run_grace_hours?: number;
+}
+
+/** cron_locks key under which a watcher records when it first saw `jobName` missing. */
+export function awaitingFirstRunKey(jobName: string): string {
+  return `${jobName}:awaiting-first-run`;
 }
 
 export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
@@ -120,16 +135,19 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
   deliveryRollup: {
     job_name: "delivery-rollup",
     max_age_hours: 1, // every 10 min; 1h is ~5 missed runs
+    first_run_grace_hours: 20 / 60, // 2x the 10-min interval
     label: "Delivered % rollup refresh (every 10 min)",
   },
   deliveryRollupSettle: {
     job_name: "delivery-rollup-settle",
     max_age_hours: 7, // every 3h; ~2 missed settles
+    first_run_grace_hours: 6, // 2x the 3-h interval
     label: "Delivered % rollup 7-day settle (every 3 h)",
   },
   deliveryRollupReconcile: {
     job_name: "delivery-rollup-reconcile",
     max_age_hours: 50, // daily; ~2 missed runs
+    first_run_grace_hours: 48, // 2x the daily interval
     label: "Delivered % rollup reconciliation (nightly)",
   },
   // ---- Tells (spec §4.5) — MUTUAL WATCH, because these two are the sole
@@ -167,11 +185,18 @@ export interface HeartbeatStatus {
   age_hours: number | null;
   max_age_hours: number;
   stale: boolean;
+  /**
+   * Set only for a job that has NEVER run and carries first_run_grace_hours:
+   * how long the watchers have seen it missing. null otherwise.
+   */
+  awaiting_first_run_hours: number | null;
 }
 
 // Check the heartbeats of jobs OTHER than the caller. A NULL watermark counts as
 // stale: a job that has never recorded a run is indistinguishable from one that
-// stopped, and both need looking at.
+// stopped, and both need looking at — unless the expectation opts into
+// first_run_grace_hours, in which case "never ran" becomes stale only after the
+// job has been seen missing for longer than that (see HeartbeatExpectation).
 export async function checkHeartbeats(
   dbc: DbOrTx,
   expectations: HeartbeatExpectation[],
@@ -187,16 +212,48 @@ export async function checkHeartbeats(
     FROM cron_locks WHERE job_name IN (${names})
   `)) as unknown as { job_name: string; last_run: string | null; age_hours: number | null }[];
 
+  // For never-run jobs that opted into a grace: stamp "first seen missing" once
+  // (ON CONFLICT DO NOTHING keeps the FIRST stamp), then read how long ago it was.
+  const neverRan = expectations.filter(
+    (e) =>
+      e.first_run_grace_hours != null &&
+      rows.find((r) => r.job_name === e.job_name)?.age_hours == null,
+  );
+  const waited = new Map<string, number>();
+  if (neverRan.length > 0) {
+    const keys = neverRan.map((e) => awaitingFirstRunKey(e.job_name));
+    await dbc.execute(sql`
+      INSERT INTO cron_locks (job_name, watermark)
+      SELECT k, now() FROM unnest(${sql`ARRAY[${sql.join(keys.map((k) => sql`${k}`), sql`, `)}]::text[]`}) AS k
+      ON CONFLICT (job_name) DO NOTHING
+    `);
+    const since = (await dbc.execute(sql`
+      SELECT job_name, EXTRACT(EPOCH FROM (now() - watermark)) / 3600 AS hours
+      FROM cron_locks WHERE job_name IN (${sql.join(keys.map((k) => sql`${k}`), sql`, `)})
+    `)) as unknown as { job_name: string; hours: number | null }[];
+    for (const e of neverRan) {
+      const h = since.find((r) => r.job_name === awaitingFirstRunKey(e.job_name))?.hours;
+      waited.set(e.job_name, h == null ? 0 : Number(h));
+    }
+  }
+
   return expectations.map((e) => {
     const row = rows.find((r) => r.job_name === e.job_name);
     const age = row?.age_hours == null ? null : Number(row.age_hours);
+    const awaiting = age == null && waited.has(e.job_name) ? waited.get(e.job_name)! : null;
     return {
       job_name: e.job_name,
       label: e.label,
       last_run: row?.last_run ?? null,
       age_hours: age == null ? null : Number(age.toFixed(1)),
       max_age_hours: e.max_age_hours,
-      stale: age == null || age > e.max_age_hours,
+      stale:
+        age != null
+          ? age > e.max_age_hours
+          : awaiting != null
+            ? awaiting > (e.first_run_grace_hours as number)
+            : true,
+      awaiting_first_run_hours: awaiting == null ? null : Number(awaiting.toFixed(2)),
     };
   });
 }
@@ -206,7 +263,9 @@ export function heartbeatBreaches(statuses: HeartbeatStatus[]): string[] {
     .filter((s) => s.stale)
     .map((s) =>
       s.last_run == null
-        ? `${s.label} has NEVER recorded a run. Silence from it means nothing.`
+        ? `${s.label} has NEVER recorded a run` +
+          (s.awaiting_first_run_hours != null ? ` (missing for ${s.awaiting_first_run_hours}h since first checked)` : "") +
+          `. Silence from it means nothing.`
         : `${s.label} last ran ${s.age_hours}h ago (tolerance ${s.max_age_hours}h). ` +
           `Its silence cannot be read as healthy.`,
     );

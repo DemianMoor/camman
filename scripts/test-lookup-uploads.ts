@@ -1,10 +1,18 @@
+import "./_env-preload";
+import "./_require-preview-db"; // second — refuses any target but the preview DB
+
+import { createRequire } from "node:module";
+
 // Phase 5 backend tests: csv_import precedence + coercions, preview dedupe.
 // DB-level, test rows cleaned up in finally. No Telnyx HTTP.
-// Run: npx tsx scripts/test-lookup-uploads.ts
-import { config } from "dotenv";
-import { createRequire } from "node:module";
-import { resolve } from "node:path";
-config({ path: resolve(process.cwd(), ".env.local") });
+//
+// ⚠️ PREVIEW-ONLY, AND IT WRITES. `.env.local` IS PRODUCTION. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
+//     npx tsx scripts/test-lookup-uploads.ts
+// The `_require-preview-db` import above is the refusal; it runs before
+// db/client is evaluated. (Until 2026-09-22 this file loaded `.env.local` with
+// dotenv and reached db/client only through a dynamic import, which
+// `check:guards` could not see — so a bare run wrote to production.)
 const req = createRequire(import.meta.url);
 try {
   const p = req.resolve("server-only");

@@ -87,6 +87,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "apply-links-short-domain-index-concurrent.ts", why: "builds a production index with CREATE INDEX CONCURRENTLY" },
   { file: "apply-lookup-migrations.ts", why: "controlled, ordered apply of migrations 0095–0098 against production" },
   { file: "apply-trgm-concurrent.ts", why: "builds production indexes with CREATE INDEX CONCURRENTLY" },
+  { file: "backfill-carrier-v2.ts", why: "one-shot production rollout of carrier resolver v2 (docs/04-features/phone-lookup-carrier.md); dry-run default, writes only behind --apply, snapshots contacts.carrier_norm to a rollback table first" },
   { file: "backfill-content-dedup-exposures.ts", why: "one-shot production backfill of the content-dedup ledgers" },
   { file: "backfill-conversion-events.ts", viaLibrary: true, why: "one-shot production backfill; writes only behind --apply (writes via lib/conversions/ingest, so it carries no write token of its own)" },
   { file: "backfill-creative-spam-scores.ts", why: "one-shot production backfill of creatives.spam_score" },
@@ -197,14 +198,43 @@ interface Needle {
   readonly re: RegExp;
   /** Code this needle MUST match, and that no sibling needle may match. */
   readonly sample: string;
+  /**
+   * A NEAR MISS this needle must NOT match — the control against WIDENING, as
+   * `sample` is the control against narrowing. Hand-written, like `sample`.
+   */
+  readonly negative?: string;
 }
 
-/** Ways a script can reach a database at all. */
+/**
+ * Ways a script can reach a database at all.
+ *
+ * ⭐ DYNAMIC IMPORTS COUNT (2026-09-22). Until then only a STATIC
+ * `from "…/db/client"` counted, so a script that loaded `.env.local` with
+ * dotenv and reached the client only through `await import("@/db/client")` —
+ * the shape a `server-only` stub forces — matched no needle, was never
+ * enrolled, and wrote to PRODUCTION when run bare. Four such scripts were
+ * found: test-lookup-worker, test-lookup-uploads, test-eligible-gate (now
+ * guarded) and backfill-carrier-v2 (a production tool, now in EXCLUSIONS).
+ * One needle per spelling the tree actually uses, so narrowing either one
+ * turns its own sample bar red instead of hiding behind the other.
+ */
 const DB_REACH: ReadonlyArray<Needle> = [
   { id: "db/client", re: /from\s+["'](?:@\/|\.\.\/|\.\/)db\/client["']/, sample: `import { db } from "../db/client";` },
   { id: "_env-preload", re: /import\s+["']\.\/_env-preload["']/, sample: `import "./_env-preload";` },
   { id: "postgres", re: /from\s+["']postgres["']/, sample: `import pg from "postgres";` },
   { id: "drizzle-postgres-js", re: /from\s+["']drizzle-orm\/postgres-js["']/, sample: `import { drizzle } from "drizzle-orm/postgres-js";` },
+  {
+    id: "import(@/db/client)",
+    re: /import\s*\(\s*["']@\/db\/client["']/,
+    sample: `  const { db } = await import("@/db/client");`,
+    negative: `  const { contacts } = await import("@/db/schema");`,
+  },
+  {
+    id: "import(../db/client)",
+    re: /import\s*\(\s*["']\.\.\/db\/client["']/,
+    sample: `  const { db: sharedDb } = await import("../db/client");`,
+    negative: `  const { contacts } = await import("../db/schema");`,
+  },
 ];
 
 /**
@@ -386,6 +416,16 @@ function main() {
   check("⭐ a brand-new write-capable script with no guard IS caught",
         touchesDb(newcomer) && writesDb(newcomer) && verdictFor(newcomer).importsHelper === false);
 
+  // …and the shape that slipped through until 2026-09-22: dotenv, a server-only
+  // stub, and db/client reached ONLY through a dynamic import().
+  const dynamicNewcomer = stripComments(
+    `import { config } from "dotenv";${eol}config({ path: ".env.local" });${eol}` +
+      `async function main() {${eol}  const { db } = await import("@/db/client");${eol}` +
+      `  await db.execute(sql\`DELETE FROM lookup_queue WHERE id = 1\`);${eol}}${eol}`,
+  );
+  check("⭐ a write-capable script that reaches db/client only via import() IS caught",
+        touchesDb(dynamicNewcomer) && writesDb(dynamicNewcomer) && verdictFor(dynamicNewcomer).importsHelper === false);
+
   // ── ⭐ …AND EVERY CLASSIFIER NEEDLE SEPARATELY ─────────────────────────────
   //
   // Every control above exercises the GUARD VERDICT — none of them touches
@@ -407,17 +447,24 @@ function main() {
   const needleBars = (label: string, list: ReadonlyArray<Needle>) => {
     const dead: string[] = [];
     const shared: string[] = [];
+    const widened: string[] = [];
     for (const n of list) {
       for (const [ending, nl] of [["LF", "\n"], ["CRLF", "\r\n"]] as const) {
         const mod = `import "./_x";${nl}${n.sample}${nl}`;
         if (!n.re.test(mod)) dead.push(`${n.id}@${ending}`);
         const others = list.filter((o) => o.id !== n.id && o.re.test(n.sample)).map((o) => o.id);
         if (others.length > 0) shared.push(`${n.id} also matched by ${others.join("/")}`);
+        if (n.negative !== undefined && n.re.test(`import "./_x";${nl}${n.negative}${nl}`)) widened.push(`${n.id}@${ending}`);
       }
     }
     check(`⭐ every ${label} needle matches its own sample and NO sibling's (${list.length} needles × LF/CRLF)`,
           dead.length === 0 && shared.length === 0,
           `dead: ${dead.join(", ") || "none"} | not isolated: ${[...new Set(shared)].join("; ") || "none"}`);
+    const withNegative = list.filter((n) => n.negative !== undefined).length;
+    if (withNegative > 0) {
+      check(`⭐ …and every ${label} needle with a near miss rejects it (${withNegative} needles × LF/CRLF)`,
+            widened.length === 0, `widened: ${widened.join(", ")}`);
+    }
     // Negative control on the matcher itself: a read-only script must classify
     // as neither, or "everything matches" would satisfy the bar above.
     const readOnly = `import { readFileSync } from "node:fs";${eol}const rows = await client.query(select);${eol}`;
@@ -436,7 +483,7 @@ function main() {
   // sees, and adding one is a deliberate bump here rather than a silent widening.
   const roster = (list: ReadonlyArray<Needle>) => list.map((n) => n.id).sort().join(",");
   check("⭐ the DB_REACH roster is intact (a deleted needle is not a narrowed one)",
-        roster(DB_REACH) === "_env-preload,db/client,drizzle-postgres-js,postgres",
+        roster(DB_REACH) === "_env-preload,db/client,drizzle-postgres-js,import(../db/client),import(@/db/client),postgres",
         roster(DB_REACH));
   check("⭐ the WRITE_SIGNAL roster is intact",
         roster(WRITE_SIGNAL) ===
@@ -455,7 +502,8 @@ function main() {
         signalless.length === 0,
         `${signalless.join(", ")} — either the entry is stale, or a WRITE_SIGNAL needle died`);
   // The same, one axis over: 16 of these reach a database ONLY through the
-  // `postgres` needle, so this is where that needle's death lands.
+  // `postgres` needle, so this is where that needle's death lands — and
+  // backfill-carrier-v2.ts reaches one ONLY through `import(@/db/client)`.
   const unreachable = EXCLUSIONS.filter(
     (e) => existsSync(`scripts/${e.file}`) && !touchesDb(code.get(e.file) ?? ""),
   ).map((e) => e.file);

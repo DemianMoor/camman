@@ -1,6 +1,6 @@
 # Phone Lookup & Carrier Enrichment (Telnyx)
 
-_Last updated: 2026-07-14_
+_Last updated: 2026-09-22_
 
 > **Status: in build** (`feat/telnyx-number-lookup`). Phase 1 (schema) is authored; the worker, upload flows, segment/campaign wiring, and admin UI land in later phases. This doc is updated as each phase ships.
 
@@ -48,7 +48,7 @@ Plus two non-bucket states (migration 0099):
 
 **Admin review** — the `/settings/lookup` "Carrier triage — needs review" section (`/api/carrier/triage-queue`) lists `pending`/`needs_human` strings **ranked by affected contact count**; assigning a bucket (`/api/carrier/triage-queue/assign`) writes the mapping on the normalized key (fixing all variants) and marks the row `human_resolved`. The legacy "Unmapped carriers" section (by exact `carrier_raw`) remains.
 
-**Backfill** — [scripts/backfill-carrier-v2.ts](../../scripts/backfill-carrier-v2.ts): dry-run (default) reports the before→after bucket distribution over `phone_lookups` without writing; `--apply` backfills `normalized_carrier` from `raw_response` (free), snapshots `contacts.carrier_norm` to `carrier_norm_backfill_snapshot` (rollback), recomputes `carrier_norm` in batches, syncs contacts, and enqueues still-Unmapped keys. Run the dry-run and review before flipping `carrier_resolver_v2`.
+**Backfill** — [scripts/backfill-carrier-v2.ts](../../scripts/backfill-carrier-v2.ts): dry-run (default) reports the before→after bucket distribution over `phone_lookups` without writing; `--apply` backfills `normalized_carrier` from `raw_response` (free), snapshots `contacts.carrier_norm` to `carrier_norm_backfill_snapshot` (rollback), recomputes `carrier_norm` in batches, syncs contacts, and enqueues still-Unmapped keys. Run the dry-run and review before flipping `carrier_resolver_v2`. It is a deliberate production tool, so `npm run check:guards` lists it in `EXCLUSIONS` instead of guarding it (see [07-conventions](../07-conventions.md), "A script that writes to a database must refuse production").
 
 ## Line-type mapping (Telnyx → us)
 
@@ -90,7 +90,7 @@ See [03-data-model.md](../03-data-model.md) for columns. `lookup_settings` is a 
 - **Claim** `FOR UPDATE SKIP LOCKED`, `attempts++`+`updated_at` at claim; 429 → left pending, 60s cooldown (backoff); terminal fail → queue `failed`, no `phone_lookups` row (contact stays `Unidentified`). Paced to `lookup_concurrency_rps`/sec.
 - **Contact sync** per completed lookup (`syncContactsForPhones`): copies line_type/carrier down (replacing `Unidentified`), and for landlines cancels **pending** `stage_sends` only (never `sending` — mid-flight; deleting can't unsend and breaks the DLR match) + removes from `campaign_audience_pool`. Drained batch → finalized (actual cost from line-type mix) + Telegram summary.
 
-Live-fire drain needs `TELNYX_API_KEY` set; the first run is the 500-number calibration batch. Verified without HTTP (lease overlap/CAS/crash-recovery, attempt-summed cap, enqueue dedup — `scripts/test-lookup-worker.ts`).
+Live-fire drain needs `TELNYX_API_KEY` set; the first run is the 500-number calibration batch. Verified without HTTP (lease overlap/CAS/crash-recovery, attempt-summed cap, enqueue dedup — `scripts/test-lookup-worker.ts`). That test is **preview-only** (2026-09-22): it refuses every target except camman-v2, so run it with the `.env.demo` `DATABASE_URL`. It rewrites the global `lookup_settings` row, so it reads the row first, puts `worker_lease_until` back in `finally`, and fails unless the whole row reads back unchanged.
 
 ## Eligible-invariant wiring (phase 4)
 
@@ -99,7 +99,7 @@ The `AND messaging_status = 'eligible'` gate is threaded in as a **SQL literal**
 - **`buildGroupMembershipClause`** ([lib/audience-snapshot.ts](../../lib/audience-snapshot.ts)) — inner-joins contacts with the eligible literal, gating the group dimension.
 - **Send backstop** ([lib/sends/recipients.ts](../../lib/sends/recipients.ts) `enumerateStageRecipients`) — telemetry, **not** a silent filter: the frozen pool is already landline-free (snapshot gate + landline sync), so a `not_applicable` row here means an upstream gate leaked → log + skip + count + Telegram alert.
 
-Active-pool reads (`computeStageAudienceCount*`, lane counts) need no gate — landlines never enter `campaign_audience_pool`. Verified: `scripts/test-eligible-gate.ts` (landline drops out of the segment audience but stays in contacts; partial-index selection via `EXPLAIN` + `enable_seqscan=off`). **Deferred:** re-run the `EXPLAIN` comparison after the 500-number calibration batch and again after backfill, once `not_applicable` rows exist, to confirm the planner chooses the partial indexes naturally for broad reads too.
+Active-pool reads (`computeStageAudienceCount*`, lane counts) need no gate — landlines never enter `campaign_audience_pool`. Verified: `scripts/test-eligible-gate.ts` (landline drops out of the segment audience but stays in contacts; partial-index selection via `EXPLAIN` + `enable_seqscan=off`). The test is preview-only (2026-09-22). Since then its `SET LOCAL enable_seqscan=off` and the `EXPLAIN` run in one transaction. Before, they were two pool calls that could land on different connections, so the setting never reached the plan. Production masked that because the natural plan already chose the index; on camman-v2, where one org owns every contact, the forced bar was red. **Deferred:** re-run the `EXPLAIN` comparison after the 500-number calibration batch and again after backfill, once `not_applicable` rows exist, to confirm the planner chooses the partial indexes naturally for broad reads too.
 
 ## Upload backend (phase 5 — API + helpers)
 
@@ -110,7 +110,7 @@ Endpoints under `/api/telnyx/lookup/` (all in `lib/telnyx/`):
 - `POST enqueue` (`lookup.run`) — enqueue uploaded numbers (`trigger='upload'`, dedup vs cache/pending). Called by the upload UI after contacts insert when the toggle is ON — decoupled from the per-entity upload routes so ONE endpoint covers every phone-upload path.
 - `POST csv-update` (`lookup.admin`) — bulk-update existing contacts from predefined `line_type`/`carrier` (`importCsvLookups`): writes `phone_lookups` `source='csv_import'` (never overwriting a `telnyx` row) + syncs. No Telnyx calls.
 
-Precedence/coercion (verified `scripts/test-lookup-uploads.ts`): `telnyx` wins, `csv_import` never overwrites it; type-without-carrier → `Unknown`; landline → `Unknown`; garbage `line_type` → `unknown` (never rejected); predefined rows are excluded from the enqueue (`predefinedPhonesOf`) so the toggle never double-spends. Toggle OFF → contacts keep the `Unidentified` default (no enqueue).
+Precedence/coercion (verified `scripts/test-lookup-uploads.ts`, preview-only since 2026-09-22): `telnyx` wins, `csv_import` never overwrites it; type-without-carrier → `Unknown`; landline → `Unknown`; garbage `line_type` → `unknown` (never rejected); predefined rows are excluded from the enqueue (`predefinedPhonesOf`) so the toggle never double-spends. Toggle OFF → contacts keep the `Unidentified` default (no enqueue).
 
 **Enqueue is always delta-only — re-runs cost only the delta.** The shared enqueue path (`enqueueNormalized`) dedups against cache-complete + already-pending in one `INSERT … SELECT`, so a completed number is skipped for free; only new contacts and previously-failed numbers (which write no row) are ever re-enqueued. Safe to trigger repeatedly for any scoped set.
 

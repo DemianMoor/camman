@@ -1,11 +1,23 @@
+import "./_env-preload";
+import "./_require-preview-db"; // second — refuses any target but the preview DB
+
+import { createRequire } from "node:module";
+
 // Phase 3 worker tests: pure (Warsaw midnight, summary) + live-DB (lease single-
 // runner + crash recovery, attempt-summed daily cap, enqueue dedup, worker lease
 // guard). All DB writes are test rows, cleaned up in finally. No Telnyx HTTP.
-// Run: npx tsx scripts/test-lookup-worker.ts
-import { config } from "dotenv";
-import { createRequire } from "node:module";
-import { resolve } from "node:path";
-config({ path: resolve(process.cwd(), ".env.local") });
+//
+// ⚠️ PREVIEW-ONLY, AND IT WRITES. `.env.local` IS PRODUCTION. Run it as:
+//   DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
+//     npx tsx scripts/test-lookup-worker.ts
+// The `_require-preview-db` import above is the refusal; it runs before
+// db/client is evaluated. (Until 2026-09-22 this file loaded `.env.local` with
+// dotenv and reached db/client only through a dynamic import, which
+// `check:guards` could not see — so a bare run wrote to production.)
+//
+// ⭐ `lookup_settings` IS ONE GLOBAL ROW, and the lease bars rewrite it. The
+// whole row is read first; `finally` puts `worker_lease_until` back to exactly
+// what it was, then reads the row again and fails the run unless it matches.
 
 // Neutralize the `server-only` import guard for this node/tsx test (tsx runs CJS
 // here) without a global export condition — a condition would also alter how other
@@ -41,6 +53,12 @@ async function main() {
   const capPhone = "+19998880000";
   const batchIds: string[] = [];
   const allPhones = [...testPhones, cachePhone, capPhone];
+
+  // The global row as it stood before any bar touched it (undefined = no row).
+  const settingsRow = async () =>
+    (await db.execute<{ row: unknown; lease: string | null }>(sql`
+      SELECT to_jsonb(s) AS row, worker_lease_until::text AS lease FROM lookup_settings s WHERE id = true`))[0];
+  const settingsBefore = await settingsRow();
 
   try {
     // ---- pure: Warsaw midnight (summer = UTC+2) ----
@@ -114,12 +132,19 @@ async function main() {
     batchIds.push(r3.batchId);
     eq([r3.cacheHits, r3.enqueued], [1, 0], "already-looked-up number: 1 cache hit, 0 enqueued (free)");
   } finally {
+    // The global row first: put the lease back exactly as it was, then prove it.
+    if (settingsBefore) {
+      await db.execute(sql`
+        UPDATE lookup_settings SET worker_lease_until = ${settingsBefore.lease}::timestamptz WHERE id = true`);
+      const same = JSON.stringify((await settingsRow())?.row) === JSON.stringify(settingsBefore.row);
+      console.log(`\nlookup_settings: ${same ? "✓ row identical to before the run" : "✗ ROW DIFFERS from before the run"} (worker_lease_until=${settingsBefore.lease ?? "NULL"})`);
+      if (!same) failures++;
+    }
     // cleanup — remove all test data from the global tables
     const { pgArray } = await import("@/lib/telnyx/pg-array");
     if (batchIds.length) await db.execute(sql`DELETE FROM lookup_batches WHERE id = ANY(${pgArray(batchIds, "uuid")})`);
     await db.execute(sql`DELETE FROM phone_lookups WHERE phone = ANY(${pgArray(allPhones, "text")})`);
     await db.execute(sql`DELETE FROM lookup_queue WHERE phone = ANY(${pgArray(allPhones, "text")})`);
-    await db.execute(sql`UPDATE lookup_settings SET worker_lease_until = NULL WHERE id = true`);
     await sqlEnd();
   }
 

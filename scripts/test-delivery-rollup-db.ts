@@ -57,7 +57,8 @@ async function main() {
   const never = R.rollupScope(now, null);
   bar("P1 no settle yet ⇒ 7-day settle window", never.settle && never.range.from === "2026-09-16" && never.range.to === "2026-09-22", JSON.stringify(never));
   const recent = R.rollupScope(now, new Date(now.getTime() - 3_600_000));
-  bar("P2 settled 1h ago ⇒ today + yesterday only", !recent.settle && recent.range.from === "2026-09-21" && recent.range.to === "2026-09-22", JSON.stringify(recent));
+  bar("P2 settled 1h ago ⇒ TODAY only (fresh tier narrowed 2026-09-23)",
+    !recent.settle && recent.range.from === "2026-09-22" && recent.range.to === "2026-09-22", JSON.stringify(recent));
   const due = R.rollupScope(now, new Date(now.getTime() - 3 * 3_600_000));
   bar("P3 settled exactly 3h ago ⇒ settle again", due.settle && due.range.from === "2026-09-16", JSON.stringify(due));
   const rec = R.reconcileRange(now);
@@ -81,6 +82,13 @@ async function main() {
   bar("F5 window entirely past the horizon ⇒ final, never stale", f5.final && !f5.stale && f5.as_of === null, JSON.stringify(f5));
   const f6 = R.deliveryFreshness({ from: "2026-09-22", to: "2026-09-22" }, null, null, now);
   bar("F6 refresh never ran ⇒ stale, no as-of", f6.stale && f6.as_of === null && !f6.final, JSON.stringify(f6));
+  // Since the fresh tier is today-only, YESTERDAY is the settle tier's job, so a
+  // yesterday-only window must report the settle stamp — the honest older one.
+  const f7 = R.deliveryFreshness({ from: "2026-09-21", to: "2026-09-21" }, min(5), min(170), now);
+  bar("F7 yesterday-only ⇒ as of the SETTLE stamp, not the 10-min refresh",
+    !f7.stale && f7.as_of === min(170).toISOString(), JSON.stringify(f7));
+  const f8 = R.deliveryFreshness({ from: "2026-09-21", to: "2026-09-21" }, min(5), min(8 * 60), now);
+  bar("F8 …and it goes stale on the SETTLE threshold (8 h > 7 h)", f8.stale, JSON.stringify(f8));
 
   const tag = `dr-${Date.now()}`;
   let orgId = "";

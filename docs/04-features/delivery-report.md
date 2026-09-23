@@ -277,10 +277,12 @@ volume grew; nothing re-measured it until the Overview reached 30 s.
 
 **Refresh — the only writer** (`/api/cron/delivery-rollup`, every 10 min at `:x3`):
 
-| Tier | Cells recomputed | When | Measured cost |
+| Tier | Cells recomputed | When | Measured cost per run |
 |---|---|---|---|
-| A (fresh) | today + yesterday (ET) | every run | ~0.6 s warm / 2.2 s cold per day of stages |
+| A (fresh) | **today only (ET)** | every run | **0.43–0.47 s · 0–2 blocks** |
 | B (settle) | the last 7 ET days | when the last settle is ≥ 3 h old | ~10 s |
+
+⚠️ **Tier A covered today + yesterday until 2026-09-23**, which made this job the #3 consumer on the database — 129 runs in 21.5 h at 6.96 s and ~267 MB each, about **34 GB/day**, because every tick re-read yesterday's sends and two days of receipts. Measured before/after on the same org in rolled-back transactions: today+yesterday **2.6 s warm / 8.1 s cold, 100–345 MB**; today only **0.45 s, ~0 blocks**. Yesterday is not dropped — the settle tier still recomputes it every 3 h, so a late receipt for yesterday lands within 3 h instead of 10 min, and the "as of" label says so (a window including yesterday reports the settle stamp). `sent` for yesterday is unaffected either way: a send is stamped when it goes out, so yesterday's cells stop changing at midnight.
 
 - **Scope is the SEND's day, not the stage.** `campaign_stages.sent_at` is NULL on 3 stages that really sent, and has been re-stamped up to 4 h 12 m after a stage's first send.
 - **Cells older than 7 ET days are final.** 0 of 2.64M terminal receipts ever arrived ≥ 6 days after their send (max 5 d 00:02). 99.1% of txr receipts land within a day, so tier B only picks up the late ~1%.

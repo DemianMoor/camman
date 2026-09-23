@@ -37,7 +37,12 @@
  *     by the table, not by the cell, so they do not travel with a sticky cell.
  *
  * Nothing here has a width or a layout effect, so a table that does not
- * overflow renders exactly as it did before, minus the 1px divider.
+ * overflow keeps exactly the LAYOUT it had — no column moves, nothing reflows.
+ * It does NOT look identical, though: the box-shadow is unconditional, so the
+ * 1px divider down the first column's right edge APPEARS at every width,
+ * overflowing or not. That is the one deliberate visual change to a
+ * non-overflowing frozen table, and it is the wanted one — the column is a
+ * real boundary before the scroll starts, not only during it.
  */
 export const FROZEN_FIRST_COLUMN_CELL =
   "sticky left-0 z-10 bg-background shadow-[1px_0_0_0_var(--color-border)] " +

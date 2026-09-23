@@ -75,6 +75,11 @@ type ReportRow = {
   epc: number; // PERIOD — the selected date range
   counted_clickers: number;
   lifetime_epc: number; // LIFETIME — ignores the date filter; the PRIMARY figure
+  // KEPT DELIBERATELY THOUGH NO COLUMN ON THIS TAB RENDERS IT. `Human clicks
+  // (all time)` was removed on 2026-09-23; the field stays because this type
+  // MIRRORS the response, which still carries it, and because it is the
+  // denominator the SERVER divided by to produce the `lifetime_epc` above.
+  // Do not go hunting for the column that shows it — there is none, on purpose.
   lifetime_clickers: number;
   profit: number;
   // Delivery receipts (lib/reporting/delivery.ts — the same layer behind
@@ -428,6 +433,20 @@ export function KeitaroReport() {
     filters.sortBy,
     filters.sortDir,
   );
+
+  // …and written back ONCE, so a dead id does not sit in
+  // localStorage["reports.filters"] for the life of the browser profile,
+  // re-corrected on every read forever. The READ above stays the source of
+  // truth: nothing depends on this write landing, which is exactly why it is
+  // safe as an effect that a storage failure may swallow. In an EFFECT and not
+  // during render because updateFilters both sets state and touches
+  // localStorage. Guarded on a real difference, so the normal case writes
+  // nothing and the effect cannot loop — normalizeOverviewSort is idempotent,
+  // its fallback being itself a member of the roster.
+  useEffect(() => {
+    if (sortById === filters.sortBy && sortDirection === filters.sortDir) return;
+    updateFilters({ sortBy: sortById, sortDir: sortDirection });
+  }, [sortById, sortDirection, filters.sortBy, filters.sortDir, updateFilters]);
 
   useEffect(() => {
     let cancelled = false;

@@ -17,7 +17,12 @@ import { nextSortState } from "@/lib/ui/sort-cycle";
 //   3. a stable third key so identical rows never jitter;
 //   4. the direction is applied to the PRIMARY key alone — a tie-break folded
 //      in before the flip reverses with the sort, which is the bug this file
-//      was written to keep fixed.
+//      was written to keep fixed;
+//   5. a null primary sorts LAST in both directions on EVERY kind of column,
+//      not only the generated event ones;
+//   6. the two source facts no pure fixture can reach — the route sorts the
+//      FULL row set before it slices the page, and the By-X tabs' header click
+//      runs the same shared cycle Overview does.
 //
 // ⭐ EVERY FIXTURE IS ONE-SIDED. No bar asserts an order that the pre-change
 // comparator would have produced anyway: each tie-break fixture ranks its rows
@@ -65,6 +70,10 @@ type OvRow = {
   counted_clickers: number;
   sales: number;
   opt_out_rate: number;
+  // A PLAIN (non-event) numeric column that can go negative and, in S13, be
+  // null. `profit` is a real Overview sort id; nothing in the response makes it
+  // null today, which is the whole point of S13 — see the note there.
+  profit: number | null;
   ev: number | null;
 };
 
@@ -78,6 +87,7 @@ function ov(p: Partial<OvRow> & { campaign_id: number }): OvRow {
     counted_clickers: 0,
     sales: 0,
     opt_out_rate: 0,
+    profit: 0,
     ev: seq, // never null unless a fixture says so
     ...p,
   };
@@ -368,7 +378,31 @@ console.log("\nS12 · the wiring");
   // A pure comparator that nothing calls is worth nothing, and a tie-break is
   // only fixed if the old "negate the whole comparison" line is GONE.
   const routeFoldsThenFlips = /sortDir === "asc" \? cmp : -cmp/.test(route);
-  const byxFlipsInline = /\*\s*dir\b/.test(byx);
+
+  // ⭐ THIS REPLACED AN ABSENCE REGEX FOR THE LITERAL `* dir` (2026-09-23,
+  // review), WHICH ONLY EVER CAUGHT THE ONE SPELLING THE OLD CODE HAPPENED TO
+  // USE. The property that matters is not "that literal is gone" but "this
+  // component does not order rows itself": every `.sort(` in it must be handed
+  // the SHARED comparator. A flip re-hand-rolled as `? cmp : -cmp`, as
+  // `(bv - av)`, or as anything else has to replace that argument to take
+  // effect, so it goes red HERE, where the old needle stayed green. The list
+  // must be NON-EMPTY, so a renamed call site fails the bar rather than
+  // emptying it into a vacuous pass.
+  const byxSortArgs = [
+    ...byx.matchAll(/\.sort\(\s*([A-Za-z_$][\w$]*|[\s\S])/g),
+  ].map((m) => m[1]);
+  const byxSortsItself =
+    byxSortArgs.length === 0 ||
+    byxSortArgs.some((arg) => arg !== "makeDimensionComparator");
+  // Belt and braces, and the half that survives a sort spelled some other way:
+  // no hand-written comparison of two rows anywhere in the file, whichever way
+  // round the operands are written, and no post-hoc `.reverse()`.
+  const byxHandRollsAComparison =
+    /\*\s*dir\b/.test(byx) ||
+    /-\s*cmp\b/.test(byx) ||
+    /\b[ab]v\s*-\s*[ab]v\b/.test(byx) ||
+    /\b[ab]\.\w+\s*-\s*[ab]\.\w+/.test(byx) ||
+    /\.reverse\(\)/.test(byx);
 
   // Every OTHER screen must still be on the default cycle. Scanning the tree
   // for the prop by name rather than trusting the default's declaration: a
@@ -382,7 +416,8 @@ console.log("\nS12 · the wiring");
     route.includes("makeOverviewComparator") &&
       !routeFoldsThenFlips &&
       byx.includes("makeDimensionComparator") &&
-      !byxFlipsInline &&
+      !byxSortsItself &&
+      !byxHandRollsAComparison &&
       overview.includes('sortCycle="desc-asc"') &&
       wrapper.includes('sortCycle = "asc-desc-clear"') &&
       wrapper.includes("nextSortState(") &&
@@ -391,7 +426,145 @@ console.log("\nS12 · the wiring");
       byx.includes("[...derived].sort(") &&
       consumers.length === 1 &&
       consumers[0] === OVERVIEW,
-    `route folds-then-flips: ${routeFoldsThenFlips} | by-x inline flip: ${byxFlipsInline} | sortCycle consumers: ${consumers.join(",") || "none"}`,
+    `route folds-then-flips: ${routeFoldsThenFlips} | by-x sort args: ${byxSortArgs.join(",") || "NONE FOUND"} | by-x hand-rolled comparison: ${byxHandRollsAComparison} | sortCycle consumers: ${consumers.join(",") || "none"}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 7 · Added by review, 2026-09-23
+//
+// Numbered AFTER S12 rather than slotted in beside the bars they belong with,
+// so the "Bar S12" references in docs/07-conventions.md and docs/CHANGELOG.md
+// stay true. Read S13 with the comparator bars (S3–S11) and S14–S15 with the
+// wiring bar (S12).
+// ---------------------------------------------------------------------------
+
+console.log("\nS13–S15 · the null rule on a plain column, and two source facts");
+
+{
+  // ⭐ ONE NULL RULE, NOT TWO. The event branch (S9) and By-X (S10) have always
+  // sorted a null LAST in both directions; Overview's PLAIN-column branch used
+  // to coerce a missing value with `?? 0`, so the rule docs/07-conventions.md
+  // states was false for most of Overview's columns. It is inert in practice —
+  // no whitelisted Overview sort id is nullable today — and that is precisely
+  // why it needs a bar rather than a note: nothing on screen would have gone
+  // wrong until the first nullable column arrived, and then it would have gone
+  // wrong quietly, in the direction nobody looks at.
+  //
+  // ONE-SIDED IN BOTH DIRECTIONS, on purpose. The fixture sorts by `profit`,
+  // which can be NEGATIVE, so the two rules disagree either way round:
+  //   `?? 0`      desc → c4(9), c3/c2(0), c1(-5) · asc → c1(-5), c3/c2(0), c4
+  //   nulls-last  desc → c4(9), c1(-5), c3, c2  · asc → c1, c4, c3, c2
+  // A fixture of non-negative values would have passed under the OLD coercion
+  // descending and proved nothing.
+  const rows: OvRow[] = [
+    ov({ campaign_id: 1, profit: -5, clickers: 1 }),
+    ov({ campaign_id: 2, profit: null, clickers: 100 }),
+    ov({ campaign_id: 3, profit: null, clickers: 200 }),
+    ov({ campaign_id: 4, profit: 9, clickers: 2 }),
+  ];
+  const desc = ovOrder(rows, "profit", "desc");
+  const asc = ovOrder(rows, "profit", "asc");
+  check(
+    "S13 ⭐⭐ a null on a PLAIN Overview column sorts LAST in both directions — the same rule as the event branch and By-X, not `?? 0` — and two nulls are tied, so the Clickers secondary orders them 200 before 100",
+    eq(desc, ["c4", "c1", "c3", "c2"]) && eq(asc, ["c1", "c4", "c3", "c2"]),
+    `desc ${desc.join(",")} | asc ${asc.join(",")}`,
+  );
+}
+
+{
+  // ⭐⭐ THE REAL HANDLER, EXECUTED — not a regex over it, and not a copy of it.
+  // `toggleSort` is lifted out of the component source and run against a
+  // stand-in `filters` / `updateFilters` pair, so what this bar exercises is
+  // the text that ships. It is the only way to state the By-X CYCLE at all:
+  // the old guard was a single absence regex that said nothing about what a
+  // click does. A rewrite that still calls the shared function but passes the
+  // wrong cycle, or applies the result to the wrong field, fails here.
+  //
+  // Source is CRLF, so the multi-line needle runs against an LF copy.
+  const byxLf = readFileSync(
+    "components/reports/performance-report.tsx",
+    "utf-8",
+  ).replace(/\r\n/g, "\n");
+  const m = byxLf.match(/\n  function toggleSort\(([^)]*)\)\s*\{\n([\s\S]*?)\n  \}\n/);
+  if (!m) {
+    // POSITIVE CONTROL. A needle that stops matching must FAIL, not skip: a
+    // silently-unrun bar is the failure mode this whole file exists to avoid.
+    check(
+      "S14 ⭐⭐ By-X's header click runs the SHARED desc-asc cycle (the real handler, executed)",
+      false,
+      "could not lift `function toggleSort(…)` out of components/reports/performance-report.tsx — the needle may have gone stale, which is not the same as the behaviour being right",
+    );
+  } else {
+    const params = m[1].replace(/:\s*[\w<>[\]|., ]+/g, "").trim();
+    const body = m[2];
+    const state: { sortBy: string; sortDir: "asc" | "desc" } = {
+      sortBy: "revenue",
+      sortDir: "desc",
+    };
+    const updateFilters = (next: Partial<typeof state>) => {
+      Object.assign(state, next);
+    };
+    const build = new Function(
+      "nextSortState",
+      "filters",
+      "updateFilters",
+      `return function toggleSort(${params}) {\n${body}\n};`,
+    ) as (
+      cycle: typeof nextSortState,
+      filters: typeof state,
+      update: typeof updateFilters,
+    ) => (id: string) => void;
+    const toggleSort = build(nextSortState, state, updateFilters);
+
+    const seen: string[] = [];
+    const clickAndSnap = (id: string) => {
+      toggleSort(id);
+      seen.push(`${state.sortBy}/${state.sortDir}`);
+    };
+    clickAndSnap("sales"); // a fresh column opens DESCENDING
+    clickAndSnap("sales"); // the same column flips to ascending
+    clickAndSnap("sales"); // and back — the sort is never cleared
+    clickAndSnap("cost"); // a fresh column from ASC still opens descending
+    const trace = seen.join(" → ");
+    check(
+      "S14 ⭐⭐ By-X's header click runs the SHARED desc-asc cycle — the real `toggleSort` source, executed: fresh column descending, same column flips, never cleared, and a fresh column from ascending still opens descending",
+      trace === "sales/desc → sales/asc → sales/desc → cost/desc" &&
+        body.includes("nextSortState(") &&
+        body.includes('"desc-asc"'),
+      `states: ${trace} | delegates: ${body.includes("nextSortState(")} | cycle named: ${body.includes('"desc-asc"')}`,
+    );
+  }
+}
+
+{
+  // ⭐⭐ THE ORDERING CLAIM, PINNED TO THE SOURCE. Overview's Clickers secondary
+  // is only right ACROSS PAGES because the route sorts the whole assembled
+  // array and cuts the page out of the RESULT. Move the slice above the sort
+  // and every other bar in this file still passes — the comparator is
+  // unchanged, it is just being applied to twenty rows the primary key already
+  // chose. Nothing but the source order can catch that, so the source order is
+  // what is asserted.
+  const routeSrc = readFileSync("app/api/keitaro/reports/route.ts", "utf-8");
+  const SORT_NEEDLE = "data.sort(";
+  const SLICE_NEEDLE = ".slice(page * pageSize";
+  const sortAt = routeSrc.indexOf(SORT_NEEDLE);
+  const sliceAt = routeSrc.indexOf(SLICE_NEEDLE);
+  // POSITIVE CONTROL, and the reason this is not a one-line `indexOf <`:
+  // `indexOf` answers -1 for a needle that no longer exists, and -1 is less
+  // than everything, so a renamed variable would turn the comparison
+  // permanently and silently green. Both needles must be present, and present
+  // EXACTLY ONCE — two sorts or two slices make "which one" unanswerable.
+  const sortCount = routeSrc.split(SORT_NEEDLE).length - 1;
+  const sliceCount = routeSrc.split(SLICE_NEEDLE).length - 1;
+  check(
+    "S15 ⭐⭐ the route sorts the FULL row set BEFORE it slices the page — asserted on source order, with both needles proven present exactly once so a rename cannot pass it vacuously",
+    sortCount === 1 &&
+      sliceCount === 1 &&
+      sortAt >= 0 &&
+      sliceAt >= 0 &&
+      sortAt < sliceAt,
+    `"${SORT_NEEDLE}" at ${sortAt} (${sortCount}×) | "${SLICE_NEEDLE}" at ${sliceAt} (${sliceCount}×)`,
   );
 }
 

@@ -34,7 +34,12 @@ while the rest scroll under it. The class bundle lives once, in
   (Tailwind's preflight default) collapsed borders are painted by the table, not
   by the cell, so they do not travel with a sticky cell.
 - Nothing in the bundle has a layout effect, so a table that does not overflow
-  renders exactly as before, minus the 1px divider.
+  keeps exactly the LAYOUT it had — no column moves, nothing reflows. It does
+  **not** look identical, though: the box-shadow is unconditional, so the 1px
+  divider down the first column's right edge **appears at every width**,
+  overflowing or not. That is the one deliberate visual change to a
+  non-overflowing frozen table, and it is the wanted one — the column is a real
+  boundary before the scroll starts, not only during it.
 - **Bars:** [scripts/test-frozen-first-column.ts](../scripts/test-frozen-first-column.ts)
   (`npx tsx`, pure) fails if the wrapper's default moves, if the class escapes
   the first cell, if a second screen opts in, or if either table's row hover
@@ -63,10 +68,17 @@ Owner's rules for every `/reports` table — Overview and the By-X tabs alike.
     silently re-teach every list in the app at once. Bar **S12** in
     [scripts/test-report-sort.ts](../scripts/test-report-sort.ts) fails if a
     second consumer appears; **S1** fails if the default moves.
-  - The By-X tabs' own `toggleSort`
+  - ⭐ **The By-X tabs go through the SAME function.** Their `toggleSort`
     ([components/reports/performance-report.tsx](../components/reports/performance-report.tsx))
-    has always behaved this way. The two tabs must not disagree about what a
-    click means.
+    always behaved this way, but until 2026-09-23 it said so in two
+    hand-written lines of its own; it now calls
+    `nextSortState(…, "desc-asc")` and applies the result. The two tabs must
+    not disagree about what a click means, and a second copy of a rule is how
+    they would come to — by drift, not by decision. Bar **S14** in
+    [scripts/test-report-sort.ts](../scripts/test-report-sort.ts) lifts that
+    handler out of the component source and RUNS it: fresh column descending,
+    the same column flips, the sort never clears, and a fresh column clicked
+    while another is ascending still opens descending.
 - **Clickers is a permanent secondary sort, high → low, whatever the primary
   is** — on every sortable column, rate and text columns included. Sorting by
   Sales therefore puts the campaigns that made sales first, then orders the
@@ -102,9 +114,24 @@ Owner's rules for every `/reports` table — Overview and the By-X tabs alike.
 - **Overview's secondary has to be computed server-side.** The route sorts the
   assembled rows and THEN slices the page, so a secondary key applied in the
   browser would only reorder the twenty rows the primary key had already chosen.
-- Unchanged by all of the above: a null (unknown ratio) on an event column still
-  sorts **last in both directions**, and hourly's pinned **Manual** row still
-  sorts first, ahead of the direction and both tie-breaks.
+  That ORDER is load-bearing, and it is asserted on the source rather than only
+  in prose: bar **S15** fails if the slice ever moves ahead of the sort — and
+  fails too if either needle stops matching, because `indexOf` answers `-1` for
+  a needle that no longer exists and `-1` is less than everything, which would
+  otherwise turn the comparison permanently and silently green.
+- **A null sorts LAST in both directions — on every kind of column, and there
+  is only ONE rule.** "We cannot say" is not a small number: it must not win a
+  descending sort over a real 0.0%, nor head an ascending one. That held on the
+  generated event columns and on By-X from the start, while Overview's plain
+  numeric branch coerced a missing value with `?? 0` — so this line was false
+  for most of Overview's columns until 2026-09-23. It is inert in practice (no
+  whitelisted Overview sort id is nullable today), which is exactly why it is a
+  bar and not a note: bar **S13** sorts by `profit`, a column that can go
+  NEGATIVE, so the coercion and the rule disagree in BOTH directions and the
+  fixture cannot pass under the wrong one. Two nulls are TIED, not
+  incomparable, so the Clickers secondary still orders them.
+- Unchanged by all of the above: hourly's pinned **Manual** row still sorts
+  first, ahead of the direction and both tie-breaks.
 
 ## Contact lifecycle status has exactly one definition (2026-09-22)
 

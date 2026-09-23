@@ -35,6 +35,7 @@ import type {
 import { makeDimensionComparator } from "@/lib/reporting/report-sort";
 import { DIMENSION_LABEL, type ReportDimension } from "@/lib/reporting/report-dimensions";
 import { FROZEN_FIRST_COLUMN_CELL } from "@/lib/ui/frozen-column";
+import { nextSortState } from "@/lib/ui/sort-cycle";
 
 interface PerfResponse {
   dimension: ReportDimension;
@@ -423,8 +424,22 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
   const providers = resp?.providers ?? [];
 
   function toggleSort(id: string) {
-    if (filters.sortBy === id) updateFilters({ sortDir: filters.sortDir === "asc" ? "desc" : "asc" });
-    else updateFilters({ sortBy: id, sortDir: "desc" });
+    // ONE definition of what a header click means, shared with Overview
+    // (lib/ui/sort-cycle.ts): the `desc-asc` cycle — a fresh column opens
+    // DESCENDING whatever the previous column's direction was, clicking the
+    // same column flips it, and the sort is NEVER cleared. That is precisely
+    // what the two hand-written lines this replaces did; the point of routing
+    // it through the pure function is that the rule now lives in one place, so
+    // a change to Overview's cycle cannot quietly leave the By-X tabs on the
+    // old one. `sortBy` is non-null on this cycle by construction — only
+    // `asc-desc-clear` ever returns null — and `?? id` keeps the types honest
+    // without inventing a behaviour the cycle cannot produce.
+    const next = nextSortState(
+      { sortBy: filters.sortBy, sortDir: filters.sortDir },
+      id,
+      "desc-asc",
+    );
+    updateFilters({ sortBy: next.sortBy ?? id, sortDir: next.sortDir });
   }
   // Reads the EFFECTIVE sort, so the arrow sits on the column the rows are
   // actually ordered by — including when a persisted id named a column that is

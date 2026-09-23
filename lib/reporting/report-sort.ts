@@ -134,9 +134,24 @@ export function makeOverviewComparator<T extends OverviewSortRow>(
       else if (bv == null) return -1;
       else cmp = av - bv;
     } else {
-      cmp =
-        ((a as unknown as Record<string, number>)[sortBy] ?? 0) -
-        ((b as unknown as Record<string, number>)[sortBy] ?? 0);
+      // THE SAME nulls-last RULE AS THE EVENT BRANCH ABOVE AND AS By-X's
+      // comparator below — not a `?? 0` coercion. A missing value is "we
+      // cannot say", not zero: coerced to 0 it lands wherever 0 happens to
+      // fall, which on a column that can go negative (Profit) is the MIDDLE of
+      // the table descending and the TOP of it ascending. That is the opposite
+      // of the rule docs/07-conventions.md states and of what the other two
+      // branches do. Inert on today's roster — every whitelisted Overview sort
+      // id is a plain number on every row — so this changes no order anyone
+      // can produce today; it is here so the next nullable sortable column
+      // inherits the stated rule instead of the coercion. Like the event
+      // branch, the early `return` skips the tie-breaks on purpose: there is
+      // no ordering between a knowable row and an unknowable one to refine.
+      const av = (a as unknown as Record<string, number | null | undefined>)[sortBy];
+      const bv = (b as unknown as Record<string, number | null | undefined>)[sortBy];
+      if (av == null && bv == null) cmp = 0;
+      else if (av == null) return 1;
+      else if (bv == null) return -1;
+      else cmp = av - bv;
     }
     return applyReportSortKeys(
       cmp,

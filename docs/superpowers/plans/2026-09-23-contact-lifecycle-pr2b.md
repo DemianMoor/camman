@@ -662,7 +662,7 @@ Write `scripts/measure-lifecycle-list.ts`, modelled on the existing `scripts/mea
 
 **Read-only: no INSERT, UPDATE or DELETE anywhere in the script.**
 
-Acceptance: each under ~2 s. If the `new` arm is materially slower, say so with the plan before proceeding — the fix is a partial index, which needs a migration and therefore approval, not a silent timeout bump.
+**Acceptance (owner, 2026-09-23):** the **page query under 300 ms** and the **capped count under 1 s**, for every shape including the `new` arm. This is a 20-row page; anything slower is a plan problem, not a tolerable cost. Report anything above either bar **with its `EXPLAIN` plan** before proceeding — the fix is a partial index, which needs a migration and therefore approval, not a silent timeout bump.
 
 - [ ] **Step 8: Lint and commit**
 
@@ -978,10 +978,15 @@ It follows the page's existing idioms exactly: `<h2 className="mb-2 text-sm font
                       : "—"
                   }
                 />
-                <Field
-                  label="Send cadence"
-                  value={`every ${contact.lifecycle.freeze_cadence_days}d`}
-                />
+                {/* Cadence throttling only applies in Freeze (spec §3.2 / §8).
+                    Showing "every 14d" on a hot or cold contact would read as
+                    if a cadence limited their sends, which it does not. */}
+                {contact.lifecycle.status === "freeze" && (
+                  <Field
+                    label="Send cadence"
+                    value={`every ${contact.lifecycle.freeze_cadence_days}d`}
+                  />
+                )}
                 <Field label="Thresholds from" value={thresholdSource} />
               </dl>
               <p className="text-muted-foreground mt-3 text-xs">
@@ -1043,7 +1048,8 @@ The final `|| "Group overrides"` covers a group that has since been archived out
 
 Open `/contacts/[id]` for three contacts picked from production statuses — one `hot`, one `freeze` (so the freeze clock is populated), and one recently uploaded with no `contact_engagement` row — and confirm:
 - the hot contact shows a Since date and a last click;
-- the freeze contact shows a freeze clock and a cadence;
+- the freeze contact shows a freeze clock **and** a Send cadence field;
+- the hot contact shows **no** Send cadence field at all — cadence applies only in Freeze;
 - the never-evaluated contact shows "New — not yet evaluated" with no broken dates;
 - the history lists transitions newest-first and reads as English ("Hot → Warm  click aged warm  23 Sep 2026 16:40");
 - the Suppression card below still renders "Global suppression" from Task 1.

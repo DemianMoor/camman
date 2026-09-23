@@ -1404,16 +1404,22 @@ check(
   `found=${creativesSrc.includes(SORT_AWARE_FILTER)}`,
 );
 
-// ── ⭐ THE PERIOD PAIR IS NAMED THE SAME ON BOTH REPORT TABLES ──────────────
+// ── ⭐ THE PERIOD PAIR — BY-X CARRIES BOTH HALVES, OVERVIEW ONLY THE EPC ─────
 //
-// `Clicks` / `EPC` lost their "(period)" suffix on BOTH the Overview tab
-// (keitaro-report.tsx) and the four By-X tabs (performance-report.tsx) in the
-// same change, because they are the same two metrics one click apart inside one
-// section and a rename applied to only one of them is worse than either name on
-// its own. V13 pins the VALUE on the By-X side; this pins the AGREEMENT, which
-// is the part a later edit to one file would break. Overview shows every column
-// unconditionally (`showAllColumns` is a literal `true` there), so it has no
-// curated-view bar of its own and this is its only cover.
+// `Clicks` / `EPC` lost their "(period)" suffix on BOTH tables in one change,
+// because they were the same two metrics one click apart inside one section.
+// ⭐ RE-EXPRESSED 2026-09-23: Overview no longer HAS the denominator half. The
+// owner removed `Human clicks` and `Human clicks (all time)` from that tab (V26
+// pins the removal), so the old "both tables head the pair identically" claim
+// now asks about a column that deliberately does not exist, and an undefined
+// header would satisfy it against an undefined one on a broken parse.
+//
+// What survives, and is what this bar now holds: the By-X tables head the FULL
+// pair `Human clicks` / `EPC`; Overview heads its `EPC` the SAME WAY — bare,
+// with no time suffix, because one date picker drives both tabs — and carries
+// no denominator column beside it. An `EPC (period)` creeping back onto either
+// table, or a denominator quietly reappearing on Overview under a new header,
+// is red. V13 pins the VALUE on the By-X side; this pins the relationship.
 const overviewCols = new Map(
   [...flatSrc("components/reports/keitaro-report.tsx").matchAll(COL_PAIR)].map(
     (m) => [m[1], m[2]] as [string, string],
@@ -1421,18 +1427,19 @@ const overviewCols = new Map(
 );
 const byXCols = new Map(fullCols);
 const PERIOD_PAIR = ["counted_clickers", "epc"] as const;
+const DENOM_IDS = ["counted_clickers", "lifetime_clickers"] as const;
 check(
-  `V20 ⭐⭐ Overview and the By-X tables head the period pair identically — ${PERIOD_PAIR.map((id) => `${id}=${JSON.stringify(overviewCols.get(id))}`).join(", ")} — and neither carries a time suffix`,
-  // One-sided: the Overview parse must have found a real table, or two
-  // undefineds would "agree" and this bar would pass over nothing.
+  `V20 ⭐⭐ the By-X tables head the period pair ${PERIOD_PAIR.map((id) => `${id}=${JSON.stringify(byXCols.get(id))}`).join(", ")} with no time suffix — and Overview heads ${JSON.stringify(overviewCols.get("epc"))} the same way over no denominator column at all (${DENOM_IDS.map((id) => `${id}=${JSON.stringify(overviewCols.get(id) ?? null)}`).join(", ")})`,
+  // One-sided: the Overview parse must have found a real table, or "the
+  // denominator is absent" is a statement about a parse that found nothing.
   overviewCols.size >= 10 &&
     PERIOD_PAIR.every(
-      (id) =>
-        overviewCols.get(id) !== undefined &&
-        overviewCols.get(id) === byXCols.get(id) &&
-        !/\(.*\)/.test(overviewCols.get(id)!),
-    ),
-  `overview=${overviewCols.size} cols; ${PERIOD_PAIR.map((id) => `${id}: ${overviewCols.get(id)} vs ${byXCols.get(id)}`).join(" | ")}`,
+      (id) => byXCols.get(id) !== undefined && !/\(.*\)/.test(byXCols.get(id)!),
+    ) &&
+    byXCols.get("counted_clickers") === "Human clicks" &&
+    overviewCols.get("epc") === byXCols.get("epc") &&
+    DENOM_IDS.every((id) => overviewCols.get(id) === undefined),
+  `overview=${overviewCols.size} cols; epc: ${overviewCols.get("epc")} vs ${byXCols.get("epc")}; overview denom: ${DENOM_IDS.map((id) => `${id}=${overviewCols.get(id) ?? "(absent)"}`).join(", ")}`,
 );
 
 // ── ⭐ A HEADER NAMES A TIME BASIS EXACTLY WHEN THE DATE FILTER DOES NOT ─────
@@ -1474,7 +1481,13 @@ check(
     // basis" would satisfy the rule vacuously — an assertion about today's
     // empty state rather than about the rule. And the matcher itself has to
     // discriminate, or every header would read as unqualified.
-    lifetimeSeen.length >= 4 &&
+    //
+    // ⚠️ THE FLOOR WAS 4 AND IS NOW 3 — a world-state change, not a slackening:
+    // Overview's lifetime PAIR became a single column on 2026-09-23 when
+    // `Human clicks (all time)` was removed from that tab (V26), leaving
+    // By-X's two and Overview's `EPC (all time)`. Three is still two tables, so
+    // the control still covers more than one parse.
+    lifetimeSeen.length >= 3 &&
     TIME_BASIS.test("Human clicks (all time)") &&
     TIME_BASIS.test("EPC (period)") &&
     TIME_BASIS.test("EPC (30d)") &&
@@ -1595,11 +1608,16 @@ const creativeTriples = creativeCols.map(
   ([id, h]) => ["/creatives", id, h] as [string, string, string],
 );
 const allHeaders = [...fixedCols, ...creativeTriples];
+// ⭐ THE TWO OVERVIEW ENTRIES WERE REMOVED 2026-09-23, and their absence is
+// pinned rather than merely dropped: Overview no longer DECLARES a
+// counted_clickers or lifetime_clickers column at all (owner's decision — V26
+// holds that half, and V20 holds that its EPC now stands alone). This roster is
+// "every denominator column that EXISTS heads Human clicks…"; deleting a column
+// from the product and leaving its name here would make the bar red for the
+// right reason with the wrong message, so the entry moves to V26 instead.
 const DENOM_COLS: Array<[string, string]> = [
   ["By-X", "counted_clickers"],
   ["By-X", "lifetime_clickers"],
-  ["Overview", "counted_clickers"],
-  ["Overview", "lifetime_clickers"],
   ["/creatives", "clean_clicks_lifetime"],
 ];
 const headerOf = (table: string, id: string) =>
@@ -1619,7 +1637,7 @@ const bareClicks = allHeaders.filter(([, , h]) => IS_BARE_CLICKS.test(h));
 const humanOnVisits = allHeaders.filter(([, id, h]) => id === "clickers" && /human/i.test(h));
 const visitColsSeen = allHeaders.filter(([, id]) => id === "clickers");
 check(
-  `V23 ⭐⭐ all ${DENOM_COLS.length} counted_clicker columns head "Human clicks…" (the API's clicks_human) across the By-X tables, Overview and /creatives — no column heads a bare "Clicks", and the word never lands on \`clickers\`, which is Keitaro's landing-VISIT count`,
+  `V23 ⭐⭐ all ${DENOM_COLS.length} counted_clicker columns that still exist head "Human clicks…" (the API's clicks_human) — the By-X tables and /creatives; Overview carries none since 2026-09-23 (V26) — no column anywhere heads a bare "Clicks", and the word never lands on \`clickers\`, which is Keitaro's landing-VISIT count`,
   denomMissing.length === 0 &&
     denomBad.length === 0 &&
     bareClicks.length === 0 &&
@@ -1649,52 +1667,77 @@ check(
     ` | headers=${allHeaders.length} visitCols=${visitColsSeen.length}`,
 );
 
-// ── ⭐ V24 — THE VISIT COUNT IS NAMED `Landing visits` ON EVERY SURFACE ───────
+// ── ⭐ V24 — ONE METRIC, TWO NAMES, ON PURPOSE: `Landing visits` ON BY-X AND
+//            `Clickers` ON OVERVIEW, AND NEITHER MAY CROSS ──────────────────
 //
-// The owner renamed `Clickers` → `Landing visits` on 2026-09-20, the same day
-// the trap was flagged. V23 above asks a PROPERTY and stayed green through it;
-// this one TRANSCRIBES the result, which is the half that notices a revert.
-// Both are wanted, and the pair is the point: a property bar survives a correct
-// change, a transcription bar reports an incorrect one.
+// The owner renamed `Clickers` → `Landing visits` on ALL THREE tables on
+// 2026-09-20, and SPLIT IT BACK on 2026-09-23 — Overview alone returns to
+// `Clickers`. ⭐ THE SPLIT IS THE DECISION, NOT DRIFT, and the reason is a
+// difference between the tables rather than a preference about the word: the
+// long name earned its length by sitting four columns from `Human clicks`, the
+// real EPC denominator, on a table that showed both. Overview no longer shows
+// EITHER human-click column (V26 pins that), so on that tab there is nothing to
+// confuse it with and the shorter name is the one the owner reads the funnel
+// by. The By-X tables still show the denominator, so the trap is live there and
+// they keep `Landing visits`.
 //
-// ⭐ WHY A COLUMN-HEADER BAR WOULD NOT HAVE BEEN ENOUGH. `clickers` reaches the
-// screen through THREE column declarations (FULL_COLS, HOURLY_COLS and the
-// Overview table) and THREE totals TILES that no column parser can see — two
-// <StatCard>s in performance-report.tsx and one in keitaro-report.tsx. That is
-// the six label sites the rename had to touch, and a bar reading only the
-// rosters would have been green with half the page still saying `Clickers`.
-// It also pins the Overview's funnel SENTENCE, the one piece of prose that
-// names the funnel's first stage out loud.
+// ⭐ THIS IS THE BAR THAT STOPS A LATER "CONSISTENCY" EDIT RE-UNIFYING THEM
+// SILENTLY. It pins each tab's header AND that NEITHER string appears on the
+// other, so renaming either side to match the other is red from both
+// directions — and the next reader who notices the inconsistency finds the
+// reason recorded here and at both column declarations instead of a tidy-up to
+// make.
+//
+// ⭐ WHY A COLUMN-HEADER BAR WOULD NOT BE ENOUGH. `clickers` reaches the screen
+// through THREE column declarations (FULL_COLS, HOURLY_COLS and the Overview
+// table) and THREE totals TILES that no column parser can see — two <StatCard>s
+// in performance-report.tsx and one in keitaro-report.tsx — plus the Overview
+// funnel SENTENCE, the one piece of prose that names the funnel's first stage
+// out loud. A bar reading only the rosters would be green with half the page
+// still saying the other name.
 //
 // ⭐ THE COLUMN `id` IS ASSERTED UNCHANGED, DELIBERATELY. The whole claim that
-// this rename cost nothing rests on it: sorts persist as `sortBy: "clickers"`
+// these renames cost nothing rests on it: sorts persist as `sortBy: "clickers"`
 // (usePersistedFilters stores column IDS, never header text) and the Operator
 // API ships the field as `clickers`. If a later tidy-up renames the id to match
-// the label, every saved sort falls back silently and an API field moves — so
-// the id is a clause of this bar, not an incidental of it.
+// a label, every saved sort falls back silently and an API field moves — so the
+// id is a clause of this bar, not an incidental of it.
 const VISIT_ID = "clickers";
-const VISIT_HEADER = "Landing visits";
-const OLD_VISIT_HEADER = "Clickers";
+const BYX_VISIT_HEADER = "Landing visits";
+const OVERVIEW_VISIT_HEADER = "Clickers";
+const VISIT_HEADER_BY_TABLE: Record<string, string> = {
+  "By-X": BYX_VISIT_HEADER,
+  Hourly: BYX_VISIT_HEADER,
+  Overview: OVERVIEW_VISIT_HEADER,
+};
+const otherTabsHeader = (table: string) =>
+  table === "Overview" ? BYX_VISIT_HEADER : OVERVIEW_VISIT_HEADER;
 const countIn = (hay: string, needle: string) => hay.split(needle).length - 1;
 const keitaroFlat = flatSrc("components/reports/keitaro-report.tsx");
 const visitHeaderCols = allHeaders.filter(([, id]) => id === VISIT_ID);
-const visitHeaderBad = visitHeaderCols.filter(([, , h]) => h !== VISIT_HEADER);
-const oldHeaderAnywhere = allHeaders.filter(([, , h]) => h === OLD_VISIT_HEADER);
-const newTiles =
-  countIn(perfSrc, `label="${VISIT_HEADER}"`) + countIn(keitaroFlat, `label="${VISIT_HEADER}"`);
-const oldTiles =
-  countIn(perfSrc, `label="${OLD_VISIT_HEADER}"`) + countIn(keitaroFlat, `label="${OLD_VISIT_HEADER}"`);
-const FUNNEL_NEW = `${VISIT_HEADER} → Offer Redirect → Sales funnel`;
-const FUNNEL_OLD = `${OLD_VISIT_HEADER} → Offer Redirect → Sales funnel`;
+const visitHeaderBad = visitHeaderCols.filter(
+  ([t, , h]) => h !== VISIT_HEADER_BY_TABLE[t],
+);
+// The other tab's name, anywhere on this one — on ANY column, not just the
+// visit count. That is the shape a "consistency" edit takes.
+const crossedCols = fixedCols.filter(([t, , h]) => h === otherTabsHeader(t));
+const byXTiles = countIn(perfSrc, `label="${BYX_VISIT_HEADER}"`);
+const overviewTiles = countIn(keitaroFlat, `label="${OVERVIEW_VISIT_HEADER}"`);
+const crossedTiles =
+  countIn(perfSrc, `label="${OVERVIEW_VISIT_HEADER}"`) +
+  countIn(keitaroFlat, `label="${BYX_VISIT_HEADER}"`);
+const FUNNEL_NEW = `${OVERVIEW_VISIT_HEADER} → Offer Redirect → Sales funnel`;
+const FUNNEL_OLD = `${BYX_VISIT_HEADER} → Offer Redirect → Sales funnel`;
 check(
-  `V24 ⭐⭐ the landing-VISIT count reads ${JSON.stringify(VISIT_HEADER)} on all ${visitHeaderCols.length} tables that show it and on all ${newTiles} totals tiles, the Overview funnel sentence names it, nothing still reads ${JSON.stringify(OLD_VISIT_HEADER)} — and the column id stays ${JSON.stringify(VISIT_ID)}, so no saved sort and no API field moved`,
+  `V24 ⭐⭐ the landing-VISIT count reads ${JSON.stringify(BYX_VISIT_HEADER)} on the By-X and Hourly tables and ${JSON.stringify(OVERVIEW_VISIT_HEADER)} on Overview (${visitHeaderCols.length} tables, ${byXTiles + overviewTiles} totals tiles, the Overview funnel sentence), NEITHER name appears on the other tab — and the column id stays ${JSON.stringify(VISIT_ID)} on all three, so no saved sort and no API field moved`,
   visitHeaderBad.length === 0 &&
-    oldHeaderAnywhere.length === 0 &&
-    oldTiles === 0 &&
-    newTiles === 3 &&
-    byXCols.get(VISIT_ID) === VISIT_HEADER &&
-    new Map(hourlyCols).get(VISIT_ID) === VISIT_HEADER &&
-    overviewCols.get(VISIT_ID) === VISIT_HEADER &&
+    crossedCols.length === 0 &&
+    crossedTiles === 0 &&
+    byXTiles === 2 &&
+    overviewTiles === 1 &&
+    byXCols.get(VISIT_ID) === BYX_VISIT_HEADER &&
+    new Map(hourlyCols).get(VISIT_ID) === BYX_VISIT_HEADER &&
+    overviewCols.get(VISIT_ID) === OVERVIEW_VISIT_HEADER &&
     keitaroFlat.includes(FUNNEL_NEW) &&
     !keitaroFlat.includes(FUNNEL_OLD) &&
     // One-sided five ways. The parse must have found real tables (or every
@@ -1706,38 +1749,189 @@ check(
     allHeaders.length >= 40 &&
     visitHeaderCols.length === 3 &&
     ["\n", "\r\n"].every((nl) => {
-      const renamed = stripFlat(
-        `Live campaign performance from Keitaro: the ${VISIT_HEADER} → Offer${nl}          Redirect → Sales funnel, per stage`,
+      const overview = stripFlat(
+        `Live campaign performance from Keitaro: the ${OVERVIEW_VISIT_HEADER} → Offer Redirect${nl}          → Sales funnel, per stage`,
       );
-      const original = stripFlat(
-        `Live campaign performance from Keitaro: the ${OLD_VISIT_HEADER} → Offer Redirect →${nl}          Sales funnel, per stage`,
+      const unified = stripFlat(
+        `Live campaign performance from Keitaro: the ${BYX_VISIT_HEADER} → Offer${nl}          Redirect → Sales funnel, per stage`,
       );
       return (
-        renamed.includes(FUNNEL_NEW) &&
-        !renamed.includes(FUNNEL_OLD) &&
-        original.includes(FUNNEL_OLD) &&
-        !original.includes(FUNNEL_NEW)
+        overview.includes(FUNNEL_NEW) &&
+        !overview.includes(FUNNEL_OLD) &&
+        unified.includes(FUNNEL_OLD) &&
+        !unified.includes(FUNNEL_NEW)
       );
     }) &&
     ["\n", "\r\n"].every((nl) => {
-      const renamedTile = stripFlat(
-        `<StatCard${nl}              label="${VISIT_HEADER}"${nl}              value={fmtInt(totals.clickers)}${nl}            />`,
+      const overviewTile = stripFlat(
+        `<StatCard${nl}              label="${OVERVIEW_VISIT_HEADER}"${nl}              value={fmtInt(totals.clickers)}${nl}            />`,
       );
-      const originalTile = stripFlat(
-        `<StatCard${nl}              label="${OLD_VISIT_HEADER}"${nl}              value={fmtInt(totals.clickers)}${nl}            />`,
+      const byXTile = stripFlat(
+        `<StatCard${nl}              label="${BYX_VISIT_HEADER}"${nl}              value={fmtInt(totals.clickers)}${nl}            />`,
       );
       return (
-        countIn(renamedTile, `label="${VISIT_HEADER}"`) === 1 &&
-        countIn(renamedTile, `label="${OLD_VISIT_HEADER}"`) === 0 &&
-        countIn(originalTile, `label="${OLD_VISIT_HEADER}"`) === 1 &&
-        countIn(originalTile, `label="${VISIT_HEADER}"`) === 0
+        countIn(overviewTile, `label="${OVERVIEW_VISIT_HEADER}"`) === 1 &&
+        countIn(overviewTile, `label="${BYX_VISIT_HEADER}"`) === 0 &&
+        countIn(byXTile, `label="${BYX_VISIT_HEADER}"`) === 1 &&
+        countIn(byXTile, `label="${OVERVIEW_VISIT_HEADER}"`) === 0
       );
     }),
   `cols: ${visitHeaderCols.map(([t, , h]) => `${t}=${JSON.stringify(h)}`).join(", ")}` +
-    ` | tiles new/old: ${newTiles}/${oldTiles}` +
-    ` | old header elsewhere: ${oldHeaderAnywhere.map(([t, id]) => `${t}:${id}`).join(", ") || "none"}` +
-    ` | funnel new/old: ${keitaroFlat.includes(FUNNEL_NEW)}/${keitaroFlat.includes(FUNNEL_OLD)}` +
+    ` | tiles byX/overview/crossed: ${byXTiles}/${overviewTiles}/${crossedTiles}` +
+    ` | crossed cols: ${crossedCols.map(([t, id, h]) => `${t}:${id}=${JSON.stringify(h)}`).join(", ") || "none"}` +
+    ` | funnel overview/unified: ${keitaroFlat.includes(FUNNEL_NEW)}/${keitaroFlat.includes(FUNNEL_OLD)}` +
     ` | headers=${allHeaders.length} visitCols=${visitHeaderCols.length}`,
+);
+
+// ── ⭐ V25 — THE OVERVIEW COLUMN ORDER, LEFT TO RIGHT ────────────────────────
+//
+// The owner's order, 2026-09-23, transcribed. The four money columns he reads
+// together (Sales · Sales CR · Revenue · Pending $) sit as ONE group straight
+// after the funnel, the generated per-event block that elaborates them follows,
+// and Cost / EPC (all time) / EPC / Profit close the row.
+//
+// ⭐ IT RECONSTRUCTS THE RENDERED ORDER RATHER THAN READING THE SOURCE ORDER.
+// The declarations are not the row: `campaignCol` and `stageCol` are declared
+// above `rest` (and `stageCol` is a groupBy ternary declaring BOTH branches),
+// and the generated block is SPLICED IN by the id of the column it precedes.
+// So the anchor literal is parsed out and the splice is replayed here. Moving
+// the anchor back to "sales" — the shape of this change, reverted — is red, and
+// so is swapping any two neighbours or dropping one.
+//
+// ⚠️ FIXED COLUMNS ONLY, and the generated block enters as ONE marker. Its
+// members come from a per-org registry, so their count is config; WHERE the
+// block sits is code, and that is the part worth pinning.
+const OVERVIEW_ORDER = [
+  "campaign_name",
+  "stage",
+  "total_sent",
+  "opt_outs",
+  "opt_out_rate",
+  "delivered_pct",
+  "clickers",
+  "click_rate",
+  "offer_redirect",
+  "redirect_rate",
+  "sales",
+  "sales_cr",
+  "revenue",
+  "pending_revenue",
+  "«generated»",
+  "cost",
+  "lifetime_epc",
+  "epc",
+  "profit",
+];
+const COLS_MEMO_START = "const columns = useMemo<ColumnDef<ReportRow>[]>";
+const COLS_MEMO_END = "const generated: ColumnDef<ReportRow>[] =";
+const ANY_COL = /\{ id: "([^"]+)", header:/g;
+const SPLICE_ANCHOR = /rest\.findIndex\(\(c\) => c\.id === "([^"]+)"\)/;
+const overviewRegion = keitaroFlat.slice(
+  keitaroFlat.indexOf(COLS_MEMO_START),
+  keitaroFlat.indexOf(COLS_MEMO_END),
+);
+const overviewDeclaredIds = [...overviewRegion.matchAll(ANY_COL)].map((m) => m[1]);
+// The campaign column, then the groupBy ternary's TWO branches, then `rest`.
+const overviewHead = overviewDeclaredIds.slice(0, 3);
+const overviewRest = overviewDeclaredIds.slice(3);
+const overviewAnchor = SPLICE_ANCHOR.exec(keitaroFlat)?.[1] ?? "";
+const anchorAt = overviewRest.indexOf(overviewAnchor);
+const overviewRenderOrder =
+  anchorAt < 0
+    ? ["(anchor not found)", ...overviewRest]
+    : // Stage grain — `stages` is the campaign-grain branch of the same slot.
+      [
+        overviewHead[0],
+        overviewHead[2],
+        ...overviewRest.slice(0, anchorAt),
+        "«generated»",
+        ...overviewRest.slice(anchorAt),
+      ];
+const orderProbe = (nl: string, anchor: string) =>
+  SPLICE_ANCHOR.exec(
+    stripFlat(`const at = rest.findIndex((c) => c.id === "${anchor}");${nl}    const withEvents =`),
+  )?.[1];
+check(
+  `V25 ⭐⭐ Overview renders exactly ${OVERVIEW_ORDER.length} columns in the owner's order, with the generated block spliced before ${JSON.stringify(overviewAnchor)} — ${overviewRenderOrder.join(" · ")}`,
+  overviewRenderOrder.length === OVERVIEW_ORDER.length &&
+    overviewRenderOrder.every((id, i) => id === OVERVIEW_ORDER[i]) &&
+    // One-sided four ways: the parse must have found a real table; the head
+    // must really be campaign + both groupBy branches (or the slice silently
+    // mis-aligns everything after it); the anchor must be a real id in `rest`
+    // rather than a miss that appends; and the anchor needle must DISCRIMINATE,
+    // proved on hand-written samples in BOTH line endings.
+    overviewDeclaredIds.length >= 18 &&
+    overviewHead.join(",") === "campaign_name,stages,stage" &&
+    anchorAt >= 0 &&
+    (["\n", "\r\n"] as const).every(
+      (nl) => orderProbe(nl, "zzz_probe") === "zzz_probe" && orderProbe(nl, "sales") === "sales",
+    ),
+  `parsed=${overviewRenderOrder.join(" · ")} | head=${overviewHead.join(",")} anchor=${JSON.stringify(overviewAnchor)}@${anchorAt} declared=${overviewDeclaredIds.length}`,
+);
+
+// ── ⭐ V26 — THE TWO HUMAN-CLICK COLUMNS ARE GONE FROM OVERVIEW, ON BOTH SIDES
+//
+// Owner, 2026-09-23: `Human clicks` and `Human clicks (all time)` come off the
+// Overview tab. REMOVED, not hidden — Overview has no curated-view toggle to
+// hide a column into (`showAllColumns` is a literal `true` there, bar W-note).
+//
+// ⭐ THE SERVER HALF IS THE POINT. A column can vanish from the table while its
+// id stays in the route's SORTABLE whitelist, and a browser that had sorted by
+// it still sends `sortBy: "counted_clickers"` out of localStorage. Accepted,
+// that reorders every row against a column nobody can see, with no indicator
+// anywhere — which is indistinguishable from an unsorted table. So the ids must
+// be absent from the whitelist too, and the client must drop them on read.
+//
+// ⭐ AND THE CLIENT ROSTER IS CHECKED AGAINST THE DECLARATIONS, not transcribed.
+// `OVERVIEW_SORTABLE_IDS` is what normalizeOverviewSort() accepts; if it could
+// drift from the columns actually declared `enableSorting: true` it would be a
+// second roster to forget. Asserting equality makes it derived in effect.
+//
+// ⚠️ THE FIELDS SURVIVE AND THAT IS DELIBERATE: `counted_clickers` still feeds
+// every generated per-event rate/EPC cell and both still feed the server's EPC
+// figures. This bar is about COLUMNS and SORT KEYS, never about the response.
+const routeFlat = flatSrc("app/api/keitaro/reports/route.ts");
+const idsIn = (s: string) => [...s.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+const routeSortable = idsIn(
+  /export const SORTABLE = new Set\(\[(.*?)\]\)/.exec(routeFlat)?.[1] ?? "",
+);
+const overviewSortRoster = idsIn(
+  /const OVERVIEW_SORTABLE_IDS: ReadonlySet<string> = new Set\(\[(.*?)\]\)/.exec(keitaroFlat)?.[1] ??
+    "",
+);
+// Every Overview column declared sortable, read the way verify-sortable-columns
+// reads it: walk each declaration and look ahead to the next one.
+const overviewSortableDeclared = overviewDeclaredIds.filter((id, i) => {
+  const from = overviewRegion.indexOf(`{ id: "${id}", header:`);
+  const next = overviewDeclaredIds[i + 1];
+  const to = next ? overviewRegion.indexOf(`{ id: "${next}", header:`) : overviewRegion.length;
+  return /enableSorting: true/.test(overviewRegion.slice(from, to));
+});
+const removedStillColumns = DENOM_IDS.filter((id) => overviewDeclaredIds.includes(id));
+const removedStillSortable = DENOM_IDS.filter((id) => routeSortable.includes(id));
+const rosterDrift = [
+  ...overviewSortRoster.filter((id) => !overviewSortableDeclared.includes(id)),
+  ...overviewSortableDeclared.filter((id) => !overviewSortRoster.includes(id)),
+];
+const rosterNotAccepted = overviewSortRoster.filter((id) => !routeSortable.includes(id));
+check(
+  `V26 ⭐⭐ Overview declares neither ${DENOM_IDS.map((id) => JSON.stringify(id)).join(" nor ")} as a column, both are out of the route's SORTABLE whitelist (${routeSortable.length} ids), and the client's sort roster (${overviewSortRoster.length}) is exactly the ${overviewSortableDeclared.length} columns declared sortable — so no stale persisted sort can name an invisible column from either side`,
+  removedStillColumns.length === 0 &&
+    removedStillSortable.length === 0 &&
+    rosterDrift.length === 0 &&
+    rosterNotAccepted.length === 0 &&
+    // One-sided four ways. Each parse must have found a real list, or every
+    // "absent" clause passes over an empty one — so each is asked for an id it
+    // MUST still contain, which is the control that the "must not contain"
+    // clauses can say no.
+    overviewDeclaredIds.includes("clickers") &&
+    routeSortable.includes("epc") &&
+    routeSortable.length >= 12 &&
+    overviewSortRoster.includes("revenue") &&
+    overviewSortableDeclared.length >= 12,
+  `still columns: ${removedStillColumns.join(",") || "none"} | still sortable: ${removedStillSortable.join(",") || "none"}` +
+    ` | roster drift: ${rosterDrift.join(",") || "none"} | roster not accepted by route: ${rosterNotAccepted.join(",") || "none"}` +
+    ` | declared=${overviewDeclaredIds.length} sortableDeclared=${overviewSortableDeclared.length} roster=${overviewSortRoster.length} route=${routeSortable.length}`,
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

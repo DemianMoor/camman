@@ -1,6 +1,137 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-22_
+_Last updated: 2026-09-23_
+
+## A frozen first column is OPT-IN PER TABLE, and it must stay that way (2026-09-23)
+
+`/reports` is ~25–30 columns wide, so the name that identifies the row — the
+campaign on Overview, the dimension on the By-X tabs — scrolls off the left edge
+long before the interesting numbers arrive. The first column is now pinned there
+while the rest scroll under it. The class bundle lives once, in
+[lib/ui/frozen-column.ts](../lib/ui/frozen-column.ts).
+
+- ⭐ **Opt-in, for exactly the reason `sortCycle` is** (see the section below).
+  [components/data-table.tsx](../components/data-table.tsx) backs ~20 registry
+  lists that are narrow enough not to want this; its `freezeFirstColumn` prop
+  **defaults to `false`** and `/reports` Overview is the only screen that passes
+  it. The By-X table hand-rolls its own markup
+  ([components/reports/performance-report.tsx](../components/reports/performance-report.tsx))
+  and applies the SAME exported constant — one bundle, so the two tables cannot
+  drift apart.
+- **An opaque background is the whole trick, and the row-state tint has to be
+  re-applied on top of it.** A row's background is translucent (`bg-muted/50` on
+  hover, nothing at rest), so a frozen cell that simply inherited it would show
+  the scrolling columns through itself. The cell therefore paints an opaque
+  `bg-background` base and layers the row's tint back over it in a `::before` —
+  re-using the row's OWN utility, not a hand-mixed opaque equivalent, so the
+  frozen cell composites to exactly the row's colour and no seam appears down
+  the middle of a hovered row. Because each table styles its rows differently
+  (the wrapper hovers `muted/50`, the By-X body `muted/30`, its header a flat
+  `muted/40`), the tint is supplied by the CALLER. **A frozen table that adds a
+  row state — selected, zebra, the `muted/40` hover `onRowClick` brings — must
+  add the matching `…:before:bg-…` class or the frozen cell will not follow it.**
+- **The edge is a box-shadow, not `border-r`.** Under `border-collapse: collapse`
+  (Tailwind's preflight default) collapsed borders are painted by the table, not
+  by the cell, so they do not travel with a sticky cell.
+- Nothing in the bundle has a layout effect, so a table that does not overflow
+  keeps exactly the LAYOUT it had — no column moves, nothing reflows. It does
+  **not** look identical, though: the box-shadow is unconditional, so the 1px
+  divider down the first column's right edge **appears at every width**,
+  overflowing or not. That is the one deliberate visual change to a
+  non-overflowing frozen table, and it is the wanted one — the column is a real
+  boundary before the scroll starts, not only during it.
+- **Bars:** [scripts/test-frozen-first-column.ts](../scripts/test-frozen-first-column.ts)
+  (`npx tsx`, pure) fails if the wrapper's default moves, if the class escapes
+  the first cell, if a second screen opts in, or if either table's row hover
+  changes without its frozen tint following. ⚠️ **What those bars CANNOT prove
+  is the behaviour itself** — that the column stays put and stays opaque is a
+  rendered-layout fact, proven by measuring `getBoundingClientRect().x` before
+  and after scrolling the container in a real browser, at two viewport widths,
+  on Overview and on the By-X tabs.
+
+## On `/reports` a header click sorts DESCENDING first, and no tie-break ever flips with the direction (2026-09-23)
+
+Owner's rules for every `/reports` table — Overview and the By-X tabs alike.
+
+- **Two states, descending first, never cleared.** The first click on a column
+  sorts it high → low (for a report column the interesting end is the top of the
+  list), the second flips to low → high, and a further click flips back. There is
+  no "unsorted" state to land in: clearing the sort is a step the owner said he
+  will never want. The rule is a pure function,
+  `nextSortState()` in [lib/ui/sort-cycle.ts](../lib/ui/sort-cycle.ts).
+  - ⭐ **It is OPT-IN, because the table wrapper is shared.**
+    [components/data-table.tsx](../components/data-table.tsx) backs ~20 registry
+    lists, all of which keep the historical `asc → desc → clear`. That stays the
+    DEFAULT of both the prop and the function; Overview passes
+    `sortCycle="desc-asc"` and is the only caller that does. A new screen wanting
+    the report behaviour asks for it by name — changing the default would
+    silently re-teach every list in the app at once. Bar **S12** in
+    [scripts/test-report-sort.ts](../scripts/test-report-sort.ts) fails if a
+    second consumer appears; **S1** fails if the default moves.
+  - ⭐ **The By-X tabs go through the SAME function.** Their `toggleSort`
+    ([components/reports/performance-report.tsx](../components/reports/performance-report.tsx))
+    always behaved this way, but until 2026-09-23 it said so in two
+    hand-written lines of its own; it now calls
+    `nextSortState(…, "desc-asc")` and applies the result. The two tabs must
+    not disagree about what a click means, and a second copy of a rule is how
+    they would come to — by drift, not by decision. Bar **S14** in
+    [scripts/test-report-sort.ts](../scripts/test-report-sort.ts) lifts that
+    handler out of the component source and RUNS it: fresh column descending,
+    the same column flips, the sort never clears, and a fresh column clicked
+    while another is ascending still opens descending.
+- **Clickers is a permanent secondary sort, high → low, whatever the primary
+  is** — on every sortable column, rate and text columns included. Sorting by
+  Sales therefore puts the campaigns that made sales first, then orders the
+  zero-sales tail by Clickers rather than by whatever the rows happened to
+  arrive in. Sorting BY Clickers is just Clickers descending; the secondary is
+  skipped there because it is 0 by construction.
+- **Then a stable key**, ascending, so two rows tied on everything visible come
+  out in the same order on every request. Overview uses `campaign_id` **then**
+  `stage_id` — `groupBy=stage` makes `campaign_id` non-unique, and only the
+  stage id separates a campaign's own rows. By-X uses the row's `key`, the
+  dimension's own identity (phone id, offer id, sequence slot, group id, hour,
+  `"manual"`), which is unique within a response where `label` is a display
+  string two dimensions can share.
+- ⭐ **A TIE-BREAK MUST BE APPLIED AFTER THE DIRECTION FLIP, NEVER FOLDED IN
+  BEFORE IT.** Both comparators used to do `if (cmp === 0) cmp = <tie-break>;
+  return sortDir === "asc" ? cmp : -cmp` — which puts the tie-break behind the
+  negation, so it REVERSES with the sort. Rows tied on the primary came out in
+  one order descending and the exact opposite order ascending, which is
+  precisely what a tie-break exists to prevent. The direction belongs to the
+  column the operator clicked; the secondary and the stable key are properties
+  of the TABLE. `applyReportSortKeys()` in
+  [lib/reporting/report-sort.ts](../lib/reporting/report-sort.ts) is the one
+  place the whole key order lives, shared by both comparators. Bar **S4** is the
+  bug bar: the same fixture sorted ascending must keep the identical
+  Clickers-descending order the descending sort produced.
+- ⚠️ **The secondary reads `clickers`, not `counted_clickers`.** `clickers` is
+  `visit_clicks_clean`, the column Overview heads `Clickers` and By-X heads
+  `Landing visits`; `counted_clickers` is the deduplicated EPC denominator, a
+  different number on the same row that ranks rows differently. Reading the
+  wrong one fails silently — the table is still sorted, just by a metric nobody
+  can see. Bar **S11** pins it with a fixture whose two fields rank the rows in
+  opposite orders.
+- **Overview's secondary has to be computed server-side.** The route sorts the
+  assembled rows and THEN slices the page, so a secondary key applied in the
+  browser would only reorder the twenty rows the primary key had already chosen.
+  That ORDER is load-bearing, and it is asserted on the source rather than only
+  in prose: bar **S15** fails if the slice ever moves ahead of the sort — and
+  fails too if either needle stops matching, because `indexOf` answers `-1` for
+  a needle that no longer exists and `-1` is less than everything, which would
+  otherwise turn the comparison permanently and silently green.
+- **A null sorts LAST in both directions — on every kind of column, and there
+  is only ONE rule.** "We cannot say" is not a small number: it must not win a
+  descending sort over a real 0.0%, nor head an ascending one. That held on the
+  generated event columns and on By-X from the start, while Overview's plain
+  numeric branch coerced a missing value with `?? 0` — so this line was false
+  for most of Overview's columns until 2026-09-23. It is inert in practice (no
+  whitelisted Overview sort id is nullable today), which is exactly why it is a
+  bar and not a note: bar **S13** sorts by `profit`, a column that can go
+  NEGATIVE, so the coercion and the rule disagree in BOTH directions and the
+  fixture cannot pass under the wrong one. Two nulls are TIED, not
+  incomparable, so the Clickers secondary still orders them.
+- Unchanged by all of the above: hourly's pinned **Manual** row still sorts
+  first, ahead of the direction and both tie-breaks.
 
 ## Contact lifecycle status has exactly one definition (2026-09-22)
 
@@ -821,7 +952,7 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
   - **Keitaro `sub_id_3` = the STAGE tracking id** (the offer postfix param carries it into the tracked URL), not a bare campaign id. The Keitaro poll groups by `sub_id_3` + `campaign_id` and maps back via `campaign_stages.tracking_id`; campaign totals are the SUM across stages. See [04-features/keitaro-poll.md](04-features/keitaro-poll.md).
   - **Keitaro `sub_id_1` = the per-recipient id** (= `stage_sends.id`), appended to the tracked link at redirect time for per-sale → phone attribution (conversions poll).
   - **`sub_idN` URL-param vs `sub_id_N` Keitaro-token spelling split (don't mix them up):** the inbound URL param has **no** underscore before the digit (`sub_id1`, `sub_id3`); the Keitaro token / report column / `conversions/log` column has the underscore (`sub_id_1`, `sub_id_3`). The campaign *Parameters* tab maps one onto the other. A mismatch silently breaks attribution (real past bug). Constants: `STAGE_TRACKING_PARAM = "sub_id3"` ([lib/stage-url.ts](../lib/stage-url.ts)), `RECIPIENT_SUB_ID_PARAM = "sub_id1"` ([lib/links/resolve-click.ts](../lib/links/resolve-click.ts)).
-  - **Keitaro visit/redirect classification:** clicks are classified by the Keitaro campaign **name** `gk-lp-visits` (landing-page **visits**, headed "Landing visits" on screen — "Clickers" before 2026-09-20) vs **any other** campaign (**offer redirects**, whose conversions are sales). Match on **name, not alias** — in the live panel `gk-lp-visits` is the campaign's *name*; its *alias* is a random code (e.g. `ZttBSV`). Resolve the name → `campaign_id`(s) once, then classify rows by `campaign_id`; never hardcode the id (rebuild-safe). Funnel: Landing visits → Offer Redirect → Sales, where visits ⊇ redirects (every redirect is also a visit) and the two are **never summed** — total arrivals = visit count. Headline numbers are the **clean** (bot/prefetch-filtered) counts.
+  - **Keitaro visit/redirect classification:** clicks are classified by the Keitaro campaign **name** `gk-lp-visits` (landing-page **visits**, headed "Landing visits" on the By-X/Hourly tables and "Clickers" on `/reports` Overview — see the naming-split entry below) vs **any other** campaign (**offer redirects**, whose conversions are sales). Match on **name, not alias** — in the live panel `gk-lp-visits` is the campaign's *name*; its *alias* is a random code (e.g. `ZttBSV`). Resolve the name → `campaign_id`(s) once, then classify rows by `campaign_id`; never hardcode the id (rebuild-safe). Funnel: Landing visits → Offer Redirect → Sales, where visits ⊇ redirects (every redirect is also a visit) and the two are **never summed** — total arrivals = visit count. Headline numbers are the **clean** (bot/prefetch-filtered) counts.
 - API route naming: `[parentEntityId]` for nested API segments, `[id]` for page routes (avoids Next's sibling-dynamic-segment prohibition).
 
 ## Timezone (ET everywhere)
@@ -1493,9 +1624,11 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 
 ## Keitaro visit columns and their CamMan equivalents (see [04-features/tracking-attribution.md §7c](04-features/tracking-attribution.md))
 
-Only `visit_clicks_clean` is ever rendered (as "Landing visits" since 2026-09-20;
-"Clickers" before that); `visit_clicks_raw` is read into the funnel tally but
-reaches no screen.
+Only `visit_clicks_clean` is ever rendered — as **"Landing visits"** on the By-X
+and Hourly tables since 2026-09-20, and as **"Clickers"** on the `/reports`
+Overview tab again since 2026-09-23 (the split is deliberate — see the entry
+below); "Clickers" everywhere before 2026-09-20. `visit_clicks_raw` is read into
+the funnel tally but reaches no screen.
 
 When substituting a CamMan figure for a Keitaro visit count, scope it to
 **human-classified** clicks. Measured 2026-08-24 over 284 healthy `guidekn.com`
@@ -1526,10 +1659,12 @@ the same row.
 - **Lifetime EPC is primary**; period EPC attributes revenue by the CLICK's date, not the sale's.
 - **On a date-filtered page an unqualified header means THAT filter's range, and a column the filter does not drive must say so in its own header.** This is the reason a bare `EPC` is safe on `/reports` and it is the thing to re-check before dropping another suffix — **not** "the old rule was overturned". One picker sits above the page and drives every tab, so a header with no time basis has exactly one possible reading; the only way a bare name could mean two things is if some column on the same table answered to something else, which is what the second half of the rule forbids. **Checked, not assumed (2026-09-20):** across Overview, the four By-X tables and Hourly, the only fixed columns outside the date filter are `Human clicks (all time)` and `EPC (all time)` — `lifetime_clickers` / `lifetime_epc`, the pair fed by the lifetime aggregate rather than the ranged one ([lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts), `PerfMetrics`: *"LIFETIME pair — ignores the date filter entirely"*) — and both name it; every other fixed column, the unsuffixed `Human clicks` / `EPC` included, is in range. **Bar V21** ([scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts)) pins that correspondence in BOTH directions on all three tables: a ranged column that gains a basis, or a lifetime column that loses one, is red. The entry this replaced said "a bare EPC is not acceptable"; that rule was written for surfaces with no shared filter and it still holds on every one of them — what makes the unqualified form safe here is the filter, not a change of mind. The day a second out-of-filter column lands on these tables, the bare names stop being unambiguous and the suffixes come back.
 - ⚠️ **It is a property of the PAGE, not of the metric — and `/creatives` does not have it.** That table has no date picker, so nothing on it can inherit a range, and it does **not** obey the rule today: `CTR`, `Checkout Rate`, `Sales CR` and every generated event count are 30-day figures carrying their basis only in a `title` tooltip, sitting beside `EPC (30d)`, `EPC (all time)`, `Human clicks (all time)` and `Sales, qty (all time)`, which carry theirs in the header. Recorded as a real gap rather than smoothed over, and **carded** in [04-features/conversion-events.md](04-features/conversion-events.md) (owner, 2026-09-20: *"card it, don't fix it now"*) — the card names the affected columns, the reader-facing cost and what a fix would take. On a page with no picker the header is the only place a basis can live, so nothing above is licence for a bare `EPC` there.
-- **The EPC denominator is headed `Human clicks` everywhere it appears, and the word belongs to that metric alone (2026-09-20, APPLIED).** `counted_clickers` — deduplicated PEOPLE with a click scored `human`, or a Rule-F conversion; the single denominator behind every EPC — heads **`Human clicks`** on the four By-X tables and on Overview, and **`Human clicks (all time)`** for `lifetime_clickers` there and for `clean_clicks_lifetime` on `/creatives`. Owner: *"Matches what the Operator API already ships as `clicks_human`."* It does: [operator-api.md](operator-api.md) prints `"counted_clickers": 4480, "clicks_human": 4480` on one row, so the screen and the API now say the same word for the same number instead of contradicting each other. **The API field names did not change** — this was a header rename on three screens, not a contract change. **Bar V23** ([scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts)) pins all five columns at once, so a later edit to one file cannot quietly re-split the vocabulary.
-  - ⚠️ **Do NOT spell "human" over `Landing visits` (the column formerly headed `Clickers`) — it is a different metric, and the word would be false there.** That column is `s.tally.visit_clicks_clean`: Keitaro's clean landing-page **VISITS**, bot-filtered by **Keitaro** rather than human-scored by **CamMan**, and explicitly display-only ([lib/keitaro/poll.ts](../lib/keitaro/poll.ts): *"Clickers = landing-page visits (visit_clicks_clean)"*; `PerfMetrics` in [lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts): *"`clickers` above is the Keitaro landing-visit count and is display-only"*). V23's second half is red if "human" ever lands on it, and it stayed green through the `Landing visits` rename below — a property bar survives a correct change.
+- **The EPC denominator is headed `Human clicks` wherever it is SHOWN — the By-X tables and `/creatives` — and the word belongs to that metric alone (2026-09-20, APPLIED; scope narrowed 2026-09-23).** `counted_clickers` — deduplicated PEOPLE with a click scored `human`, or a Rule-F conversion; the single denominator behind every EPC — heads **`Human clicks`** on the four By-X tables, and **`Human clicks (all time)`** for `lifetime_clickers` there and for `clean_clicks_lifetime` on `/creatives`. Owner: *"Matches what the Operator API already ships as `clicks_human`."* It does: [operator-api.md](operator-api.md) prints `"counted_clickers": 4480, "clicks_human": 4480` on one row, so the screen and the API say the same word for the same number instead of contradicting each other. **The API field names did not change** — this was a header rename on three screens, not a contract change. **Bar V23** ([scripts/test-event-columns-view.ts](../scripts/test-event-columns-view.ts)) pins every denominator column that exists at once, so a later edit to one file cannot quietly re-split the vocabulary.
+  - **⭐ THE `/reports` OVERVIEW TAB DELIBERATELY SHOWS EPC WITH NO DENOMINATOR COLUMN — owner's decision, 2026-09-23.** Both `Human clicks` (`counted_clickers`) and `Human clicks (all time)` (`lifetime_clickers`) were **REMOVED** from Overview ([components/reports/keitaro-report.tsx](../components/reports/keitaro-report.tsx)). Removed, **not hidden**: Overview has no curated-view toggle to hide a column into — it passes a literal `true` for `showAllColumns` — so there was no third option. `EPC (all time)` and `EPC` now stand there with nothing beside them saying what they divided by. **That is a real cost and it was accepted with its name on it:** a `$0.00` EPC is only interpretable next to a denominator of `4` ([04-features/epc-denominator.md](04-features/epc-denominator.md) §7), and on Overview the reader no longer has that. **Why it was worth it:** the tab is the one the owner keeps narrow and every column competes for the same horizontal room; the denominator is **one tab away** on By Number / By Offer / By Sequence, which read the same stages out of the same [lib/reporting/stage-funnel.ts](../lib/reporting/stage-funnel.ts) figures; and removing the two people-worded columns is precisely what let `Clickers` regain its meaning on that tab (next entry). ⚠️ **Nothing numeric moved** — `counted_clickers` still divides every EPC on Overview, still feeds every generated per-event rate cell, and is still a field on the response; only two column declarations went. **The sort keys went with them, on both sides:** the ids were dropped from `SORTABLE` in [app/api/keitaro/reports/route.ts](<../app/api/keitaro/reports/route.ts>) and from the client's `OVERVIEW_SORTABLE_IDS`, because a persisted `sortBy: "counted_clickers"` in a browser that had used the column would otherwise reorder every row against a column nobody can see, with no indicator anywhere. Bars **V20/V26** pin the removal and both whitelists; `normalizeOverviewSort()` is the one named helper that falls a stale sort back to `revenue`/`desc`.
+  - ⚠️ **Do NOT spell "human" over the visit column on ANY tab (`Landing visits` on By-X/Hourly, `Clickers` on Overview) — it is a different metric, and the word would be false there.** That column is `s.tally.visit_clicks_clean`: Keitaro's clean landing-page **VISITS**, bot-filtered by **Keitaro** rather than human-scored by **CamMan**, and explicitly display-only ([lib/keitaro/poll.ts](../lib/keitaro/poll.ts): *"Clickers = landing-page visits (visit_clicks_clean)"*; `PerfMetrics` in [lib/reporting/performance-report.ts](../lib/reporting/performance-report.ts): *"`clickers` above is the Keitaro landing-visit count and is display-only"*). V23's second half is red if "human" ever lands on it, and it stayed green through the `Landing visits` rename below — a property bar survives a correct change.
 - **⭐ `Clickers` WAS A TRAP AND IS NOW `Landing visits` — flagged and APPLIED 2026-09-20, owner-approved.** Owner, flagging it: *"Leave `Clickers` alone for now, but flag it: a people-word for a display-only Keitaro visit count, sitting near the real denominator, is a trap waiting to catch someone."* The shape of the trap, kept because it is the reason the new name is what it is: in the default `/reports` view that column sits **four columns** from `Human clicks`; the one named for **people counted visits**, and the one named for **clicks counts people**. A reader who wanted "how many humans clicked" reached left, landed on `Clickers`, and got a number that is **neither deduplicated nor human-scored** — and on a healthy tracked stage the two differ by roughly 1.35× (`counted_clickers` ≈ 1.35 × `visit_clicks_clean`, measured over 284 guidekn stages, [app/api/keitaro/reports/route.ts](<../app/api/keitaro/reports/route.ts>)), so the mistake was plausible enough to go unnoticed and wrong enough to matter. The column is also the divisor of `Redir %` and the numerator of `CR %`, and it is **not** a denominator anywhere EPC is involved.
-  - **Why `Landing visits` and not the alternatives.** What the field genuinely counts: **landing-page visits that Keitaro's own bot filter let through, counted as visits and not as people, for display only.** `Visits` alone was shortest but bare beside `Redirects`; `Tracker visits` named the source but is jargon. **`Landing visits` is the only candidate true in both halves** — *landing* distinguishes it from `Redirects` (offer clicks) one column later, and *visits* stops it claiming to be people — and it reads naturally beside `CR %` ("clicks ÷ sent") and `Redir %` ("redirects ÷ landing visits").
+  - **⭐ AND ON THE OVERVIEW TAB IT IS `Clickers` AGAIN SINCE 2026-09-23 — one metric, two names, on purpose (owner).** The 2026-09-20 rename was applied to all three tables under "one metric, one name", and that was right while all three showed the same columns. They no longer do: Overview **dropped both human-click columns** in the same 2026-09-23 change (entry above), and the trap the long name guards against is a trap *about a neighbouring column* — a reader wanting "how many humans clicked" reaching left and landing on a visit count. With no `Human clicks` anywhere on Overview there is nothing left there to be mistaken for, so the shorter name is unambiguous **on that tab and only on that tab**. The By-X and Hourly tables still show the denominator two columns away and therefore keep **`Landing visits`**; `/creatives` is unaffected. ⚠️ **This divergence is a decision, not drift — do not "restore consistency" by renaming either side.** Bar **V24** pins each tab's header AND that neither string appears on the other, so a unifying edit is red from both directions, and the reasoning is repeated at both column declarations ([components/reports/keitaro-report.tsx](../components/reports/keitaro-report.tsx), [components/reports/performance-report.tsx](../components/reports/performance-report.tsx)) where an editor meets it. Sites changed on Overview: the column header, the totals `StatCard` and the funnel prose sentence, plus the two source comments naming the tab. **The column `id` is still `clickers` on all three tables**, so no saved sort and no API field moved — the Operator API still ships `clickers` ([operator-api.md](operator-api.md) §7). **No width was re-measured** for this change; the two removed columns make Overview narrower, not wider, and `Clickers` is 6 characters shorter than `Landing visits`.
+  - **Why `Landing visits` and not the alternatives** (still the rule on the By-X tables). What the field genuinely counts: **landing-page visits that Keitaro's own bot filter let through, counted as visits and not as people, for display only.** `Visits` alone was shortest but bare beside `Redirects`; `Tracker visits` named the source but is jargon. **`Landing visits` is the only candidate true in both halves** — *landing* distinguishes it from `Redirects` (offer clicks) one column later, and *visits* stops it claiming to be people — and it reads naturally beside `CR %` ("clicks ÷ sent") and `Redir %` ("redirects ÷ landing visits").
   - **What it cost, verified on applying rather than quoted from the estimate.** **No API cost — re-confirmed:** the Operator API field is `clickers` (documented at [operator-api.md](operator-api.md) §7 as *"the tracker's clean landing visits — not human clicks"*); it is a FIELD NAME, not a label, and it did not move. There is no `/reports` CSV export and no `clickers_label` anywhere. **No saved-sort cost — re-confirmed:** sorts persist by column **id**, and a live read of `localStorage["reports.performance"]` after the rename returned `"sortBy":"sent"` — an id, never header text. The column id is still `clickers` on all three tables. **UI cost: the six label sites, all six applied** — `FULL_COLS`, `HOURLY_COLS` and **two** `StatCard`s in [components/reports/performance-report.tsx](../components/reports/performance-report.tsx), and the column header + a `StatCard` in [components/reports/keitaro-report.tsx](../components/reports/keitaro-report.tsx) — plus two prose sentences (the Overview funnel *"the Landing visits → Offer Redirect → Sales funnel"*, and the Hourly rates line *"redirect ÷ landing visits"*) and bar V13's roster literal.
   - **⚠️ WIDTH: IT FITS ON AN ORDINARY OFFER NAME AND GOES 18px OVER ON A LONG ONE — measured, not estimated.** Real Chromium at a 1440px viewport against camman-v2, `table.scrollWidth` vs the same 1126px container, By Offer default view (15 columns), all four cells read back in ONE session on ONE fixture (offer 5), before and after in the same session:
 

@@ -1,6 +1,6 @@
 # Feature — UI System
 
-_Last updated: 2026-08-28_
+_Last updated: 2026-09-23_
 
 ## 1. Purpose
 A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shadcn/ui. Reusable wrappers enforce the project's interaction conventions (dialog dismissal, required-field markers, file uploads, multi-select) so individual screens stay thin.
@@ -14,7 +14,7 @@ A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shad
 ## 3. Shared components
 | Component | File | Role |
 |-----------|------|------|
-| `DataTable` | `components/data-table.tsx` | TanStack wrapper: manual pagination/sort/selection, loading skeletons, empty state, row-click |
+| `DataTable` | `components/data-table.tsx` | TanStack wrapper: manual pagination/sort/selection, loading skeletons, empty state, row-click. The header-click cycle is `sortCycle` (`lib/ui/sort-cycle.ts`), **default `"asc-desc-clear"`** — every registry list keeps it; `/reports` Overview is the only screen passing `"desc-asc"` (descending first, two states, never cleared). Changing the default would re-teach ~20 screens at once, so a new cycle is always opt-in. `freezeFirstColumn` (**default `false`**, Overview again the only caller) pins the first column while the rest scroll — see below |
 | `MultiSelectPicker` | `components/multi-select-picker.tsx` | popover searchable checkbox list for >10 options (UTM tags, groups); scales to hundreds. Pill-toggles reserved for ≤5 fixed enums. `layout` picks where the selected-item chips go: `"stacked"` (default) puts them on their own row beneath the trigger — right for a full-width form field; `"inline"` puts them beside it (`flex-nowrap`) so the control grows **wider, not taller**, with `triggerClassName` setting the trigger's width and `maxChipsShown` capping the run |
 | `SearchableSelect` | `components/searchable-select.tsx` | **single**-select sibling of `MultiSelectPicker`: popover + filter input + ↑/↓/Enter nav; commits one value and closes on pick. Trigger mirrors `<SelectTrigger>` styling so it drops into a row without shifting layout. Used by the segment Rules tab (rule type + brand/offer/segment/contact-group value pickers). `fallbackLabel`/`fallbackColor` render a persisted value whose options haven't loaded (or that is archived). Optional `searchText` per option is matched by the filter but never rendered — for labels that don't contain the form the user types (the Today's-Sends number filter searches raw digits behind a spaced `+1 844 621 0404`) |
 | `SegmentPicker` / `OfferPicker` | `components/segments/segment-picker.tsx`, `components/offers/offer-picker.tsx` | popover searchable pickers with **pin (star) + recently-used** ordering (Pinned → Recent → All). SegmentPicker is multi-select; OfferPicker is single-select. Both back their prefs with `usePickerPrefs(namespace)` (`lib/hooks/use-picker-prefs.ts`), a per-browser localStorage store keyed `segments.*` / `offers.*`. `useSegmentPrefs` is a thin wrapper over it |
@@ -23,6 +23,11 @@ A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shad
 | `CopyableId` | `components/ui/copyable-id.tsx` | read-only input + copy button + toast for system-generated ids (tracking IDs) |
 | Sidebar + nav | `components/protected/sidebar*.tsx`, `nav-config.ts` | grouped nav, **collapsible groups** (see below); items disabled via `isEntityAvailable()` |
 | `SpamCheckStrip` | `components/spam/spam-check-strip.tsx` | inline spam-score button under creative textareas |
+
+### Frozen first column (opt-in)
+[lib/ui/frozen-column.ts](../../lib/ui/frozen-column.ts) exports one class bundle, `FROZEN_FIRST_COLUMN_CELL`, that pins a table's first cell (`sticky left-0` + a z-index) inside the `overflow-x-auto` container the tables already have, paints an **opaque `bg-background`** base so the scrolling columns cannot show through, layers the row's own state tint back over that base in a `::before` (`-z-10`, so it sits above the cell's background and below its content), and draws the boundary with a 1px **box-shadow** — a `border-r` would be swallowed by `border-collapse: collapse`, which paints collapsed borders from the table rather than the cell.
+
+Two consumers, both on `/reports`: `DataTable`'s `freezeFirstColumn` prop (Overview) and the hand-rolled By-X table ([components/reports/performance-report.tsx](../../components/reports/performance-report.tsx)), which applies the same constant directly. The **tint is passed by the caller** because each table's rows differ (`muted/50` hover in the wrapper, `muted/30` in the By-X body, a flat `muted/40` in its header) — a frozen table that adds a row state must add the matching `…:before:bg-…` class. Bars: [scripts/test-frozen-first-column.ts](../../scripts/test-frozen-first-column.ts). Rationale and the browser proof: [07-conventions.md](../07-conventions.md).
 
 ### Sidebar groups (collapsible)
 The nav is a list of `NavGroup`s in [components/protected/nav-config.ts](../../components/protected/nav-config.ts); [components/protected/sidebar-nav.tsx](../../components/protected/sidebar-nav.tsx) renders them. The same component serves desktop and the mobile `<Sheet>` drawer — `app/(protected)/layout.tsx` mounts `<Sidebar>` twice.

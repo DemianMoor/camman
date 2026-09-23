@@ -31,9 +31,13 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import type { DeliveryFreshness } from "@/lib/reporting/delivery-rollup";
-import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
+import {
+  eventColumnById,
+  type EventMap,
+  type EventTypeSpec,
+} from "@/lib/reporting/event-columns";
 
-// The "Overview" tab of /reports — the Keitaro Landing visits → Offer Redirect → Sales
+// The "Overview" tab of /reports — the Keitaro Clickers → Offer Redirect → Sales
 // funnel, per stage or per campaign. Moved verbatim out of app/(protected)/reports
 // /page.tsx (which is now a thin tab router) when the five performance reports were
 // added; the page's <h1> + tab bar now live in the router, so this renders its own
@@ -71,6 +75,11 @@ type ReportRow = {
   epc: number; // PERIOD — the selected date range
   counted_clickers: number;
   lifetime_epc: number; // LIFETIME — ignores the date filter; the PRIMARY figure
+  // KEPT DELIBERATELY THOUGH NO COLUMN ON THIS TAB RENDERS IT. `Human clicks
+  // (all time)` was removed on 2026-09-23; the field stays because this type
+  // MIRRORS the response, which still carries it, and because it is the
+  // denominator the SERVER divided by to produce the `lifetime_epc` above.
+  // Do not go hunting for the column that shows it — there is none, on purpose.
   lifetime_clickers: number;
   profit: number;
   // Delivery receipts (lib/reporting/delivery.ts — the same layer behind
@@ -263,6 +272,56 @@ const DEFAULT_FILTERS: Filters = {
   showEvents: false,
 };
 
+// ⭐ A PERSISTED SORT CAN NAME A COLUMN THIS TABLE NO LONGER HAS. `Human clicks`
+// and `Human clicks (all time)` were removed from Overview on 2026-09-23 and
+// their ids left the route's SORTABLE whitelist with them — but a browser that
+// had sorted by either still holds `sortBy: "counted_clickers"` in
+// localStorage["reports.filters"]. Sent as-is, the request is accepted, the
+// server silently falls back to revenue, and no header on screen carries an
+// indicator: rows in a real order with nothing saying so, which is
+// indistinguishable from an unsorted table (07-conventions.md, "A curated
+// default view must never hide the column the table is SORTED BY").
+//
+// Normalised ON READ, in ONE named helper used for BOTH the request and the
+// indicator, so the two cannot disagree — and so the sort work that follows has
+// a single place to extend rather than a second copy to keep in step.
+//
+// ⭐ FIXED IDS ONLY IN THE ROSTER, DELIBERATELY. The GENERATED per-event columns
+// are `evt:<key>:<kind>` / `evtfunnel:<key>:<key>` over a per-org registry that
+// arrives WITH the response, so they cannot be enumerated at module scope. They
+// are accepted by SHAPE through eventColumnById() — the one parser of that id
+// grammar, and exactly how /api/keitaro/reports accepts them. Without that
+// clause an operator who sorted by an event column would be thrown back to
+// revenue on every page load.
+const OVERVIEW_SORTABLE_IDS: ReadonlySet<string> = new Set([
+  "campaign_name",
+  "total_sent",
+  "opt_outs",
+  "opt_out_rate",
+  "clickers",
+  "click_rate",
+  "offer_redirect",
+  "redirect_rate",
+  "sales",
+  "sales_cr",
+  "revenue",
+  "pending_revenue",
+  "cost",
+  "lifetime_epc",
+  "epc",
+  "profit",
+]);
+
+export function normalizeOverviewSort(
+  sortBy: string,
+  sortDir: "asc" | "desc",
+): { sortBy: string; sortDir: "asc" | "desc" } {
+  if (OVERVIEW_SORTABLE_IDS.has(sortBy) || eventColumnById(sortBy)) {
+    return { sortBy, sortDir };
+  }
+  return { sortBy: DEFAULT_FILTERS.sortBy, sortDir: DEFAULT_FILTERS.sortDir };
+}
+
 const SEARCH_DEBOUNCE_MS = 300;
 
 const usd = new Intl.NumberFormat("en-US", {
@@ -367,6 +426,28 @@ export function KeitaroReport() {
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
 
+  // The persisted sort, made safe to send AND safe to display — see
+  // normalizeOverviewSort above. Both the request below and the DataTable's
+  // indicator read these two, never `filters.sortBy` / `filters.sortDir`.
+  const { sortBy: sortById, sortDir: sortDirection } = normalizeOverviewSort(
+    filters.sortBy,
+    filters.sortDir,
+  );
+
+  // …and written back ONCE, so a dead id does not sit in
+  // localStorage["reports.filters"] for the life of the browser profile,
+  // re-corrected on every read forever. The READ above stays the source of
+  // truth: nothing depends on this write landing, which is exactly why it is
+  // safe as an effect that a storage failure may swallow. In an EFFECT and not
+  // during render because updateFilters both sets state and touches
+  // localStorage. Guarded on a real difference, so the normal case writes
+  // nothing and the effect cannot loop — normalizeOverviewSort is idempotent,
+  // its fallback being itself a member of the roster.
+  useEffect(() => {
+    if (sortById === filters.sortBy && sortDirection === filters.sortDir) return;
+    updateFilters({ sortBy: sortById, sortDir: sortDirection });
+  }, [sortById, sortDirection, filters.sortBy, filters.sortDir, updateFilters]);
+
   useEffect(() => {
     let cancelled = false;
     setFetchError(null);
@@ -376,8 +457,8 @@ export function KeitaroReport() {
       groupBy: filters.groupBy,
       page: String(filters.page),
       pageSize: String(filters.pageSize),
-      sortBy: filters.sortBy,
-      sortDir: filters.sortDir,
+      sortBy: sortById,
+      sortDir: sortDirection,
     });
     if (filters.search) params.set("search", filters.search);
 
@@ -418,8 +499,8 @@ export function KeitaroReport() {
     filters.groupBy,
     filters.page,
     filters.pageSize,
-    filters.sortBy,
-    filters.sortDir,
+    sortById,
+    sortDirection,
     refreshTick,
     listApi.execute,
   ]);
@@ -549,12 +630,24 @@ export function KeitaroReport() {
       },
       {
         id: "clickers",
-        // ⭐ `Landing visits`, NOT `Clickers` (owner, 2026-09-20) — the same
-        // rename as FULL_COLS/HOURLY_COLS in performance-report.tsx, and for
-        // the same reason: this is `visit_clicks_clean`, Keitaro's bot-filtered
-        // landing-page VISIT count, display-only and not the EPC denominator.
-        // The `id` stays `clickers` — sorts and the Operator API key off it.
-        header: "Landing visits",
+        // ⭐ `Clickers` HERE, `Landing visits` ON THE BY-X TABS — and the split
+        // is deliberate (owner, 2026-09-23). The 2026-09-20 rename applied one
+        // name everywhere because a people-word sat FOUR COLUMNS from the real
+        // EPC denominator, `Human clicks` (counted_clickers), and the two were
+        // confusable. Overview no longer carries either human-click column —
+        // both were removed in this same change — so on THIS tab there is no
+        // second click-shaped number for `Clickers` to be mistaken for, and the
+        // shorter name is what the owner reads the funnel by. The By-X tables
+        // still show `Human clicks` beside it, so the trap is still live there
+        // and they keep `Landing visits`. "One metric, one name" held while the
+        // tabs showed the same columns; they no longer do.
+        //
+        // ⚠️ The field is unchanged: `visit_clicks_clean`, Keitaro's
+        // bot-filtered landing-page VISIT count, display-only, and the
+        // denominator of NOTHING EPC touches. Do not spell "human" over it on
+        // either tab (V23). The `id` stays `clickers` — sorts and the Operator
+        // API key off it. Bar V24 pins the split in both directions.
+        header: "Clickers",
         enableSorting: true,
         cell: ({ row }) => (
           <span
@@ -651,26 +744,26 @@ export function KeitaroReport() {
           </span>
         ),
       },
-      // LIFETIME first — the primary figure, ignoring the date filter entirely.
-      // Each EPC sits immediately after the count it divided by, because a $0.00
-      // EPC is only interpretable when you can see the denominator was 4. The
-      // two are NOT derivable from one another: counted clickers are
-      // deduplicated, so a lifetime figure can never be summed out of periods.
-      // ⭐ "Human clicks", not "Clicks" — see the FULL_COLS note in
-      // performance-report.tsx. The word belongs on counted_clickers (the EPC
-      // denominator, the API's `clicks_human`) and NEVER on `clickers`, which
-      // is Keitaro's bot-filtered landing-VISIT count and now heads
-      // `Landing visits`. Bar V23 pins both halves; V24 pins the new header.
-      {
-        id: "lifetime_clickers",
-        header: "Human clicks (all time)",
-        enableSorting: true,
-        cell: ({ row }) => (
-          <span className="tabular-nums">
-            {row.original.lifetime_clickers.toLocaleString()}
-          </span>
-        ),
-      },
+      // ⭐ THE TWO HUMAN-CLICK COLUMNS ARE GONE FROM THIS TAB (owner,
+      // 2026-09-23) — `Human clicks (all time)` (`lifetime_clickers`) and
+      // `Human clicks` (`counted_clickers`). REMOVED, not hidden: Overview has
+      // no curated-view toggle (`showAllColumns` is a literal `true` below), so
+      // there is no place to hide a column to. Each EPC therefore sits here
+      // WITHOUT the count it divided by, which is a real cost and an accepted
+      // one: this is the tab the owner keeps narrow and every column competes
+      // for the same horizontal room, and the denominator is one tab away on
+      // By Number / By Offer / By Sequence, which read the same stages out of
+      // the same stage-funnel.ts figures and keep both columns. Dropping the
+      // two people-worded columns is also what let `Clickers` regain its
+      // meaning above. See docs/07-conventions.md for the decision and its cost.
+      //
+      // ⚠️ `counted_clickers` and `lifetime_clickers` REMAIN on the row type and
+      // in the response. `counted_clickers` is still read by every generated
+      // per-event rate/EPC cell below, and both still feed the server's EPC
+      // figures. NOTHING NUMERIC CHANGED — only two column declarations went.
+      //
+      // LIFETIME first — the primary figure, ignoring the date filter entirely,
+      // which is why it alone still names its basis in the header (V21).
       {
         id: "lifetime_epc",
         header: "EPC (all time)",
@@ -678,20 +771,6 @@ export function KeitaroReport() {
         cell: ({ row }) => (
           <span className="tabular-nums font-medium">
             {fmtUsd(row.original.lifetime_epc)}
-          </span>
-        ),
-      },
-      {
-        id: "counted_clickers",
-        // Unsuffixed, matching the By-X tables — the owner's 2026-09-20 rename.
-        // Overview has the same date filter, so splitting the naming across two
-        // tabs of one section would be worse than either name on its own. V20
-        // pins that agreement; V23 pins the "Human clicks" wording itself.
-        header: "Human clicks",
-        enableSorting: true,
-        cell: ({ row }) => (
-          <span className="tabular-nums text-muted-foreground">
-            {row.original.counted_clickers.toLocaleString()}
           </span>
         ),
       },
@@ -724,8 +803,12 @@ export function KeitaroReport() {
     ];
     // The GENERATED block, spliced by the ID of the column it sits BEFORE rather
     // than by an index — an index would silently move the block the next time a
-    // column is added. Before Sales, so the row reads as one funnel and no
-    // existing column moves relative to its neighbours.
+    // column is added. ⭐ THE ANCHOR MOVED FROM `sales` TO `cost` (owner,
+    // 2026-09-23): the four money columns the owner reads together — Sales,
+    // Sales CR, Revenue, Pending $ — now sit as one group immediately after the
+    // funnel, and the per-event breakdown that elaborates them follows, ahead of
+    // Cost / EPC / Profit. Keep the by-id form; the reasoning for it is the
+    // reason the move was a one-word change rather than an index audit.
     const generated: ColumnDef<ReportRow>[] = block.columns.map((e) => ({
       id: e.id,
       header: e.header,
@@ -739,7 +822,7 @@ export function KeitaroReport() {
         </span>
       ),
     }));
-    const at = rest.findIndex((c) => c.id === "sales");
+    const at = rest.findIndex((c) => c.id === "cost");
     const withEvents =
       at < 0 ? [...rest, ...generated] : [...rest.slice(0, at), ...generated, ...rest.slice(at)];
     return [campaignCol, stageCol, ...withEvents];
@@ -751,8 +834,8 @@ export function KeitaroReport() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          Live campaign performance from Keitaro: the Landing visits → Offer
-          Redirect → Sales funnel, per stage or rolled up per campaign. Times in{" "}
+          Live campaign performance from Keitaro: the Clickers → Offer Redirect
+          → Sales funnel, per stage or rolled up per campaign. Times in{" "}
           {CAMPAIGN_TIMEZONE_LABEL}.
         </p>
         {canRefresh ? (
@@ -835,7 +918,7 @@ export function KeitaroReport() {
         <>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-8">
             <StatCard
-              label="Landing visits"
+              label="Clickers"
               value={`${fmtInt(totals.clickers)}${totals.clickers_is_fallback ? "*" : ""}`}
             />
             <StatCard
@@ -913,8 +996,21 @@ export function KeitaroReport() {
           totalCount={totalCount}
           onPageChange={(p) => updateFilters({ page: p })}
           onPageSizeChange={(s) => updateFilters({ pageSize: s, page: 0 })}
-          sortBy={filters.sortBy || null}
-          sortDir={filters.sortDir}
+          sortBy={sortById || null}
+          sortDir={sortDirection}
+          // ⭐ THE ONLY SCREEN ON THE NEW CYCLE, AND DELIBERATELY OPT-IN. A
+          // header click here opens DESCENDING — for a report column the
+          // interesting end is the top of the list — flips to ascending, and
+          // never clears (owner: an unsorted report is a step he will never
+          // want). Every other DataTable in the app keeps asc → desc → clear,
+          // which is why this is a prop and not a change to the wrapper's
+          // default. The By-X tabs' own `toggleSort` already behaves this way.
+          sortCycle="desc-asc"
+          // ⭐ ALSO OPT-IN, AND FOR THE SAME REASON AS THE CYCLE ABOVE. This
+          // report is ~30 columns wide, so the Campaign name has to survive the
+          // sideways scroll; every other DataTable in the app is narrow enough
+          // that pinning a column there would be a change nobody asked for.
+          freezeFirstColumn
           onSortChange={(by, dir) =>
             updateFilters({ sortBy: by ?? "revenue", sortDir: dir, page: 0 })
           }

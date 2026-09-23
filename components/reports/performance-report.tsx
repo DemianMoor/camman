@@ -32,7 +32,10 @@ import type {
   PerfRow,
   ProviderOption,
 } from "@/lib/reporting/performance-report";
+import { makeDimensionComparator } from "@/lib/reporting/report-sort";
 import { DIMENSION_LABEL, type ReportDimension } from "@/lib/reporting/report-dimensions";
+import { FROZEN_FIRST_COLUMN_CELL } from "@/lib/ui/frozen-column";
+import { nextSortState } from "@/lib/ui/sort-cycle";
 
 interface PerfResponse {
   dimension: ReportDimension;
@@ -173,6 +176,18 @@ const FULL_COLS: Col[] = [
   // ships the field as `clickers`, so renaming the HEADER changed neither a
   // saved sort nor a contract. Do not "tidy" the id to match the label.
   // Do not spell "human" here — V23. Bars V13/V24 pin the new header.
+  //
+  // ⭐ OVERVIEW HEADS THIS SAME METRIC `Clickers` SINCE 2026-09-23, AND THAT
+  // DIVERGENCE IS THE OWNER'S DECISION, NOT DRIFT. "One metric, one name" was
+  // right while both tabs showed the same columns: the danger was a people-word
+  // sitting four columns from `Human clicks`, the real EPC denominator, on a
+  // table that carried both. Overview no longer carries EITHER human-click
+  // column — they were removed from it in the same change — so nothing there
+  // can be mistaken for the denominator and the shorter name is unambiguous on
+  // that tab alone. THIS table still shows `Human clicks` two columns down, so
+  // the trap is live here and `Landing visits` stays. ⚠️ Do NOT "restore
+  // consistency" by renaming either side: bar V24 pins each tab's header AND
+  // that neither string appears on the other.
   { id: "clickers", header: "Landing visits", kind: "count" },
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
   { id: "redirects", header: "Redirects", kind: "count" },
@@ -222,8 +237,12 @@ const FULL_COLS: Col[] = [
 // Hourly: Sent (by send hour) + activity-time engagement with % rates. Rates use
 // the same formulas as the other tabs (÷ sent, redirect ÷ clickers, sales ÷
 // redirects). No cost/EPC/profit (cost is a per-stage lump, not hour-bucketable).
-// `clickers` heads `Landing visits` here too — one metric, one name on every
-// table that shows it (V24).
+// `clickers` heads `Landing visits` here too — one name across the tables that
+// show the EPC denominator beside it. ⭐ Overview heads the same metric
+// `Clickers` since 2026-09-23 (owner): it dropped both `Human clicks` columns,
+// so the confusion the long name guards against cannot arise there. The FULL_COLS
+// note above has the reasoning; V24 pins both halves and forbids either string
+// from appearing on the other tab.
 const HOURLY_COLS: Col[] = [
   { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },
@@ -383,30 +402,44 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
 
   const rows = useMemo<DerivedRow[]>(() => {
     const derived = (resp?.data ?? []).map(derive);
-    const dir = filters.sortDir === "asc" ? 1 : -1;
     const key = sortBy as keyof DerivedRow;
     const sortCol = cols.find((c) => c.id === sortBy);
-    return [...derived].sort((a, b) => {
-      // Pinned rows (hourly "Manual") always sort to the top.
-      if (a.pinned && !b.pinned) return -1;
-      if (b.pinned && !a.pinned) return 1;
-      const av = sortCol ? cellValue(a, sortCol) : a[key];
-      const bv = sortCol ? cellValue(b, sortCol) : b[key];
-      // "Unknown" sorts LAST in BOTH directions — it is not a small number. Same
-      // rule as the Overview API's comparator.
-      if (av == null && bv != null) return 1;
-      if (bv == null && av != null) return -1;
-      if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
-      return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
-    });
+    // Pinned row first → clicked column (direction-flipped) → Landing visits
+    // high-to-low (never flipped) → the row's `key` (never flipped). The key
+    // order and the comparator are shared with Overview's server-side sort in
+    // lib/reporting/report-sort.ts, so the tabs cannot drift.
+    return [...derived].sort(
+      makeDimensionComparator<DerivedRow>(
+        filters.sortDir,
+        sortBy === "clickers",
+        (r) =>
+          sortCol
+            ? cellValue(r, sortCol)
+            : (r[key] as unknown as number | string | null),
+      ),
+    );
   }, [resp, sortBy, filters.sortDir, cols]);
 
   const totals = resp?.totals ?? null;
   const providers = resp?.providers ?? [];
 
   function toggleSort(id: string) {
-    if (filters.sortBy === id) updateFilters({ sortDir: filters.sortDir === "asc" ? "desc" : "asc" });
-    else updateFilters({ sortBy: id, sortDir: "desc" });
+    // ONE definition of what a header click means, shared with Overview
+    // (lib/ui/sort-cycle.ts): the `desc-asc` cycle — a fresh column opens
+    // DESCENDING whatever the previous column's direction was, clicking the
+    // same column flips it, and the sort is NEVER cleared. That is precisely
+    // what the two hand-written lines this replaces did; the point of routing
+    // it through the pure function is that the rule now lives in one place, so
+    // a change to Overview's cycle cannot quietly leave the By-X tabs on the
+    // old one. `sortBy` is non-null on this cycle by construction — only
+    // `asc-desc-clear` ever returns null — and `?? id` keeps the types honest
+    // without inventing a behaviour the cycle cannot produce.
+    const next = nextSortState(
+      { sortBy: filters.sortBy, sortDir: filters.sortDir },
+      id,
+      "desc-asc",
+    );
+    updateFilters({ sortBy: next.sortBy ?? id, sortDir: next.sortDir });
   }
   // Reads the EFFECTIVE sort, so the arrow sits on the column the rows are
   // actually ordered by — including when a persisted id named a column that is
@@ -616,7 +649,13 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/40 text-left">
-                <th className="px-3 py-2 font-medium">{isHourly ? "Hour" : DIMENSION_LABEL[dimension]}</th>
+                {/* Frozen — the tint is this header row's own flat `bg-muted/40`,
+                    not a hover state, so it is unconditional. */}
+                <th
+                  className={`${FROZEN_FIRST_COLUMN_CELL} before:bg-muted/40 px-3 py-2 font-medium`}
+                >
+                  {isHourly ? "Hour" : DIMENSION_LABEL[dimension]}
+                </th>
                 {cols.map((c) => (
                   <th
                     key={c.id}
@@ -633,7 +672,11 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             <tbody>
               {rows.map((r) => (
                 <tr key={r.key} className="border-b last:border-0 hover:bg-muted/30">
-                  <td className="px-3 py-2">{renderLabel(r)}</td>
+                  <td
+                    className={`${FROZEN_FIRST_COLUMN_CELL} [tr:hover>&]:before:bg-muted/30 px-3 py-2`}
+                  >
+                    {renderLabel(r)}
+                  </td>
                   {cols.map((c) => {
                     const v = cellValue(r, c);
                     const cls =

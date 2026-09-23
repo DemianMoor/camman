@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-20_
+_Last updated: 2026-09-23_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -193,8 +193,9 @@ curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=
 Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, event_types, range }`.
 Every row, and `totals`, carries `sent`, `opt_outs`, `clickers` (the tracker's
 clean landing visits — not human clicks; the `/reports` UI heads this column
-**`Landing visits`** since 2026-09-20, previously `Clickers` — **the field name
-did not change**, and no field on this endpoint did), `redirects`, `counted_clickers`,
+**`Landing visits`** on the By-X/Hourly tables since 2026-09-20 and **`Clickers`**
+on the Overview tab since 2026-09-23 — **the field name did not change** through
+either rename, and no field on this endpoint did), `redirects`, `counted_clickers`,
 `sales`, `revenue`, `cost`, and the grading fields `reached`, `clicks_human`,
 `click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7).
 
@@ -742,11 +743,16 @@ Both are counts only. There is no endpoint on this list that returns a contact.
   revenue-bearing conversions only, so a registrant whose click was never scored
   human is in the numerator and not the denominator. Like `click_to_reach_pct`,
   the ratio is **not clamped**, and a zero denominator gives `null`, never `0`.
-  (The report tables head that column **`Human clicks`** — renamed 2026-09-20 to
-  match this API's `clicks_human`, and unsuffixed because the page's own date
-  filter names the window. `/creatives` heads its lifetime one
-  `Human clicks (all time)`. **The API field names are unchanged**: this was a
-  header rename on three screens, not a contract change. ⚠️ **`clickers` on a
+  (The **By-X and Hourly** report tables head that column **`Human clicks`** —
+  renamed 2026-09-20 to match this API's `clicks_human`, and unsuffixed because
+  the page's own date filter names the window. ⚠️ **The `/reports` Overview tab
+  heads no such column**: it dropped both `Human clicks` and
+  `Human clicks (all time)` on 2026-09-23, so its two EPCs stand there with no
+  denominator beside them — the denominator is one tab away, off the same
+  figures. `/creatives` still heads its lifetime one `Human clicks (all time)`.
+  **The API field names are unchanged** by either change: `clicks_human` is
+  still on every row and `counted_clickers` still divides every EPC — those
+  were header changes on the screens, not a contract change. ⚠️ **`clickers` on a
   report row is NOT that column and never carries the word "human"** — it is the
   tracker's bot-filtered landing-VISIT count, display-only; see the note under
   `clicks_human` above.)

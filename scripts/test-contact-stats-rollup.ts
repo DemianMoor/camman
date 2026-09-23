@@ -5,7 +5,8 @@
 // that is rolled back in the finally block so no state persists.
 //
 // Run: npx tsx scripts/test-contact-stats-rollup.ts
-// (after migration 0145 is applied AND the cron has run at least once)
+// (after migration 0145 is applied AND one read has populated the row - the
+//  1-minute cron was deleted 2026-09-23; see docs/04-features/w2-rollup-layer.md)
 
 import { config } from "dotenv";
 import { resolve } from "node:path";

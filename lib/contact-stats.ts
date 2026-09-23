@@ -3,6 +3,7 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { withKeyedLease } from "@/lib/cron/keyed-lease";
 
 // W2 Task 1 — contact_org_stats rollup helpers.
 //
@@ -147,6 +148,61 @@ export async function bumpContactOrgStats(
       clicker_count  = contact_org_stats.clicker_count  + EXCLUDED.clicker_count,
       updated_at     = now()
   `);
+}
+
+// ── Freshness: recompute on READ, not on a clock ──────────────────────────
+//
+// This used to be recomputed by a 1-minute cron. Measured on prod 2026-09-23:
+// the cron ran 1,436x/day (verified 1.00/min over a 6-minute sample) at
+// 1,441 ms and 708 blocks per run -- 20.18 h of database time, 17.9% of ALL
+// time the database spent on anything, and ~272 GB read. What it served:
+// contact_org_stats was SCANNED 155 times and UPDATED 50,374 times since
+// 2026-05-07 (pg_stat_user_tables), i.e. ~325 recomputes per read, and only
+// two endpoints read it at all (contacts/base-stats, contacts/carrier-stats).
+//
+// So the work now follows the reads. A reader triggers a recompute only when
+// the last one is older than the documented 60-second freshness contract,
+// which means the numbers a reader sees are no staler than before -- the cost
+// is simply no longer paid 1,435 times over for nobody. The reader pays ~1.4 s
+// when it does fire; both endpoints fetch these stats in the background, and
+// neither page blocks on them.
+//
+// TTL basis is cron_locks.watermark, NOT contact_org_stats.updated_at:
+// bumpContactOrgStats() also stamps updated_at, and a writer's increment is
+// not a full recompute -- using it would skip the carrier_breakdown rebuild
+// that is the whole reason this exists.
+export const CONTACT_STATS_TTL_MS = 60_000;
+
+// Long enough to cover a measured 1.4 s recompute many times over; short
+// enough that a killed request cannot block the next read for long.
+const CONTACT_STATS_LEASE_MS = 30_000;
+
+export const contactStatsJobKey = (orgId: string) => `contact-stats:${orgId}`;
+
+// Recompute contact_org_stats for this org if the last full recompute is older
+// than CONTACT_STATS_TTL_MS. Concurrent callers (the contacts page fires BOTH
+// endpoints at once) are collapsed by the lease: one recomputes, the other
+// returns immediately and reads the row as it stands.
+export async function ensureContactOrgStatsFresh(
+  dbc: DbOrTx,
+  orgId: string,
+): Promise<void> {
+  const key = contactStatsJobKey(orgId);
+  const fresh = await dbc.execute(sql`
+    SELECT 1 FROM cron_locks
+    WHERE job_name = ${key}
+      AND watermark > now() - ${CONTACT_STATS_TTL_MS} * interval '1 millisecond'
+  `);
+  if (fresh.length > 0) return;
+
+  await withKeyedLease(dbc, key, CONTACT_STATS_LEASE_MS, async () => {
+    await refreshContactOrgStats(dbc, orgId);
+    // Stamped only after the recompute succeeds: a failed refresh must not buy
+    // itself another TTL of silence.
+    await dbc.execute(sql`
+      UPDATE cron_locks SET watermark = now() WHERE job_name = ${key}
+    `);
+  });
 }
 
 // Full recompute of ALL columns from base tables. Runs inside the 1-min cron

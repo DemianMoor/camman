@@ -145,6 +145,18 @@ The statuses (`new`/`cold`/`hot`/`warm`/`freeze`/`suppressed`, migration 0187) a
 - **Editing lifecycle configuration is `lifecycle.configure` (manager+), audited.** The org thresholds, the per-group overrides and the `engine_mode` switch are one permission, and every change lands in `org_setting_events`. The constant ships in PR 1, ahead of the screen that uses it, so the switch can never be moved through the app before its gate exists.
 - **The freeze clock counts only messages sent after `freeze_entered_at`.** That is what makes the backfill safe: existing freeze contacts start their clock at the backfill instant, so nobody is suppressed at launch on the strength of history nobody reviewed.
 
+## A scheduled rollup's cadence must be justified by its READ rate, not by its freshness target (2026-09-23)
+
+`contact_org_stats` was refreshed every minute to honour a documented "stats may lag up to 60 seconds" contract. Measured on prod: **1,436 refreshes/day at 1.44 s each — 17.9% of ALL database time — serving ~1 read/day**. The contract was fine; paying for it on a clock was not.
+
+Refreshing on the read, past a TTL equal to the freshness target, honours the *same* contract at the read rate instead of the clock rate: the reader still never sees data older than the target, and nobody pays when nobody looks. It costs the reader the recompute (~1.4 s here) when the TTL has expired, so it suits background fetches and not the send path.
+
+**Before choosing or keeping a cadence, measure both sides:**
+- refresh rate — `n_tup_upd` on the rollup table, or `calls` for the refresh `queryid` over a known interval. Do not assume the cron schedule is what actually runs: this job's lifetime average read 701/day because it started mid-window, while the live rate was 1,436/day.
+- read rate — `seq_scan` / `idx_scan` on the rollup table in `pg_stat_user_tables`, which (unlike `pg_stat_statements`) cannot be evicted, plus a grep for every reader of the table.
+
+If refreshes outnumber reads by orders of magnitude, the cadence is the bug. Applies to `audience_fresh_counts` (`11,41 * * * *`) and any future one-row-per-org rollup.
+
 ## Measuring your own work: match statements on `queryid`, and re-verify a stated cause before acting on it (2026-09-23)
 
 Two mistakes from one day of performance work, both of which produced a confident wrong number.

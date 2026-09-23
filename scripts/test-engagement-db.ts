@@ -486,6 +486,24 @@ async function main() {
     bar("D5 the preview writes nothing",
       (await count("contact_engagement_transitions")) === 13 && (await row(cBot)).status === "cold");
 
+    // ── PART F — a big touched set escalates to a full recount ──────────────
+    // On 2026-09-23 a send burst put 43,448 contacts in one 15-minute window;
+    // the per-contact recount blew the statement timeout, and because `since`
+    // only advances on success every later run inherited a wider window. The
+    // escalation is what bounds that. maxTouched is set to 1 here so a world of
+    // eight contacts can exercise it.
+    console.log("\nPART F — incremental escalation");
+    const fSmall = await run({ mode: "incremental", dryRun: true, asOf: A4, since: plus(A4, -70), maxTouched: 10_000 });
+    bar("F1 a normal window stays incremental",
+      fSmall.escalatedToFull !== true && fSmall.mode === "incremental", JSON.stringify({ esc: fSmall.escalatedToFull, recounted: fSmall.recounted }));
+    const fBig = await run({ mode: "incremental", dryRun: true, asOf: A4, since: plus(A4, -70), maxTouched: 1 });
+    bar("F2 a window over the ceiling escalates: every contact recounted and evaluated",
+      fBig.escalatedToFull === true && fBig.recounted === 8 && fBig.evaluated === 8,
+      JSON.stringify({ esc: fBig.escalatedToFull, recounted: fBig.recounted, evaluated: fBig.evaluated }));
+    bar("F3 the escalated run agrees with a real full run (same rows would change)",
+      fBig.rowsWritten === (await run({ mode: "full", dryRun: true, asOf: A4 })).rowsWritten,
+      String(fBig.rowsWritten));
+
     // ── PART E — a threshold change reaches contacts nothing else touched ────
     console.log("\nPART E — reevaluate_requested_at");
     const { reevaluationDue } = await import("@/lib/engagement/refresh");

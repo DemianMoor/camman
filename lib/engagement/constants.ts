@@ -60,5 +60,22 @@ export const ENGAGEMENT_REEVAL_JOB = "contact-engagement-reeval";
  */
 export const INCREMENTAL_OVERLAP_MINUTES = 30;
 
-/** If the last successful run is older than this, the next run recounts everything. */
-export const FULL_FALLBACK_HOURS = 24;
+/**
+ * If the last successful run is older than this, the next run recounts
+ * everything. Kept SHORT on purpose: `since` only advances on success, so a
+ * failed run makes the next window wider, which makes failure likelier. Three
+ * hours bounds that spiral — measured 2026-09-23, when a send burst put 43,448
+ * contacts in one window, the per-contact recount blew the statement timeout,
+ * and the job stalled for 2.5 h until a full recount was run by hand.
+ */
+export const FULL_FALLBACK_HOURS = 3;
+
+/**
+ * Above this many touched contacts, an incremental run ESCALATES to a full
+ * recount. The incremental path costs one index probe per touched contact,
+ * which is the right shape for a normal 15-minute window (tens to hundreds)
+ * and the wrong shape for a send burst: at 43,448 contacts it exceeded the
+ * statement timeout, while the org-wide set-based pass finishes in ~230 s for
+ * every contact there is. Past this point the bounded pass is the cheaper one.
+ */
+export const INCREMENTAL_MAX_TOUCHED = 20_000;

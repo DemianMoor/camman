@@ -1,6 +1,10 @@
 import { sql, type SQL } from "drizzle-orm";
 
-import { ENGAGEMENT_STATUSES, type EngagementStatus } from "@/lib/engagement/constants";
+import {
+  ENGAGEMENT_STATUSES,
+  INCREMENTAL_MAX_TOUCHED,
+  type EngagementStatus,
+} from "@/lib/engagement/constants";
 import { ENGAGEMENT_VALUE_COLUMNS, evaluationSelectSql } from "@/lib/engagement/status-sql";
 import { createThresholdTempTables } from "@/lib/engagement/thresholds-sql";
 import { HUMAN_CLICK } from "@/lib/reporting/counted-clickers";
@@ -50,6 +54,12 @@ export interface RefreshOptions {
   /** Also compute the per-group and opted-out breakdowns (the dry-run report). */
   withReport?: boolean;
   /**
+   * Escalate an incremental run to a full recount above this many touched
+   * contacts. Defaults to INCREMENTAL_MAX_TOUCHED; the tests set it low so the
+   * switch can be exercised on a world of eight contacts.
+   */
+  maxTouched?: number;
+  /**
    * Evaluate EVERY stored row, not only the recounted and time-due ones. The
    * cron passes this when lifecycle_settings.reevaluate_requested_at is newer
    * than the last run that honoured one: a threshold change moves neither
@@ -81,6 +91,8 @@ export interface GroupBreakdownRow {
 
 export interface RefreshResult {
   mode: RefreshMode;
+  /** true ⇒ asked for incremental, but the touched set was too big and it ran full. */
+  escalatedToFull?: boolean;
   dryRun: boolean;
   /** Contacts whose facts were recounted from history. */
   recounted: number;
@@ -127,7 +139,8 @@ export async function refreshContactEngagement(
   const q = async <T>(query: SQL): Promise<T[]> => (await dbc.execute(query)) as unknown as T[];
   const org = sql`${orgId}::uuid`;
   const asOf = opts.asOf ? sql`${opts.asOf.toISOString()}::timestamptz` : sql`now()`;
-  const full = opts.mode === "full";
+  let full = opts.mode === "full";
+  let escalatedToFull = false;
 
   // ── 1. Who gets recounted ────────────────────────────────────────────────
   await phase("touched", async () => {
@@ -146,6 +159,21 @@ export async function refreshContactEngagement(
            AND ck.org_id = ${org}`);
     }
     await dbc.execute(sql`ANALYZE eng_touched`);
+    if (!full) {
+      // A send burst can put tens of thousands of contacts in one window, and
+      // the incremental path costs an index probe per contact. Past
+      // maxTouched the org-wide set-based pass is both cheaper and BOUNDED, so
+      // switch to it rather than run a per-contact loop that will time out —
+      // and, because `since` only advances on success, keep timing out.
+      const [{ n }] = (await dbc.execute(sql`SELECT count(*)::int AS n FROM eng_touched`)) as unknown as { n: number }[];
+      if (Number(n) > (opts.maxTouched ?? INCREMENTAL_MAX_TOUCHED)) {
+        full = true;
+        escalatedToFull = true;
+        await dbc.execute(sql`DELETE FROM eng_touched`);
+        await dbc.execute(sql`INSERT INTO eng_touched SELECT id FROM contacts WHERE org_id = ${org}`);
+        await dbc.execute(sql`ANALYZE eng_touched`);
+      }
+    }
   });
 
   // The sends a recount reads. Full: the org's whole table in one pass.
@@ -410,6 +438,7 @@ export async function refreshContactEngagement(
 
   return {
     mode: opts.mode,
+    escalatedToFull,
     dryRun: opts.dryRun,
     recounted: Number(counts.recounted),
     evaluated: Number(counts.evaluated),

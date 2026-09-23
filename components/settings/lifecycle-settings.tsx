@@ -22,6 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
 import { ENGAGEMENT_STATUSES, type LifecycleThresholds } from "@/lib/engagement/constants";
+import { ENGAGEMENT_STATUS_LABELS } from "@/lib/engagement/labels";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 type Settings = LifecycleThresholds & {
@@ -254,7 +255,8 @@ export function LifecycleSettings() {
               <p className="mt-2 text-xs text-muted-foreground">
                 {preview.evaluated.toLocaleString()} contacts evaluated ·{" "}
                 {ENGAGEMENT_STATUSES.map(
-                  (s) => `${s} ${(preview.projectedCounts[s] ?? 0).toLocaleString()}`,
+                  (s) =>
+                    `${ENGAGEMENT_STATUS_LABELS[s]} ${(preview.projectedCounts[s] ?? 0).toLocaleString()}`,
                 ).join(" · ")}
               </p>
             </div>

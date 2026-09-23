@@ -591,6 +591,48 @@ async function main() {
       (await one<{ n: number }>(sql`
         SELECT count(*)::int AS n FROM stage_send_lifecycle
         WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[]) AND org_id = ${org}`)).n === 3);
+
+    // ── PART H — the contacts-list status filter ─────────────────────────────
+    // Calls lifecycleStatusCondition, the function the route ships. A test that
+    // rebuilt the SQL would only compare the statement against a copy of itself.
+    // World right now: cHot hot, cBot freeze, cWarm has NO row, and the other
+    // five carry whatever Parts B/E left them.
+    console.log("\nPART H — lifecycleStatusCondition (contacts list filter)");
+    const { lifecycleStatusCondition, parseLifecycleStatuses } = await import(
+      "@/lib/engagement/list-filter"
+    );
+    const { ENGAGEMENT_STATUSES: H_ALL } = await import("@/lib/engagement/constants");
+
+    const countWith = async (statuses: readonly string[]) => {
+      const cond = lifecycleStatusCondition(orgId, statuses as never);
+      return Number(
+        (await one<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM contacts
+          WHERE org_id = ${org}${cond ? sql` AND ${cond}` : sql``}`)).n,
+      );
+    };
+
+    const hStored = await one<{ n: number }>(sql`
+      SELECT count(*)::int AS n FROM contact_engagement WHERE org_id = ${org}`);
+    bar("H1 precondition: one of the 8 contacts has no contact_engagement row",
+      Number(hStored.n) === 7, `${hStored.n} stored rows`);
+
+    const hNew = await countWith(["new"]);
+    bar("H2 'new' finds the contact with NO engagement row — the bug a bare EXISTS causes",
+      hNew === 1, `matched ${hNew}`);
+    const hHot = await countWith(["hot"]);
+    bar("H3 'hot' finds cHot", hHot === 1, `matched ${hHot}`);
+    bar("H4 multi-select is a union", (await countWith(["hot", "new"])) === hHot + hNew,
+      `${await countWith(["hot", "new"])} vs ${hHot}+${hNew}`);
+    const hAll = await countWith(H_ALL);
+    const hNone = await countWith([]);
+    bar("H5 every status selected == no filter at all", hAll === hNone && hAll === 8,
+      `${hAll} vs ${hNone}`);
+    bar("H6 unknown values are dropped, and duplicates collapse",
+      parseLifecycleStatuses("hot,nonsense,hot, warm ").join(",") === "hot,warm",
+      parseLifecycleStatuses("hot,nonsense,hot, warm ").join(","));
+    bar("H7 an empty param means no filter",
+      lifecycleStatusCondition(orgId, parseLifecycleStatuses(null)) === null);
   } finally {
     if (orgId) {
       const name = (await all<{ name: string }>(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))[0]?.name ?? "";

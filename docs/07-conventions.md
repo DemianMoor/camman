@@ -27,6 +27,8 @@ It is **opt-in**. Today only the three delivery-rollup jobs carry it (20 min / 6
 
 Also: pick the freeze horizon from a **measured** late-arrival distribution (0 of 2.64M receipts arrived ≥ 6 days late), and let the reconciliation be what notices if that ever changes.
 
+**A mutual heartbeat watch pages on its first deploy unless it has a first-run grace.** Two jobs that each page when the other has "never run" will page whichever you start first; the rollup's did on 2026-09-22. A documented start order didn't make it safe. The fix is the first-run grace (the section at the top of this file, #210).
+
 ## A new index on a write-hot table must report its HOT-update rate before and after (2026-09-22)
 
 **The rule.** A PR or migration that adds an index to a table written continuously states that table's HOT-update rate over a comparable window **before** the index and **after** it, in the PR body and the CHANGELOG entry. A drop is a finding to explain, not a detail. It is part of the index's cost, like its size and build time. Write-hot tables include `stage_sends`, `textrequest_dlr_events`, `ahoi_dlr_events`, `tells_webhook_events`, `campaign_stages`, `clicks`, `links`, `contacts`, `lookup_queue` and `cron_locks`.

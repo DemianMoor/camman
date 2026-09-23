@@ -5,11 +5,11 @@ import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-time
 import { can } from "@/lib/permissions";
 import {
   NO_DLR_NOTE,
-  getDeliveryByStage,
   getPhoneDirectory,
   getProviderRegistry,
   rollupByProvider,
 } from "@/lib/reporting/delivery";
+import { getDeliveryByStage, getDeliveryFreshness } from "@/lib/reporting/delivery-rollup";
 
 // Read API for /reports/delivery — delivery receipts per provider over a window.
 // Gated on campaigns.view, matching Overview and the performance reports.
@@ -17,13 +17,10 @@ export const dynamic = "force-dynamic";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// ⚠️ HARD CAP, and lower than the other reports' 92 days on purpose. The cost
-// grows with the window on both sides — every send in it (heap fetches off
-// stage_sends_org_sent_at_idx) and every receipt received since it opened.
-// Measured on prod 2026-09-22: 1 day ~0.5 s warm, 7 days ~16.5 s, 14 days
-// ~20 s (lib/reporting/delivery.ts, PERF). Raising this cap needs a structural
-// change first (ClickUp 869ehwae3 + the per-send delivery-state follow-up); do
-// not widen it on the assumption that it scales.
+// CAP, lower than the other reports' 92 days. Since the stage_delivery_rollup
+// cutover (migration 0186) this reads stored cells — 22–29 ms at 1/7/14 days —
+// so the cap is no longer a cost limit; widening it is a separate decision (the
+// rollup already covers all history).
 const MAX_RANGE_DAYS = 14;
 
 export async function GET(req: NextRequest) {
@@ -57,10 +54,11 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const [rows, phones, registry] = await Promise.all([
+  const [rows, phones, registry, freshness] = await Promise.all([
     getDeliveryByStage(auth.orgId, { from, to }),
     getPhoneDirectory(auth.orgId),
     getProviderRegistry(auth.orgId),
+    getDeliveryFreshness({ from, to }),
   ]);
 
   // Provider rows, each carrying its per-number breakdown. Attribution comes
@@ -83,5 +81,7 @@ export async function GET(req: NextRequest) {
     totals,
     no_dlr_note: NO_DLR_NOTE,
     range: { from, to, timezone: CAMPAIGN_TIMEZONE, max_days: MAX_RANGE_DAYS },
+    // Read from stage_delivery_rollup (migration 0186): how current the cells are.
+    freshness,
   });
 }

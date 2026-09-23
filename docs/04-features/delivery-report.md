@@ -236,14 +236,17 @@ Therefore:
 - `/api/reports/delivery` caps the range at **14 days** (`MAX_RANGE_DAYS`).
 - The Overview route permits **92** days, so its `Delivered %` column is
   **computed only when the range is ≤ 14 days**. Beyond that the column reports
-  `null` and the UI says why. The Overview now reads delivery **in parallel**
-  with the funnel instead of after it.
+  `null` and the UI says why. The Overview reads delivery **in parallel** with
+  the funnel instead of after it.
+- ⚠️ Since the rollup cutover (§5b) both caps are **kept product limits, not
+  cost limits**. The rollup covers all history and reads in ~25 ms at any
+  width, so widening either is a product decision rather than an engineering one.
 
 `campaign_stages.sms_count` is **not** a shortcut: it is `0` on all 882 stages
 with API sends (a manual-mode field), so `Sent` cannot come from a pre-aggregate.
 
-**Raising either cap requires the structural change first.** Don't widen it on
-the assumption that the query scales.
+The live query's cost above is what the tripwire and the nightly
+reconciliation pay; the report surfaces no longer do (§5b).
 
 <details><summary>Superseded 2026-08-13 measurement (kept for the record)</summary>
 
@@ -254,9 +257,17 @@ volume grew; nothing re-measured it until the Overview reached 30 s.
 
 ---
 
-## 5b. The stage delivery rollup (migration 0186) — SHADOW until cutover
+## 5b. The stage delivery rollup (migration 0186) — the report read path
 
-**Status (2026-09-22):** built and running in **shadow**. `/reports/delivery`, the Overview column and the tripwire still read the live query (`getDeliveryByStage` → `queryDeliveryByStage`). A separate cutover PR switches the two report surfaces to the rollup and adds the "as of" label and staleness flag. Cutover waits for the backfill, a clean snapshot gate and one clean nightly reconciliation. ClickUp `869f5q5au`.
+**Status.** Migration 0186 was applied to prod on 2026-09-22, and the backfill wrote 2,122 cells whose `sent` totals match `stage_sends` exactly (5,202,994 sends). The refresh and reconciliation crons have been live since PR #208. **Since the cutover PR, `/reports/delivery` and the Overview's Delivered % column read the rollup** through `getDeliveryByStage` in [lib/reporting/delivery-rollup.ts](../../lib/reporting/delivery-rollup.ts). The tripwire and the reconciliation still read the live `queryDeliveryByStage`. ClickUp `869f5q5au`.
+
+**"As of" and stale.** Both surfaces show how current the cells are, from the two refresh heartbeats in `cron_locks` (`deliveryFreshness`, a pure function with its own test bars):
+
+- a window touching today or yesterday depends on the 10-minute refresh;
+- a window touching days 2–6 back depends on the 3-hourly settle;
+- the label is the **older** of the stamps the window depends on, because some of its cells may be that far behind;
+- a window entirely older than 7 ET days is **final** (its numbers won't change);
+- it shows **stale**, in amber, when a stamp it depends on is missing or older than 30 min (refresh) or 7 h (settle). A stale percentage looks exactly like a fresh one, so the flag has to be on the screen.
 
 **Why.** Past ~1 day the live query is I/O-bound on both sides (§5). `stage_delivery_rollup` stores the same four counts per (stage, number, **send ET day**). A report window is then a sum over a few hundred rows: measured on a prototype built from prod data, **22–29 ms for 1, 7 and 14 days** (live: 0.5 s / 16.5 s / 20.2 s), with identical row counts and send totals.
 
@@ -285,13 +296,15 @@ volume grew; nothing re-measured it until the Overview reached 30 s.
 
 **The tripwire stays on the live query** (owner decision, 2026-09-22). It needs a rolling 6 h window, sends at least 10 min old, and fresh data, none of which a day-grain rollup refreshed every 10 min can express. Since #206 the live version is cheap: bounded by `received_at` and restricted to tls stages.
 
-**Deploy order:**
+**Deploy order (as done, 2026-09-22):**
 
 1. Apply migration 0186 on prod (manual).
-2. Run `npx tsx scripts/backfill-delivery-rollup.ts --apply`. It's idempotent; ~2 min, ~2.1K cells; it ends with a foot of Σ stored `sent` against `stage_sends` for every day before today.
+2. Run `npx tsx scripts/backfill-delivery-rollup.ts --apply`. It's idempotent; took 2.6 min for 2,122 cells, ending with the `sent` foot against `stage_sends`.
 3. Deploy.
-4. Trigger `/api/cron/delivery-rollup-reconcile` once **before the first 10-minute tick**. The refresh job treats "the reconciliation has never run" as stale and would otherwise page.
+4. Trigger `/api/cron/delivery-rollup`, then `/api/cron/delivery-rollup-reconcile`, to get a first reconciliation result straight away.
 5. Watch pgss for the two new statements. The retired `report-rollup` became the #1 DB consumer by rewriting unchanged rows; this one must not.
+
+⚠️ **The mutual watch paged on its first deploy.** The refresh pages if the reconciliation has never run, and the reconciliation pages if the refresh has never run. On 2026-09-22 the reconciliation was triggered first and sent one "rollup is not refreshing — never ran" message (cleared a minute later). **Fixed in #210:** every delivery-rollup heartbeat now has a first-run grace of 2× its interval (20 min / 6 h / 48 h), so "never ran" pages only if a job stays missing that long (see the first-run-grace section of [07-conventions.md](../07-conventions.md)). Running the refresh first is still the quickest way to get a first reconciliation result, but it's no longer what prevents the page.
 
 ## 6. Counting traps
 

@@ -17,13 +17,13 @@ import {
   loadEventTypes,
 } from "@/lib/reporting/event-columns";
 import {
-  getDeliveryByStage,
   getPhoneDirectory,
   getStageDirectory,
   rollupByCampaign,
   rollupByStage,
   type DeliveryCell,
 } from "@/lib/reporting/delivery";
+import { getDeliveryByStage, getDeliveryFreshness } from "@/lib/reporting/delivery-rollup";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 import {
   shouldSubstituteClickers,
@@ -161,6 +161,7 @@ export async function GET(req: NextRequest) {
             getDeliveryByStage(auth.orgId, { from, to }),
             getStageDirectory(auth.orgId),
             getPhoneDirectory(auth.orgId),
+            getDeliveryFreshness({ from, to }),
           ])
         : null,
     ]);
@@ -456,13 +457,12 @@ export async function GET(req: NextRequest) {
 
   // ---- Delivered % (lib/reporting/delivery.ts — the shared layer) ----------
   //
-  // ⚠️ CONDITIONAL ON THE RANGE, and that is not an optimisation. This route
-  // permits 92 days, and the delivery query's cost grows with the window: it
-  // reads every send in it from stage_sends (no covering index — ClickUp
-  // 869ehwae3) and every receipt received since it opened. Running it
-  // unconditionally would make a wide Overview range time out. Past the cap
-  // the column reports null and the UI says why, rather than silently showing
-  // "—" that reads as "no delivery data".
+  // CONDITIONAL ON THE RANGE. The column reads stage_delivery_rollup (migration
+  // 0186) — a few hundred stored cells, 22–29 ms at 1/7/14 days — so the cap is
+  // no longer a cost limit; it is kept at 14 days pending a separate decision to
+  // widen it (the rollup already covers all history). Past the cap the column
+  // reports null and the UI says why, rather than silently showing "—" that
+  // reads as "no delivery data".
   //
   // Read in parallel with the funnel (top of the handler) over the FULL row
   // set, then attached — each grain aggregates the shared stage rows ITSELF
@@ -500,6 +500,9 @@ export async function GET(req: NextRequest) {
     delivery: {
       available: deliveryAvailable,
       max_days: DELIVERY_MAX_RANGE_DAYS,
+      // The rollup's freshness for THIS window — the column header's "as of"
+      // and stale flag (lib/reporting/delivery-rollup.ts, deliveryFreshness).
+      freshness: delivery ? delivery[3] : null,
     },
     totalCount,
     page,

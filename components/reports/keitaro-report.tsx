@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { BarChart3, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
@@ -18,7 +18,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
+import {
+  CAMPAIGN_TIMEZONE_LABEL,
+  formatCampaignDateTime,
+  formatInCampaignTimezone,
+} from "@/lib/campaign-timezone";
 import {
   formatPhoneInternational,
   formatPhoneLast4,
@@ -26,6 +30,7 @@ import {
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
+import type { DeliveryFreshness } from "@/lib/reporting/delivery-rollup";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
 
 // The "Overview" tab of /reports — the Keitaro Landing visits → Offer Redirect → Sales
@@ -86,9 +91,64 @@ type ReportRow = {
   manual_topup: number;
 };
 
+// Delivered % header. The cells come from stage_delivery_rollup (migration 0186),
+// refreshed every 10 min (today + yesterday) and every 3 h (the 7 days before),
+// so the header says how current they are — and says so in amber when a refresh
+// missed its schedule, because a stale percentage looks exactly like a fresh one.
+function DeliveredHeader({
+  freshness,
+  available,
+}: {
+  freshness: DeliveryFreshness | null;
+  available: boolean;
+}) {
+  let note: ReactNode = null;
+  if (available && freshness) {
+    const asOf = freshness.as_of
+      ? `as of ${formatInCampaignTimezone(freshness.as_of, "h:mm a")} ${CAMPAIGN_TIMEZONE_LABEL}`
+      : null;
+    if (freshness.stale) {
+      note = (
+        <span
+          className="text-amber-600"
+          title={
+            `The delivery refresh has missed its schedule, so these percentages may be behind` +
+            (freshness.as_of ? ` (receipts counted up to ${formatCampaignDateTime(freshness.as_of)}).` : ".")
+          }
+        >
+          stale{asOf ? ` · ${asOf}` : ""}
+        </span>
+      );
+    } else if (freshness.final) {
+      note = (
+        <span title="Every day in this range is more than 7 days old — these delivery numbers are final.">
+          final
+        </span>
+      );
+    } else if (asOf) {
+      note = (
+        <span
+          title={
+            `Delivery receipts counted up to ${formatCampaignDateTime(freshness.as_of)}. ` +
+            `Today and yesterday refresh every 10 minutes; the 7 days before, every 3 hours.`
+          }
+        >
+          {asOf}
+        </span>
+      );
+    }
+  }
+  return (
+    <span className="inline-flex flex-col leading-tight">
+      <span>Delivered, %</span>
+      {note ? <span className="text-[10px] font-normal text-muted-foreground">{note}</span> : null}
+    </span>
+  );
+}
+
 // Delivered % cell. Three distinct "no number" cases, which must not look alike:
-//   · range too wide  — the delivery query is capped at 14 days (measured: 473 ms
-//                       at 7 days vs 11.0 s at 30), so the column is not computed
+//   · range too wide  — the column is capped at 14 days (a kept product limit,
+//                       no longer a cost one — see the route), so not computed
 //   · no capable sends — this grain sends only via providers with no DLR intake
 //   · partial coverage — a MIXED campaign: show the figure AND label its coverage,
 //                        because 91.4% over 4% of sends is not the same claim as
@@ -153,7 +213,7 @@ type ReportResponse = {
   event_types: EventTypeSpec[];
   // available=false ⇒ the selected range exceeds the delivery cap and the
   // Delivered % column was not computed at all (see DeliveredCell).
-  delivery?: { available: boolean; max_days: number };
+  delivery?: { available: boolean; max_days: number; freshness?: DeliveryFreshness | null };
   range: { from: string; to: string; timezone: string };
 };
 
@@ -303,6 +363,7 @@ export function KeitaroReport() {
   const [fetchError, setFetchError] = useState<string | null>(null);
   // Whether the server computed the Delivered % column at all for this range.
   const [deliveryAvailable, setDeliveryAvailable] = useState(true);
+  const [deliveryFreshness, setDeliveryFreshness] = useState<DeliveryFreshness | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const refetch = useCallback(() => setRefreshTick((n) => n + 1), []);
 
@@ -331,6 +392,7 @@ export function KeitaroReport() {
         setEventTypes(result.data.event_types ?? []);
         setTotalCount(result.data.totalCount);
         setDeliveryAvailable(result.data.delivery?.available ?? true);
+        setDeliveryFreshness(result.data.delivery?.freshness ?? null);
       } else {
         // ⭐ THE STALE RESPONSE GOES WITH IT. The error block replaces the
         // TABLE, but the stat cards and the unmapped badge sit above it — so a
@@ -342,6 +404,7 @@ export function KeitaroReport() {
         setTotals(null);
         setEventTypes([]);
         setTotalCount(0);
+        setDeliveryFreshness(null);
         setFetchError(result.error);
       }
     })();
@@ -480,7 +543,7 @@ export function KeitaroReport() {
       },
       {
         id: "delivered_pct",
-        header: "Delivered, %",
+        header: () => <DeliveredHeader freshness={deliveryFreshness} available={deliveryAvailable} />,
         enableSorting: false,
         cell: ({ row }) => <DeliveredCell row={row.original} available={deliveryAvailable} />,
       },
@@ -680,7 +743,7 @@ export function KeitaroReport() {
     const withEvents =
       at < 0 ? [...rest, ...generated] : [...rest.slice(0, at), ...generated, ...rest.slice(at)];
     return [campaignCol, stageCol, ...withEvents];
-  }, [filters.groupBy, deliveryAvailable, block]);
+  }, [filters.groupBy, deliveryAvailable, deliveryFreshness, block]);
 
   const isAuthLoading = !auth;
 

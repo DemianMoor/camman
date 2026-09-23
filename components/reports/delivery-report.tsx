@@ -4,11 +4,16 @@ import { Fragment, useEffect, useState } from "react";
 import { ChevronRight } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
+import {
+  CAMPAIGN_TIMEZONE_LABEL,
+  formatCampaignDateTime,
+  formatInCampaignTimezone,
+} from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
 import type { DeliveryProviderRow } from "@/lib/reporting/delivery";
+import type { DeliveryFreshness } from "@/lib/reporting/delivery-rollup";
 
 interface DeliveryResponse {
   data: DeliveryProviderRow[];
@@ -21,11 +26,41 @@ interface DeliveryResponse {
   };
   no_dlr_note: string;
   range: { from: string; to: string; timezone: string; max_days: number };
+  /** How current the stored cells are (stage_delivery_rollup, migration 0186). */
+  freshness?: DeliveryFreshness | null;
 }
 
-// Window options. Capped at 14 days by the route — a 30-day window measures
-// 11.0s against prod, which would exceed the function limit. Widening this
-// needs the covering index first (ClickUp 869ehwae3).
+// How current the numbers are. The page reads stored cells refreshed every
+// 10 min (today + yesterday) and every 3 h (the 7 days before); a stale
+// percentage looks exactly like a fresh one, so a missed refresh says so in amber.
+function FreshnessNote({ freshness }: { freshness: DeliveryFreshness | null }) {
+  if (!freshness) return null;
+  if (freshness.final) return <span> · final</span>;
+  const asOf = freshness.as_of
+    ? `as of ${formatInCampaignTimezone(freshness.as_of, "h:mm a")} ${CAMPAIGN_TIMEZONE_LABEL}`
+    : null;
+  if (freshness.stale) {
+    return (
+      <span
+        className="text-amber-600"
+        title={
+          `The delivery refresh has missed its schedule, so these figures may be behind` +
+          (freshness.as_of ? ` (receipts counted up to ${formatCampaignDateTime(freshness.as_of)}).` : ".")
+        }
+      >
+        {" "}
+        · stale{asOf ? ` · ${asOf}` : ""}
+      </span>
+    );
+  }
+  return asOf ? (
+    <span title={`Delivery receipts counted up to ${formatCampaignDateTime(freshness.as_of)}.`}> · {asOf}</span>
+  ) : null;
+}
+
+// Window options. Capped at 14 days by the route. Since the rollup cutover
+// (migration 0186) the cap is a kept product limit, not a cost one — widening
+// it is a separate decision.
 const WINDOWS = [
   { days: 1, label: "Today" },
   { days: 7, label: "7 days" },
@@ -168,6 +203,7 @@ export function DeliveryReport() {
         {resp ? (
           <p className="text-sm text-muted-foreground">
             {resp.range.from} → {resp.range.to} ({CAMPAIGN_TIMEZONE_LABEL})
+            <FreshnessNote freshness={resp.freshness ?? null} />
           </p>
         ) : null}
       </div>

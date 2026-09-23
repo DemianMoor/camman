@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
+import { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import {
   DELIVERY_COUNTS,
@@ -82,8 +83,14 @@ export interface RollupScope {
  */
 export function rollupScope(now: Date, lastSettle: Date | null): RollupScope {
   const today = formatInCampaignTimezone(now, "yyyy-MM-dd");
+  // An unparseable stamp counts as "never": NaN compares false, and without this
+  // guard a bad stamp would silently stop the settle forever. (cron_locks
+  // watermarks arrive from drizzle's execute() as STRINGS, not Dates — Node
+  // parses Postgres' format, but that is an engine behaviour, not a contract.)
   const settle =
-    lastSettle == null || now.getTime() - lastSettle.getTime() >= SETTLE_EVERY_HOURS * 3_600_000;
+    lastSettle == null ||
+    Number.isNaN(lastSettle.getTime()) ||
+    now.getTime() - lastSettle.getTime() >= SETTLE_EVERY_HOURS * 3_600_000;
   const days = settle ? SETTLE_DAYS : FRESH_DAYS;
   return { range: { from: addEtDays(today, -(days - 1)), to: today }, settle };
 }
@@ -211,6 +218,80 @@ export async function readDeliveryRollup(
     undelivered: Number(r.undelivered),
     no_receipt: Number(r.no_receipt),
   }));
+}
+
+/**
+ * THE REPORT READ (cutover, 2026-09-2x). /reports/delivery and the Overview's
+ * Delivered % column read the rollup through this; the live
+ * queryDeliveryByStage stays for the undelivered tripwire (rolling hours,
+ * matured sends — a day-grain rollup cannot express either) and for the
+ * nightly reconciliation that checks this table against it.
+ */
+export async function getDeliveryByStage(orgId: string, range: EtDayRange): Promise<DeliveryStageRow[]> {
+  return readDeliveryRollup(db, orgId, range);
+}
+
+/** A tier-A heartbeat older than this means the 10-minute refresh has missed ~3 runs. */
+export const FRESH_STALE_MINUTES = 30;
+/** Matches HEARTBEAT_JOBS.deliveryRollupSettle.max_age_hours (~2 missed settles). */
+export const SETTLE_STALE_HOURS = 7;
+
+export interface DeliveryFreshness {
+  /**
+   * The OLDEST refresh any cell in the window may be behind — the honest "as
+   * of". null when every cell is final, or when a tier the window depends on
+   * has never run.
+   */
+  as_of: string | null;
+  /** Every cell in the window is past the 7-day horizon: these numbers will not change. */
+  final: boolean;
+  /** A refresh tier this window depends on has missed its schedule (or never ran). */
+  stale: boolean;
+}
+
+/**
+ * Which refresh stamps a window depends on. Pure, so the rules are testable:
+ *   · a window entirely older than the settle horizon is FINAL — no stamp matters;
+ *   · a window touching today/yesterday depends on the 10-minute refresh;
+ *   · a window touching days 2–6 back depends on the 3-hourly settle.
+ * as_of is the older of the stamps it depends on, because some of its cells may
+ * be that far behind.
+ */
+export function deliveryFreshness(
+  range: EtDayRange,
+  freshAt: Date | null,
+  settleAt: Date | null,
+  now: Date,
+): DeliveryFreshness {
+  const today = formatInCampaignTimezone(now, "yyyy-MM-dd");
+  const freshFrom = addEtDays(today, -(FRESH_DAYS - 1));
+  const settleFrom = addEtDays(today, -(SETTLE_DAYS - 1));
+  if (range.to < settleFrom) return { as_of: null, final: true, stale: false };
+
+  const deps: { at: Date | null; maxMs: number }[] = [];
+  if (range.to >= freshFrom) deps.push({ at: freshAt, maxMs: FRESH_STALE_MINUTES * 60_000 });
+  if (range.from < freshFrom) deps.push({ at: settleAt, maxMs: SETTLE_STALE_HOURS * 3_600_000 });
+
+  const stale = deps.some((d) => d.at == null || now.getTime() - d.at.getTime() > d.maxMs);
+  const known = deps.map((d) => d.at).filter((d): d is Date => d != null);
+  const as_of =
+    known.length === deps.length && known.length > 0
+      ? new Date(Math.min(...known.map((d) => d.getTime()))).toISOString()
+      : null;
+  return { as_of, final: false, stale };
+}
+
+/** Freshness of a report window, from the two refresh heartbeats in cron_locks. */
+export async function getDeliveryFreshness(range: EtDayRange, now = new Date()): Promise<DeliveryFreshness> {
+  const rows = (await db.execute(sql`
+    SELECT job_name, (extract(epoch FROM watermark) * 1000)::float8 AS ms FROM cron_locks
+    WHERE job_name IN (${DELIVERY_ROLLUP_JOB}, ${DELIVERY_ROLLUP_SETTLE_JOB})
+  `)) as unknown as { job_name: string; ms: number | null }[];
+  const at = (job: string) => {
+    const v = rows.find((r) => r.job_name === job)?.ms;
+    return v == null ? null : new Date(Number(v));
+  };
+  return deliveryFreshness(range, at(DELIVERY_ROLLUP_JOB), at(DELIVERY_ROLLUP_SETTLE_JOB), now);
 }
 
 /** Canonical form for diffing two row sets — sorted by (stage, phone). */

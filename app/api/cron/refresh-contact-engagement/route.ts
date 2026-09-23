@@ -94,9 +94,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         // One org's failure must not stop the rest; it withholds the heartbeat.
         try {
           const r = await db.transaction(async (tx) => {
-            await tx.execute(
-              sql.raw(`SET LOCAL statement_timeout = '${mode === "full" ? "270s" : "100s"}'`),
-            );
+            // One budget for both modes: an incremental run ESCALATES to a full
+            // recount when the touched set is too big (lib/engagement/refresh.ts),
+            // and a 100 s ceiling would kill exactly the runs that needed to
+            // escalate. The lease, not the timeout, is what stops overlap.
+            await tx.execute(sql.raw("SET LOCAL statement_timeout = '270s'"));
             return refreshContactEngagement(tx, org_id, { mode, dryRun: false, since, evaluateAll });
           });
           results.push({ org_id, ...r });

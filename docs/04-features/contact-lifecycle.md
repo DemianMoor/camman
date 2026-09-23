@@ -87,9 +87,18 @@ runs inside the caller's transaction and stages everything through ANALYZEd
   the only index that can: `stage_sends` has none leading with `contact_id`.
 - **full** (`?mode=full`, 06:35 UTC) recounts every contact of the org in three
   passes (human clicks, send facts, offer exposures) and evaluates everyone. It
-  also picks up click re-classifications and group-membership changes. An
-  incremental run falls back to full when the last success is missing or more
-  than 24 h old.
+  also picks up click re-classifications and group-membership changes. Measured
+  on prod 2026-09-23: **230 s for 906,082 contacts**.
+- **An incremental run escalates to full** when its touched set exceeds
+  `INCREMENTAL_MAX_TOUCHED` (20,000), or when the last success is missing or
+  more than `FULL_FALLBACK_HOURS` (3 h) old. ⚠️ **This is load-bearing, not
+  tuning.** The incremental path costs one index probe per touched contact; on
+  2026-09-23 a send burst put **43,448** contacts in a single 15-minute window,
+  the recount exceeded the statement timeout, and because `since` advances only
+  on success every later run inherited a wider window — the job stalled for
+  2.5 h until a full recount was run by hand. The escalation bounds that, and
+  the short fallback stops a stall outliving one send burst. The dead-man did
+  its job: `contact-engagement-stale` fired 55 minutes in.
 - Recounts always read a contact's **full** history, so an overlapping window is
   idempotent. Only rows whose values changed are written.
 - `dryRun` computes everything and skips every write.

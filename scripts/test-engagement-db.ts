@@ -550,10 +550,15 @@ async function main() {
       INSERT INTO organizations (name) VALUES (${`${MARKER} monitor-${Date.now()}`}) RETURNING id`)).id;
     try {
       await db.execute(sql`INSERT INTO lifecycle_settings (org_id, engine_mode) VALUES (${monitorOrg}::uuid, 'write')`);
-      const hb = await all<{ watermark: string | null }>(sql`SELECT watermark FROM cron_locks WHERE job_name = 'contact-engagement'`);
-      if (hb.length > 0 && hb[0].watermark != null) {
-        bar("C2 precondition: preview has no contact-engagement heartbeat", false, "a heartbeat exists — skipping");
-      } else {
+      // Part C PREPARES its own world rather than asserting the preview DB has
+      // never seen this job. It had asserted exactly that, and went red the first
+      // time somebody legitimately ran the backfill here — a guard that expires
+      // on correct use. cron_locks carries no org_id and the preview DB runs no
+      // crons, so clearing these two rows is safe and repeatable.
+      await db.execute(sql`
+        DELETE FROM cron_locks
+        WHERE job_name IN ('contact-engagement', 'contact-engagement:awaiting-first-run')`);
+      {
         // PR #210's first-run grace: a job that has never run is not stale until
         // it has been missing longer than first_run_grace_hours (0.5 h here), so
         // the deploy that introduces the watch cannot page.

@@ -1,9 +1,9 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-09-22_
+_Last updated: 2026-09-23_
 
-**PR 1 of 5: the data layer only.** The statuses are computed and stored, and
-nothing reads them yet. Segment rules (PR 3), the campaign lifecycle chips and
+**PR 1 + 2a shipped.** The statuses are computed and stored, and the thresholds
+that decide them are editable (§8). Nothing selects an audience by status yet. Segment rules (PR 3), the campaign lifecycle chips and
 the eligibility layers (PR 4) and the cohort report (PR 5) follow.
 Design: [2026-09-22-contact-lifecycle-status-design.md](../superpowers/specs/2026-09-22-contact-lifecycle-status-design.md).
 
@@ -125,7 +125,46 @@ the key `lifecycle.engine_mode`. The permission constant exists from PR 1 so
 nothing can move the switch through the app before a gate exists for it; in PR 1
 the only writer is the backfill script above, which writes the same audit row.
 
-## 6. Monitoring
+## 6. Configuring it
+
+**Settings → Lifecycle** (`/settings/lifecycle`, permission `lifecycle.configure`,
+manager and above; the page's own layout 404s for anyone else):
+
+- the six org thresholds, each with its range and the code default beside it;
+- **Preview changes** — what the proposed values would do, before saving;
+- the **status engine** switch, with a confirm dialog in BOTH directions: turning
+  it off stops every status moving and lets the stored ones go stale, and turning
+  it on makes the next run apply everything that happened while it was off.
+
+Save writes one `org_setting_events` row per **changed** field (`lifecycle.<field>`),
+so an unchanged field leaves no trace, and stamps `reevaluate_requested_at`.
+
+**Per-group overrides** live on the contact-group edit form: the four freeze and
+suppression fields, blank meaning inherit. Each shows the value in force
+("Effective: 10 (org default)" / "Effective: 8 (this group)"), and the form says
+outright that a contact in several groups takes the **strictest** value across
+its active groups rather than this group's. The same preview is available there,
+scoped to the group being edited. The `lifecycle.configure` check on the group
+PATCH fires only when an override is in the payload, so renaming a group still
+needs nothing but `contact_groups.update`.
+
+**How the preview works.** `previewLifecycleThresholds`
+([lib/engagement/preview.ts](../../lib/engagement/preview.ts)) runs the same
+`evaluationSelectSql` the job uses over the **stored** facts in
+`contact_engagement`, with the proposed values injected through
+[lib/engagement/thresholds-sql.ts](../../lib/engagement/thresholds-sql.ts). It
+does not recount `stage_sends`, and it writes nothing. Measured on production
+2026-09-23 over 877,943 contacts: **3.8 s warm, 10.9 s cold**. Contacts with no
+`contact_engagement` row are skipped: they are `new` with zero messages, and no
+threshold can change that.
+
+**A saved threshold reaches everyone.** The save stamps
+`lifecycle_settings.reevaluate_requested_at`; the next 15-minute run compares it
+with the `contact-engagement-reeval` watermark in `cron_locks` and, when newer,
+evaluates every stored row instead of only the touched and time-due ones. That
+costs the evaluate pass only — no recount.
+
+## 7. Monitoring
 
 Heartbeats `contact-engagement` (every 15 min) and `contact-engagement-full`
 (nightly) in `cron_locks`, stamped only when every org succeeded. The hourly
@@ -137,7 +176,7 @@ Both watches are **silent while no org has the engine on** — a switched-off jo
 is not a stale one — and they honour the first-run grace, so the deploy that
 introduces them cannot page.
 
-## 7. Tests
+## 8. Tests
 
 [scripts/test-engagement-db.ts](../../scripts/test-engagement-db.ts), preview DB only:
 
@@ -151,3 +190,14 @@ introduces them cannot page.
   bot / unscored clicks being ignored.
 - **Part C** — the heartbeat watch: silent while off, one latched alert once on
   and missing past its grace.
+- **Part D** — the settings preview: proposing the saved values moves nobody, a
+  lowered freeze threshold moves exactly the contacts that qualify, a shrunken
+  warm window ages the warm ones out, a group override reaches only that group,
+  and nothing is written.
+- **Part E (R1–R7)** — `reevaluate_requested_at`: the pure predicate's four
+  cases, then the pair that matters — an ordinary incremental run does NOT see a
+  new threshold, and the same run with `evaluateAll` does, recording a transition
+  that carries the new thresholds.
+
+Plus [scripts/measure-lifecycle-preview.ts](../../scripts/measure-lifecycle-preview.ts),
+a read-only production measurement whose every run rolls back.

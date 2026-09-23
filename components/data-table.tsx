@@ -25,6 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { FROZEN_FIRST_COLUMN_CELL } from "@/lib/ui/frozen-column";
 import { nextSortState, type SortCycle } from "@/lib/ui/sort-cycle";
 import { cn } from "@/lib/utils";
 
@@ -62,6 +63,17 @@ export interface DataTableProps<T> {
    * gets it (/reports Overview passes "desc-asc" — see lib/ui/sort-cycle.ts).
    */
   sortCycle?: SortCycle;
+  /**
+   * Pin the first column so only the rest scroll sideways. OPT-IN, and it must
+   * stay that way for the same reason `sortCycle` is: this wrapper backs every
+   * registry list in the app and none of them asked for a frozen column.
+   * /reports Overview is the only consumer — see lib/ui/frozen-column.ts.
+   *
+   * The frozen cell's tint below follows `TableRow`'s hover. A caller that also
+   * passes `onRowClick` (hover `muted/40`) or a `rowClassName` with its own row
+   * state would need its tint added there too.
+   */
+  freezeFirstColumn?: boolean;
   onRowClick?: (row: T) => void;
   /** Optional per-row className (e.g. an operational-status accent). */
   rowClassName?: (row: T) => string | undefined;
@@ -84,6 +96,7 @@ export function DataTable<T>({
   sortDir,
   onSortChange,
   sortCycle = "asc-desc-clear",
+  freezeFirstColumn = false,
   onRowClick,
   rowClassName,
 }: DataTableProps<T>) {
@@ -99,6 +112,13 @@ export function DataTable<T>({
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
   const isEmpty = !isLoading && data.length === 0;
 
+  // Undefined when the table is not frozen, so every other screen renders the
+  // exact same markup it did before this prop existed. The tint mirrors
+  // `TableRow`'s own `hover:bg-muted/50` — see lib/ui/frozen-column.ts.
+  const frozenCell = freezeFirstColumn
+    ? cn(FROZEN_FIRST_COLUMN_CELL, "[tr:hover>&]:before:bg-muted/50")
+    : undefined;
+
   function cycleSort(columnId: string) {
     // The rule itself is a pure function so it can be tested without a browser
     // and so the two cycles sit side by side in one file.
@@ -113,13 +133,16 @@ export function DataTable<T>({
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => {
+                {headerGroup.headers.map((header, index) => {
                   const def = header.column.columnDef;
                   const enableSorting = def.enableSorting !== false;
                   const id = header.column.id;
                   const isActive = sortBy === id;
                   return (
-                    <TableHead key={header.id}>
+                    <TableHead
+                      key={header.id}
+                      className={index === 0 ? frozenCell : undefined}
+                    >
                       {enableSorting ? (
                         <button
                           type="button"
@@ -154,7 +177,10 @@ export function DataTable<T>({
               Array.from({ length: pageSize }).map((_, i) => (
                 <TableRow key={`skeleton-${i}`}>
                   {columns.map((_col, j) => (
-                    <TableCell key={`skeleton-cell-${j}`}>
+                    <TableCell
+                      key={`skeleton-cell-${j}`}
+                      className={j === 0 ? frozenCell : undefined}
+                    >
                       <Skeleton className="h-4 w-full" />
                     </TableCell>
                   ))}
@@ -181,8 +207,11 @@ export function DataTable<T>({
                     rowClassName?.(row.original),
                   )}
                 >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
+                  {row.getVisibleCells().map((cell, index) => (
+                    <TableCell
+                      key={cell.id}
+                      className={index === 0 ? frozenCell : undefined}
+                    >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </TableCell>
                   ))}

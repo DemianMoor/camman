@@ -34,6 +34,7 @@ import type {
 } from "@/lib/reporting/performance-report";
 import { makeDimensionComparator } from "@/lib/reporting/report-sort";
 import { DIMENSION_LABEL, type ReportDimension } from "@/lib/reporting/report-dimensions";
+import { FROZEN_FIRST_COLUMN_CELL } from "@/lib/ui/frozen-column";
 
 interface PerfResponse {
   dimension: ReportDimension;
@@ -633,7 +634,13 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/40 text-left">
-                <th className="px-3 py-2 font-medium">{isHourly ? "Hour" : DIMENSION_LABEL[dimension]}</th>
+                {/* Frozen — the tint is this header row's own flat `bg-muted/40`,
+                    not a hover state, so it is unconditional. */}
+                <th
+                  className={`${FROZEN_FIRST_COLUMN_CELL} before:bg-muted/40 px-3 py-2 font-medium`}
+                >
+                  {isHourly ? "Hour" : DIMENSION_LABEL[dimension]}
+                </th>
                 {cols.map((c) => (
                   <th
                     key={c.id}
@@ -650,7 +657,11 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
             <tbody>
               {rows.map((r) => (
                 <tr key={r.key} className="border-b last:border-0 hover:bg-muted/30">
-                  <td className="px-3 py-2">{renderLabel(r)}</td>
+                  <td
+                    className={`${FROZEN_FIRST_COLUMN_CELL} [tr:hover>&]:before:bg-muted/30 px-3 py-2`}
+                  >
+                    {renderLabel(r)}
+                  </td>
                   {cols.map((c) => {
                     const v = cellValue(r, c);
                     const cls =

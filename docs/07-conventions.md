@@ -2,6 +2,48 @@
 
 _Last updated: 2026-09-23_
 
+## A frozen first column is OPT-IN PER TABLE, and it must stay that way (2026-09-23)
+
+`/reports` is ~25–30 columns wide, so the name that identifies the row — the
+campaign on Overview, the dimension on the By-X tabs — scrolls off the left edge
+long before the interesting numbers arrive. The first column is now pinned there
+while the rest scroll under it. The class bundle lives once, in
+[lib/ui/frozen-column.ts](../lib/ui/frozen-column.ts).
+
+- ⭐ **Opt-in, for exactly the reason `sortCycle` is** (see the section below).
+  [components/data-table.tsx](../components/data-table.tsx) backs ~20 registry
+  lists that are narrow enough not to want this; its `freezeFirstColumn` prop
+  **defaults to `false`** and `/reports` Overview is the only screen that passes
+  it. The By-X table hand-rolls its own markup
+  ([components/reports/performance-report.tsx](../components/reports/performance-report.tsx))
+  and applies the SAME exported constant — one bundle, so the two tables cannot
+  drift apart.
+- **An opaque background is the whole trick, and the row-state tint has to be
+  re-applied on top of it.** A row's background is translucent (`bg-muted/50` on
+  hover, nothing at rest), so a frozen cell that simply inherited it would show
+  the scrolling columns through itself. The cell therefore paints an opaque
+  `bg-background` base and layers the row's tint back over it in a `::before` —
+  re-using the row's OWN utility, not a hand-mixed opaque equivalent, so the
+  frozen cell composites to exactly the row's colour and no seam appears down
+  the middle of a hovered row. Because each table styles its rows differently
+  (the wrapper hovers `muted/50`, the By-X body `muted/30`, its header a flat
+  `muted/40`), the tint is supplied by the CALLER. **A frozen table that adds a
+  row state — selected, zebra, the `muted/40` hover `onRowClick` brings — must
+  add the matching `…:before:bg-…` class or the frozen cell will not follow it.**
+- **The edge is a box-shadow, not `border-r`.** Under `border-collapse: collapse`
+  (Tailwind's preflight default) collapsed borders are painted by the table, not
+  by the cell, so they do not travel with a sticky cell.
+- Nothing in the bundle has a layout effect, so a table that does not overflow
+  renders exactly as before, minus the 1px divider.
+- **Bars:** [scripts/test-frozen-first-column.ts](../scripts/test-frozen-first-column.ts)
+  (`npx tsx`, pure) fails if the wrapper's default moves, if the class escapes
+  the first cell, if a second screen opts in, or if either table's row hover
+  changes without its frozen tint following. ⚠️ **What those bars CANNOT prove
+  is the behaviour itself** — that the column stays put and stays opaque is a
+  rendered-layout fact, proven by measuring `getBoundingClientRect().x` before
+  and after scrolling the container in a real browser, at two viewport widths,
+  on Overview and on the By-X tabs.
+
 ## On `/reports` a header click sorts DESCENDING first, and no tie-break ever flips with the direction (2026-09-23)
 
 Owner's rules for every `/reports` table — Overview and the By-X tabs alike.

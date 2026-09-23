@@ -987,6 +987,11 @@ export function KeitaroReport() {
           // which is why this is a prop and not a change to the wrapper's
           // default. The By-X tabs' own `toggleSort` already behaves this way.
           sortCycle="desc-asc"
+          // ⭐ ALSO OPT-IN, AND FOR THE SAME REASON AS THE CYCLE ABOVE. This
+          // report is ~30 columns wide, so the Campaign name has to survive the
+          // sideways scroll; every other DataTable in the app is narrow enough
+          // that pinning a column there would be a change nobody asked for.
+          freezeFirstColumn
           onSortChange={(by, dir) =>
             updateFilters({ sortBy: by ?? "revenue", sortDir: dir, page: 0 })
           }

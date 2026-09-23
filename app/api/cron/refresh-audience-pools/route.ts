@@ -9,9 +9,16 @@ import { withCronLease } from "@/lib/cron/lease";
 // behind GET /api/audience/pools.
 //
 // ⚠️ READS stage_sends: one org-wide aggregate per org, measured 40.2s on prod
-// (2026-09-14, default work_mem). Read-only against the send tables; writes one
-// operator_rollups row per org. At :29/:59 it never coincides with
-// refresh-fresh-counts (:11/:41) or the */5 jobs.
+// (2026-09-14, default work_mem) and 41.0 s / 2.02 GB per run on live ticks
+// (2026-09-23). Read-only against the send tables; writes one operator_rollups
+// row per org. At :29 it never coincides with refresh-fresh-counts (:11/:41) or
+// the */5 jobs.
+//
+// HOURLY since 2026-09-23, cut from `29,59 * * * *`. At 48 runs/day this was the
+// platform's largest scheduled reader (~97 GB/day). These are planning counts,
+// an hour stale changes no decision made from them, and nothing on the send,
+// preflight, kickoff or compliance path reads them — see the note in
+// app/api/audience/pools/route.ts.
 //
 // maxDuration 300 because the cost grows with send volume; the lease TTL sits
 // past it so a slow run can never overlap the next tick.

@@ -21,6 +21,12 @@ import { purchasedSendIds } from "@/lib/sale-attribution";
 // decision asks ("when did this person last hear from us"), and it is why this
 // rollup reads stage_sends, which fresh-counts deliberately avoids.
 //
+// ⚠️ REFRESHED HOURLY (`29 * * * *`), cut from every 30 minutes on 2026-09-23.
+// At 48 runs/day this was the platform's largest scheduled reader: 41.0 s and
+// 2.02 GB per run, ~97 GB/day, measured on live ticks (queryid watched 89 -> 92
+// calls). Halving the cadence halves that; what makes it 2 GB at all is the
+// org-wide stage_sends scan below, which is a separate open question.
+//
 // ⚠️ ONE ORG-WIDE PASS COVERS EVERY OFFER. "Rested" needs each contact's last
 // send of any offer, so the stage_sends scan is org-wide whatever the offer
 // count; grouping it by (contact, offer) in the same pass makes every offer free.

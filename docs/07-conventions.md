@@ -157,6 +157,20 @@ Refreshing on the read, past a TTL equal to the freshness target, honours the *s
 
 If refreshes outnumber reads by orders of magnitude, the cadence is the bug. Applies to `audience_fresh_counts` (`11,41 * * * *`) and any future one-row-per-org rollup.
 
+## A lifetime total in `pg_stat_statements` proves nothing about CURRENT load (2026-09-23)
+
+`pg_stat_statements` has no timestamps. A statement that was retired months ago keeps its lifetime `calls`, `total_exec_time` and `shared_blks_read` forever, and sorting by any of them puts dead work at the top. **This trap has now produced a wrong "top consumer" three times:**
+
+1. The original perf brief named the #1 lifetime consumer (31.5 h, 2.18B blocks) as the fix target. PR #199 had retired it 17 hours earlier; its replacement ran in 2 ms.
+2. `INSERT INTO counted_clickers` queryid `-5880403591437047382` holds **16,639 GB** lifetime (11,850 calls at 1.40 GB each) and was about to be reported as "the platform's biggest reader, 232 GB/day". Across a live advance of the `counted-clickers-incremental` heartbeat it took **zero calls**; the live pair cost **0.7 s / 16 MB per poll**, about 4.6 GB/day.
+3. The audience-pools aggregate was first measured on queryid `-1497339108613919828` (344 calls, 638 GB) — the pre-Phase-3 text, which the 17:29 refresh did not touch. The live one is a different `queryid` at 41.0 s / 2.02 GB.
+
+**Before naming any statement a top consumer, prove it is alive:** snapshot its `calls` by `queryid`, wait past one run of the job that issues it (its `cron_locks` watermark advancing is the cleanest trigger), read again. A zero delta across a confirmed tick means dead, whatever the lifetime total says.
+
+**And never derive a per-day rate by dividing lifetime calls by the pgss window.** That is only valid if the statement existed for the whole window. Dividing 344 calls by the 71.8-day window said "4.8 runs/day" for a job scheduled 48 times a day — and briefly "disproved" a correct 91 GB/day figure — because the statement is younger than the window. Measure a delta over a known interval instead, or corroborate with `pg_stat_user_tables` counters (`n_tup_upd`, `seq_scan`, `idx_scan`), which cannot be evicted and whose divisor is the TABLE's age.
+
+Companion to the back-to-back rule below: one says *when* to measure, this one says *what you are measuring*.
+
 ## A periodic job's cost must be measured on a real tick, not on back-to-back runs (2026-09-23)
 
 Narrowing the delivery rollup's fresh tier was measured by running the old scope and the new scope one after another in the same session, inside rolled-back transactions. The new scope came out at **0.43–0.47 s and 0–2 blocks read** — which shipped, in the PR and in the docs, as its cost.

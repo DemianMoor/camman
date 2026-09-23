@@ -11,8 +11,16 @@ import { can } from "@/lib/permissions";
 //
 // Counts only: group NAMES and integers. The rollup never holds a contact id or
 // a phone number (lib/audience/pools.ts), so there is nothing to strip here.
-// Serves a 30-minute rollup and says so: computed_at + stale_seconds on every
+// Serves an HOURLY rollup and says so: computed_at + stale_seconds on every
 // response, 503 rather than zeros before the first run.
+//
+// The counts are PLANNING figures — "roughly how many can I still mail for
+// offer X" while sizing a send — and an hour of staleness does not change that
+// decision. Nothing on the send, preflight, kickoff or compliance path reads
+// them: send-time opt-out suppression re-reads `opt_outs` live at the moment of
+// claim (lib/sends/drain.ts, the SEND-TIME OPT-OUT INVARIANT). Verified as the
+// blocking condition of the 2026-09-23 cadence cut; if that ever stops being
+// true, this cadence is wrong, not just stale.
 export const dynamic = "force-dynamic";
 
 // offers.id is an int4: anything larger would reach Postgres as a 22003.
@@ -57,14 +65,14 @@ export async function GET(req: NextRequest) {
     case "rollup_not_ready":
       return apiError(
         503,
-        "Audience pools have not been computed yet. The refresh runs every 30 minutes.",
+        "Audience pools have not been computed yet. The refresh runs hourly.",
         API_ERROR_CODES.INTERNAL,
         { reason: "rollup_not_ready" },
       );
     case "offer_not_in_rollup_yet":
       return apiError(
         503,
-        "This offer first sent after the last refresh. It appears within 30 minutes.",
+        "This offer first sent after the last refresh. It appears within the hour.",
         API_ERROR_CODES.INTERNAL,
         { reason: "offer_not_in_rollup_yet" },
       );

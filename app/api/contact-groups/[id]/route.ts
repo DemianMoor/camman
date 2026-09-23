@@ -10,8 +10,10 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { loadLifecycleSettings } from "@/lib/engagement/settings-io";
 import {
   contactGroupUpdateSchema,
+  LIFECYCLE_OVERRIDE_KEYS,
   nullIfEmpty,
 } from "@/lib/validators/contact-groups";
 
@@ -54,7 +56,12 @@ export async function GET(
       entity: "contact_group",
     });
   }
-  return NextResponse.json(rows[0]);
+  // The org thresholds ride along so the edit form can show "Effective: N"
+  // beside each override without a second round trip.
+  return NextResponse.json({
+    ...rows[0],
+    org_thresholds: await loadLifecycleSettings(db, orgId),
+  });
 }
 
 export async function PATCH(
@@ -90,6 +97,20 @@ export async function PATCH(
       400,
       parsed.error.issues[0]?.message ?? "Invalid input",
       API_ERROR_CODES.VALIDATION,
+    );
+  }
+
+  // The lifecycle overrides are governed by their own permission, checked only
+  // when one of them is actually in the payload — otherwise a plain rename by
+  // someone with contact_groups.update but not lifecycle.configure would 403.
+  // An explicit null passes through the loop below as null ("inherit"), which is
+  // exactly what clearing a field must store.
+  const touchesLifecycle = LIFECYCLE_OVERRIDE_KEYS.some((k) => k in parsed.data);
+  if (touchesLifecycle && !can(role, "lifecycle.configure")) {
+    return apiError(
+      403,
+      "Changing lifecycle overrides needs the lifecycle permission.",
+      API_ERROR_CODES.FORBIDDEN,
     );
   }
 

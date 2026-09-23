@@ -7,6 +7,7 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import {
+  ensureContactOrgStatsFresh,
   isContactStatsRollupEnabled,
   readContactOrgStats,
 } from "@/lib/contact-stats";
@@ -49,6 +50,13 @@ export async function GET() {
   }
 
   if (isContactStatsRollupEnabled()) {
+    // Recompute on read when the row is older than the 60-second freshness
+    // contract (there is no longer a cron doing it 1,436x a day). A failure
+    // here degrades to the stale row -- which still carries stats_as_of -- and
+    // never to a 500: the numbers were good enough a minute ago.
+    await ensureContactOrgStatsFresh(db, orgId).catch((err) => {
+      console.warn("[base-stats] refresh skipped:", err);
+    });
     const { base, updatedAt } = await readContactOrgStats(db, orgId);
     if (updatedAt !== null) {
       return NextResponse.json({ ...base, stats_as_of: updatedAt });

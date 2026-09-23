@@ -7,6 +7,7 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import {
+  ensureContactOrgStatsFresh,
   isContactStatsRollupEnabled,
   readContactOrgStats,
 } from "@/lib/contact-stats";
@@ -31,6 +32,12 @@ export async function GET() {
   }
 
   if (isContactStatsRollupEnabled()) {
+    // See base-stats: recompute on read past the TTL, degrade to the stale row
+    // on failure. The contacts page calls both endpoints at once; the lease
+    // inside collapses that into ONE recompute.
+    await ensureContactOrgStatsFresh(db, orgId).catch((err) => {
+      console.warn("[carrier-stats] refresh skipped:", err);
+    });
     const { carrier, updatedAt } = await readContactOrgStats(db, orgId);
     if (carrier !== null) {
       return NextResponse.json({ ...carrier, stats_as_of: updatedAt });

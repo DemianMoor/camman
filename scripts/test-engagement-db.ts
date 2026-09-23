@@ -529,6 +529,68 @@ async function main() {
     bar("R7 recorded as a transition carrying the NEW thresholds",
       cBotLast.t.freeze_after_messages === 3, JSON.stringify(cBotLast));
     await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 10 WHERE org_id = ${org}`);
+
+    // ── PART G — status-at-send stamping (PR 2b) ─────────────────────────────
+    // stage_send_lifecycle records what a contact's status WAS when the send
+    // was materialized. It is written by a CTE inside bulkInsertStageSends —
+    // the real statement is imported here, because a test that rebuilds the
+    // SQL only compares the statement against a copy of itself.
+    console.log("\nPART G — stage_send_lifecycle stamping at Prepare");
+    const { bulkInsertStageSends } = await import("@/lib/sends/kickoff");
+
+    // Three known statuses, including the one that has no row at all. Deleting
+    // cWarm's row is how a contact uploaded minutes ago looks: no
+    // contact_engagement record yet, which IS 'new' by contract
+    // (db/schema.ts:4106-4108).
+    await db.execute(sql`UPDATE contact_engagement SET status = 'hot' WHERE contact_id = ${cHot.id}::uuid`);
+    await db.execute(sql`UPDATE contact_engagement SET status = 'freeze' WHERE contact_id = ${cBot.id}::uuid`);
+    await db.execute(sql`DELETE FROM contact_engagement WHERE contact_id = ${cWarm.id}::uuid`);
+
+    const gRows = [cHot, cBot, cWarm].map((c) => ({
+      id: crypto.randomUUID(),
+      orgId,
+      campaignId: K1,
+      stageId: S1,
+      contactId: c.id,
+      phone: c.phone,
+      linkId: null,
+      renderedText: "part G",
+      leadId: `lead-${tag}-${c.id.slice(0, 8)}`,
+      carrierNorm: null,
+      providerPhoneId: null,
+      costPerSms: null,
+    }));
+    const gIds = sql.join(gRows.map((r) => sql`${r.id}`), sql`, `);
+
+    const gInserted = await bulkInsertStageSends(db, gRows);
+    bar("G1 the insert still returns one row per send", gInserted === 3, `got ${gInserted}`);
+
+    const gStamped = await all<{ status: string; reconstructed: boolean }>(sql`
+      SELECT status, reconstructed FROM stage_send_lifecycle
+      WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[]) ORDER BY status`);
+    bar("G2 every inserted send is stamped, and live rows are not reconstructed",
+      gStamped.length === 3 && gStamped.every((r) => r.reconstructed === false),
+      JSON.stringify(gStamped));
+    bar("G3 hot/freeze stamp themselves; a contact with NO engagement row stamps 'new'",
+      gStamped.map((r) => r.status).join(",") === "freeze,hot,new",
+      gStamped.map((r) => r.status).join(","));
+
+    // Re-materialization is idempotent by design: the send insert conflicts
+    // away, so the stamp must too — and must not duplicate or overwrite.
+    await db.execute(sql`UPDATE stage_send_lifecycle SET status = 'cold' WHERE stage_send_id = ${gRows[0].id}::uuid`);
+    const gAgain = await bulkInsertStageSends(db, gRows);
+    const gCount = await one<{ n: number }>(sql`
+      SELECT count(*)::int AS n FROM stage_send_lifecycle WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[])`);
+    const gKept = await one<{ status: string } | undefined>(sql`
+      SELECT status FROM stage_send_lifecycle WHERE stage_send_id = ${gRows[0].id}::uuid`);
+    bar("G4 re-running inserts no send, no duplicate stamp, and does not overwrite",
+      gAgain === 0 && Number(gCount.n) === 3 && gKept?.status === "cold",
+      JSON.stringify({ gAgain, n: gCount.n, kept: gKept?.status ?? null }));
+
+    bar("G5 the stamp is scoped to the send's org",
+      (await one<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM stage_send_lifecycle
+        WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[]) AND org_id = ${org}`)).n === 3);
   } finally {
     if (orgId) {
       const name = (await all<{ name: string }>(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))[0]?.name ?? "";
@@ -545,6 +607,7 @@ async function main() {
               + (SELECT count(*) FROM contact_engagement_transitions WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM contact_offer_campaigns WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM stage_sends WHERE org_id = ${orgId}::uuid)
+              + (SELECT count(*) FROM stage_send_lifecycle WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM lifecycle_settings WHERE org_id = ${orgId}::uuid)) AS n`);
       console.log(`\nTeardown: ${left.n} row(s) left for this run`);
       if (Number(left.n) !== 0) fail++;

@@ -450,6 +450,42 @@ async function main() {
     const totalTransitions = await count("contact_engagement_transitions");
     bar("B7 transition history total = 8 + 2 + 1 + 2 = 13", totalTransitions === 13, String(totalTransitions));
 
+    // ── PART D — the settings preview over STORED facts ─────────────────────
+    // State after B7: cNew cold (1 msg), cCold warm, cFreeze suppressed,
+    // cHot warm, cWarm warm, cBot cold (3 msgs), cD freeze (8 msgs), cOpt cold (1 msg).
+    console.log("\nPART D — previewLifecycleThresholds");
+    const { previewLifecycleThresholds } = await import("@/lib/engagement/preview");
+    const preview = (opts: Parameters<typeof previewLifecycleThresholds>[2]) =>
+      db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL statement_timeout = '60s'`);
+        return previewLifecycleThresholds(tx, orgId, opts);
+      });
+    const SAVED = {
+      hot_days: 30, warm_days: 120, freeze_after_messages: 10,
+      freeze_cadence_days: 21, suppress_after_days: 60, suppress_min_freeze_messages: 2,
+    };
+    const d0 = await preview({ proposedOrg: SAVED, asOf: A4 });
+    bar("D1 proposing the saved values moves nobody",
+      Object.keys(d0.transitions).length === 0 && d0.evaluated === 8, JSON.stringify(d0.transitions));
+    bar("D1 current counts are the stored ones",
+      d0.currentCounts.cold === 3 && d0.currentCounts.warm === 3 &&
+      d0.currentCounts.freeze === 1 && d0.currentCounts.suppressed === 1, JSON.stringify(d0.currentCounts));
+    // Only cBot has ≥3 messages since its last click; cNew and cOpt have 1 each,
+    // and the three warm contacts are decided by their click before any message
+    // count is consulted. So exactly one contact moves and freeze goes 1 → 2.
+    const d1 = await preview({ proposedOrg: { ...SAVED, freeze_after_messages: 3 }, asOf: A4 });
+    bar("D2 lowering freeze_after_messages to 3 freezes only the 3-message contact",
+      d1.transitions["cold→freeze"] === 1 && d1.projectedCounts.freeze === 2, JSON.stringify(d1.transitions));
+    const d2 = await preview({ proposedOrg: { ...SAVED, warm_days: 30 }, asOf: A4 });
+    bar("D3 shrinking warm_days to 30 ages all three warm contacts out",
+      (d2.transitions["warm→cold"] ?? 0) + (d2.transitions["warm→freeze"] ?? 0) === 3, JSON.stringify(d2.transitions));
+    const d3 = await preview({ proposedGroup: { groupId: GA, overrides: { freeze_after_messages: 1 } }, asOf: A4 });
+    bar("D4 a group override reaches only that group's contacts (A = cNew, cCold)",
+      (d3.transitions["cold→freeze"] ?? 0) === 1 && (d3.transitions["warm→freeze"] ?? 0) === 0,
+      JSON.stringify(d3.transitions));
+    bar("D5 the preview writes nothing",
+      (await count("contact_engagement_transitions")) === 13 && (await row(cBot)).status === "cold");
+
     // ── PART E — a threshold change reaches contacts nothing else touched ────
     console.log("\nPART E — reevaluate_requested_at");
     const { reevaluationDue } = await import("@/lib/engagement/refresh");

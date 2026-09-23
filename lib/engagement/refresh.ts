@@ -1,11 +1,8 @@
 import { sql, type SQL } from "drizzle-orm";
 
-import {
-  DEFAULT_LIFECYCLE_THRESHOLDS as D,
-  ENGAGEMENT_STATUSES,
-  type EngagementStatus,
-} from "@/lib/engagement/constants";
+import { ENGAGEMENT_STATUSES, type EngagementStatus } from "@/lib/engagement/constants";
 import { ENGAGEMENT_VALUE_COLUMNS, evaluationSelectSql } from "@/lib/engagement/status-sql";
+import { createThresholdTempTables } from "@/lib/engagement/thresholds-sql";
 import { HUMAN_CLICK } from "@/lib/reporting/counted-clickers";
 import type { DbOrTx } from "@/lib/reporting/cron-heartbeat";
 
@@ -52,6 +49,28 @@ export interface RefreshOptions {
   initialReason?: "backfill" | "first_seen";
   /** Also compute the per-group and opted-out breakdowns (the dry-run report). */
   withReport?: boolean;
+  /**
+   * Evaluate EVERY stored row, not only the recounted and time-due ones. The
+   * cron passes this when lifecycle_settings.reevaluate_requested_at is newer
+   * than the last run that honoured one: a threshold change moves neither
+   * counter, so nothing else would notice it. It costs no recount — the facts
+   * are already stored, so this is the evaluate pass and nothing more.
+   */
+  evaluateAll?: boolean;
+}
+
+/**
+ * Is a full re-evaluation due? `requestedAt` is
+ * lifecycle_settings.reevaluate_requested_at, `lastReevalAt` the cron_locks
+ * watermark of the last run that honoured one. Pure, so the rule is testable
+ * without a database.
+ */
+export function reevaluationDue(
+  requestedAt: Date | null,
+  lastReevalAt: Date | null,
+): boolean {
+  if (requestedAt == null) return false;
+  return lastReevalAt == null || requestedAt.getTime() > lastReevalAt.getTime();
 }
 
 export interface GroupBreakdownRow {
@@ -189,44 +208,8 @@ export async function refreshContactEngagement(
 
   // ── 5. Effective thresholds ──────────────────────────────────────────────
   // The org row (or the code defaults), then the STRICTEST value across the
-  // contact's ACTIVE groups. Only contacts that belong to an active group
-  // carrying an override need the aggregate; everyone else takes the org values,
-  // so this costs nothing until somebody sets an override.
-  await phase("thresholds", async () => {
-    await dbc.execute(sql`
-      CREATE TEMP TABLE eng_org_thr ON COMMIT DROP AS
-      SELECT coalesce(ls.hot_days, ${D.hot_days})::int AS hot_days,
-             coalesce(ls.warm_days, ${D.warm_days})::int AS warm_days,
-             coalesce(ls.freeze_after_messages, ${D.freeze_after_messages})::int AS freeze_after_messages,
-             coalesce(ls.freeze_cadence_days, ${D.freeze_cadence_days})::int AS freeze_cadence_days,
-             coalesce(ls.suppress_after_days, ${D.suppress_after_days})::int AS suppress_after_days,
-             coalesce(ls.suppress_min_freeze_messages, ${D.suppress_min_freeze_messages})::int AS suppress_min_freeze_messages
-      FROM (SELECT 1) one
-      LEFT JOIN lifecycle_settings ls ON ls.org_id = ${org}`);
-    await dbc.execute(sql`
-      CREATE TEMP TABLE eng_grp_thr ON COMMIT DROP AS
-      SELECT ccg.contact_id,
-             min(coalesce(g.freeze_after_messages, o.freeze_after_messages))::int AS freeze_after_messages,
-             max(coalesce(g.freeze_cadence_days, o.freeze_cadence_days))::int AS freeze_cadence_days,
-             min(coalesce(g.suppress_after_days, o.suppress_after_days))::int AS suppress_after_days,
-             min(coalesce(g.suppress_min_freeze_messages, o.suppress_min_freeze_messages))::int AS suppress_min_freeze_messages,
-             coalesce(array_agg(g.id ORDER BY g.id) FILTER (
-               WHERE g.freeze_after_messages IS NOT NULL OR g.freeze_cadence_days IS NOT NULL
-                  OR g.suppress_after_days IS NOT NULL OR g.suppress_min_freeze_messages IS NOT NULL
-             ), '{}')::int[] AS override_group_ids
-      FROM contact_contact_groups ccg
-      JOIN contact_groups g ON g.id = ccg.contact_group_id AND g.status = 'active' AND g.org_id = ${org}
-      CROSS JOIN eng_org_thr o
-      WHERE ccg.org_id = ${org}
-        AND ccg.contact_id IN (
-          SELECT ccg2.contact_id FROM contact_contact_groups ccg2
-          JOIN contact_groups g2 ON g2.id = ccg2.contact_group_id AND g2.status = 'active' AND g2.org_id = ${org}
-          WHERE ccg2.org_id = ${org}
-            AND (g2.freeze_after_messages IS NOT NULL OR g2.freeze_cadence_days IS NOT NULL
-                 OR g2.suppress_after_days IS NOT NULL OR g2.suppress_min_freeze_messages IS NOT NULL))
-      GROUP BY ccg.contact_id`);
-    await dbc.execute(sql`ANALYZE eng_grp_thr`);
-  });
+  // contact's ACTIVE groups — ONE resolution, shared with the settings preview.
+  await phase("thresholds", () => createThresholdTempTables(dbc, orgId));
 
   // ── 6. The evaluation set and its inputs ─────────────────────────────────
   await phase("evaluate", async () => {
@@ -236,8 +219,10 @@ export async function refreshContactEngagement(
       ${
         full
           ? sql``
-          : sql`UNION SELECT contact_id FROM contact_engagement
-                 WHERE org_id = ${org} AND time_due_at <= ${asOf}`
+          : opts.evaluateAll
+            ? sql`UNION SELECT contact_id FROM contact_engagement WHERE org_id = ${org}`
+            : sql`UNION SELECT contact_id FROM contact_engagement
+                   WHERE org_id = ${org} AND time_due_at <= ${asOf}`
       }`);
     await dbc.execute(sql`ANALYZE eng_set`);
     // A recounted contact takes the fresh facts; everyone else keeps their stored ones.

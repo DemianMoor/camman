@@ -17,6 +17,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import {
   ContactGroupForm,
   type ContactGroupFormValues,
+  type OrgThresholds,
 } from "@/components/contact-groups/contact-group-form";
 import { DataTable } from "@/components/data-table";
 import { useAuth } from "@/components/protected/auth-context";
@@ -63,6 +64,11 @@ type ContactGroup = {
   created_at: string;
   org_id: string;
   contact_count: number;
+  // Lifecycle overrides (migration 0187); null = inherit the org value.
+  freeze_after_messages: number | null;
+  freeze_cadence_days: number | null;
+  suppress_after_days: number | null;
+  suppress_min_freeze_messages: number | null;
 };
 
 type ListResponse = {
@@ -149,8 +155,28 @@ export default function ContactGroupsPage() {
   }, [searchInput, filters.search, updateFilters]);
 
   const listApi = useApiCall<ListResponse>();
+  const lifecycleApi = useApiCall<OrgThresholds>();
   const createApi = useApiCall<ContactGroup>();
   const updateApi = useApiCall<ContactGroup>();
+  const [orgThresholds, setOrgThresholds] = useState<OrgThresholds | null>(null);
+
+  // Only a viewer who may change an override needs the "Effective: N" hints, and
+  // /api/settings/lifecycle is operator-denied — so gate the call on the
+  // permission rather than firing it and swallowing a 403.
+  const fetchLifecycle = lifecycleApi.execute;
+  const mayConfigureLifecycle = can("lifecycle.configure");
+  useEffect(() => {
+    if (!mayConfigureLifecycle) return;
+    let active = true;
+    void (async () => {
+      const r = await fetchLifecycle("/api/settings/lifecycle");
+      if (active && r.ok) setOrgThresholds(r.data);
+    })();
+    return () => {
+      active = false;
+    };
+  }, [mayConfigureLifecycle, fetchLifecycle]);
+
   const archiveApi = useApiCall<ContactGroup>();
   const restoreApi = useApiCall<ContactGroup>();
 
@@ -522,6 +548,8 @@ export default function ContactGroupsPage() {
         <ContactGroupForm
           key="create"
           mode="create"
+          orgThresholds={orgThresholds ?? undefined}
+          canConfigureLifecycle={mayConfigureLifecycle}
           onSubmit={handleCreate}
           onCancel={() => setCreateOpen(false)}
           isSubmitting={createApi.isLoading}
@@ -545,11 +573,18 @@ export default function ContactGroupsPage() {
           <ContactGroupForm
             key={`edit-${editing.id}`}
             mode="edit"
+            groupId={editing.id}
+            orgThresholds={orgThresholds ?? undefined}
+            canConfigureLifecycle={mayConfigureLifecycle}
             initialValues={{
               name: editing.name,
               contact_group_id: editing.contact_group_id,
               description: editing.description ?? "",
               color: editing.color ?? "",
+              freeze_after_messages: editing.freeze_after_messages,
+              freeze_cadence_days: editing.freeze_cadence_days,
+              suppress_after_days: editing.suppress_after_days,
+              suppress_min_freeze_messages: editing.suppress_min_freeze_messages,
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}

@@ -7,11 +7,13 @@ import {
   ENGAGEMENT_FULL_JOB,
   ENGAGEMENT_JOB,
   ENGAGEMENT_LEASE,
+  ENGAGEMENT_REEVAL_JOB,
   FULL_FALLBACK_HOURS,
   INCREMENTAL_OVERLAP_MINUTES,
 } from "@/lib/engagement/constants";
 import { watchEngagementHeartbeat } from "@/lib/engagement/monitor";
 import {
+  reevaluationDue,
   refreshContactEngagement,
   type RefreshMode,
   type RefreshResult,
@@ -73,6 +75,20 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         ? new Date(last.getTime() - INCREMENTAL_OVERLAP_MINUTES * 60_000)
         : undefined;
 
+      // A threshold edit moves neither the touched set nor time_due_at, so it
+      // would otherwise reach a contact only when its next message or click
+      // arrived. The settings save stamps reevaluate_requested_at; this run
+      // honours it by evaluating every stored row (no recount — the facts are
+      // already stored) and then records that it did.
+      const [reeval] = (await db.execute(sql`
+        SELECT (SELECT max(reevaluate_requested_at) FROM lifecycle_settings WHERE engine_mode = 'write') AS requested_at,
+               (SELECT watermark FROM cron_locks WHERE job_name = ${ENGAGEMENT_REEVAL_JOB}) AS last_at
+      `)) as unknown as { requested_at: string | null; last_at: string | null }[];
+      const evaluateAll = reevaluationDue(
+        reeval?.requested_at ? new Date(reeval.requested_at) : null,
+        reeval?.last_at ? new Date(reeval.last_at) : null,
+      );
+
       const results: OrgResult[] = [];
       for (const org_id of orgs) {
         // One org's failure must not stop the rest; it withholds the heartbeat.
@@ -81,7 +97,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
             await tx.execute(
               sql.raw(`SET LOCAL statement_timeout = '${mode === "full" ? "270s" : "100s"}'`),
             );
-            return refreshContactEngagement(tx, org_id, { mode, dryRun: false, since });
+            return refreshContactEngagement(tx, org_id, { mode, dryRun: false, since, evaluateAll });
           });
           results.push({ org_id, ...r });
         } catch (err) {
@@ -95,10 +111,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       if (ok) {
         await recordHeartbeat(db, ENGAGEMENT_JOB);
         if (mode === "full") await recordHeartbeat(db, ENGAGEMENT_FULL_JOB);
+        // A full recount evaluates everyone too, so it satisfies any pending request.
+        if (evaluateAll || mode === "full") await recordHeartbeat(db, ENGAGEMENT_REEVAL_JOB);
       }
       // Watch the nightly recount from the frequent job, never from itself.
       if (mode === "incremental") await watchEngagementHeartbeat(db, "full");
-      return { ok, engine: "on" as const, mode, results };
+      return { ok, engine: "on" as const, mode, evaluateAll, results };
     },
     LEASE_MS,
   );

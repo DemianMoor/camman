@@ -26,7 +26,24 @@ export const contactGroupCreateSchema = z.object({
       z.literal(""),
     ])
     .optional(),
+  // Lifecycle overrides (migration 0187). null = inherit the org default. The
+  // ranges mirror contact_groups_lifecycle_overrides_check; a contact in several
+  // groups takes the STRICTEST value across its active ones, which is resolved
+  // in lib/engagement/thresholds-sql.ts, not here.
+  freeze_after_messages: z.number().int().min(1).max(1000).nullable().optional(),
+  freeze_cadence_days: z.number().int().min(1).max(365).nullable().optional(),
+  suppress_after_days: z.number().int().min(1).max(730).nullable().optional(),
+  suppress_min_freeze_messages: z.number().int().min(1).max(100).nullable().optional(),
 });
+
+/** The four lifecycle override columns, shared by the form, the PATCH route and the preview. */
+export const LIFECYCLE_OVERRIDE_KEYS = [
+  "freeze_after_messages",
+  "freeze_cadence_days",
+  "suppress_after_days",
+  "suppress_min_freeze_messages",
+] as const;
+export type LifecycleOverrideKey = (typeof LIFECYCLE_OVERRIDE_KEYS)[number];
 
 export const contactGroupUpdateSchema = contactGroupCreateSchema
   .partial()

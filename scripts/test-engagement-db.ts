@@ -367,6 +367,39 @@ async function main() {
       Number(offers[1].offer_id) === O2 && Number(offers[1].messages) === 5 &&
       Number(offers[1].last) === epoch(plus(A, -11)), JSON.stringify(offers));
 
+    // B2t — the extracted threshold builder resolves what the job stores.
+    const thr = await import("@/lib/engagement/thresholds-sql");
+    const resolved = await db.transaction(async (tx) => {
+      await thr.createThresholdTempTables(tx, orgId);
+      return (await tx.execute(sql`
+        SELECT contact_id::text AS contact_id, freeze_after_messages, freeze_cadence_days,
+               suppress_after_days, suppress_min_freeze_messages
+        FROM eng_grp_thr ORDER BY contact_id`)) as unknown as Record<string, unknown>[];
+    });
+    const forContact = (c: C) => resolved.find((r) => r.contact_id === c.id);
+    bar("B2t cCold: strictest across A (cadence 7) and B (inherits 21) ⇒ 21",
+      n(forContact(cCold)?.freeze_cadence_days) === 21, JSON.stringify(forContact(cCold)));
+    bar("B2t cD: group D's 8 / 30 / 1 win over the org's 10 / 60 / 2",
+      n(forContact(cD)?.freeze_after_messages) === 8 && n(forContact(cD)?.suppress_after_days) === 30 &&
+      n(forContact(cD)?.suppress_min_freeze_messages) === 1, JSON.stringify(forContact(cD)));
+    bar("B2t cBot: its only group is archived ⇒ not in the per-contact table at all",
+      forContact(cBot) === undefined);
+    const proposedThr = await db.transaction(async (tx) => {
+      await thr.createThresholdTempTables(tx, orgId, {
+        proposedOrg: { hot_days: 30, warm_days: 120, freeze_after_messages: 5,
+                       freeze_cadence_days: 21, suppress_after_days: 60, suppress_min_freeze_messages: 2 },
+        proposedGroup: { groupId: GD, overrides: { freeze_after_messages: null } },
+      });
+      return (await tx.execute(sql`
+        SELECT (SELECT freeze_after_messages FROM eng_org_thr) AS org_fam,
+               (SELECT freeze_after_messages FROM eng_grp_thr WHERE contact_id = ${cD.id}::uuid) AS cd_fam
+      `)) as unknown as { org_fam: number; cd_fam: number }[];
+    });
+    bar("B2t proposed org values are used instead of the saved row",
+      n(proposedThr[0].org_fam) === 5, JSON.stringify(proposedThr[0]));
+    bar("B2t clearing group D's override falls back to the proposed org value",
+      n(proposedThr[0].cd_fam) === 5, JSON.stringify(proposedThr[0]));
+
     // B3 — the same full run again changes nothing.
     const r1b = await run({ mode: "full", dryRun: false, asOf: A });
     bar("B3 full again: 0 rows, 0 transitions, 0 offer writes, 0 deletes",
@@ -416,6 +449,68 @@ async function main() {
       expired.reason === "freeze_expired" && expired.t.suppress_after_days === 60, JSON.stringify(expired));
     const totalTransitions = await count("contact_engagement_transitions");
     bar("B7 transition history total = 8 + 2 + 1 + 2 = 13", totalTransitions === 13, String(totalTransitions));
+
+    // ── PART D — the settings preview over STORED facts ─────────────────────
+    // State after B7: cNew cold (1 msg), cCold warm, cFreeze suppressed,
+    // cHot warm, cWarm warm, cBot cold (3 msgs), cD freeze (8 msgs), cOpt cold (1 msg).
+    console.log("\nPART D — previewLifecycleThresholds");
+    const { previewLifecycleThresholds } = await import("@/lib/engagement/preview");
+    const preview = (opts: Parameters<typeof previewLifecycleThresholds>[2]) =>
+      db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL statement_timeout = '60s'`);
+        return previewLifecycleThresholds(tx, orgId, opts);
+      });
+    const SAVED = {
+      hot_days: 30, warm_days: 120, freeze_after_messages: 10,
+      freeze_cadence_days: 21, suppress_after_days: 60, suppress_min_freeze_messages: 2,
+    };
+    const d0 = await preview({ proposedOrg: SAVED, asOf: A4 });
+    bar("D1 proposing the saved values moves nobody",
+      Object.keys(d0.transitions).length === 0 && d0.evaluated === 8, JSON.stringify(d0.transitions));
+    bar("D1 current counts are the stored ones",
+      d0.currentCounts.cold === 3 && d0.currentCounts.warm === 3 &&
+      d0.currentCounts.freeze === 1 && d0.currentCounts.suppressed === 1, JSON.stringify(d0.currentCounts));
+    // Only cBot has ≥3 messages since its last click; cNew and cOpt have 1 each,
+    // and the three warm contacts are decided by their click before any message
+    // count is consulted. So exactly one contact moves and freeze goes 1 → 2.
+    const d1 = await preview({ proposedOrg: { ...SAVED, freeze_after_messages: 3 }, asOf: A4 });
+    bar("D2 lowering freeze_after_messages to 3 freezes only the 3-message contact",
+      d1.transitions["cold→freeze"] === 1 && d1.projectedCounts.freeze === 2, JSON.stringify(d1.transitions));
+    const d2 = await preview({ proposedOrg: { ...SAVED, warm_days: 30 }, asOf: A4 });
+    bar("D3 shrinking warm_days to 30 ages all three warm contacts out",
+      (d2.transitions["warm→cold"] ?? 0) + (d2.transitions["warm→freeze"] ?? 0) === 3, JSON.stringify(d2.transitions));
+    const d3 = await preview({ proposedGroup: { groupId: GA, overrides: { freeze_after_messages: 1 } }, asOf: A4 });
+    bar("D4 a group override reaches only that group's contacts (A = cNew, cCold)",
+      (d3.transitions["cold→freeze"] ?? 0) === 1 && (d3.transitions["warm→freeze"] ?? 0) === 0,
+      JSON.stringify(d3.transitions));
+    bar("D5 the preview writes nothing",
+      (await count("contact_engagement_transitions")) === 13 && (await row(cBot)).status === "cold");
+
+    // ── PART E — a threshold change reaches contacts nothing else touched ────
+    console.log("\nPART E — reevaluate_requested_at");
+    const { reevaluationDue } = await import("@/lib/engagement/refresh");
+    bar("R1 pure: never requested ⇒ not due", reevaluationDue(null, null) === false);
+    bar("R2 pure: requested, never re-evaluated ⇒ due", reevaluationDue(A4, null) === true);
+    bar("R3 pure: requested BEFORE the last re-evaluation ⇒ not due",
+      reevaluationDue(A4, new Date(A4.getTime() + 1000)) === false);
+    bar("R4 pure: requested AFTER the last re-evaluation ⇒ due",
+      reevaluationDue(new Date(A4.getTime() + 2000), A4) === true);
+    // cBot is cold with 3 messages and no click, and nothing has touched it since B2.
+    await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 3 WHERE org_id = ${org}`);
+    const rNo = await run({ mode: "incremental", dryRun: false, asOf: A4, since: plus(A4, 0, -0.5) });
+    bar("R5 an ordinary incremental run does NOT see the new threshold",
+      (await row(cBot)).status === "cold" && rNo.rowsWritten === 0, JSON.stringify(rNo.transitions));
+    const rAll = await run({
+      mode: "incremental", dryRun: false, asOf: A4, since: plus(A4, 0, -0.5), evaluateAll: true,
+    });
+    bar("R6 evaluateAll applies it: cBot cold→freeze",
+      (await row(cBot)).status === "freeze" && rAll.transitions["cold→freeze"] === 1, JSON.stringify(rAll.transitions));
+    const cBotLast = await one<{ reason: string; t: { freeze_after_messages: number } }>(sql`
+      SELECT reason, thresholds AS t FROM contact_engagement_transitions
+      WHERE contact_id = ${cBot.id}::uuid ORDER BY id DESC LIMIT 1`);
+    bar("R7 recorded as a transition carrying the NEW thresholds",
+      cBotLast.t.freeze_after_messages === 3, JSON.stringify(cBotLast));
+    await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 10 WHERE org_id = ${org}`);
   } finally {
     if (orgId) {
       const name = (await all<{ name: string }>(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))[0]?.name ?? "";
@@ -455,10 +550,15 @@ async function main() {
       INSERT INTO organizations (name) VALUES (${`${MARKER} monitor-${Date.now()}`}) RETURNING id`)).id;
     try {
       await db.execute(sql`INSERT INTO lifecycle_settings (org_id, engine_mode) VALUES (${monitorOrg}::uuid, 'write')`);
-      const hb = await all<{ watermark: string | null }>(sql`SELECT watermark FROM cron_locks WHERE job_name = 'contact-engagement'`);
-      if (hb.length > 0 && hb[0].watermark != null) {
-        bar("C2 precondition: preview has no contact-engagement heartbeat", false, "a heartbeat exists — skipping");
-      } else {
+      // Part C PREPARES its own world rather than asserting the preview DB has
+      // never seen this job. It had asserted exactly that, and went red the first
+      // time somebody legitimately ran the backfill here — a guard that expires
+      // on correct use. cron_locks carries no org_id and the preview DB runs no
+      // crons, so clearing these two rows is safe and repeatable.
+      await db.execute(sql`
+        DELETE FROM cron_locks
+        WHERE job_name IN ('contact-engagement', 'contact-engagement:awaiting-first-run')`);
+      {
         // PR #210's first-run grace: a job that has never run is not stale until
         // it has been missing longer than first_run_grace_hours (0.5 h here), so
         // the deploy that introduces the watch cannot page.

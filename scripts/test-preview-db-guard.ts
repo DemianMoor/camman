@@ -109,6 +109,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "drain-texthub-inbox.ts", why: "ingests real STOPs from the live provider inbox into production; --apply" },
   { file: "engagement-backfill.ts", why: "production dry-run report + one-off backfill of contact_engagement (migration 0187); the dry run always rolls back, and --apply writes only after the owner approves the numbers" },
   { file: "import-texthub-optouts.ts", why: "imports real opt-outs from a provider export into production; --apply" },
+  { file: "measure-lifecycle-preview.ts", viaLibrary: true, why: "read-only production measurement of the lifecycle settings preview; every run is inside a transaction that always rolls back (computes via lib/engagement/preview, so it carries no write token of its own)" },
   { file: "resync-stage-day-conversions.ts", viaLibrary: true, why: "one-shot production re-derive of the stage-day conversion columns; dry-run default, writes only behind --apply (writes via lib/keitaro/stage-day-conversions, so it carries no write token of its own)" },
   { file: "seed-ahoi-number-credential.ts", why: "seeds the real Ahoi sending number + credential in production" },
   { file: "seed-ahoi-webhook-token.ts", why: "mints the real production inbound-webhook token" },

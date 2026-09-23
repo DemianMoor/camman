@@ -19,6 +19,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import {
   ContactGroupForm,
   type ContactGroupFormValues,
+  type OrgThresholds,
 } from "@/components/contact-groups/contact-group-form";
 import { DataTable } from "@/components/data-table";
 import {
@@ -63,6 +64,13 @@ type ContactGroup = {
   status: "active" | "archived";
   archived_at: string | null;
   created_at: string;
+  // Lifecycle overrides (migration 0187); null = inherit the org value.
+  freeze_after_messages: number | null;
+  freeze_cadence_days: number | null;
+  suppress_after_days: number | null;
+  suppress_min_freeze_messages: number | null;
+  /** The org defaults, returned alongside the row for the "Effective: N" hints. */
+  org_thresholds?: OrgThresholds;
 };
 
 type GroupContactRow = {
@@ -694,11 +702,18 @@ export default function ContactGroupDetailPage() {
         <ContactGroupForm
           key={`edit-${group.id}`}
           mode="edit"
+          groupId={group.id}
+          orgThresholds={group.org_thresholds}
+          canConfigureLifecycle={can("lifecycle.configure")}
           initialValues={{
             name: group.name,
             contact_group_id: group.contact_group_id,
             description: group.description ?? "",
             color: group.color ?? "",
+            freeze_after_messages: group.freeze_after_messages,
+            freeze_cadence_days: group.freeze_cadence_days,
+            suppress_after_days: group.suppress_after_days,
+            suppress_min_freeze_messages: group.suppress_min_freeze_messages,
           }}
           onSubmit={handleEdit}
           onCancel={() => setEditOpen(false)}

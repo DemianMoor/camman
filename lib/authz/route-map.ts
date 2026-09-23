@@ -421,6 +421,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "sends/today": { methods: ["GET"], token: ["GET"] },
 
   // ── settings ─────────────────────────────────────────────────────────────
+  "settings/lifecycle": null, // settings -- lifecycle.configure (manager+); no operator path
+  "settings/lifecycle/preview": null, // settings -- lifecycle.configure (manager+); no operator path
   "settings/notifications": null, // settings / provider registry -- Owner only
   "settings/providers": null, // settings / provider registry -- Owner only
   "settings/sending": null, // settings / provider registry -- Owner only

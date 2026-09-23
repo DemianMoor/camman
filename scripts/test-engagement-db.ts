@@ -367,6 +367,39 @@ async function main() {
       Number(offers[1].offer_id) === O2 && Number(offers[1].messages) === 5 &&
       Number(offers[1].last) === epoch(plus(A, -11)), JSON.stringify(offers));
 
+    // B2t — the extracted threshold builder resolves what the job stores.
+    const thr = await import("@/lib/engagement/thresholds-sql");
+    const resolved = await db.transaction(async (tx) => {
+      await thr.createThresholdTempTables(tx, orgId);
+      return (await tx.execute(sql`
+        SELECT contact_id::text AS contact_id, freeze_after_messages, freeze_cadence_days,
+               suppress_after_days, suppress_min_freeze_messages
+        FROM eng_grp_thr ORDER BY contact_id`)) as unknown as Record<string, unknown>[];
+    });
+    const forContact = (c: C) => resolved.find((r) => r.contact_id === c.id);
+    bar("B2t cCold: strictest across A (cadence 7) and B (inherits 21) ⇒ 21",
+      n(forContact(cCold)?.freeze_cadence_days) === 21, JSON.stringify(forContact(cCold)));
+    bar("B2t cD: group D's 8 / 30 / 1 win over the org's 10 / 60 / 2",
+      n(forContact(cD)?.freeze_after_messages) === 8 && n(forContact(cD)?.suppress_after_days) === 30 &&
+      n(forContact(cD)?.suppress_min_freeze_messages) === 1, JSON.stringify(forContact(cD)));
+    bar("B2t cBot: its only group is archived ⇒ not in the per-contact table at all",
+      forContact(cBot) === undefined);
+    const proposedThr = await db.transaction(async (tx) => {
+      await thr.createThresholdTempTables(tx, orgId, {
+        proposedOrg: { hot_days: 30, warm_days: 120, freeze_after_messages: 5,
+                       freeze_cadence_days: 21, suppress_after_days: 60, suppress_min_freeze_messages: 2 },
+        proposedGroup: { groupId: GD, overrides: { freeze_after_messages: null } },
+      });
+      return (await tx.execute(sql`
+        SELECT (SELECT freeze_after_messages FROM eng_org_thr) AS org_fam,
+               (SELECT freeze_after_messages FROM eng_grp_thr WHERE contact_id = ${cD.id}::uuid) AS cd_fam
+      `)) as unknown as { org_fam: number; cd_fam: number }[];
+    });
+    bar("B2t proposed org values are used instead of the saved row",
+      n(proposedThr[0].org_fam) === 5, JSON.stringify(proposedThr[0]));
+    bar("B2t clearing group D's override falls back to the proposed org value",
+      n(proposedThr[0].cd_fam) === 5, JSON.stringify(proposedThr[0]));
+
     // B3 — the same full run again changes nothing.
     const r1b = await run({ mode: "full", dryRun: false, asOf: A });
     bar("B3 full again: 0 rows, 0 transitions, 0 offer writes, 0 deletes",

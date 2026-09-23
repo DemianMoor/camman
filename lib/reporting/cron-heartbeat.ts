@@ -150,6 +150,24 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     first_run_grace_hours: 48, // 2x the daily interval
     label: "Delivered % rollup reconciliation (nightly)",
   },
+  // ---- Contact engagement (migration 0187). The 15-min job is watched by the
+  // hourly tracking-monitors; the nightly full recount is watched by the 15-min
+  // job. Neither vouches for itself. Both watches stay silent while no org has
+  // lifecycle_settings.engine_mode = 'write' (lib/engagement/monitor.ts), so the
+  // PR can ship inert and the backfill decides when the watch starts meaning
+  // anything.
+  contactEngagement: {
+    job_name: "contact-engagement",
+    max_age_hours: 0.75, // spec §5: page when the last success is > 45 min old
+    first_run_grace_hours: 0.5, // 2x the 15-min interval
+    label: "Contact lifecycle refresh (every 15 min)",
+  },
+  contactEngagementFull: {
+    job_name: "contact-engagement-full",
+    max_age_hours: 50, // nightly cadence, ~2 missed runs
+    first_run_grace_hours: 48, // 2x the nightly interval
+    label: "Contact lifecycle full recount (nightly)",
+  },
   // ---- Tells (spec §4.5) — MUTUAL WATCH, because these two are the sole
   // detection layer for broken STOP intake and a dead job cannot report itself
   // dead. tellsMonitors (hourly) checks tellsSweep; tellsSweep (*/5) checks

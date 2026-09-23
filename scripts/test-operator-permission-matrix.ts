@@ -440,11 +440,15 @@ const FROZEN: Record<Exclude<Role, "operator">, Permission[]> = {
 // an intentional grant is visible here instead of quietly widening a baseline.
 const PHASE2_ADDITIONS: Record<string, Permission[]> = {
   viewer: ["contacts.stats"],
-  manager: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import"],
-  admin: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import"],
+  // "lifecycle.configure" (migration 0187) is manager+ and inherited upward: it
+  // gates the lifecycle thresholds, the per-group overrides and the engine_mode
+  // switch. Declared here so the freeze keeps meaning "nothing moved that was
+  // not written down".
+  manager: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure"],
+  admin: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure"],
   owner: [
     "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import",
-    "compliance.manage", "deletion.approve", "audit.view",
+    "compliance.manage", "deletion.approve", "audit.view", "lifecycle.configure",
   ],
 };
 

@@ -1043,6 +1043,15 @@ export const contact_groups = pgTable(
     description: text("description"),
     color: text("color"),
     status: text("status").notNull().default("active"),
+    // Lifecycle overrides (migration 0187). NULL = inherit the org default in
+    // lifecycle_settings. A contact in several ACTIVE groups takes the strictest
+    // value across them (lib/engagement/refresh.ts): lowest freeze_after_messages,
+    // longest freeze_cadence_days, shortest suppress_after_days, lowest
+    // suppress_min_freeze_messages.
+    freeze_after_messages: smallint("freeze_after_messages"),
+    freeze_cadence_days: smallint("freeze_cadence_days"),
+    suppress_after_days: smallint("suppress_after_days"),
+    suppress_min_freeze_messages: smallint("suppress_min_freeze_messages"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -1053,6 +1062,10 @@ export const contact_groups = pgTable(
     check(
       "contact_groups_status_check",
       sql`${table.status} IN ('active', 'archived')`,
+    ),
+    check(
+      "contact_groups_lifecycle_overrides_check",
+      sql`(${table.freeze_after_messages} IS NULL OR ${table.freeze_after_messages} BETWEEN 1 AND 1000) AND (${table.freeze_cadence_days} IS NULL OR ${table.freeze_cadence_days} BETWEEN 1 AND 365) AND (${table.suppress_after_days} IS NULL OR ${table.suppress_after_days} BETWEEN 1 AND 730) AND (${table.suppress_min_freeze_messages} IS NULL OR ${table.suppress_min_freeze_messages} BETWEEN 1 AND 100)`,
     ),
   ],
 );
@@ -1833,6 +1846,11 @@ export const campaigns = pgTable(
     exclude_prior_offer_contacts: boolean("exclude_prior_offer_contacts")
       .notNull()
       .default(false),
+    // Migration 0187. true once a campaign is created with the lifecycle chips
+    // (PR 4); every campaign that existed before stays false and keeps its
+    // legacy audience semantics. Gates the lifecycle eligibility layers, so a
+    // frozen audience can never change under an activated campaign.
+    lifecycle_rules: boolean("lifecycle_rules").notNull().default(false),
     // ⚠️ Drip Phase 4. NOT NULL DEFAULT 'regular' so a missing or unreadable
     // value can never be read as drip — the same fail-toward-existing-behaviour
     // direction R13 mandates for the opt-out breaker. Callers that build an
@@ -4081,6 +4099,206 @@ export const stage_delivery_rollup = pgTable(
 );
 
 export type StageDeliveryRollup = typeof stage_delivery_rollup.$inferSelect;
+
+// ---- Contact lifecycle / engagement (migration 0187) -------------------------
+// Spec: docs/superpowers/specs/2026-09-22-contact-lifecycle-status-design.md.
+// Written ONLY by lib/engagement/refresh.ts (the 15-min cron, the nightly full
+// recount and the one-off backfill). A contact with NO contact_engagement row
+// reads as 'new' everywhere — that is the contract, so a contact uploaded
+// seconds ago is correct before the job has seen it.
+
+export const lifecycle_settings = pgTable(
+  "lifecycle_settings",
+  {
+    org_id: uuid("org_id")
+      .primaryKey()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    hot_days: smallint("hot_days").notNull().default(30),
+    warm_days: smallint("warm_days").notNull().default(120),
+    freeze_after_messages: smallint("freeze_after_messages").notNull().default(10),
+    freeze_cadence_days: smallint("freeze_cadence_days").notNull().default(14),
+    suppress_after_days: smallint("suppress_after_days").notNull().default(60),
+    suppress_min_freeze_messages: smallint("suppress_min_freeze_messages")
+      .notNull()
+      .default(2),
+    // 'off' (the default) = the cron skips this org entirely. The one-off
+    // backfill flips it to 'write' once the owner approves the dry-run numbers.
+    engine_mode: text("engine_mode").notNull().default("off"),
+    reevaluate_requested_at: timestamp("reevaluate_requested_at", {
+      withTimezone: true,
+    }),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_by: uuid("updated_by"),
+  },
+  (table) => [
+    check(
+      "lifecycle_settings_ranges_check",
+      sql`${table.hot_days} BETWEEN 1 AND 365 AND ${table.warm_days} BETWEEN 2 AND 730 AND ${table.warm_days} > ${table.hot_days} AND ${table.freeze_after_messages} BETWEEN 1 AND 1000 AND ${table.freeze_cadence_days} BETWEEN 1 AND 365 AND ${table.suppress_after_days} BETWEEN 1 AND 730 AND ${table.suppress_min_freeze_messages} BETWEEN 1 AND 100`,
+    ),
+    check(
+      "lifecycle_settings_engine_mode_check",
+      sql`${table.engine_mode} IN ('off', 'write')`,
+    ),
+  ],
+);
+
+export type LifecycleSettings = typeof lifecycle_settings.$inferSelect;
+
+export const contact_engagement = pgTable(
+  "contact_engagement",
+  {
+    contact_id: uuid("contact_id")
+      .primaryKey()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    status_changed_at: timestamp("status_changed_at", { withTimezone: true }).notNull(),
+    msgs_total: integer("msgs_total").notNull().default(0),
+    // Messages sent AFTER last_click_at (= msgs_total when never clicked). This,
+    // not msgs_total, is what freeze_after_messages is compared against.
+    msgs_since_click: integer("msgs_since_click").notNull().default(0),
+    msgs_7d: integer("msgs_7d").notNull().default(0),
+    msgs_14d: integer("msgs_14d").notNull().default(0),
+    msgs_30d: integer("msgs_30d").notNull().default(0),
+    msgs_90d: integer("msgs_90d").notNull().default(0),
+    first_sent_at: timestamp("first_sent_at", { withTimezone: true }),
+    last_sent_at: timestamp("last_sent_at", { withTimezone: true }),
+    first_click_at: timestamp("first_click_at", { withTimezone: true }),
+    last_click_at: timestamp("last_click_at", { withTimezone: true }),
+    // The freeze clock: entered when the contact ENTERS freeze; started/msgs
+    // count only messages sent after that, which is what suppression needs.
+    freeze_entered_at: timestamp("freeze_entered_at", { withTimezone: true }),
+    freeze_started_at: timestamp("freeze_started_at", { withTimezone: true }),
+    freeze_msgs: integer("freeze_msgs").notNull().default(0),
+    // The effective cadence, stored so Prepare and the drain can read it without
+    // resolving group overrides per recipient.
+    freeze_cadence_days: smallint("freeze_cadence_days").notNull(),
+    thresholds: jsonb("thresholds").notNull(),
+    time_due_at: timestamp("time_due_at", { withTimezone: true }),
+    computed_at: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("contact_engagement_org_status_idx").on(table.org_id, table.status),
+    index("contact_engagement_org_time_due_idx")
+      .on(table.org_id, table.time_due_at)
+      .where(sql`${table.time_due_at} IS NOT NULL`),
+    check(
+      "contact_engagement_status_check",
+      sql`${table.status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,
+    ),
+  ],
+);
+
+export type ContactEngagement = typeof contact_engagement.$inferSelect;
+
+export const contact_engagement_transitions = pgTable(
+  "contact_engagement_transitions",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    from_status: text("from_status"),
+    to_status: text("to_status").notNull(),
+    reason: text("reason").notNull(),
+    // The EFFECTIVE thresholds at the moment of the move, plus the ids of the
+    // groups that overrode them — so a history row can be read years later
+    // without guessing which settings were live.
+    thresholds: jsonb("thresholds").notNull(),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("contact_engagement_transitions_contact_idx").on(
+      table.contact_id,
+      table.created_at,
+    ),
+    index("contact_engagement_transitions_org_idx").on(table.org_id, table.created_at),
+    check(
+      "contact_engagement_transitions_to_check",
+      sql`${table.to_status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,
+    ),
+    check(
+      "contact_engagement_transitions_from_check",
+      sql`${table.from_status} IS NULL OR ${table.from_status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,
+    ),
+    check(
+      "contact_engagement_transitions_reason_check",
+      sql`${table.reason} IN ('backfill', 'first_seen', 'first_message', 'freeze_threshold', 'threshold_change', 'freeze_expired', 'human_click', 'click_aged_warm', 'click_aged_cold', 'recount')`,
+    ),
+  ],
+);
+
+export type ContactEngagementTransition =
+  typeof contact_engagement_transitions.$inferSelect;
+
+// Per (contact, offer, campaign) exposure — the grain offer_exposures does NOT
+// have (it is UNIQUE per contact x offer and keeps only the FIRST exposure), and
+// the grain ClickUp 869f53efz's "Y days since / N times" rule needs. Maintained
+// by the engagement job, so the send path gains no work.
+export const contact_offer_campaigns = pgTable(
+  "contact_offer_campaigns",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    first_sent_at: timestamp("first_sent_at", { withTimezone: true }).notNull(),
+    last_sent_at: timestamp("last_sent_at", { withTimezone: true }).notNull(),
+    messages: integer("messages").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.contact_id, table.offer_id, table.campaign_id] }),
+    index("contact_offer_campaigns_org_offer_contact_idx").on(
+      table.org_id,
+      table.offer_id,
+      table.contact_id,
+    ),
+  ],
+);
+
+export type ContactOfferCampaign = typeof contact_offer_campaigns.$inferSelect;
+
+// Status-at-send for the cohort report (PR 5): stamped at Prepare, never by
+// rewriting stage_sends. Cascades with the send row, so the planned retention
+// job carries it away too.
+export const stage_send_lifecycle = pgTable(
+  "stage_send_lifecycle",
+  {
+    stage_send_id: uuid("stage_send_id")
+      .primaryKey()
+      .references(() => stage_sends.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    status: text("status").notNull(),
+    // true = rebuilt from history by the 60-day backfill, not stamped live.
+    reconstructed: boolean("reconstructed").notNull().default(false),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      "stage_send_lifecycle_status_check",
+      sql`${table.status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,
+    ),
+  ],
+);
+
+export type StageSendLifecycle = typeof stage_send_lifecycle.$inferSelect;
 
 // Q4/Q5 — per-NUMBER carrier policy (migration 0142). One row per
 // (number, carrier); an ABSENT row means allowed and uncapped, which is what

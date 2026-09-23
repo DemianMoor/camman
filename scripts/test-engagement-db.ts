@@ -449,6 +449,32 @@ async function main() {
       expired.reason === "freeze_expired" && expired.t.suppress_after_days === 60, JSON.stringify(expired));
     const totalTransitions = await count("contact_engagement_transitions");
     bar("B7 transition history total = 8 + 2 + 1 + 2 = 13", totalTransitions === 13, String(totalTransitions));
+
+    // ── PART E — a threshold change reaches contacts nothing else touched ────
+    console.log("\nPART E — reevaluate_requested_at");
+    const { reevaluationDue } = await import("@/lib/engagement/refresh");
+    bar("R1 pure: never requested ⇒ not due", reevaluationDue(null, null) === false);
+    bar("R2 pure: requested, never re-evaluated ⇒ due", reevaluationDue(A4, null) === true);
+    bar("R3 pure: requested BEFORE the last re-evaluation ⇒ not due",
+      reevaluationDue(A4, new Date(A4.getTime() + 1000)) === false);
+    bar("R4 pure: requested AFTER the last re-evaluation ⇒ due",
+      reevaluationDue(new Date(A4.getTime() + 2000), A4) === true);
+    // cBot is cold with 3 messages and no click, and nothing has touched it since B2.
+    await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 3 WHERE org_id = ${org}`);
+    const rNo = await run({ mode: "incremental", dryRun: false, asOf: A4, since: plus(A4, 0, -0.5) });
+    bar("R5 an ordinary incremental run does NOT see the new threshold",
+      (await row(cBot)).status === "cold" && rNo.rowsWritten === 0, JSON.stringify(rNo.transitions));
+    const rAll = await run({
+      mode: "incremental", dryRun: false, asOf: A4, since: plus(A4, 0, -0.5), evaluateAll: true,
+    });
+    bar("R6 evaluateAll applies it: cBot cold→freeze",
+      (await row(cBot)).status === "freeze" && rAll.transitions["cold→freeze"] === 1, JSON.stringify(rAll.transitions));
+    const cBotLast = await one<{ reason: string; t: { freeze_after_messages: number } }>(sql`
+      SELECT reason, thresholds AS t FROM contact_engagement_transitions
+      WHERE contact_id = ${cBot.id}::uuid ORDER BY id DESC LIMIT 1`);
+    bar("R7 recorded as a transition carrying the NEW thresholds",
+      cBotLast.t.freeze_after_messages === 3, JSON.stringify(cBotLast));
+    await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 10 WHERE org_id = ${org}`);
   } finally {
     if (orgId) {
       const name = (await all<{ name: string }>(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))[0]?.name ?? "";

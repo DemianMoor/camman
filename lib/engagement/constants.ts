@@ -50,6 +50,8 @@ export const DEFAULT_LIFECYCLE_THRESHOLDS: LifecycleThresholds = {
 export const ENGAGEMENT_LEASE = "contact-engagement-run";
 export const ENGAGEMENT_JOB = "contact-engagement"; // heartbeat: any successful run
 export const ENGAGEMENT_FULL_JOB = "contact-engagement-full"; // heartbeat: a successful full recount
+/** cron_locks watermark: the last run that evaluated EVERY stored row (a full recount, or one honouring a threshold change). */
+export const ENGAGEMENT_REEVAL_JOB = "contact-engagement-reeval";
 
 /**
  * An incremental run re-reads sends and clicks from this long before the last

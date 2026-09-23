@@ -49,6 +49,28 @@ export interface RefreshOptions {
   initialReason?: "backfill" | "first_seen";
   /** Also compute the per-group and opted-out breakdowns (the dry-run report). */
   withReport?: boolean;
+  /**
+   * Evaluate EVERY stored row, not only the recounted and time-due ones. The
+   * cron passes this when lifecycle_settings.reevaluate_requested_at is newer
+   * than the last run that honoured one: a threshold change moves neither
+   * counter, so nothing else would notice it. It costs no recount — the facts
+   * are already stored, so this is the evaluate pass and nothing more.
+   */
+  evaluateAll?: boolean;
+}
+
+/**
+ * Is a full re-evaluation due? `requestedAt` is
+ * lifecycle_settings.reevaluate_requested_at, `lastReevalAt` the cron_locks
+ * watermark of the last run that honoured one. Pure, so the rule is testable
+ * without a database.
+ */
+export function reevaluationDue(
+  requestedAt: Date | null,
+  lastReevalAt: Date | null,
+): boolean {
+  if (requestedAt == null) return false;
+  return lastReevalAt == null || requestedAt.getTime() > lastReevalAt.getTime();
 }
 
 export interface GroupBreakdownRow {
@@ -197,8 +219,10 @@ export async function refreshContactEngagement(
       ${
         full
           ? sql``
-          : sql`UNION SELECT contact_id FROM contact_engagement
-                 WHERE org_id = ${org} AND time_due_at <= ${asOf}`
+          : opts.evaluateAll
+            ? sql`UNION SELECT contact_id FROM contact_engagement WHERE org_id = ${org}`
+            : sql`UNION SELECT contact_id FROM contact_engagement
+                   WHERE org_id = ${org} AND time_due_at <= ${asOf}`
       }`);
     await dbc.execute(sql`ANALYZE eng_set`);
     // A recounted contact takes the fresh facts; everyone else keeps their stored ones.

@@ -278,6 +278,14 @@ export const navGroups: NavGroup[] = [
         permission: "campaigns.drain",
         icon: Bell,
       },
+      // Contact lifecycle thresholds + the status engine switch (migration 0187).
+      // The page itself is gated on the same permission server-side.
+      {
+        label: "Lifecycle",
+        href: "/settings/lifecycle",
+        permission: "lifecycle.configure",
+        icon: Activity,
+      },
       // Owner-only member roster, invites and the deactivation kill switch
       // (869et3vm1 Phase 1). Enforced server-side; `permission` only keeps the
       // link out of the way for roles that would get a 403.

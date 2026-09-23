@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-09-21_
+_Last updated: 2026-09-23_
 
 **Status (2026-09-21):** Phases 1–4 are LIVE on production and Phase 5 (per-event columns) ships with this change; migrations **0181** (applied 2026-09-18) and **0182–0185** (applied 2026-09-21 19:05–19:07 UTC, one transaction) are recorded on production, byte-identical to `db/migrations`. The history below is how the phases got there. The ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). (Until 2026-09-21 these readers were verified on camman-v2 and by read-only checks against prod; since the Gate 3 cutover they run on production.)
 
@@ -1550,7 +1550,12 @@ the real stage-day `ok` (`sales` 2 = 1 purchase + 1 stray, `unmapped_conversions
     alias (owner: *"Matches what the Operator API already ships as
     clicks_human."*). Applied on the four By-X tables and Overview
     (`counted_clickers`, `lifetime_clickers`) and on `/creatives`
-    (`clean_clicks_lifetime`), with the By-X explainer's *"Rates divide by
+    (`clean_clicks_lifetime`). ⚠️ **Superseded on Overview 2026-09-23:** the
+    owner removed BOTH human-click columns from that tab, so the rule now holds
+    on the By-X tables and `/creatives` only and Overview shows its two EPCs with
+    no denominator column — [07-conventions.md](../07-conventions.md) and
+    [epc-denominator.md](epc-denominator.md) §7 carry the decision and its cost.
+    With the By-X explainer's *"Rates divide by
     Clicks"* and the two lifetime tooltips moved to the same wording. **No API
     field changed** — `counted_clickers` / `clicks_human` are unchanged, and
     `sortBy` persists by column **id**, so no saved sort moved.
@@ -1628,7 +1633,14 @@ the real stage-day `ok` (`sales` 2 = 1 purchase + 1 stray, `unmapped_conversions
     [reports-rollup.md](reports-rollup.md), so it is met wherever the width is
     read about.
   - **✅ RENAMING `Clickers` → `Landing visits` — PROPOSED AND APPLIED
-    2026-09-20, owner-approved.** The flag that produced it: *"Leave `Clickers`
+    2026-09-20, owner-approved.** ⚠️ **Partly reversed 2026-09-23, on purpose:**
+    the `/reports` **Overview** tab heads the column `Clickers` again, because
+    the same change removed both `Human clicks` columns from that tab and the
+    trap below is a trap *about a neighbouring column* — with no denominator left
+    on Overview there is nothing there to confuse it with. The By-X and Hourly
+    tables keep `Landing visits` and everything below still describes them; bar
+    **V24** now pins each tab's header and forbids either string from appearing
+    on the other. The flag that produced the original rename: *"Leave `Clickers`
     alone for now, but flag it: a people-word for a display-only Keitaro visit
     count, sitting near the real denominator, is a trap waiting to catch
     someone."* **What it genuinely counts:** `visit_clicks_clean` — landing-page

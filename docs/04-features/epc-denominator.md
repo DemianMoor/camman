@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-09-20_
+_Last updated: 2026-09-23_
 
 ## 1. Purpose
 
@@ -172,13 +172,15 @@ All six, through one function. `withFunnelDerived` takes the denominator as a **
 
 The two are **not derivable from one another**. Counted clickers are deduplicated, so a lifetime figure can never be summed out of period slices — both are queried and carried separately.
 
-Each is displayed next to **its own** click count. A `$0.00` EPC is only interpretable when the denominator beside it reads `4`. Without that, a narrow filter is actively misleading: on a 7-day window, six of the eight top campaigns by revenue read `$0.00` and one read `$75.00` — a 53x distortion off a single in-window clicker.
+**On the four By-X tables and on `/creatives`, each is displayed next to its own click count** — `Human clicks` beside `EPC`, `Human clicks (all time)` beside `EPC (all time)`. A `$0.00` EPC is only interpretable when the denominator beside it reads `4`. Without that, a narrow filter is actively misleading: on a 7-day window, six of the eight top campaigns by revenue read `$0.00` and one read `$75.00` — a 53x distortion off a single in-window clicker.
+
+⚠️ **The `/reports` Overview tab is the exception since 2026-09-23, deliberately — owner's decision.** Both denominator columns (`Human clicks`, `Human clicks (all time)`) were **removed** from that tab, so `EPC (all time)` and `EPC` stand there with **no click count beside them** and the distortion described above is exactly what a reader of Overview can no longer see for themselves. The trade was made with that cost named, for three reasons: Overview is the tab the owner keeps narrow and every column on it is competing for the same horizontal room; the denominator is **one tab away** — By Number / By Offer / By Sequence show the same stages with both click columns, sourced from the same [stage-funnel.ts](../../lib/reporting/stage-funnel.ts) figures — and dropping the two human-click columns is what let the visit column revert to the shorter **`Clickers`** on that tab alone, since nothing is left there to confuse it with (see [07-conventions.md](../07-conventions.md)). ⚠️ **Nothing numeric changed:** `counted_clickers` still divides every EPC on Overview, still feeds every generated per-event rate, and is still in the API response — only two column declarations went. Bars V20/V26 in [scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts) pin the removal on both the client and the route's sort whitelist. No width was re-measured for this change.
 
 ### ⚠️ Time basis by surface — convergence holds only at MATCHED windows
 
 | Surface | Time basis |
 |---|---|
-| `/reports` Overview + all four By-X tabs | **lifetime (primary) + period, both shown** |
+| `/reports` Overview + all four By-X tabs | **lifetime (primary) + period, both shown** (Overview shows the two EPCs without their denominators — see above) |
 | `GET /api/keitaro/results` | lifetime (totals, stages) · per-day (rows) — see its `time_basis` field |
 | `/creatives` + stage picker | **30-day (sorted) + lifetime (shown)** |
 | `/offers/[id]/report` | **lifetime only**, explicitly labelled (the matview has no date dimension) |
@@ -239,20 +241,25 @@ A NULL watermark counts as stale: never-run and stopped-running need the same at
 by the same `counted_clickers` set this document defines.** There is no second
 denominator, no per-event click set, and no per-event rescue rule. `Registration
 rate` is `registrations ÷ counted clickers in the same window` — the identical
-divisor as `EPC` and `Sales CR`'s neighbours — and the report table's own header
+divisor as `EPC` and `Sales CR`'s neighbours — and on the By-X tables the header
 for that divisor reads **`Human clicks`** (renamed 2026-09-20 to match the
 Operator API's `clicks_human`, and unsuffixed because the page's date filter
 names the window; `/creatives` heads its lifetime one `Human clicks (all time)` —
 see [07-conventions.md](../07-conventions.md)). §7 of
 [operator-api.md](../operator-api.md) says so too. **The API field names are
 unchanged** — this was a header rename on three screens, not a contract change.
-⚠️ **`Landing visits`, four columns to its left, is NOT this set** and never
-carries the word "human": it is `visit_clicks_clean`, the tracker's bot-filtered
-landing-VISIT count, display-only. (It was headed `Clickers` until 2026-09-20 —
-a people-word over a visit count, which is exactly why it was renamed; the field
-is still `clickers`.) Bar V23 in
+⚠️ **The `/reports` Overview tab shows no such column since 2026-09-23** (§7
+above): the divisor is identical, it is simply not rendered there, so a
+per-event rate on Overview divides by a number the reader cannot see.
+⚠️ **`Landing visits` on the By-X tables, four columns to the divisor's left, is
+NOT this set** and never carries the word "human": it is `visit_clicks_clean`,
+the tracker's bot-filtered landing-VISIT count, display-only. (It was headed
+`Clickers` until 2026-09-20 — a people-word over a visit count, which is exactly
+why it was renamed — and **Overview heads it `Clickers` again since 2026-09-23**,
+because the human-click columns it could be confused with are no longer on that
+tab; the field is still `clickers` on all of them.) Bar V23 in
 [scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts)
-holds both halves.
+holds both halves; V24 holds the per-tab split.
 
 **The consequence, stated rather than buried: `<Type> rate` can legitimately read
 more than 100%, and it is not clamped.**

@@ -1,6 +1,6 @@
 # Feature — Link Shortener, Click Tracking & Attribution
 
-_Last updated: 2026-09-20_
+_Last updated: 2026-09-23_
 
 ## 1. Purpose
 For tracked campaigns, mint a **unique short link per recipient-message** so a click resolves 1:1 to `(contact, campaign, stage, creative, destination)`. The public redirect logs every click; a deferred scoring job enriches and classifies clicks (human / bot / prefetch / suspect) without ever deleting data — reports filter on the score.
@@ -123,8 +123,9 @@ Rebuild is safe to run at any time (the `NOT EXISTS` guard makes every insert id
 
 A landing page missing its Keitaro visit script records no visits while CamMan
 keeps recording every tap. `keitaro_stage_results.visit_clicks_raw/clean` read 0,
-the Overview tab renders "Landing visits 0" (headed "Clickers" before
-2026-09-20), and nothing else in the system notices —
+the Overview tab renders "Clickers 0" (that tab headed the column "Clickers"
+before 2026-09-20, "Landing visits" until 2026-09-23 and "Clickers" again since
+— the By-X tabs keep "Landing visits"), and nothing else in the system notices —
 sends succeed, DLRs arrive, and redirects may keep landing.
 
 **Detection.** `/api/cron/tracking-monitors` (hourly) reports any tracked stage

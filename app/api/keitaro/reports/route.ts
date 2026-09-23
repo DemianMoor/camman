@@ -65,9 +65,17 @@ export const SORTABLE = new Set([
   // Added with the lifetime columns. A column rendered with enableSorting but
   // absent from this whitelist silently falls back to sorting by revenue — the
   // header responds and the order changes, just not by what was clicked.
+  //
+  // ⚠️ `lifetime_clickers` and `counted_clickers` were REMOVED on 2026-09-23,
+  // with the two `Human clicks` columns they sorted (owner's decision — see
+  // components/reports/keitaro-report.tsx). The whitelist is the one place that
+  // can refuse a sort by a column that is no longer on screen: a persisted
+  // `sortBy` naming either still arrives from browsers that used them, and an
+  // accepted-but-invisible sort reorders the rows with no indicator anywhere.
+  // The client drops the same two ids on read (normalizeOverviewSort); this is
+  // the half that holds when the client is an older bundle. Both still EXIST as
+  // response fields and still feed every EPC — only the columns went.
   "lifetime_epc",
-  "lifetime_clickers",
-  "counted_clickers",
   "profit",
   "opt_outs",
   "total_sent",

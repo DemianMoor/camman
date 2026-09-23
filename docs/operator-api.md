@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-20_
+_Last updated: 2026-09-23_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -193,8 +193,9 @@ curl -s "https://camman.vercel.app/api/reports/performance?dimension=offer&from=
 Response: `{ dimension, attribution, data: [row, …], totals, refreshedAt, providers, event_types, range }`.
 Every row, and `totals`, carries `sent`, `opt_outs`, `clickers` (the tracker's
 clean landing visits — not human clicks; the `/reports` UI heads this column
-**`Landing visits`** since 2026-09-20, previously `Clickers` — **the field name
-did not change**, and no field on this endpoint did), `redirects`, `counted_clickers`,
+**`Landing visits`** on the By-X/Hourly tables since 2026-09-20 and **`Clickers`**
+on the Overview tab since 2026-09-23 — **the field name did not change** through
+either rename, and no field on this endpoint did), `redirects`, `counted_clickers`,
 `sales`, `revenue`, `cost`, and the grading fields `reached`, `clicks_human`,
 `click_to_reach_pct`, `reach_to_sale_pct` and `opt_rate` (see §7).
 

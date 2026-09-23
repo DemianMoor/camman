@@ -173,6 +173,18 @@ const FULL_COLS: Col[] = [
   // ships the field as `clickers`, so renaming the HEADER changed neither a
   // saved sort nor a contract. Do not "tidy" the id to match the label.
   // Do not spell "human" here — V23. Bars V13/V24 pin the new header.
+  //
+  // ⭐ OVERVIEW HEADS THIS SAME METRIC `Clickers` SINCE 2026-09-23, AND THAT
+  // DIVERGENCE IS THE OWNER'S DECISION, NOT DRIFT. "One metric, one name" was
+  // right while both tabs showed the same columns: the danger was a people-word
+  // sitting four columns from `Human clicks`, the real EPC denominator, on a
+  // table that carried both. Overview no longer carries EITHER human-click
+  // column — they were removed from it in the same change — so nothing there
+  // can be mistaken for the denominator and the shorter name is unambiguous on
+  // that tab alone. THIS table still shows `Human clicks` two columns down, so
+  // the trap is live here and `Landing visits` stays. ⚠️ Do NOT "restore
+  // consistency" by renaming either side: bar V24 pins each tab's header AND
+  // that neither string appears on the other.
   { id: "clickers", header: "Landing visits", kind: "count" },
   { id: "click_rate", header: "CR %", kind: "pct", muted: true },
   { id: "redirects", header: "Redirects", kind: "count" },
@@ -222,8 +234,12 @@ const FULL_COLS: Col[] = [
 // Hourly: Sent (by send hour) + activity-time engagement with % rates. Rates use
 // the same formulas as the other tabs (÷ sent, redirect ÷ clickers, sales ÷
 // redirects). No cost/EPC/profit (cost is a per-stage lump, not hour-bucketable).
-// `clickers` heads `Landing visits` here too — one metric, one name on every
-// table that shows it (V24).
+// `clickers` heads `Landing visits` here too — one name across the tables that
+// show the EPC denominator beside it. ⭐ Overview heads the same metric
+// `Clickers` since 2026-09-23 (owner): it dropped both `Human clicks` columns,
+// so the confusion the long name guards against cannot arise there. The FULL_COLS
+// note above has the reasoning; V24 pins both halves and forbids either string
+// from appearing on the other tab.
 const HOURLY_COLS: Col[] = [
   { id: "sent", header: "Sent", kind: "count" },
   { id: "opt_outs", header: "Opt-outs", kind: "count", muted: true },

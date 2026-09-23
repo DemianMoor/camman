@@ -1265,9 +1265,10 @@ export default function ContactsPage() {
         <DialogHeader>
           <DialogTitle>Import contact statuses</DialogTitle>
           <DialogDescription>
-            Update Opt-out, Suppressed, and Scrubbed statuses in bulk from a CSV.
-            Statuses exclude contacts from future campaigns; campaigns already
-            created keep their locked audience.
+            Update {CONTACT_STATUS_LABELS.opt_out},{" "}
+            {CONTACT_STATUS_LABELS.suppressed} and {CONTACT_STATUS_LABELS.scrubbed}{" "}
+            statuses in bulk from a CSV. Statuses exclude contacts from future
+            campaigns; campaigns already created keep their locked audience.
           </DialogDescription>
         </DialogHeader>
         <ContactStatusImportForm

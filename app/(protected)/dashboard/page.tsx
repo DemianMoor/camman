@@ -842,7 +842,7 @@ export default function DashboardPage() {
             value={baseStats?.opt_out_count ?? 0}
             sublabel={
               baseStats
-                ? `${baseStats.opt_out_count_by_reason.opt_out} opt-outs · ${baseStats.opt_out_count_by_reason.suppressed} suppressed · ${baseStats.opt_out_count_by_reason.scrubbed} scrubbed · ${baseStats.opt_out_count_by_reason.bounced} bounced`
+                ? `${baseStats.opt_out_count_by_reason.opt_out} opt-outs · ${baseStats.opt_out_count_by_reason.suppressed} globally suppressed · ${baseStats.opt_out_count_by_reason.scrubbed} scrubbed · ${baseStats.opt_out_count_by_reason.bounced} bounced`
                 : "unique contacts"
             }
             href="/opt-outs"

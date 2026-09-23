@@ -1,6 +1,6 @@
 # Feature — UI System
 
-_Last updated: 2026-08-28_
+_Last updated: 2026-09-23_
 
 ## 1. Purpose
 A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shadcn/ui. Reusable wrappers enforce the project's interaction conventions (dialog dismissal, required-field markers, file uploads, multi-select) so individual screens stay thin.
@@ -14,7 +14,7 @@ A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shad
 ## 3. Shared components
 | Component | File | Role |
 |-----------|------|------|
-| `DataTable` | `components/data-table.tsx` | TanStack wrapper: manual pagination/sort/selection, loading skeletons, empty state, row-click |
+| `DataTable` | `components/data-table.tsx` | TanStack wrapper: manual pagination/sort/selection, loading skeletons, empty state, row-click. The header-click cycle is `sortCycle` (`lib/ui/sort-cycle.ts`), **default `"asc-desc-clear"`** — every registry list keeps it; `/reports` Overview is the only screen passing `"desc-asc"` (descending first, two states, never cleared). Changing the default would re-teach ~20 screens at once, so a new cycle is always opt-in |
 | `MultiSelectPicker` | `components/multi-select-picker.tsx` | popover searchable checkbox list for >10 options (UTM tags, groups); scales to hundreds. Pill-toggles reserved for ≤5 fixed enums. `layout` picks where the selected-item chips go: `"stacked"` (default) puts them on their own row beneath the trigger — right for a full-width form field; `"inline"` puts them beside it (`flex-nowrap`) so the control grows **wider, not taller**, with `triggerClassName` setting the trigger's width and `maxChipsShown` capping the run |
 | `SearchableSelect` | `components/searchable-select.tsx` | **single**-select sibling of `MultiSelectPicker`: popover + filter input + ↑/↓/Enter nav; commits one value and closes on pick. Trigger mirrors `<SelectTrigger>` styling so it drops into a row without shifting layout. Used by the segment Rules tab (rule type + brand/offer/segment/contact-group value pickers). `fallbackLabel`/`fallbackColor` render a persisted value whose options haven't loaded (or that is archived). Optional `searchText` per option is matched by the filter but never rendered — for labels that don't contain the form the user types (the Today's-Sends number filter searches raw digits behind a spaced `+1 844 621 0404`) |
 | `SegmentPicker` / `OfferPicker` | `components/segments/segment-picker.tsx`, `components/offers/offer-picker.tsx` | popover searchable pickers with **pin (star) + recently-used** ordering (Pinned → Recent → All). SegmentPicker is multi-select; OfferPicker is single-select. Both back their prefs with `usePickerPrefs(namespace)` (`lib/hooks/use-picker-prefs.ts`), a per-browser localStorage store keyed `segments.*` / `offers.*`. `useSegmentPrefs` is a thin wrapper over it |

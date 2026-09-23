@@ -25,6 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { nextSortState, type SortCycle } from "@/lib/ui/sort-cycle";
 import { cn } from "@/lib/utils";
 
 export interface DataTableProps<T> {
@@ -54,6 +55,13 @@ export interface DataTableProps<T> {
   sortBy: string | null;
   sortDir: "asc" | "desc";
   onSortChange: (sortBy: string | null, sortDir: "asc" | "desc") => void;
+  /**
+   * What a header click does. OPT-IN, and it must stay that way: this wrapper
+   * backs every registry list in the app, so the default is the historical
+   * asc → desc → clear cycle and only a screen that asks for something else
+   * gets it (/reports Overview passes "desc-asc" — see lib/ui/sort-cycle.ts).
+   */
+  sortCycle?: SortCycle;
   onRowClick?: (row: T) => void;
   /** Optional per-row className (e.g. an operational-status accent). */
   rowClassName?: (row: T) => string | undefined;
@@ -75,6 +83,7 @@ export function DataTable<T>({
   sortBy,
   sortDir,
   onSortChange,
+  sortCycle = "asc-desc-clear",
   onRowClick,
   rowClassName,
 }: DataTableProps<T>) {
@@ -91,13 +100,10 @@ export function DataTable<T>({
   const isEmpty = !isLoading && data.length === 0;
 
   function cycleSort(columnId: string) {
-    if (sortBy !== columnId) {
-      onSortChange(columnId, "asc");
-    } else if (sortDir === "asc") {
-      onSortChange(columnId, "desc");
-    } else {
-      onSortChange(null, "desc");
-    }
+    // The rule itself is a pure function so it can be tested without a browser
+    // and so the two cycles sit side by side in one file.
+    const next = nextSortState({ sortBy, sortDir }, columnId, sortCycle);
+    onSortChange(next.sortBy, next.sortDir);
   }
 
   return (

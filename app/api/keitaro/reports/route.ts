@@ -24,6 +24,7 @@ import {
   type DeliveryCell,
 } from "@/lib/reporting/delivery";
 import { getDeliveryByStage, getDeliveryFreshness } from "@/lib/reporting/delivery-rollup";
+import { makeOverviewComparator } from "@/lib/reporting/report-sort";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 import {
   shouldSubstituteClickers,
@@ -438,30 +439,24 @@ export async function GET(req: NextRequest) {
   // Resolved once, not per comparison: the parse is pure and the answer cannot
   // change inside a single sort.
   const sortEventCol = eventSortColumn(sortBy);
-  data.sort((a, b) => {
-    let cmp: number;
-    if (sortBy === "campaign_name") {
-      cmp = a.campaign_name.localeCompare(b.campaign_name);
-    } else if (sortEventCol) {
-      // A null (unknown ratio) sorts LAST in BOTH directions — "we cannot say" is
-      // not "zero", and it must not win a descending sort over a real 0.0%. The
-      // early `return` skips the tie-break on purpose: there is no ordering
-      // between two unknowns to break.
-      const av = eventCellValue(sortEventCol, a.events, a.counted_clickers);
-      const bv = eventCellValue(sortEventCol, b.events, b.counted_clickers);
-      if (av == null && bv == null) cmp = 0;
-      else if (av == null) return 1;
-      else if (bv == null) return -1;
-      else cmp = av - bv;
-    } else {
-      cmp =
-        (a[sortBy as keyof typeof a] as number) -
-        (b[sortBy as keyof typeof b] as number);
-    }
-    if (cmp === 0)
-      cmp = (a.stage_id ?? a.campaign_id) - (b.stage_id ?? b.campaign_id);
-    return sortDir === "asc" ? cmp : -cmp;
-  });
+  // The key order — clicked column (direction-flipped) → Clickers high-to-low
+  // (never flipped) → campaign_id, stage_id (never flipped) — lives in
+  // lib/reporting/report-sort.ts, the ONE place that owns it, shared with the
+  // By-X tables' client-side sort so the two tabs cannot drift.
+  //
+  // ⚠️ IT HAS TO HAPPEN HERE, NOT IN THE CLIENT. The page slice below cuts this
+  // array, so a secondary key applied after the response would only reorder the
+  // twenty rows that happened to survive the slice — the rows themselves would
+  // already have been chosen by the primary key alone.
+  data.sort(
+    makeOverviewComparator<OutRow>(
+      sortBy,
+      sortDir,
+      sortEventCol
+        ? (row) => eventCellValue(sortEventCol, row.events, row.counted_clickers)
+        : null,
+    ),
+  );
 
   // ---- Delivered % (lib/reporting/delivery.ts — the shared layer) ----------
   //

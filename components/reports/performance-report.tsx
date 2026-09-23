@@ -32,6 +32,7 @@ import type {
   PerfRow,
   ProviderOption,
 } from "@/lib/reporting/performance-report";
+import { makeDimensionComparator } from "@/lib/reporting/report-sort";
 import { DIMENSION_LABEL, type ReportDimension } from "@/lib/reporting/report-dimensions";
 
 interface PerfResponse {
@@ -399,22 +400,22 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
 
   const rows = useMemo<DerivedRow[]>(() => {
     const derived = (resp?.data ?? []).map(derive);
-    const dir = filters.sortDir === "asc" ? 1 : -1;
     const key = sortBy as keyof DerivedRow;
     const sortCol = cols.find((c) => c.id === sortBy);
-    return [...derived].sort((a, b) => {
-      // Pinned rows (hourly "Manual") always sort to the top.
-      if (a.pinned && !b.pinned) return -1;
-      if (b.pinned && !a.pinned) return 1;
-      const av = sortCol ? cellValue(a, sortCol) : a[key];
-      const bv = sortCol ? cellValue(b, sortCol) : b[key];
-      // "Unknown" sorts LAST in BOTH directions — it is not a small number. Same
-      // rule as the Overview API's comparator.
-      if (av == null && bv != null) return 1;
-      if (bv == null && av != null) return -1;
-      if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
-      return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
-    });
+    // Pinned row first → clicked column (direction-flipped) → Landing visits
+    // high-to-low (never flipped) → the row's `key` (never flipped). The key
+    // order and the comparator are shared with Overview's server-side sort in
+    // lib/reporting/report-sort.ts, so the tabs cannot drift.
+    return [...derived].sort(
+      makeDimensionComparator<DerivedRow>(
+        filters.sortDir,
+        sortBy === "clickers",
+        (r) =>
+          sortCol
+            ? cellValue(r, sortCol)
+            : (r[key] as unknown as number | string | null),
+      ),
+    );
   }, [resp, sortBy, filters.sortDir, cols]);
 
   const totals = resp?.totals ?? null;

@@ -2,6 +2,68 @@
 
 _Last updated: 2026-09-23_
 
+## On `/reports` a header click sorts DESCENDING first, and no tie-break ever flips with the direction (2026-09-23)
+
+Owner's rules for every `/reports` table — Overview and the By-X tabs alike.
+
+- **Two states, descending first, never cleared.** The first click on a column
+  sorts it high → low (for a report column the interesting end is the top of the
+  list), the second flips to low → high, and a further click flips back. There is
+  no "unsorted" state to land in: clearing the sort is a step the owner said he
+  will never want. The rule is a pure function,
+  `nextSortState()` in [lib/ui/sort-cycle.ts](../lib/ui/sort-cycle.ts).
+  - ⭐ **It is OPT-IN, because the table wrapper is shared.**
+    [components/data-table.tsx](../components/data-table.tsx) backs ~20 registry
+    lists, all of which keep the historical `asc → desc → clear`. That stays the
+    DEFAULT of both the prop and the function; Overview passes
+    `sortCycle="desc-asc"` and is the only caller that does. A new screen wanting
+    the report behaviour asks for it by name — changing the default would
+    silently re-teach every list in the app at once. Bar **S12** in
+    [scripts/test-report-sort.ts](../scripts/test-report-sort.ts) fails if a
+    second consumer appears; **S1** fails if the default moves.
+  - The By-X tabs' own `toggleSort`
+    ([components/reports/performance-report.tsx](../components/reports/performance-report.tsx))
+    has always behaved this way. The two tabs must not disagree about what a
+    click means.
+- **Clickers is a permanent secondary sort, high → low, whatever the primary
+  is** — on every sortable column, rate and text columns included. Sorting by
+  Sales therefore puts the campaigns that made sales first, then orders the
+  zero-sales tail by Clickers rather than by whatever the rows happened to
+  arrive in. Sorting BY Clickers is just Clickers descending; the secondary is
+  skipped there because it is 0 by construction.
+- **Then a stable key**, ascending, so two rows tied on everything visible come
+  out in the same order on every request. Overview uses `campaign_id` **then**
+  `stage_id` — `groupBy=stage` makes `campaign_id` non-unique, and only the
+  stage id separates a campaign's own rows. By-X uses the row's `key`, the
+  dimension's own identity (phone id, offer id, sequence slot, group id, hour,
+  `"manual"`), which is unique within a response where `label` is a display
+  string two dimensions can share.
+- ⭐ **A TIE-BREAK MUST BE APPLIED AFTER THE DIRECTION FLIP, NEVER FOLDED IN
+  BEFORE IT.** Both comparators used to do `if (cmp === 0) cmp = <tie-break>;
+  return sortDir === "asc" ? cmp : -cmp` — which puts the tie-break behind the
+  negation, so it REVERSES with the sort. Rows tied on the primary came out in
+  one order descending and the exact opposite order ascending, which is
+  precisely what a tie-break exists to prevent. The direction belongs to the
+  column the operator clicked; the secondary and the stable key are properties
+  of the TABLE. `applyReportSortKeys()` in
+  [lib/reporting/report-sort.ts](../lib/reporting/report-sort.ts) is the one
+  place the whole key order lives, shared by both comparators. Bar **S4** is the
+  bug bar: the same fixture sorted ascending must keep the identical
+  Clickers-descending order the descending sort produced.
+- ⚠️ **The secondary reads `clickers`, not `counted_clickers`.** `clickers` is
+  `visit_clicks_clean`, the column Overview heads `Clickers` and By-X heads
+  `Landing visits`; `counted_clickers` is the deduplicated EPC denominator, a
+  different number on the same row that ranks rows differently. Reading the
+  wrong one fails silently — the table is still sorted, just by a metric nobody
+  can see. Bar **S11** pins it with a fixture whose two fields rank the rows in
+  opposite orders.
+- **Overview's secondary has to be computed server-side.** The route sorts the
+  assembled rows and THEN slices the page, so a secondary key applied in the
+  browser would only reorder the twenty rows the primary key had already chosen.
+- Unchanged by all of the above: a null (unknown ratio) on an event column still
+  sorts **last in both directions**, and hourly's pinned **Manual** row still
+  sorts first, ahead of the direction and both tie-breaks.
+
 ## Contact lifecycle status has exactly one definition (2026-09-22)
 
 The statuses (`new`/`cold`/`hot`/`warm`/`freeze`/`suppressed`, migration 0187) are computed in ONE place and read everywhere else.

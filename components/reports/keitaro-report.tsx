@@ -979,6 +979,14 @@ export function KeitaroReport() {
           onPageSizeChange={(s) => updateFilters({ pageSize: s, page: 0 })}
           sortBy={sortById || null}
           sortDir={sortDirection}
+          // ⭐ THE ONLY SCREEN ON THE NEW CYCLE, AND DELIBERATELY OPT-IN. A
+          // header click here opens DESCENDING — for a report column the
+          // interesting end is the top of the list — flips to ascending, and
+          // never clears (owner: an unsorted report is a step he will never
+          // want). Every other DataTable in the app keeps asc → desc → clear,
+          // which is why this is a prop and not a change to the wrapper's
+          // default. The By-X tabs' own `toggleSort` already behaves this way.
+          sortCycle="desc-asc"
           onSortChange={(by, dir) =>
             updateFilters({ sortBy: by ?? "revenue", sortDir: dir, page: 0 })
           }

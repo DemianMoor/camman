@@ -34,8 +34,31 @@ import {
 // sent_at is what the rollup is keyed on, so it is what the refresh scopes by.
 // =============================================================================
 
-/** Tier A: today + yesterday (ET), every run. */
-export const FRESH_DAYS = 2;
+/**
+ * Tier A: TODAY only (ET), every run.
+ *
+ * It covered today + yesterday until 2026-09-23, which made this job the #3
+ * consumer on the database: measured over 21.5 h of production, 129 runs at
+ * 6.96 s and ~267 MB each — **~34 GB/day** — because every tick re-read
+ * yesterday's sends and two days of receipts. Yesterday's pages are rarely
+ * still cached ten minutes later, so most runs paid the cold price.
+ *
+ * Measured per run, same org, rolled-back transactions (2026-09-23):
+ *   today + yesterday   2.6 s warm / 8.1 s cold · 12,787–44,101 blocks (100–345 MB)
+ *   today only          0.43–0.47 s             · 0–2 blocks
+ *
+ * Yesterday is not dropped — the 7-day settle below still recomputes it every
+ * 3 h, so a late receipt for yesterday lands within that window instead of
+ * within ten minutes. That is a freshness trade the UI already states: the
+ * "as of" label on Delivered % shows the OLDER stamp a window depends on, so a
+ * window including yesterday now honestly reports the settle time.
+ *
+ * ⚠️ `sent` for yesterday is NOT affected by this: a send is stamped when it
+ * goes out, so yesterday's cells stop changing at midnight; only
+ * delivered/undelivered evolve with receipts. That is what lets the Overview's
+ * Total Sent read yesterday's cells while counting today live.
+ */
+export const FRESH_DAYS = 1;
 /**
  * Tier B: the last 7 ET days, at most every SETTLE_EVERY_HOURS. Cells OLDER than
  * this are final and never recomputed — 0 of 2.64M terminal receipts ever

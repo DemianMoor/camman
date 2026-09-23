@@ -144,6 +144,16 @@ The statuses (`new`/`cold`/`hot`/`warm`/`freeze`/`suppressed`, migration 0187) a
 - **Editing lifecycle configuration is `lifecycle.configure` (manager+), audited.** The org thresholds, the per-group overrides and the `engine_mode` switch are one permission, and every change lands in `org_setting_events`. The constant ships in PR 1, ahead of the screen that uses it, so the switch can never be moved through the app before its gate exists.
 - **The freeze clock counts only messages sent after `freeze_entered_at`.** That is what makes the backfill safe: existing freeze contacts start their clock at the backfill instant, so nobody is suppressed at launch on the strength of history nobody reviewed.
 
+## Measuring your own work: match statements on `queryid`, and re-verify a stated cause before acting on it (2026-09-23)
+
+Two mistakes from one day of performance work, both of which produced a confident wrong number.
+
+**Match statements on `queryid`, never on leading text.** A Fix 3 report claimed "Delivered % query — 181 calls, mean 7,575 ms". That was two different statements summed: **129 calls of the rollup refresh job and 52 of the live query**, which both begin `WITH sends AS (SELECT id, stage_id, provider_phone_id`. Prefix matching silently merges statements that share a preamble, and the merged mean describes neither. When attributing cost to a statement, take the `queryid` (or identify it by which `queryid`'s `calls` moved across a snapshot) — the text is not an identifier.
+
+**Re-verify a stated cause before acting on it, including your own.** An approved task read "PR #211's inlined literals must be parameterized so 267 calls stop producing 82 pg_stat_statements entries" — a premise from my own earlier report, and wrong. The SQL already bound parameters (`$1`/`$2` are visible in the stored text). The real cause is **per-run temp tables**: pgss fingerprints a statement together with the relation OIDs it touches, so a `CREATE TEMP TABLE … ON COMMIT DROP` gives every statement touching it a new entry on every run, parameterized or not. Proof, 3 identical runs of 3 identical statements on camman-v2: **temp table → 7 entries; stable `UNLOGGED` table + `TRUNCATE` → 3**. Building the approved fix would have parameterized already-parameterized SQL and reported the churn as solved while it continued.
+
+The general form: an approved task carries a stated cause, and approval does not make it true. Reproduce the cause first — ideally on the preview DB, in a few lines — and if it does not reproduce, say so before building. Same family as [the recon-reads-origin-main rule](#) and the "guards must print their input scope" rule below.
+
 ## A watched job's "never ran" gets a first-run grace, not a deploy-order ritual (2026-09-22)
 
 A dead-man watch (`checkHeartbeats`, [lib/reporting/cron-heartbeat.ts](../lib/reporting/cron-heartbeat.ts)) treats a job with **no heartbeat at all** as stale, because a job that never ran looks exactly like one that stopped. On the deploy that introduces a *mutual* pair, that is a false page in whichever direction runs first. On 2026-09-22 the delivery rollup's reconciliation ran before its refresh and sent one "rollup is not refreshing — never ran" alert. Writing the right order into the deploy steps was not enough: the next deploy forgets it.

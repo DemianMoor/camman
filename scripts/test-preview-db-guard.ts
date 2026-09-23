@@ -108,6 +108,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "delete-orphan-test-offers.ts", why: "exists to delete orphan test rows left in PRODUCTION" },
   { file: "drain-texthub-inbox.ts", why: "ingests real STOPs from the live provider inbox into production; --apply" },
   { file: "engagement-backfill.ts", why: "production dry-run report + one-off backfill of contact_engagement (migration 0187); the dry run always rolls back, and --apply writes only after the owner approves the numbers" },
+  { file: "apply-lifecycle-status-column.ts", why: "production application of migration 0188 — adds contacts.lifecycle_status, backfills it from contact_engagement in batches, then builds its index CONCURRENTLY (none of which fits drizzle-kit's migration transaction); dry run by default, and --apply writes only after the owner approves the SQL" },
   { file: "import-texthub-optouts.ts", why: "imports real opt-outs from a provider export into production; --apply" },
   { file: "measure-lifecycle-preview.ts", viaLibrary: true, why: "read-only production measurement of the lifecycle settings preview; every run is inside a transaction that always rolls back (computes via lib/engagement/preview, so it carries no write token of its own)" },
   { file: "measure-lifecycle-list.ts", viaLibrary: true, why: "read-only production measurement of the contacts-list lifecycle column and filter; issues only SELECT and EXPLAIN (ANALYZE) over those SELECTs (builds predicates via lib/engagement/list-filter, so it carries no write token of its own)" },

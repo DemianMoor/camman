@@ -1100,6 +1100,17 @@ export const contacts = pgTable(
     // looked up). Distinct from 'Unknown' (looked up, carrier undetermined).
     carrier_norm: text("carrier_norm").notNull().default("Unidentified"),
     messaging_status: text("messaging_status").notNull().default("eligible"),
+    // Migration 0188: a PROJECTION of contact_engagement.status, which stays the
+    // source of truth. Maintained by the engagement job (lib/engagement/refresh.ts)
+    // in the same transaction as the contact_engagement row and its transition
+    // row, and only when the status actually changes. Nothing else writes it.
+    // It exists because the contacts list filters by status and sorts
+    // newest-first, and status lives in a different table from created_at — so
+    // without this column a filtered page has to walk contacts by created_at
+    // testing each row, which measured 3.9 s for freeze and 13.4 s for
+    // suppressed on production. A contact with no contact_engagement row keeps
+    // the default 'new', the same contract the rest of the system follows.
+    lifecycle_status: text("lifecycle_status").notNull().default("new"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1131,6 +1142,19 @@ export const contacts = pgTable(
     // cache → contacts sync matches by phone_number without org_id). Managed in SQL
     // (built CONCURRENTLY); the unique(org_id, phone_number) can't serve this.
     index("contacts_phone_number_idx").on(table.phone_number),
+    // Migration 0188: org + status are equality predicates and created_at is the
+    // contacts list's sort, so a status-filtered page becomes an index range scan
+    // that stops after one page however old the cohort is. Built CONCURRENTLY in
+    // production (scripts/apply-lifecycle-status-column.ts).
+    index("contacts_org_lifecycle_created_idx").on(
+      table.org_id,
+      table.lifecycle_status,
+      table.created_at.desc(),
+    ),
+    check(
+      "contacts_lifecycle_status_check",
+      sql`${table.lifecycle_status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,
+    ),
     check(
       "contacts_line_type_check",
       sql`${table.line_type} IN ('mobile', 'landline', 'voip', 'toll_free', 'unknown')`,

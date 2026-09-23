@@ -1317,6 +1317,13 @@
       "when": 1792713600000,
       "tag": "0187_contact_engagement",
       "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1792800000000,
+      "tag": "0188_contacts_lifecycle_status",
+      "breakpoints": true
     }
   ]
 }

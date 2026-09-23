@@ -18,6 +18,10 @@
 - **The owner's decisions (2026-09-23):**
   - the engine switch **is** on the Settings page, gated on `lifecycle.configure`, behind a confirm dialog that says what turning it off does: statuses stop updating, and PR 4's eligibility will read stale statuses as-is. The script path stays.
   - the preview evaluates stored facts with proposed thresholds injected. **Measure before building the UI.** If it lands over **10 s**, it becomes a cached/background result with a spinner — never a raised timeout.
+  - **`reevaluate_requested_at` is wired in this PR** (Task 1b), not left as a follow-up: a saved threshold must reach every contact on the next run, not only the ones something else touched.
+  - the group form gets the **same preview**, scoped to that group's contacts (Task 5).
+  - the engine toggle confirms in **both** directions.
+- **`GET /api/settings/lifecycle` stays operator-denied** (`null` in the route map), and the contact-groups list page therefore fetches the org thresholds **only when the viewer holds `lifecycle.configure`**. An operator never issues the call, so it cannot 403; the hint reads "Effective: —" for anyone who could not change the value anyway. The alternative — widening a settings route to the operator token surface for a cosmetic hint — buys nothing.
 - **One definition.** Status is only ever evaluated through `evaluationSelectSql`; threshold resolution only ever through the builder extracted in Task 1. No second copy.
 - **Ranges mirror the database.** `lifecycle_settings_ranges_check` (incl. `warm_days > hot_days`) and `contact_groups_lifecycle_overrides_check`. The Zod schemas restate them; the DB is the backstop.
 - **Permissions:** `lifecycle.configure` (manager+) already exists and is already declared in the permission matrix's additions. Server routes check it with `can(role, …)`; the client hides/disables with `useAuth().can(…)`.
@@ -30,7 +34,8 @@
 | File | Responsibility |
 |---|---|
 | `lib/engagement/thresholds-sql.ts` | **New.** Builds `eng_org_thr` / `eng_grp_thr`, with optional proposed org values and one proposed group override |
-| `lib/engagement/refresh.ts` | Modify: use the extracted builder (behaviour identical) |
+| `lib/engagement/refresh.ts` | Modify: use the extracted builder (behaviour identical); `evaluateAll` for a requested re-evaluation |
+| `app/api/cron/refresh-contact-engagement/route.ts` | Modify: honour `reevaluate_requested_at` |
 | `lib/engagement/preview.ts` | **New.** `previewLifecycleThresholds()` over stored facts |
 | `lib/engagement/settings-io.ts` | **New.** `loadLifecycleSettings` / `saveLifecycleSettings` (+ audit rows) |
 | `app/api/settings/lifecycle/route.ts` | **New.** GET + PUT (thresholds, engine_mode), audited |
@@ -258,14 +263,40 @@ import { createThresholdTempTables } from "@/lib/engagement/thresholds-sql";
 
 Delete the now-unused `D` import **only if** nothing else in the file uses it (it will not be used after this change — check with `grep -n "D\." lib/engagement/refresh.ts`).
 
-- [ ] **Step 5: Prove the refactor changed nothing.**
+- [ ] **Step 5: Prove the refactor changed nothing — fixture bars AND a per-contact diff.**
 
 ```bash
 cd /c/AFF/camman/.claude/worktrees/lifecycle-recon
 npx tsc --noEmit -p . 2>&1 | tail -3
 DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx --conditions=react-server scripts/test-engagement-db.ts | tail -6
 ```
-Expected: tsc silent; every Part A/B/C bar still green **plus** the five new B2t bars; `All checks passed.` The job's own bars (B2–B7) passing is the regression gate — they assert the exact stored thresholds.
+Expected: tsc silent; every Part A/B/C bar still green **plus** the five new B2t bars; `All checks passed.`
+
+**The gate is the diff, not only the bars.** The fixture world is eight contacts; the demo org is 500. Dump `eng_grp_thr` for the whole preview org before and after the extraction and require **zero differences**:
+
+1. **Before touching `refresh.ts`**, give the preview org real overrides to compare (without them `eng_grp_thr` is empty and the diff is vacuous):
+
+```bash
+DEMO_DB="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)"
+```
+Then, with the Supabase MCP on camman-v2 (`fdzxzxayhknywvmrhjcj`), set two overrides and remember to clear them at the end:
+```sql
+UPDATE contact_groups SET freeze_after_messages = 5 WHERE name = 'Newsletter Signups';
+UPDATE contact_groups SET freeze_cadence_days = 30 WHERE name = 'Webinar Attendees';
+```
+
+2. Write `<scratchpad>/dump-grp-thr.ts` (throwaway, NOT committed). It opens one transaction, runs the **old inline SQL copied verbatim out of the pre-refactor `refresh.ts`** (both `CREATE TEMP TABLE` statements), then selects every row of `eng_grp_thr` ordered by `contact_id` and writes it as JSON to the path in `argv[2]`. Run it against the preview DB → `before.json`.
+
+3. Apply Steps 3–4 (the extraction), then change that script's body to call `createThresholdTempTables(tx, orgId)` instead of the inline SQL, and run it again → `after.json`.
+
+4. Diff:
+
+```bash
+node -e "const a=require('<scratchpad>/before.json'),b=require('<scratchpad>/after.json');console.log(a.length,b.length,JSON.stringify(a)===JSON.stringify(b)?'IDENTICAL':'DIFFERENT')"
+```
+Expected: the two row counts are equal, **non-zero**, and `IDENTICAL`. Anything else stops the task.
+
+5. Clear the two overrides on camman-v2 again, and confirm `SELECT count(*) FROM contact_groups WHERE freeze_after_messages IS NOT NULL OR freeze_cadence_days IS NOT NULL` is back to 0.
 
 - [ ] **Step 6: Commit.**
 
@@ -273,6 +304,130 @@ Expected: tsc silent; every Part A/B/C bar still green **plus** the five new B2t
 cd /c/AFF/camman/.claude/worktrees/lifecycle-recon
 git add lib/engagement/thresholds-sql.ts lib/engagement/refresh.ts scripts/test-engagement-db.ts
 git commit -m "refactor(engagement): extract effective-threshold SQL so the job and the preview share one resolution
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task 1b: A saved threshold re-evaluates everyone on the next run
+
+**Files:**
+- Modify: `lib/engagement/refresh.ts` (an `evaluateAll` option), `lib/engagement/constants.ts` (one job name), `app/api/cron/refresh-contact-engagement/route.ts` (honour the request), `scripts/test-engagement-db.ts` (Part E)
+
+**Why:** the incremental run evaluates contacts something touched, plus rows whose `time_due_at` has passed. A threshold change moves neither, so without this a saved change would reach a contact only when its next message or click arrived. `lifecycle_settings.reevaluate_requested_at` (shipped in 0187, written by Task 3's save) is the request; a `cron_locks` row is the watermark, so this needs no migration.
+
+**Interfaces:**
+- Produces: `RefreshOptions.evaluateAll?: boolean`; `ENGAGEMENT_REEVAL_JOB = "contact-engagement-reeval"`; `export function reevaluationDue(requestedAt: Date | null, lastReevalAt: Date | null): boolean`.
+
+- [ ] **Step 1: Write the failing test.** Append Part E to `scripts/test-engagement-db.ts` inside Part B's `try`, after the Part D bars:
+
+```ts
+    // ── PART E — a threshold change reaches contacts nothing else touched ────
+    console.log("\nPART E — reevaluate_requested_at");
+    const { reevaluationDue } = await import("@/lib/engagement/refresh");
+    bar("E1 pure: never requested ⇒ not due", reevaluationDue(null, null) === false);
+    bar("E2 pure: requested, never re-evaluated ⇒ due", reevaluationDue(new Date(A4), null) === true);
+    bar("E3 pure: requested BEFORE the last re-evaluation ⇒ not due",
+      reevaluationDue(new Date(A4), new Date(A4.getTime() + 1000)) === false);
+    bar("E4 pure: requested AFTER the last re-evaluation ⇒ due",
+      reevaluationDue(new Date(A4.getTime() + 2000), new Date(A4)) === true);
+    // cBot is cold with 3 messages and no click; nothing has touched it since B2.
+    await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 3 WHERE org_id = ${org}`);
+    const rNo = await run({ mode: "incremental", dryRun: false, asOf: A4, since: plus(A4, 0, -0.5) });
+    bar("E5 an ordinary incremental run does NOT see the new threshold",
+      (await row(cBot)).status === "cold" && rNo.rowsWritten === 0, JSON.stringify(rNo.transitions));
+    const rAll = await run({ mode: "incremental", dryRun: false, asOf: A4, since: plus(A4, 0, -0.5), evaluateAll: true });
+    bar("E6 evaluateAll applies it: cBot cold→freeze",
+      (await row(cBot)).status === "freeze" && rAll.transitions["cold→freeze"] === 1, JSON.stringify(rAll.transitions));
+    bar("E7 and it is recorded as a transition with the NEW thresholds",
+      (await one<{ reason: string; t: { freeze_after_messages: number } }>(sql`
+        SELECT reason, thresholds AS t FROM contact_engagement_transitions
+        WHERE contact_id = ${cBot.id}::uuid ORDER BY id DESC LIMIT 1`)).t.freeze_after_messages === 3);
+    await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 10 WHERE org_id = ${org}`);
+```
+
+- [ ] **Step 2: Run it; E1–E7 fail** (`reevaluationDue` missing, `evaluateAll` not a known option).
+
+- [ ] **Step 3: Implement.**
+
+(a) `lib/engagement/constants.ts` — next to the other job names:
+
+```ts
+/** cron_locks watermark: the last run that evaluated EVERY stored row. */
+export const ENGAGEMENT_REEVAL_JOB = "contact-engagement-reeval";
+```
+
+(b) `lib/engagement/refresh.ts` — add to `RefreshOptions`:
+
+```ts
+  /**
+   * Evaluate every stored row, not just the touched and time-due ones. The cron
+   * passes this when lifecycle_settings.reevaluate_requested_at is newer than the
+   * last such run: a threshold change moves neither counter, so nothing else
+   * would notice it. It costs no recount — the facts are already stored.
+   */
+  evaluateAll?: boolean;
+```
+
+and in the `eng_set` statement, widen the union (full mode already covers everyone):
+
+```ts
+      CREATE TEMP TABLE eng_set ON COMMIT DROP AS
+      SELECT contact_id FROM eng_touched
+      ${
+        full
+          ? sql``
+          : opts.evaluateAll
+            ? sql`UNION SELECT contact_id FROM contact_engagement WHERE org_id = ${org}`
+            : sql`UNION SELECT contact_id FROM contact_engagement
+                   WHERE org_id = ${org} AND time_due_at <= ${asOf}`
+      }`);
+```
+
+and export the pure predicate:
+
+```ts
+/**
+ * Is a full re-evaluation due? `requestedAt` is lifecycle_settings.
+ * reevaluate_requested_at, `lastReevalAt` the cron_locks watermark of the last
+ * run that honoured one. Pure, so the rule is testable without a database.
+ */
+export function reevaluationDue(requestedAt: Date | null, lastReevalAt: Date | null): boolean {
+  if (requestedAt == null) return false;
+  return lastReevalAt == null || requestedAt.getTime() > lastReevalAt.getTime();
+}
+```
+
+(c) `app/api/cron/refresh-contact-engagement/route.ts` — inside the lease, after `since` is computed:
+
+```ts
+      const [reeval] = (await db.execute(sql`
+        SELECT (SELECT max(reevaluate_requested_at) FROM lifecycle_settings WHERE org_id = ANY(${sql`ARRAY[${sql.join(orgs.map((o) => sql`${o}::uuid`), sql`, `)}]`})) AS requested_at,
+               (SELECT watermark FROM cron_locks WHERE job_name = ${ENGAGEMENT_REEVAL_JOB}) AS last_at
+      `)) as unknown as { requested_at: string | null; last_at: string | null }[];
+      const evaluateAll = reevaluationDue(
+        reeval?.requested_at ? new Date(reeval.requested_at) : null,
+        reeval?.last_at ? new Date(reeval.last_at) : null,
+      );
+```
+pass `evaluateAll` into `refreshContactEngagement(tx, org_id, { mode, dryRun: false, since, evaluateAll })`, and after the heartbeats, when `ok && (evaluateAll || mode === "full")`:
+
+```ts
+        await recordHeartbeat(db, ENGAGEMENT_REEVAL_JOB);
+```
+(a full recount evaluates everyone too, so it satisfies any pending request). Import `reevaluationDue` and `ENGAGEMENT_REEVAL_JOB`.
+
+- [ ] **Step 4: Run the test — E1–E7 green, and every earlier bar still green.** Command as in Task 1 Step 5.
+
+- [ ] **Step 5: Verify + commit.**
+
+```bash
+cd /c/AFF/camman/.claude/worktrees/lifecycle-recon
+npx tsc --noEmit -p . 2>&1 | tail -3
+npx eslint lib/engagement/refresh.ts lib/engagement/constants.ts app/api/cron/refresh-contact-engagement/route.ts scripts/test-engagement-db.ts
+git add lib/engagement/refresh.ts lib/engagement/constants.ts app/api/cron/refresh-contact-engagement/route.ts scripts/test-engagement-db.ts
+git commit -m "feat(engagement): a saved threshold re-evaluates every stored row on the next run
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -652,7 +807,7 @@ export async function saveLifecycleSettings(
 }
 ```
 
-> **Note for PR 2b/3:** `reevaluate_requested_at` is now written but nothing reads it yet — the 15-minute job re-evaluates time-due rows only. Wiring it into `refresh.ts` (re-evaluate ALL rows from stored facts when it is newer than the last run) is a one-branch change; it is out of scope here and is listed in the PR body as a known follow-up.
+> **`reevaluate_requested_at` is live:** Task 1b made the 15-minute job honour it, so the save above reaches every contact on the next run.
 
 - [ ] **Step 2: Write `app/api/settings/lifecycle/route.ts`.**
 
@@ -955,7 +1110,7 @@ export function LifecycleSettings() {
   const [saved, setSaved] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<LifecycleThresholds | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [confirmEngineOff, setConfirmEngineOff] = useState(false);
+  const [confirmEngine, setConfirmEngine] = useState<"off" | "write" | null>(null);
 
   const load = useCallback(async () => {
     const r = await getApi.execute("/api/settings/lifecycle");
@@ -974,6 +1129,13 @@ export function LifecycleSettings() {
 
   const dirty = saved != null && draft != null &&
     FIELDS.some((f) => saved[f.key] !== draft[f.key]);
+  // An emptied number input reads as 0 (and NaN while mid-edit), which the server
+  // would reject after a round trip. Catch it here instead, and include the
+  // cross-field rule the DB CHECK enforces.
+  const invalid =
+    draft == null ||
+    FIELDS.some((f) => !Number.isInteger(draft[f.key]) || draft[f.key] < f.min || draft[f.key] > f.max) ||
+    draft.warm_days <= draft.hot_days;
 
   async function runPreview() {
     if (!draft) return;
@@ -1029,12 +1191,19 @@ export function LifecycleSettings() {
             ))}
           </div>
           <div className="flex items-center gap-3">
-            <Button variant="outline" onClick={() => void runPreview()} disabled={!canEdit || busy || !dirty}>
+            <Button variant="outline" onClick={() => void runPreview()} disabled={!canEdit || busy || !dirty || invalid}>
               {previewApi.isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               Preview changes
             </Button>
-            <Button onClick={() => void save(draft)} disabled={!canEdit || busy || !dirty}>Save</Button>
-            {dirty ? <span className="text-xs text-muted-foreground">Unsaved changes</span> : null}
+            <Button onClick={() => void save(draft)} disabled={!canEdit || busy || !dirty || invalid}>Save</Button>
+            {invalid ? (
+              <span className="text-xs text-destructive">
+                Every value must be a whole number inside its range, and the warm window must be
+                longer than the hot one.
+              </span>
+            ) : dirty ? (
+              <span className="text-xs text-muted-foreground">Unsaved changes</span>
+            ) : null}
           </div>
           {preview && (
             <div className="rounded-md border p-3 text-sm">
@@ -1063,7 +1232,7 @@ export function LifecycleSettings() {
         <CardContent className="space-y-3">
           <div className="flex items-center gap-3">
             <Switch id="engine" checked={saved.engine_mode === "write"} disabled={!canEdit || busy}
-              onCheckedChange={(on) => (on ? void save({ engine_mode: "write" }) : setConfirmEngineOff(true))} />
+              onCheckedChange={(on) => setConfirmEngine(on ? "write" : "off")} />
             <Label htmlFor="engine">
               {saved.engine_mode === "write" ? "Running — statuses update every 15 minutes" : "Off — statuses are frozen"}
             </Label>
@@ -1081,21 +1250,44 @@ export function LifecycleSettings() {
         </p>
       )}
 
-      <AlertDialog open={confirmEngineOff} onOpenChange={(o) => !o && setConfirmEngineOff(false)}>
+      {/* Both directions confirm: starting the engine rewrites statuses org-wide on
+          the next run, which is as consequential as stopping it. */}
+      <AlertDialog open={confirmEngine !== null} onOpenChange={(o) => !o && setConfirmEngine(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Turn the status engine off?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {confirmEngine === "off" ? "Turn the status engine off?" : "Turn the status engine on?"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Statuses stop updating: no contact moves to hot on a click, none freezes on its
-              tenth message, and none is ever suppressed while this is off. Existing statuses
-              are kept and go stale, and the campaign rules that read them will treat stale
-              statuses as if they were current. The change is audited.
+              {confirmEngine === "off" ? (
+                <>
+                  Statuses stop updating: no contact moves to hot on a click, none freezes on
+                  its tenth message, and none is ever suppressed while this is off. Existing
+                  statuses are kept and go stale, and the campaign rules that read them will
+                  treat stale statuses as if they were current. The change is audited.
+                </>
+              ) : (
+                <>
+                  The job starts maintaining statuses again, every 15 minutes, for every
+                  contact in this organization. The first run applies everything that changed
+                  while it was off — clicks, messages and the thresholds as they stand now — so
+                  a large number of contacts can move at once, and the campaign rules that read
+                  statuses will act on the new values. Preview a threshold change before this if
+                  one is pending. The change is audited.
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => { setConfirmEngineOff(false); void save({ engine_mode: "off" }); }}>
-              Turn it off
+            <AlertDialogAction
+              onClick={() => {
+                const mode = confirmEngine;
+                setConfirmEngine(null);
+                if (mode) void save({ engine_mode: mode });
+              }}
+            >
+              {confirmEngine === "off" ? "Turn it off" : "Turn it on"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1238,6 +1430,65 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
           shortest suppression window.
         </p>
 ```
+
+Then the preview, scoped to this group (spec §6). It exists only in **edit** mode — a group being created has no id and no contacts yet — and it posts the CURRENT form values, not the saved ones:
+
+```tsx
+        {mode === "edit" && groupId != null && canConfigureLifecycle ? (
+          <div className="space-y-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={previewApi.isLoading}
+              onClick={async () => {
+                const v = form.getValues();
+                setGroupPreview(null);
+                const r = await previewApi.execute("/api/settings/lifecycle/preview", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    group: {
+                      group_id: groupId,
+                      overrides: {
+                        freeze_after_messages: v.freeze_after_messages ?? null,
+                        freeze_cadence_days: v.freeze_cadence_days ?? null,
+                        suppress_after_days: v.suppress_after_days ?? null,
+                        suppress_min_freeze_messages: v.suppress_min_freeze_messages ?? null,
+                      },
+                    },
+                  }),
+                });
+                if (r.ok) setGroupPreview(r.data);
+                else toastApiError(r, "Could not preview this override");
+              }}
+            >
+              {previewApi.isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Preview effect on this group
+            </Button>
+            {groupPreview ? (
+              Object.keys(groupPreview.transitions).length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No contact changes status under these values.
+                </p>
+              ) : (
+                <ul className="text-xs text-muted-foreground">
+                  {Object.entries(groupPreview.transitions)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([move, n]) => (
+                      <li key={move}>
+                        {move.replace("→", " → ")} {n.toLocaleString()}
+                      </li>
+                    ))}
+                </ul>
+              )
+            ) : null}
+          </div>
+        ) : null}
+```
+
+This needs three more props/state on the component: `groupId?: number`, a `previewApi = useApiCall<Preview>()`, and `const [groupPreview, setGroupPreview] = useState<Preview | null>(null)`, where `Preview` is the response type of `POST /api/settings/lifecycle/preview` (declare it locally, or export the type from `lib/engagement/preview.ts` and `import type`). The detail page passes `groupId={group.id}`; the list page passes `groupId={editing.id}` in the edit dialog and omits it when creating.
+
+**The counts are org-wide in shape but group-scoped in effect:** the preview evaluates every stored contact, and only the ones in this group can move, because only their thresholds changed. Hence the label "effect on this group".
 with, above the component:
 
 ```tsx
@@ -1249,7 +1500,25 @@ const LIFECYCLE_FIELDS = [
 ] as const;
 ```
 
-- [ ] **Step 4: Both call sites.** In `app/(protected)/contact-groups/page.tsx` and `app/(protected)/contact-groups/[id]/page.tsx`, add the four keys to each `initialValues` literal (`?? null`), pass `canConfigureLifecycle={can("lifecycle.configure")}` (the list page already has `can` from `useAuth`; add it on the detail page if missing), and pass `orgThresholds` from the group GET response on the detail page. On the list page, which has no per-group GET, fetch the org thresholds once from `/api/settings/lifecycle` alongside the existing loads and pass the same object.
+- [ ] **Step 4: Both call sites.** In `app/(protected)/contact-groups/page.tsx` and `app/(protected)/contact-groups/[id]/page.tsx`:
+
+- add the four keys to each `initialValues` literal (`?? null`);
+- pass `canConfigureLifecycle={can("lifecycle.configure")}` (the list page already has `can` from `useAuth`; add it on the detail page if missing) and `groupId` in edit mode;
+- the detail page takes `orgThresholds` from its group GET response (Step 2c added `org_thresholds` to it);
+- the list page has no per-group GET, so it fetches `/api/settings/lifecycle` **only when `can("lifecycle.configure")` is true**:
+
+```tsx
+  useEffect(() => {
+    if (!can("lifecycle.configure")) return;
+    void (async () => {
+      const r = await lifecycleApi.execute("/api/settings/lifecycle");
+      if (r.ok) setOrgThresholds(r.data);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lifecycleApi.execute]);
+```
+
+That route is operator-denied in the route map, and an operator cannot change an override anyway, so gating the fetch on the permission means the call is never made rather than made and refused. With no thresholds loaded the hints read "Effective: —", which is what `orgThresholds?.[f.name] ?? "—"` already renders.
 
 - [ ] **Step 5: Verify.**
 
@@ -1277,7 +1546,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ### Task 6: Documentation
 
-- [ ] **Step 1: `docs/04-features/contact-lifecycle.md`.** Under §5 "Switching it on", add a "Configuring it" section: the Settings page and what each threshold does, the group overrides and the strictest-wins rule, how the preview works (stored facts + injected values, no recount) and what it costs (**the measured number from Task 2**), the engine switch and what turning it off does, and that every change writes `org_setting_events` rows keyed `lifecycle.<field>`. Note that `reevaluate_requested_at` is written but not yet read. Bump the date.
+- [ ] **Step 1: `docs/04-features/contact-lifecycle.md`.** Under §5 "Switching it on", add a "Configuring it" section: the Settings page and what each threshold does, the group overrides and the strictest-wins rule, how the preview works (stored facts + injected values, no recount) and what it costs (**the measured number from Task 2**), the engine switch and what turning it off does, and that every change writes `org_setting_events` rows keyed `lifecycle.<field>`. Note that saving a threshold sets `reevaluate_requested_at`, which makes the next 15-minute run re-evaluate every stored row (Task 1b) - no recount, so it costs the evaluate pass only. Bump the date.
 - [ ] **Step 2: `docs/07-conventions.md`.** Extend the existing "Contact lifecycle status has exactly one definition" block with one bullet: threshold resolution has one implementation too (`lib/engagement/thresholds-sql.ts`), used by both the job and the preview; a preview that needs unsaved values injects them there rather than writing and rolling back. Bump the date.
 - [ ] **Step 3: `docs/CHANGELOG.md`.** One dated line naming the new page, the API routes, the group overrides, the shared threshold builder and the docs touched.
 - [ ] **Step 4: `npm run check:docs`** passes, and `git diff --stat origin/main -- docs/CHANGELOG.md` is a pure insertion. Commit.
@@ -1313,10 +1582,9 @@ PR 2a of the contact lifecycle spec: the thresholds become editable. **No migrat
 
 - **Settings → Lifecycle** (`lifecycle.configure`, manager+): the six thresholds, a preview of what a change would do, and the engine switch behind a confirm dialog that says what turning it off means. Every changed field writes an `org_setting_events` row.
 - **Per-contact-group overrides**: the four freeze/suppression fields on the group form, blank = inherit, each showing its effective value, with the strictest-wins rule stated.
-- **Preview**: the same `evaluationSelectSql` the job uses, run over the STORED facts with the proposed values injected — no `stage_sends` recount. Measured on prod: <PASTE the Task 2 numbers>.
+- **Preview**: the same `evaluationSelectSql` the job uses, run over the STORED facts with the proposed values injected — no `stage_sends` recount. Measured on prod: <PASTE the Task 2 numbers>. The group form gets the same preview, scoped to the group being edited.
+- **A saved threshold now reaches everyone**: the job honours `lifecycle_settings.reevaluate_requested_at` and re-evaluates every stored row on the next run (no recount).
 - **Shared threshold resolution**: PR 1 inlined it in `refresh.ts`; it now lives in `lib/engagement/thresholds-sql.ts` and both the job and the preview call it. The SQL is unchanged — the PR 1 fixture tests assert the exact stored thresholds and stay green.
-
-Known follow-up, deliberately not here: `reevaluate_requested_at` is now written on every save but nothing reads it yet, so a threshold change lands on the next run that touches a contact rather than re-evaluating everyone. Wiring it into `refresh.ts` is a one-branch change and belongs with PR 3.
 
 Not in this PR (they are PR 2b): the contacts list column and filter, the contact detail panel, the Prepare stamp, and the "Global suppression" relabel.
 

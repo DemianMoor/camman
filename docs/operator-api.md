@@ -38,7 +38,7 @@ open in the browser, the token cannot fetch either.
 | `403` | The endpoint is not on the token allowlist | Not a bug. Use one of the endpoints below. Repeated 403s alert the Owner. |
 | `429` | More than **300 requests in one hour** | Wait for the hour to roll over. Retrying does **not** extend the lockout, but it does not help either. |
 | `503` on `/api/audience/fresh-counts` | The rollup has not been computed yet | Retry in a few minutes. Never read this as "zero leads". |
-| `503` on `/api/audience/pools` | The rollup has not been computed yet, or the offer first sent after the last refresh (`details.reason`) | Retry within 30 minutes. Never read this as "empty pool". |
+| `503` on `/api/audience/pools` | The rollup has not been computed yet, or the offer first sent after the last refresh (`details.reason`) | Retry within the hour — the refresh runs hourly (`29 * * * *`), cut from every 30 minutes on 2026-09-23. Never read this as "empty pool". |
 
 Every request is logged against your token: endpoint, method, time, IP. Denials
 and rate-limit hits are logged individually and alert the Owner.

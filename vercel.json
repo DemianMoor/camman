@@ -110,7 +110,7 @@
     },
     {
       "path": "/api/cron/refresh-audience-pools",
-      "schedule": "29,59 * * * *"
+      "schedule": "29 * * * *"
     },
     {
       "path": "/api/cron/refresh-creative-lifetime",

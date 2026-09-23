@@ -157,6 +157,16 @@ Refreshing on the read, past a TTL equal to the freshness target, honours the *s
 
 If refreshes outnumber reads by orders of magnitude, the cadence is the bug. Applies to `audience_fresh_counts` (`11,41 * * * *`) and any future one-row-per-org rollup.
 
+## A periodic job's cost must be measured on a real tick, not on back-to-back runs (2026-09-23)
+
+Narrowing the delivery rollup's fresh tier was measured by running the old scope and the new scope one after another in the same session, inside rolled-back transactions. The new scope came out at **0.43–0.47 s and 0–2 blocks read** — which shipped, in the PR and in the docs, as its cost.
+
+It was a warm-cache artifact. The old-scope runs had just pulled today's pages into `shared_buffers`, so the new-scope runs that followed found everything already there. The real job ticks every 10 minutes on an instance with 512 MB of `shared_buffers`, and neighbouring jobs move gigabytes in between, so each tick re-reads from disk. Five consecutive live ticks measured **1.2–3.5 s and 124–211 MB** — the change is worth about **3×**, not the **~100×** the back-to-back runs implied.
+
+**Measure a periodic job by watching its own scheduled runs**: snapshot `pg_stat_statements` by `queryid`, wait for the job's heartbeat to advance, snapshot again, and repeat for several ticks — the spread between them IS the finding (here the ticks alternate 1.2 s / 3.5 s purely on what ran before them). Comparing two scopes back-to-back is still the right way to attribute a difference to the scope; it is not a production cost. If only a back-to-back number is available, say which it is.
+
+Related: [re-verify a stated cause before acting on it](#) below — including a number you produced yourself.
+
 ## Measuring your own work: match statements on `queryid`, and re-verify a stated cause before acting on it (2026-09-23)
 
 Two mistakes from one day of performance work, both of which produced a confident wrong number.

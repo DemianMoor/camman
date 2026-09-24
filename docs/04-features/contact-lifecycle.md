@@ -2,11 +2,13 @@
 
 _Last updated: 2026-09-24_
 
-**PR 1, 2a and 2b shipped.** The statuses are computed and stored, the
+**PR 1, 2a, 2b and 3 shipped.** The statuses are computed and stored, the
 thresholds that decide them are editable (§8), every send records the status it
 was prepared under, `contacts.lifecycle_status` carries a queryable projection
 (§3a), and the statuses are visible on the contacts list and the contact detail
-page (§3c). Nothing selects an audience by status yet. Segment rules (PR 3), the campaign lifecycle chips and
+page (§3c), and eight segment rule types select on lifecycle facts (§3d).
+Campaign lifecycle chips and the eligibility layers (PR 4) and the cohort
+report (PR 5) follow. Segment rules (PR 3), the campaign lifecycle chips and
 the eligibility layers (PR 4) and the cohort report (PR 5) follow.
 Design: [2026-09-22-contact-lifecycle-status-design.md](../superpowers/specs/2026-09-22-contact-lifecycle-status-design.md).
 
@@ -163,6 +165,36 @@ transitions newest-first.
   `GET /api/contacts/[id]` already runs — no new endpoint, so no route-map entry.
 - `thresholds.override_group_ids` is resolved to group names from the groups the
   route already returns, so it costs no extra query.
+
+### 3d. The segment rule types (migration 0189)
+
+Eight rule types read lifecycle facts. Seven read `contact_engagement`;
+`lifecycle_status` reads the `contacts.lifecycle_status` projection (§3a).
+
+| rule_type | value | meaning |
+|---|---|---|
+| `messages_sent_at_least` | any N | `msgs_total >= N` |
+| `messages_sent_at_most` | any N | `msgs_total <= N`, **a missing row counts as 0** |
+| `messages_sent_in_period_at_least` | `{count, days: 7\|14\|30\|90}` | `msgs_<days>d >= count` |
+| `last_message_more_than_n_days_ago` | any N | `last_sent_at < now - N days` |
+| `last_message_in_last_n_days` | any N | `last_sent_at >= now - N days` |
+| `last_click_more_than_n_days_ago` | any N | `last_click_at < now - N days` |
+| `last_click_in_last_n_days` | any N | `last_click_at >= now - N days` |
+| `lifecycle_status` | a set of the six statuses, `is` / `is_not` | `lifecycle_status = ANY(set)` |
+
+Three contracts worth knowing before using them:
+
+- **Never messaged / never clicked matches NEITHER direction.** `last_sent_at IS
+  NULL` fails `< now - N` and `>= now - N` alike, so an "Excl" segment built on
+  "last message in the last 3 days" never removes a brand-new contact. Reach
+  those contacts with `lifecycle_status is new` instead.
+- **"At most N messages" includes contacts the job has not reached.** They have
+  no `contact_engagement` row and have been sent nothing, so 0 <= N. The rule is
+  driven from `contacts` with a `LEFT JOIN` precisely so that case exists.
+- **The windows on `messages_sent_in_period_at_least` are fixed at 7/14/30/90**
+  because they ARE the stored `msgs_Nd` columns. Every other rule takes a free N.
+
+The facts are up to 15 minutes old (§14), so a rule reading them is too.
 
 ## 4. The job
 

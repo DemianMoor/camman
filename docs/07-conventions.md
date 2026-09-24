@@ -1779,10 +1779,11 @@ Default target for destructive-or-writing probes is the **`camman-v2` demo datab
 
 If a probe genuinely must run against production (it depends on real credentials, real volumes, or real provider state), ask first, keep the write set as small as possible, and verify the teardown by re-querying rather than trusting it.
 
-## A segment rule type must be registered in SEVEN places, not four
+## A segment rule type must be registered in EIGHT places, not four
 
-This section previously said FOUR. Building the `contact_attributes` rule types (0147/0148) found
-three more, and the two new ones are the dangerous ones.
+This section previously said FOUR, then SEVEN. Building the `contact_attributes` rule types
+(0147/0148) found three beyond the original four; building the lifecycle rule types (0189) found
+an eighth. The later ones are the dangerous ones.
 
 | # | place | file |
 |---|---|---|
@@ -1793,9 +1794,16 @@ three more, and the two new ones are the dangerous ones.
 | **5** | **the SQL emitter** (`buildRuleClause`) | `lib/segment-rules-eval.ts` |
 | **6** | **`segment_rules_rule_type_check`** | a DB CHECK — needs a MIGRATION |
 | **7** | the same CHECK mirrored | [db/schema.ts](../db/schema.ts) |
+| **8** | **the editor's `ValueControl`** — *and* `coerceValueForShape`, `isRuleReadyToSave` and `isRuleIncomplete` in the same file | [components/segments/rules-panel.tsx](../components/segments/rules-panel.tsx) |
 
 **Miss 5 and the rule saves, renders, and matches NOBODY** — it validates all the way through and
 then falls into the emitter's `default` branch, which returns a contradiction.
+
+**Miss 8 and the rule is uneditable, or silently marked invalid in the UI only.** `ValueControl`
+is the obvious half; the three helper chains beside it are not. `isRuleIncomplete` and
+`isRuleReadyToSave` both fall through to the same `typeof value === "number"` test the server-side
+pair does, so a set-shaped value they do not know about makes a perfectly valid rule render as
+incomplete and refuse to save — a bug that looks like a UI glitch and is really a registration miss.
 
 **Miss 6 and the rule is UNCREATABLE**: it passes Zod, passes ownership, renders in the UI, and
 Postgres rejects the INSERT with a `check_violation`. This is the same failure that shipped
@@ -3944,3 +3952,30 @@ must go through `lifecycleStatusCondition()`
 `contacts.lifecycle_status` projection, both of which encode that. A bare
 `EXISTS (SELECT 1 FROM contact_engagement …)` filter silently drops every
 unevaluated contact.
+
+## Segment rules do not filter eligibility themselves
+
+`gateEligible()` in [lib/segment-rules-eval.ts](../lib/segment-rules-eval.ts) wraps the whole
+combined audience in an inner join on `messaging_status = 'eligible'`. That is the correctness
+backstop, and it is why a rule reading `clickers` or `opt_ins` can ignore eligibility safely.
+
+Where `phone_type`, `carrier` and `contact_added_*` DO carry `messaging_status = 'eligible'` in their
+own subquery, it is an **index** device — the literal (never a bind) is what lets the planner match
+the eligible-partial indexes from migration 0096. It is not there for correctness.
+
+So: add the literal only when there is an eligible-partial index to match. The eight lifecycle rule
+types (0189) carry none, because neither of the two contacts-driven ones has such an index —
+`contacts_org_lifecycle_created_idx` is not partial. Measured 2026-09-24, adding the join anyway cost
+0.5–1.2 s per rule against a 10 s preview budget, for no change in the final audience.
+
+**The invariant to preserve:** for any rule type with `is_not`, `is X` ∪ `is_not X` must equal the
+same base set every other rule resolves against. `scripts/test-segment-rule-lifecycle.ts` bar L9
+asserts exactly that, with an INELIGIBLE contact in the fixture.
+
+## `messages_sent_at_most` is driven from `contacts`, not `contact_engagement`
+
+A contact the engagement job has not reached has **no `contact_engagement` row** and has been sent
+nothing, so it must match "at most N messages". Driving the rule from `contact_engagement` — or
+gating it with `EXISTS` — silently drops every one of them. The rule therefore selects from
+`contacts` with a `LEFT JOIN` and `coalesce(ce.msgs_total, 0)`. Same trap as the contacts-list
+lifecycle filter; see [04-features/contact-lifecycle.md](04-features/contact-lifecycle.md).

@@ -108,6 +108,7 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
   { file: "delete-orphan-test-offers.ts", why: "exists to delete orphan test rows left in PRODUCTION" },
   { file: "drain-texthub-inbox.ts", why: "ingests real STOPs from the live provider inbox into production; --apply" },
   { file: "engagement-backfill.ts", why: "production dry-run report + one-off backfill of contact_engagement (migration 0187); the dry run always rolls back, and --apply writes only after the owner approves the numbers" },
+  { file: "apply-engagement-rule-indexes-concurrent.ts", why: "builds migration 0189's two contact_engagement indexes with CREATE INDEX CONCURRENTLY, which cannot run inside drizzle-kit's migration transaction; dry run by default and it issues only CREATE INDEX" },
   { file: "engagement-cron-pause.ts", why: "pauses/resumes the contact-engagement cron against production for the migration 0188 window by holding the lease row the job already respects (cron_locks.contact-engagement-run); writes only that one lease row, and its 30-minute TTL self-clears" },
   { file: "apply-lifecycle-status-column.ts", why: "production application of migration 0188 — adds contacts.lifecycle_status, backfills it from contact_engagement in batches, then builds its index CONCURRENTLY (none of which fits drizzle-kit's migration transaction); dry run by default, and --apply writes only after the owner approves the SQL" },
   { file: "import-texthub-optouts.ts", why: "imports real opt-outs from a provider export into production; --apply" },

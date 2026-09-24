@@ -18,6 +18,11 @@ import {
   INCOME_BAND_LABELS,
 } from "@/lib/contact-attributes";
 import { CONTACT_STATUS_LABELS } from "@/lib/imports/contact-status";
+import type { EngagementStatus } from "@/lib/engagement/constants";
+import {
+  ENGAGEMENT_STATUS_CLASSES,
+  ENGAGEMENT_STATUS_LABELS,
+} from "@/lib/engagement/labels";
 
 // Contact detail (Drip Phase 1, item 1c).
 //
@@ -43,6 +48,27 @@ interface ContactDetail {
   age_band: string | null;
   groups: { id: number; name: string; color: string | null }[];
   opt_outs: { reason: string; created_at: string }[];
+  // Lifecycle (0187/0188). null = the job has never evaluated this contact,
+  // which is NOT the same as a stored status of 'new'.
+  lifecycle: {
+    status: string;
+    status_changed_at: string;
+    msgs_total: number;
+    last_sent_at: string | null;
+    last_click_at: string | null;
+    freeze_entered_at: string | null;
+    freeze_started_at: string | null;
+    freeze_msgs: number;
+    freeze_cadence_days: number;
+    thresholds: { override_group_ids?: number[] } | null;
+    computed_at: string;
+  } | null;
+  lifecycle_transitions: {
+    from_status: string | null;
+    to_status: string;
+    reason: string;
+    created_at: string;
+  }[];
 }
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {
@@ -110,6 +136,21 @@ export default function ContactDetailPage() {
   const attrs = contact.attributes;
   const optedOut = contact.opt_outs.length > 0;
 
+  // contact_engagement.thresholds carries override_group_ids (written by
+  // lib/engagement/status-sql.ts). The route already returns this contact's
+  // groups, so resolving ids to names costs no extra query.
+  const overrideIds = contact.lifecycle?.thresholds?.override_group_ids ?? [];
+  const thresholdSource =
+    overrideIds.length === 0
+      ? "Org defaults"
+      : // A group whose override was in effect at evaluation time may since have
+        // been archived off this contact; an empty string would read as a bug.
+        contact.groups
+          .filter((g) => overrideIds.includes(g.id))
+          .map((g) => g.name)
+          .join(", ") || "Group overrides";
+  const lc = contact.lifecycle;
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-3">
@@ -157,6 +198,101 @@ export default function ContactDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardContent className="pt-6">
+          <h2 className="mb-2 text-sm font-medium">Lifecycle</h2>
+          {lc ? (
+            <>
+              <dl className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                <Field
+                  label="Status"
+                  value={
+                    <span
+                      className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-xs ${
+                        ENGAGEMENT_STATUS_CLASSES[lc.status as EngagementStatus]
+                      }`}
+                    >
+                      {ENGAGEMENT_STATUS_LABELS[lc.status as EngagementStatus]}
+                    </span>
+                  }
+                />
+                <Field
+                  label="Since"
+                  value={format(new Date(lc.status_changed_at), "d MMM yyyy HH:mm")}
+                />
+                <Field label="Messages" value={lc.msgs_total} />
+                <Field
+                  label="Last message"
+                  value={
+                    lc.last_sent_at
+                      ? format(new Date(lc.last_sent_at), "d MMM yyyy")
+                      : "—"
+                  }
+                />
+                <Field
+                  label="Last human click"
+                  value={
+                    lc.last_click_at
+                      ? format(new Date(lc.last_click_at), "d MMM yyyy")
+                      : "—"
+                  }
+                />
+                <Field
+                  label="Freeze clock"
+                  value={
+                    lc.freeze_entered_at
+                      ? `${lc.freeze_msgs} msg${lc.freeze_msgs === 1 ? "" : "s"} since ${format(
+                          new Date(lc.freeze_entered_at),
+                          "d MMM yyyy",
+                        )}`
+                      : "—"
+                  }
+                />
+                {/* Cadence throttling only applies in Freeze. Showing "every
+                    14d" on a hot or cold contact would read as if a cadence
+                    limited their sends, which it does not. */}
+                {lc.status === "freeze" && (
+                  <Field
+                    label="Send cadence"
+                    value={`every ${lc.freeze_cadence_days}d`}
+                  />
+                )}
+                <Field label="Thresholds from" value={thresholdSource} />
+              </dl>
+              <p className="text-muted-foreground mt-3 text-xs">
+                Evaluated {format(new Date(lc.computed_at), "d MMM yyyy HH:mm")}. Status
+                changes on the next run, never instantly.
+              </p>
+            </>
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              New — not yet evaluated by the status job.
+            </p>
+          )}
+          {contact.lifecycle_transitions.length > 0 && (
+            <ul className="mt-4 space-y-1 text-sm">
+              {contact.lifecycle_transitions.map((t, i) => (
+                <li key={i} className="flex flex-wrap gap-3">
+                  <Badge variant="outline">
+                    {t.from_status
+                      ? `${ENGAGEMENT_STATUS_LABELS[t.from_status as EngagementStatus]} → ${
+                          ENGAGEMENT_STATUS_LABELS[t.to_status as EngagementStatus]
+                        }`
+                      : ENGAGEMENT_STATUS_LABELS[t.to_status as EngagementStatus]}
+                  </Badge>
+                  <span className="text-muted-foreground">
+                    {t.reason.replace(/_/g, " ")}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {format(new Date(t.created_at), "d MMM yyyy HH:mm")}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardContent className="pt-6">

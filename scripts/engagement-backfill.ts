@@ -72,7 +72,8 @@ async function main() {
     console.log(`\ntransitions: ${JSON.stringify(r.transitions)}`);
     console.log(
       `rows ${r.dryRun ? "that would be " : ""}written: contact_engagement ${r.rowsWritten}, ` +
-        `transitions ${r.transitionsWritten}, contact_offer_campaigns ${r.offerRowsWritten} ` +
+        `transitions ${r.transitionsWritten}, contacts.lifecycle_status ${r.projectionWritten}, ` +
+        `contact_offer_campaigns ${r.offerRowsWritten} ` +
         `(+${r.offerRowsDeleted} deleted)`,
     );
     console.log(`evaluated ${r.evaluated}, recounted ${r.recounted}`);

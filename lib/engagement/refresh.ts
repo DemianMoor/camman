@@ -13,8 +13,10 @@ import type { DbOrTx } from "@/lib/reporting/cron-heartbeat";
 // =============================================================================
 // CONTACT ENGAGEMENT REFRESH (migration 0187; spec §5)
 //
-// The ONLY writer of contact_engagement, contact_engagement_transitions and
-// contact_offer_campaigns. It runs inside the CALLER's transaction, because
+// The ONLY writer of contact_engagement, contact_engagement_transitions,
+// contact_offer_campaigns and contacts.lifecycle_status (the 0188 projection --
+// contact_engagement.status stays the source of truth).
+// It runs inside the CALLER's transaction, because
 // every stage is an ON COMMIT DROP temp table, ANALYZEd so the planner sees real
 // cardinalities rather than the ~200-row guess a set-op gets (the same lesson as
 // the audience snapshot — CLAUDE.md §10b).
@@ -103,6 +105,8 @@ export interface RefreshResult {
   transitions: Record<string, number>;
   rowsWritten: number;
   transitionsWritten: number;
+  /** contacts.lifecycle_status rows re-projected (migration 0188). */
+  projectionWritten: number;
   offerRowsWritten: number;
   offerRowsDeleted: number;
   /** Evaluated freeze contacts whose last message is still inside their cadence. */
@@ -331,6 +335,7 @@ export async function refreshContactEngagement(
 
   let rowsWritten = Number(counts.changed);
   let transitionsWritten = Object.values(transitions).reduce((a, b) => a + b, 0);
+  let projectionWritten = 0;
   let offerRowsWritten = Number(counts.offer_changed);
   let offerRowsDeleted = Number(counts.offer_gone);
 
@@ -372,6 +377,28 @@ export async function refreshContactEngagement(
           RETURNING 1)
         SELECT count(*)::int AS n FROM w`);
       transitionsWritten = Number(tw.n);
+
+      // contacts.lifecycle_status — the denormalised PROJECTION (migration
+      // 0188). It exists so the contacts list can filter by status and sort by
+      // created_at from one index; contact_engagement above remains the source
+      // of truth. Written HERE, in the same transaction as the transition row,
+      // so a status change and its projection commit together or not at all.
+      //
+      // `IS DISTINCT FROM` does two jobs: it keeps this to genuinely changed
+      // rows (a full recount evaluates every contact but rewrites almost none),
+      // and it makes the projection SELF-HEALING — any row that drifted, from a
+      // failed transaction or from the window between 0188's backfill and this
+      // code deploying, is corrected by the next run that evaluates it.
+      const [pw] = await q<{ n: number }>(sql`
+        WITH w AS (
+          UPDATE contacts c SET lifecycle_status = f.status
+          FROM eng_final f
+          WHERE c.id = f.contact_id
+            AND c.org_id = ${org}
+            AND c.lifecycle_status IS DISTINCT FROM f.status
+          RETURNING 1)
+        SELECT count(*)::int AS n FROM w`);
+      projectionWritten = Number(pw.n);
 
       const [ow] = await q<{ n: number }>(sql`
         WITH w AS (
@@ -446,6 +473,7 @@ export async function refreshContactEngagement(
     transitions,
     rowsWritten,
     transitionsWritten,
+    projectionWritten,
     offerRowsWritten,
     offerRowsDeleted,
     freezeNotDue: Number(counts.freeze_not_due),

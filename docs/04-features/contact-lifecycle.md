@@ -2,11 +2,11 @@
 
 _Last updated: 2026-09-24_
 
-**PR 1 + 2a shipped, PR 2b part 1 shipped.** The statuses are computed and
-stored, the thresholds that decide them are editable (§8), every send records
-the status it was prepared under, and `contacts.lifecycle_status` carries a
-queryable projection of the status (§3a). Nothing selects an audience by status
-yet. Segment rules (PR 3), the campaign lifecycle chips and
+**PR 1, 2a and 2b shipped.** The statuses are computed and stored, the
+thresholds that decide them are editable (§8), every send records the status it
+was prepared under, `contacts.lifecycle_status` carries a queryable projection
+(§3a), and the statuses are visible on the contacts list and the contact detail
+page (§3c). Nothing selects an audience by status yet. Segment rules (PR 3), the campaign lifecycle chips and
 the eligibility layers (PR 4) and the cohort report (PR 5) follow.
 Design: [2026-09-22-contact-lifecycle-status-design.md](../superpowers/specs/2026-09-22-contact-lifecycle-status-design.md).
 
@@ -130,6 +130,39 @@ extra round trip. `ON CONFLICT (stage_send_id) DO NOTHING` keeps
 re-materialization idempotent, matching the send insert's own conflict clause.
 It reads `contact_engagement` directly, not the projection. Stamping changes no
 send behaviour, so it applies to every campaign, legacy ones included.
+
+### 3c. Where the statuses are visible
+
+**Contacts list** (`/contacts`) — a **Lifecycle** column between Status
+indicators and Groups, and a multi-select **Filter by lifecycle** beside the
+groups filter. Both read `contacts.lifecycle_status`.
+
+- The column is deliberately **not sortable**. The list API's `SORT_COLUMNS` is
+  a two-key whitelist (`phone_number`, `created_at`) and an unrecognised
+  `sortBy` falls back to `created_at` silently, so a sortable header would look
+  like it worked and would not.
+- The filter persists per browser through `usePersistedFilters("contacts.filters")`,
+  is included in `filtersAreDefault` (so "Reset filters" appears for it), and
+  clears the row selection when it changes.
+- **CSV export does not carry it.** `/api/contacts/export` has no `group_ids`
+  support either, so "export respects the filters" is already untrue for groups;
+  giving export filter parity is its own change, not a rider on this one.
+
+**Contact detail** (`/contacts/[id]`) — a **Lifecycle** card above Attributes:
+status and since when, messages total, last message, last human click, the
+freeze clock, the effective thresholds and their source, and the last 20
+transitions newest-first.
+
+- **Send cadence renders only in Freeze.** Cadence throttling does not apply in
+  any other status, so showing "every 14d" on a hot or cold contact would read
+  as if it limited their sends.
+- A contact the job has never evaluated reads **"New — not yet evaluated"**
+  rather than inventing a `status_changed_at`. A missing `contact_engagement`
+  row IS `new`, but it is not the same as a row that says `new`.
+- The data comes from two extra lookups in the `Promise.all` that
+  `GET /api/contacts/[id]` already runs — no new endpoint, so no route-map entry.
+- `thresholds.override_group_ids` is resolved to group names from the groups the
+  route already returns, so it costs no extra query.
 
 ## 4. The job
 

@@ -28,7 +28,13 @@ export type ValueShape =
   // open — interest tags are explicitly extensible and partner slugs are
   // created per partner — so this validates SHAPE (non-empty array of non-empty
   // strings, bounded) rather than membership.
-  | "text_set";
+  | "text_set"
+  // Contact lifecycle (0187/0188). count_in_period is {count, days} where
+  // days is one of the STORED msgs_Nd windows; lifecycle_status_set is a
+  // subset of ENGAGEMENT_STATUSES. Both are set-shaped, so both need the
+  // four-place registration CLAUDE.md §10e warns about, not just two.
+  | "count_in_period"
+  | "lifecycle_status_set";
 
 // Value sets for the carrier/line-type rules (migration 0098). Stored in the
 // rule's `value` as a non-empty array of these codes. 'landline' is intentionally
@@ -47,6 +53,28 @@ export const CARRIER_VALUES = [
   "Unidentified",
 ] as const;
 export type CarrierValue = (typeof CARRIER_VALUES)[number];
+
+// The windows ARE the stored columns msgs_7d / msgs_14d / msgs_30d /
+// msgs_90d on contact_engagement, not an arbitrary interval — a free window
+// would have to recount stage_sends, which is the 121 s job, not a preview.
+// Owner confirmed 2026-09-24: fixed here, while the last-message and
+// last-click rules take any N.
+export const COUNT_IN_PERIOD_DAYS = [7, 14, 30, 90] as const;
+export type CountInPeriodDays = (typeof COUNT_IN_PERIOD_DAYS)[number];
+export type CountInPeriod = { count: number; days: CountInPeriodDays };
+
+export function isCountInPeriod(v: unknown): v is CountInPeriod {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.count === "number" &&
+    Number.isInteger(o.count) &&
+    o.count >= 1 &&
+    o.count <= 100000 &&
+    typeof o.days === "number" &&
+    (COUNT_IN_PERIOD_DAYS as readonly number[]).includes(o.days)
+  );
+}
 
 export function isStringSubsetOf<T extends string>(
   v: unknown,
@@ -414,6 +442,52 @@ export const RULE_TYPES = {
     label: "Partner is one of",
     operators: ["is", "is_not"],
     value_shape: "text_set",
+  },
+  // === Contact lifecycle (0187/0188, spec §9) ===
+  // The four time rules mirror contact_added_in_last_n_days exactly: the
+  // direction is in the type name, operator is "is" only, and the value is a
+  // free positive_integer — which is what "any N" means here.
+  messages_sent_at_least: {
+    label: "Messages sent, at least N",
+    operators: ["is"],
+    value_shape: "positive_integer",
+  },
+  messages_sent_at_most: {
+    label: "Messages sent, at most N",
+    operators: ["is"],
+    value_shape: "positive_integer",
+  },
+  messages_sent_in_period_at_least: {
+    label: "At least N messages in the last X days",
+    operators: ["is"],
+    value_shape: "count_in_period",
+  },
+  last_message_more_than_n_days_ago: {
+    label: "Last message more than N days ago",
+    operators: ["is"],
+    value_shape: "positive_integer",
+  },
+  last_message_in_last_n_days: {
+    label: "Last message within the last N days",
+    operators: ["is"],
+    value_shape: "positive_integer",
+  },
+  last_click_more_than_n_days_ago: {
+    label: "Last human click more than N days ago",
+    operators: ["is"],
+    value_shape: "positive_integer",
+  },
+  last_click_in_last_n_days: {
+    label: "Last human click within the last N days",
+    operators: ["is"],
+    value_shape: "positive_integer",
+  },
+  // The only new type with is_not — and therefore the only one whose
+  // complement the EXCEPT path produces. See isRuleComplete.
+  lifecycle_status: {
+    label: "Lifecycle status",
+    operators: ["is", "is_not"],
+    value_shape: "lifecycle_status_set",
   },
 } as const satisfies Record<string, RuleTypeSpec>;
 

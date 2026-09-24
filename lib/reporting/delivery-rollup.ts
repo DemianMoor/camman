@@ -255,6 +255,100 @@ export async function getDeliveryByStage(orgId: string, range: EtDayRange): Prom
 }
 
 /** A tier-A heartbeat older than this means the 10-minute refresh has missed ~3 runs. */
+// ── Per-stage SENT counts: rollup for closed ET days, live for today ───────
+//
+// The Overview's Total Sent used to be one `count(*) … GROUP BY stage_id` over
+// stage_sends. Measured on prod 2026-09-24, that single statement read
+// **1.6-1.7 GB and ran 10-12 s** on a 92-day window — the dominant cost of both
+// /api/keitaro/reports and /api/reports/performance.
+//
+// Every closed ET day is already counted in stage_delivery_rollup.sent, from
+// the SAME definition (status='sent', bucketed by sent_at in ET). So this reads
+// closed days from the rollup and counts ONLY TODAY live.
+//
+// ⚠️ TODAY IS DELIBERATELY LIVE, AND THE LAG IS THE REASON. Total Sent is the
+// number an operator watches mid-send to confirm a campaign is actually going
+// out; a 10-minute rollup lag there would read as a stall and get escalated.
+// That is also why Total Sent carries NO "as of" label, unlike Delivered %.
+//
+// ⚠️ THE WINDOW IS ET-DAY ALIGNED BY CONSTRUCTION, which is what makes a
+// day-grain rollup exact rather than approximate: getStageMetricsInRange takes
+// `from`/`to` as ET DATE STRINGS and derives both bounds with fromZonedTime on
+// midnight. There is no caller that can pass a partial day. If that ever
+// changes, this function is wrong and the live count must come back.
+/** The pool, or a transaction — so the boundary test can stage fixtures that
+ *  are never committed. */
+export type DeliveryDbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export interface SentCountScope {
+  orgId: string;
+  stageIds: number[];
+  /** Inclusive ET day, as YYYY-MM-DD — the same string the caller was given. */
+  fromEtDay: string;
+  /** Inclusive ET day. */
+  toEtDay: string;
+  /** Exclusive UTC end of the window, for the live half. */
+  toExclusiveUtc: Date;
+}
+
+export async function sentCountsByStage(
+  dbc: DeliveryDbOrTx,
+  scope: SentCountScope,
+  now = new Date(),
+): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  if (scope.stageIds.length === 0) return out;
+
+  const todayEt = formatInCampaignTimezone(now, "yyyy-MM-dd");
+  const add = (stageId: number, n: number) =>
+    out.set(stageId, (out.get(stageId) ?? 0) + n);
+
+  // ── closed ET days: the rollup ──
+  // Capped at yesterday: today is never read from the rollup, whatever the
+  // requested window says.
+  const rollupTo = scope.toEtDay < todayEt ? scope.toEtDay : addEtDays(todayEt, -1);
+  if (scope.fromEtDay <= rollupTo) {
+    const rows = (await dbc.execute(sql`
+      SELECT stage_id, sum(sent)::int AS sent
+      FROM stage_delivery_rollup
+      WHERE org_id = ${scope.orgId}::uuid
+        AND stage_id = ANY(${sql`ARRAY[${sql.join(
+          scope.stageIds.map((id) => sql`${id}`),
+          sql`, `,
+        )}]::int[]`})
+        AND sent_date_et >= ${scope.fromEtDay}::date
+        AND sent_date_et <= ${rollupTo}::date
+      GROUP BY stage_id
+    `)) as unknown as { stage_id: number; sent: number }[];
+    for (const r of rows) add(Number(r.stage_id), Number(r.sent));
+  }
+
+  // ── today (ET): live ──
+  // Only when the window actually reaches today. The lower bound is today's ET
+  // midnight, so a row cannot be counted by both halves.
+  if (scope.toEtDay >= todayEt) {
+    const todayStartUtc = etDayBounds({ from: todayEt, to: todayEt }).fromUtc;
+    if (todayStartUtc < scope.toExclusiveUtc) {
+      const rows = (await dbc.execute(sql`
+        SELECT stage_id, count(*)::int AS sent
+        FROM stage_sends
+        WHERE org_id = ${scope.orgId}::uuid
+          AND status = 'sent'
+          AND stage_id = ANY(${sql`ARRAY[${sql.join(
+            scope.stageIds.map((id) => sql`${id}`),
+            sql`, `,
+          )}]::int[]`})
+          AND sent_at >= ${todayStartUtc.toISOString()}::timestamptz
+          AND sent_at < ${scope.toExclusiveUtc.toISOString()}::timestamptz
+        GROUP BY stage_id
+      `)) as unknown as { stage_id: number; sent: number }[];
+      for (const r of rows) add(Number(r.stage_id), Number(r.sent));
+    }
+  }
+
+  return out;
+}
+
 export const FRESH_STALE_MINUTES = 30;
 /** Matches HEARTBEAT_JOBS.deliveryRollupSettle.max_age_hours (~2 missed settles). */
 export const SETTLE_STALE_HOURS = 7;

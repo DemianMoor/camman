@@ -50,6 +50,8 @@
 | `last_click_at < now() − 90d` | 1,059 ms | Parallel Seq Scan |
 | `last_click_at >= now() − 7d` | 1,022 ms | Parallel Seq Scan |
 
+Adding the eligibility join to a rule subquery costs a further 0.5–1.2 s each (`msgs_total >= 5`: 1,878 → 3,106 ms; `last_sent_at < now() − 30d`: 1,895 → 2,381 ms). 90,683 of 973,731 contacts are ineligible. That is the measurement behind decision 6.
+
 **Spec §4 specified `(org_id, last_sent_at)` and `(org_id, last_click_at)` indexes and migration 0187 did not create them.** That omission is invisible today because nothing queries those columns; it stops being invisible the moment these rule types exist. At ~1.2 s per rule, a segment with three of them spends 4 s of its 10 s preview budget before any set arithmetic. Task 1 adds both indexes.
 
 ## Decisions taken in this plan — override any of them
@@ -59,6 +61,28 @@
 3. **`lifecycle_status` gets its own value shape** (`lifecycle_status_set`), validated against `ENGAGEMENT_STATUSES`, rather than reusing the open `text_set`. This follows the existing convention that "the ALLOWED VALUES are part of the type so a typo cannot validate".
 4. **`messages_sent_in_period_at_least` gets a new `count_in_period` shape** `{count: N, days: 7|14|30|90}` — a set-shaped value, so it needs the four-place registration CLAUDE.md §10e warns about, not just two.
 5. **The activate-dialog Excl warning is NOT in this PR.** Spec §9 describes it next to these rules, but the rollout table puts it in PR 4 with the rest of the audience-block work, and it depends on the lifecycle-campaign flag PR 4 introduces.
+6. **None of the eight filters `messaging_status = 'eligible'` in its own subquery.** All eight rely on the global gate instead. See the section below — this reverses an earlier draft of this plan, which had the two contacts-driven cases filtering and the six engagement-driven ones not.
+
+## Eligibility: one behaviour for all eight (owner question, 2026-09-24)
+
+An earlier draft had `messages_sent_at_most` and `lifecycle_status` filtering `messaging_status = 'eligible'` while the other six did not. The owner flagged the asymmetry and set a tiebreaker: drop the filter from the two, **unless** the existing contacts-driven types apply it, in which case apply it to all eight for parity.
+
+The existing contacts-driven types do apply it — and reading *why* changes the answer, so the tiebreaker is not followed literally. Three findings:
+
+**1. There is already a global eligibility gate, and it is the correctness backstop.** `gateEligible()` in `lib/segment-rules-eval.ts` wraps the ENTIRE combined audience in an inner join on `messaging_status = 'eligible'`. Its own comment says it exists precisely to catch contacts that "enter via MANUAL membership (`segment_contacts`) or non-contacts rules (clickers, opt-ins, …), which the `is_not`/`contact_added` scan gates alone can't reach", and that gating there rather than per-consumer "means preview, snapshot, and every draft count share the exact same eligible audience". So no ineligible contact can reach an audience through any rule, filtered or not.
+
+**2. The per-rule literal is an INDEX device, not a correctness one.** The code says so where it uses it: *"messaging_status literal (NOT a bind) so the planner matches the partial index `contacts_org_created_eligible_idx`"*, and the same for `contacts_org_linetype_eligible_idx` / `contacts_org_carrier_eligible_idx`. The existing contacts-driven types filter because there is an eligible-partial index to match. **Neither of the two new contacts-driven cases has one**: 0188's `contacts_org_lifecycle_created_idx` is not partial, and `messages_sent_at_most` scans regardless. So copying the literal buys parity in spelling while buying nothing in kind.
+
+**3. Applying it to all eight costs real time for no correctness gain.** Measured on production, 2026-09-24:
+
+| rule subquery | bare | with the eligibility join |
+|---|---|---|
+| `msgs_total >= 5` | 1,878 ms | **3,106 ms** |
+| `last_sent_at < now() − 30d` | 1,895 ms | **2,381 ms** |
+
+That is +0.5 s to +1.2 s per rule, on six rules, against a 10 s preview budget already spending ~1.2 s per rule. (90,683 of 973,731 contacts are ineligible, so the intermediate sets genuinely differ — the difference simply never survives `gateEligible`.)
+
+**Decision: drop the filter from the two contacts-driven cases.** All eight then behave identically — none filters eligibility, all defer to the single global gate — which is the consistency the owner asked for, at no cost, and it puts the eight on the same footing as the clickers/opt-in rules rather than splitting the new family in half. Bar L9 in Task 5 proves the invariant that motivated the question.
 
 ---
 
@@ -352,12 +376,15 @@ Each returns a parameterised `SELECT contact_id FROM …`; the caller combines t
       // nothing, so it must match "at most N". An EXISTS/inner-join form
       // silently drops every one of them — the same trap PR 2b's list filter
       // hit. Driven from contacts so the row-less case is representable.
+      //
+      // NO messaging_status filter, like the other seven: gateEligible() gates
+      // the whole audience, and there is no eligible-partial index here to
+      // match. See "Eligibility: one behaviour for all eight" above.
       return drizzleSql`
         SELECT c.id AS contact_id FROM contacts c
         LEFT JOIN contact_engagement ce
           ON ce.contact_id = c.id AND ce.org_id = c.org_id
         WHERE c.org_id = ${orgId}::uuid
-          AND c.messaging_status = 'eligible'
           AND coalesce(ce.msgs_total, 0) <= ${Number(v)}::int
       `;
     case "messages_sent_in_period_at_least": {
@@ -404,12 +431,18 @@ Each returns a parameterised `SELECT contact_id FROM …`; the caller combines t
       // Reads the 0188 PROJECTION on contacts, not contact_engagement: the
       // same value (the job writes both in one transaction), NOT NULL so the
       // "missing row is new" case needs no coalesce, and indexed. Spec §9
-      // predates 0188. messaging_status literal so the eligible-partial
-      // indexes stay usable, as the neighbouring contacts cases do.
+      // predates 0188.
+      //
+      // NO messaging_status filter — unlike the neighbouring phone_type /
+      // carrier cases, which carry it to match an eligible-PARTIAL index.
+      // contacts_org_lifecycle_created_idx is not partial, so there is nothing
+      // to match, and gateEligible() gates the whole audience anyway. This is
+      // the only new type with is_not, so it is the one whose complement the
+      // asymmetry would have distorted — bar L9 proves it does not.
       const set = Array.isArray(v) ? (v as string[]) : [];
       return drizzleSql`
         SELECT id AS contact_id FROM contacts
-        WHERE org_id = ${orgId}::uuid AND messaging_status = 'eligible'
+        WHERE org_id = ${orgId}::uuid
           AND lifecycle_status = ANY(${drizzleSql.raw(textArrayLiteral(set))})
       `;
     }
@@ -492,8 +525,17 @@ A new `scripts/test-segment-rule-lifecycle.ts` in the house style (`_env-preload
 | L6 | `lifecycle_status is [hot, warm]` matches exactly those; `is_not [hot, warm]` is its complement within the org **and is not empty** |
 | L7 | a free N of 3 and of 365 both work on the four time rules (the owner's "any N") |
 | L8 | all eight types round-trip through `isRuleComplete` as COMPLETE with a valid value |
+| L9 | **`lifecycle_status is [hot,warm]` ∪ `is_not [hot,warm]` equals the SAME base set the other seven resolve against** — and that base set equals the org's eligible contacts |
 
-L2 and L6 are the bars that fail loudly if the traps in Task 2 Steps 4–5 are reintroduced.
+**L9 is the eligibility bar** the owner asked for. Evaluate all three sides through `buildSegmentAudienceClause`, not through `ruleInnerQuery`, because the invariant is a property of the finished clause — `gateEligible()` is part of what makes it true, and a test that skipped the gate would be testing a different thing. Build it as three segments in the throwaway org:
+
+- segment A: one rule, `lifecycle_status is [hot, warm]`
+- segment B: one rule, `lifecycle_status is_not [hot, warm]`
+- segment C: one rule that is neither and matches broadly, e.g. `messages_sent_at_most 1000000`
+
+Then assert `audience(A) ∪ audience(B) == audience(C) == {eligible contacts in the org}`, with **no overlap** between A and B, and with **both non-empty**. Include at least one INELIGIBLE contact (`messaging_status <> 'eligible'`) whose `lifecycle_status` is `hot` in the fixture — it is the row that would land on the wrong side if any of the eight started filtering eligibility on its own, and the row that proves the global gate is doing the work.
+
+L2, L6 and L9 are the bars that fail loudly if the traps in Task 2 Steps 4–5, or the eligibility asymmetry, are reintroduced.
 
 - [ ] **Step 3: End-to-end through the real API**
 

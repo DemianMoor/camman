@@ -28,9 +28,7 @@ const COUNT_CAP = 10_000;
 async function main() {
   const { db } = await import("@/db/client");
   const { contacts } = await import("@/db/schema");
-  const { lifecycleStatusCondition, lifecycleStatusExpr } = await import(
-    "@/lib/engagement/list-filter"
-  );
+  const { lifecycleStatusCondition } = await import("@/lib/engagement/list-filter");
   const { ENGAGEMENT_STATUSES } = await import("@/lib/engagement/constants");
 
   const orgs = (await db.execute(
@@ -41,8 +39,8 @@ async function main() {
   const host = new URL(process.env.DATABASE_URL ?? "postgres://x@unknown/x").hostname;
   console.log(`measuring against ${host}, org ${orgId}\n`);
 
-  // The same expression the route selects, imported rather than retyped.
-  const lifecycleStatusSql = lifecycleStatusExpr(orgId);
+  // The 0188 projection, read straight off the contacts row, as the route does.
+  const lifecycleStatusSql = contacts.lifecycle_status;
   const groupsAggSql = sql<string>`(
     select coalesce(json_agg(json_build_object(
       'id', cg."id", 'name', cg."name", 'color', cg."color"
@@ -104,14 +102,17 @@ async function main() {
   // how many contacts they match. Selectivity is the whole story here.
   const shapes: [string, ReturnType<typeof lifecycleStatusCondition>][] = [
     ["unfiltered", null],
-    ["cold (556K)", lifecycleStatusCondition(orgId, ["cold"])],
-    ["freeze (143K)", lifecycleStatusCondition(orgId, ["freeze"])],
-    ["new (123K)", lifecycleStatusCondition(orgId, ["new"])],
-    ["warm (46K)", lifecycleStatusCondition(orgId, ["warm"])],
-    ["hot (38K)", lifecycleStatusCondition(orgId, ["hot"])],
-    ["hot,warm (84K)", lifecycleStatusCondition(orgId, ["hot", "warm"])],
-    ["new,hot (161K)", lifecycleStatusCondition(orgId, ["new", "hot"])],
-    ["suppressed (0 — matches nobody until launch+60d)", lifecycleStatusCondition(orgId, ["suppressed"])],
+    ["cold (556K)", lifecycleStatusCondition(["cold"])],
+    ["freeze (143K)", lifecycleStatusCondition(["freeze"])],
+    ["new (123K)", lifecycleStatusCondition(["new"])],
+    ["warm (46K)", lifecycleStatusCondition(["warm"])],
+    ["hot (38K)", lifecycleStatusCondition(["hot"])],
+    ["hot,warm (84K)", lifecycleStatusCondition(["hot", "warm"])],
+    ["new,hot (161K)", lifecycleStatusCondition(["new", "hot"])],
+    ["suppressed (0 — matches nobody until launch+60d)", lifecycleStatusCondition(["suppressed"])],
+    // Two SPARSE, OLD statuses together — the multi-value path over the cohort
+    // whose correlation with created_at is worst.
+    ["freeze,suppressed (143K)", lifecycleStatusCondition(["freeze", "suppressed"])],
   ];
 
   let over = 0;

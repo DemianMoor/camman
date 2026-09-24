@@ -593,18 +593,29 @@ async function main() {
         WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[]) AND org_id = ${org}`)).n === 3);
 
     // ── PART H — the contacts-list status filter ─────────────────────────────
-    // Calls lifecycleStatusCondition, the function the route ships. A test that
-    // rebuilt the SQL would only compare the statement against a copy of itself.
-    // World right now: cHot hot, cBot freeze, cWarm has NO row, and the other
-    // five carry whatever Parts B/E left them.
+    // Since 0188 the filter reads contacts.lifecycle_status, so the fixture
+    // seeds THAT column: this part is about the predicate, not about whether
+    // the projection tracks contact_engagement (Part I owns that). Seeding it
+    // directly also keeps the two parts from sharing a failure.
     console.log("\nPART H — lifecycleStatusCondition (contacts list filter)");
     const { lifecycleStatusCondition, parseLifecycleStatuses } = await import(
       "@/lib/engagement/list-filter"
     );
     const { ENGAGEMENT_STATUSES: H_ALL } = await import("@/lib/engagement/constants");
 
+    const seed = async (c: { id: string }, status: string) =>
+      db.execute(sql`UPDATE contacts SET lifecycle_status = ${status} WHERE id = ${c.id}::uuid`);
+    await seed(cHot, "hot");
+    await seed(cWarm, "warm");
+    await seed(cBot, "freeze");
+    for (const c of [cCold, cFreeze, cD, cOpt]) await seed(c, "cold");
+    // cNew keeps the column DEFAULT — never written since the INSERT, which is
+    // exactly the state of a contact the job has not reached yet.
+    await db.execute(sql`
+      UPDATE contacts SET lifecycle_status = DEFAULT WHERE id = ${cNew.id}::uuid`);
+
     const countWith = async (statuses: readonly string[]) => {
-      const cond = lifecycleStatusCondition(orgId, statuses as never);
+      const cond = lifecycleStatusCondition(statuses as never);
       return Number(
         (await one<{ n: number }>(sql`
           SELECT count(*)::int AS n FROM contacts
@@ -612,27 +623,26 @@ async function main() {
       );
     };
 
-    const hStored = await one<{ n: number }>(sql`
-      SELECT count(*)::int AS n FROM contact_engagement WHERE org_id = ${org}`);
-    bar("H1 precondition: one of the 8 contacts has no contact_engagement row",
-      Number(hStored.n) === 7, `${hStored.n} stored rows`);
-
-    const hNew = await countWith(["new"]);
-    bar("H2 'new' finds the contact with NO engagement row — the bug a bare EXISTS causes",
-      hNew === 1, `matched ${hNew}`);
     const hHot = await countWith(["hot"]);
-    bar("H3 'hot' finds cHot", hHot === 1, `matched ${hHot}`);
+    const hNew = await countWith(["new"]);
+    bar("H1 a single status matches exactly its rows", hHot === 1, `hot matched ${hHot}`);
+    bar("H2 'new' matches the column default — a contact the job has not reached",
+      hNew === 1, `new matched ${hNew}`);
+    bar("H3 a many-row status matches all of them", (await countWith(["cold"])) === 4,
+      `cold matched ${await countWith(["cold"])}`);
     bar("H4 multi-select is a union", (await countWith(["hot", "new"])) === hHot + hNew,
       `${await countWith(["hot", "new"])} vs ${hHot}+${hNew}`);
+    bar("H5 a status nothing is in matches nothing",
+      (await countWith(["suppressed"])) === 0);
     const hAll = await countWith(H_ALL);
     const hNone = await countWith([]);
-    bar("H5 every status selected == no filter at all", hAll === hNone && hAll === 8,
+    bar("H6 every status selected == no filter at all", hAll === hNone && hAll === 8,
       `${hAll} vs ${hNone}`);
-    bar("H6 unknown values are dropped, and duplicates collapse",
+    bar("H7 unknown values are dropped, and duplicates collapse",
       parseLifecycleStatuses("hot,nonsense,hot, warm ").join(",") === "hot,warm",
       parseLifecycleStatuses("hot,nonsense,hot, warm ").join(","));
-    bar("H7 an empty param means no filter",
-      lifecycleStatusCondition(orgId, parseLifecycleStatuses(null)) === null);
+    bar("H8 an empty param means no filter",
+      lifecycleStatusCondition(parseLifecycleStatuses(null)) === null);
 
     // ── PART I — the 0188 projection on contacts.lifecycle_status ───────────
     // contact_engagement.status is the source of truth; contacts.lifecycle_status

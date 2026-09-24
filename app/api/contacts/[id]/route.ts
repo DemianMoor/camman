@@ -1,10 +1,12 @@
-import { and, eq, sql as drizzleSql } from "drizzle-orm";
+import { and, desc, eq, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import {
   contact_attributes,
   contact_contact_groups,
+  contact_engagement,
+  contact_engagement_transitions,
   contact_groups,
   contacts,
   opt_outs,
@@ -52,7 +54,8 @@ export async function GET(
   // page. Separate small queries rather than one wide LEFT JOIN: groups are
   // 1:N, so joining would fan the contact row out and every scalar would need
   // de-duplicating. Each of these is an indexed single-key lookup.
-  const [attrRows, groupRows, optOutRows] = await Promise.all([
+  const [attrRows, groupRows, optOutRows, engagementRows, transitionRows] =
+    await Promise.all([
     db
       .select()
       .from(contact_attributes)
@@ -81,6 +84,37 @@ export async function GET(
       .from(opt_outs)
       .where(and(eq(opt_outs.contact_id, id), eq(opt_outs.org_id, orgId)))
       .limit(5),
+    // Lifecycle (migration 0187/0188). Two more single-key index probes in the
+    // fan-out this route already runs: contact_engagement's primary key, and
+    // contact_engagement_transitions_contact_idx (contact_id, created_at).
+    db
+      .select()
+      .from(contact_engagement)
+      .where(
+        and(
+          eq(contact_engagement.contact_id, id),
+          eq(contact_engagement.org_id, orgId),
+        ),
+      )
+      .limit(1),
+    db
+      .select({
+        from_status: contact_engagement_transitions.from_status,
+        to_status: contact_engagement_transitions.to_status,
+        reason: contact_engagement_transitions.reason,
+        created_at: contact_engagement_transitions.created_at,
+      })
+      .from(contact_engagement_transitions)
+      .where(
+        and(
+          eq(contact_engagement_transitions.contact_id, id),
+          eq(contact_engagement_transitions.org_id, orgId),
+        ),
+      )
+      // Explicit, unlike the opt_outs lookup above: a history list without an
+      // order is not a history list.
+      .orderBy(desc(contact_engagement_transitions.created_at))
+      .limit(20),
   ]);
 
   const attrs = attrRows[0] ?? null;
@@ -96,6 +130,11 @@ export async function GET(
     age_band: attrs?.dob ? ageBandFromDob(attrs.dob) : null,
     groups: groupRows,
     opt_outs: optOutRows,
+    // null when the job has never evaluated this contact. The page renders that
+    // as "New — not yet evaluated" rather than inventing a status_changed_at: a
+    // missing row IS 'new', but it is not the same as a row that says 'new'.
+    lifecycle: engagementRows[0] ?? null,
+    lifecycle_transitions: transitionRows,
   });
 }
 

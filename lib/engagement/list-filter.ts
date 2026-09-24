@@ -19,59 +19,40 @@ export function parseLifecycleStatuses(raw: string | null): EngagementStatus[] {
 }
 
 /**
- * The contact's effective lifecycle status as a scalar: the stored status, or
- * 'new' when there is no contact_engagement row. That fallback is the contract
- * (db/schema.ts:4106-4108) and it is not a corner case — 122,653 of 906,082
- * production contacts had no row on 2026-09-23.
- *
- * The contacts list route selects this same expression as its column, so the
- * column and the filter below cannot disagree by construction.
- */
-export function lifecycleStatusExpr(orgId: string): SQL<string> {
-  return sql<string>`coalesce((
-    select ce."status" from "contact_engagement" ce
-    where ce."contact_id" = ${contacts.id} and ce."org_id" = ${orgId}
-  ), 'new')`;
-}
-
-/**
  * A contacts-list predicate for "lifecycle status is one of these".
+ *
+ * Reads `contacts.lifecycle_status` — the projection migration 0188 added and
+ * lib/engagement/refresh.ts maintains. That column is NOT NULL with default
+ * 'new', so the "a contact the job has never seen is new" contract is carried
+ * by the column itself and needs no `coalesce` or `NOT EXISTS` arm here.
+ *
+ * Before 0188 this had to reach into contact_engagement, and no spelling of it
+ * was fast: the list sorts by created_at while status lived in another table,
+ * so the planner walked contacts testing rows (measured on production: freeze
+ * 3,931 ms, suppressed 13,413 ms against a 300 ms bar). With the column and
+ * `contacts_org_lifecycle_created_idx (org_id, lifecycle_status, created_at
+ * DESC)` it is an index range scan.
  *
  * Returns null when no status or every status is selected, so the caller adds
  * no predicate at all rather than a tautology the planner has to prove.
- *
- * ── WHY A SCALAR SUBQUERY AND NOT `EXISTS` ─────────────────────────────────
- * The obvious spelling is `exists (… ce.status = ANY(…))`, with a second
- * `not exists` arm so that contacts with no row still count as 'new'. It is
- * correct, and measured on production (2026-09-23) it is far too slow, because
- * Postgres is free to pull a correlated EXISTS up into a semi-join:
- *
- *   - filtering to `new`, the page query built a HASHED SubPlan over all
- *     122,653 matching contacts before it could return the first of 21 rows —
- *     1,154 ms, essentially all of it startup cost;
- *   - the capped count for `hot,warm` flipped to a nested loop driven from
- *     contact_engagement, probing contacts_pkey 10,001 times at ~0.29 ms of
- *     random I/O each — 3,673 ms.
- *
- * A correlated SCALAR subquery cannot be pulled up or hashed, so the planner
- * has to evaluate it per candidate row against contact_engagement's primary
- * key. For a 20-row page that is ~21 index probes instead of a 122K-row hash.
- *
- * It also collapses the two arms into one expression: `coalesce(status,'new')`
- * says "a missing row is new" once, rather than encoding it as an OR that the
- * next person can simplify away without noticing.
  */
-export function lifecycleStatusCondition(
-  orgId: string,
-  statuses: EngagementStatus[],
-): SQL | null {
+export function lifecycleStatusCondition(statuses: EngagementStatus[]): SQL | null {
   if (statuses.length === 0 || statuses.length === ENGAGEMENT_STATUSES.length) {
     return null;
   }
-  // Values are parameterised one by one — interpolating the JS array into the
-  // template would flatten it into positional params.
-  return sql`${lifecycleStatusExpr(orgId)} = ANY(ARRAY[${sql.join(
-    statuses.map((s) => sql`${s}`),
-    sql`, `,
-  )}]::text[])`;
+  // ONE status is emitted as plain equality, not a one-element ANY(). That is
+  // not cosmetic. `= ANY(ARRAY[…])` is a ScalarArrayOpExpr, and an index scan
+  // under one cannot promise its rows in index order, so the planner will not
+  // use contacts_org_lifecycle_created_idx to satisfy `ORDER BY created_at DESC
+  // LIMIT 21` — it falls back to scanning contacts_org_id_created_at_idx and
+  // filtering. Measured on production for `freeze`: 852 ms, having discarded
+  // 236,215 rows, because it assumes matches are spread evenly along created_at
+  // and they are not (freeze contacts are the old ones). Plain equality lets the
+  // composite index provide both the match and the ordering.
+  const values = statuses.map((s) => sql`${s}`);
+  return values.length === 1
+    ? sql`${contacts.lifecycle_status} = ${statuses[0]}`
+    : // Values are parameterised one by one — interpolating the JS array into
+      // the template would flatten it into positional params.
+      sql`${contacts.lifecycle_status} = ANY(ARRAY[${sql.join(values, sql`, `)}]::text[])`;
 }

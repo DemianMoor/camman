@@ -26,6 +26,14 @@ import { DataTable } from "@/components/data-table";
 import { ExportButton } from "@/components/export-button";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import {
+  ENGAGEMENT_STATUSES,
+  type EngagementStatus,
+} from "@/lib/engagement/constants";
+import {
+  ENGAGEMENT_STATUS_CLASSES,
+  ENGAGEMENT_STATUS_LABELS,
+} from "@/lib/engagement/labels";
+import {
   PhoneUploadForm,
   type UploadResultSummary,
 } from "@/components/phone-upload-form";
@@ -91,6 +99,9 @@ type Contact = {
   // Distinct opt_outs reasons present for this contact. Drives the
   // "Status indicators" column. Empty when the contact has no suppressions.
   statuses: string[];
+  // The 0188 projection of contact_engagement.status. NOT NULL in the DB, so a
+  // contact the job has not reached yet arrives as 'new'.
+  lifecycle_status: string;
 };
 
 // Contacts is the ONE screen where landlines remain visible, so the Type
@@ -167,6 +178,7 @@ type Filters = {
   sortBy: string;
   sortDir: "asc" | "desc";
   group_ids: number[];
+  lifecycle_status: string[];
 };
 
 const DEFAULT_FILTERS: Filters = {
@@ -177,6 +189,7 @@ const DEFAULT_FILTERS: Filters = {
   sortBy: "created_at",
   sortDir: "desc",
   group_ids: [],
+  lifecycle_status: [],
 };
 
 const VIEW_LABELS: Record<ContactView, string> = {
@@ -403,7 +416,14 @@ export default function ContactsPage() {
   const filtersAreDefault =
     filters.search === DEFAULT_FILTERS.search &&
     filters.view === DEFAULT_FILTERS.view &&
-    filters.group_ids.length === 0;
+    filters.group_ids.length === 0 &&
+    filters.lifecycle_status.length === 0;
+
+  // Array identity changes every render; collapse to a stable string so the
+  // effects below depend on the VALUE, not the array object. Extracting it is
+  // what react-hooks/exhaustive-deps asks for instead of a complex expression
+  // inline in the dependency array.
+  const lifecycleKey = filters.lifecycle_status.join(",");
 
   const [searchInput, setSearchInput] = useState(filters.search);
   useEffect(() => {
@@ -465,7 +485,13 @@ export default function ContactsPage() {
   // Clear selection when the page or view changes — different rows now.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [filters.page, filters.view, filters.search, filters.group_ids.join(",")]);
+  }, [
+    filters.page,
+    filters.view,
+    filters.search,
+    filters.group_ids.join(","),
+    lifecycleKey,
+  ]);
 
   // Bulk-apply-groups dialog.
   const [applyOpen, setApplyOpen] = useState(false);
@@ -507,6 +533,8 @@ export default function ContactsPage() {
     if (filters.search) params.set("search", filters.search);
     if (filters.group_ids.length > 0)
       params.set("group_ids", filters.group_ids.join(","));
+    if (filters.lifecycle_status.length > 0)
+      params.set("lifecycle_status", filters.lifecycle_status.join(","));
 
     (async () => {
       const result = await listApi.execute(
@@ -536,6 +564,7 @@ export default function ContactsPage() {
     filters.search,
     filters.view,
     filters.group_ids.join(","),
+    lifecycleKey,
     refreshTick,
     listApi.execute,
   ]);
@@ -789,6 +818,30 @@ export default function ContactsPage() {
         },
       },
       {
+        id: "lifecycle_status",
+        header: "Lifecycle",
+        // NOT sortable: the list API's SORT_COLUMNS whitelist is
+        // (phone_number, created_at) and an unknown sortBy silently falls back
+        // to created_at, so a sortable header would look like it worked and
+        // would not.
+        enableSorting: false,
+        cell: ({ row }) => {
+          const st = row.original.lifecycle_status as EngagementStatus;
+          const label = ENGAGEMENT_STATUS_LABELS[st];
+          if (!label) return <span className="text-muted-foreground">—</span>;
+          return (
+            <span
+              className={cn(
+                "inline-flex items-center rounded-md border px-1.5 py-0.5 text-xs",
+                ENGAGEMENT_STATUS_CLASSES[st],
+              )}
+            >
+              {label}
+            </span>
+          );
+        },
+      },
+      {
         id: "groups",
         header: "Groups",
         enableSorting: false,
@@ -1001,6 +1054,22 @@ export default function ContactsPage() {
             isLoading={groupsApi.isLoading && contactGroups.length === 0}
             emptyMessage="No contact groups available."
             searchPlaceholder="Search groups…"
+          />
+        </div>
+        <div className="w-[230px]">
+          <MultiSelectPicker
+            options={ENGAGEMENT_STATUSES.map((st) => ({
+              id: st,
+              label: ENGAGEMENT_STATUS_LABELS[st],
+            }))}
+            value={filters.lifecycle_status}
+            onChange={(next) =>
+              updateFilters({ lifecycle_status: next as string[], page: 0 })
+            }
+            placeholder="Filter by lifecycle"
+            selectedLabel={(n) => `${n} status${n === 1 ? "" : "es"} filtered`}
+            emptyMessage="No lifecycle statuses."
+            searchPlaceholder="Search statuses…"
           />
         </div>
         {!filtersAreDefault ? (

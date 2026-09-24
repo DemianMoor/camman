@@ -205,8 +205,15 @@ async function main() {
 
       const updatedAtAfter = await maxUpdatedAt();
       console.log(`   contacts.updated_at high-water after:  ${updatedAtAfter}`);
+      // Compare by VALUE. postgres-js hands back Date objects, and `===` on two
+      // distinct Dates is object identity — always false, so the 2026-09-24 run
+      // reported "moved" against two byte-identical timestamps.
+      const sameInstant =
+        (updatedAtBefore == null) === (updatedAtAfter == null) &&
+        (updatedAtBefore == null ||
+          new Date(updatedAtBefore).getTime() === new Date(updatedAtAfter!).getTime());
       console.log(
-        updatedAtAfter === updatedAtBefore
+        sameInstant
           ? "   updated_at did not move ✓"
           : "   ⚠ updated_at moved — check whether something else edited contacts during the window",
       );

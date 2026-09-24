@@ -633,6 +633,59 @@ async function main() {
       parseLifecycleStatuses("hot,nonsense,hot, warm ").join(","));
     bar("H7 an empty param means no filter",
       lifecycleStatusCondition(orgId, parseLifecycleStatuses(null)) === null);
+
+    // ── PART I — the 0188 projection on contacts.lifecycle_status ───────────
+    // contact_engagement.status is the source of truth; contacts.lifecycle_status
+    // is a projection the job maintains in the same transaction as the
+    // transition row. The bar that matters is that they NEVER disagree after a
+    // run — and that a drifted row heals rather than staying wrong forever,
+    // which is what makes the 0188 reconcile safe to run at any time.
+    console.log("\nPART I — contacts.lifecycle_status projection");
+
+    const drift = async () =>
+      Number(
+        (await one<{ n: number }>(sql`
+          SELECT count(*)::int AS n
+          FROM contacts c
+          JOIN contact_engagement ce ON ce.contact_id = c.id AND ce.org_id = c.org_id
+          WHERE c.org_id = ${org} AND c.lifecycle_status IS DISTINCT FROM ce.status`)).n,
+      );
+
+    // Deliberately corrupt one row, the way a failed transaction or the window
+    // between 0188's backfill and this code deploying would.
+    await db.execute(sql`
+      UPDATE contacts SET lifecycle_status = 'suppressed' WHERE id = ${cCold.id}::uuid`);
+    bar("I1 a drifted row is visible before the run", (await drift()) >= 1);
+
+    const iRun = await run({ mode: "full", dryRun: false, asOf: A4 });
+    bar("I2 after a job run the projection and the source do not disagree",
+      (await drift()) === 0, `${await drift()} disagreeing`);
+    bar("I3 the run reports what it re-projected",
+      iRun.projectionWritten >= 1, `projectionWritten=${iRun.projectionWritten}`);
+
+    // A dry run must not touch the projection either.
+    await db.execute(sql`
+      UPDATE contacts SET lifecycle_status = 'hot' WHERE id = ${cCold.id}::uuid`);
+    const iDry = await run({ mode: "full", dryRun: true, asOf: A4 });
+    bar("I4 a dry run writes no projection", iDry.projectionWritten === 0 && (await drift()) === 1,
+      `projectionWritten=${iDry.projectionWritten}`);
+    await run({ mode: "full", dryRun: false, asOf: A4 }); // heal it again
+
+    // A contact the job has never seen: no engagement row, and the column's
+    // default is the same 'new' the rest of the system reads for it.
+    const orphanPhone = fictionalPhones(9)[8];
+    await refuseIfPhonesInUse(db, [orphanPhone]);
+    const orphan = await one<{ id: string; lifecycle_status: string }>(sql`
+      INSERT INTO contacts (org_id, phone_number) VALUES (${org}, ${orphanPhone})
+      RETURNING id, lifecycle_status`);
+    const orphanHasRow = Number(
+      (await one<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM contact_engagement
+        WHERE contact_id = ${orphan.id}::uuid`)).n,
+    );
+    bar("I5 a contact with no engagement row reads 'new'",
+      orphan.lifecycle_status === "new" && orphanHasRow === 0,
+      `${orphan.lifecycle_status}, engagement rows=${orphanHasRow}`);
   } finally {
     if (orgId) {
       const name = (await all<{ name: string }>(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))[0]?.name ?? "";

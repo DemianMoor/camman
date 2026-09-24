@@ -447,7 +447,7 @@ export function PhoneUploadForm({
           ) : null}
           {typeof result.unattributed === "number" ? (
             <Stat
-              label="Suppressed only"
+              label="Global suppression only"
               value={result.unattributed}
               tone="muted"
             />

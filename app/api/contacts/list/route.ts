@@ -24,6 +24,11 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import {
+  lifecycleStatusCondition,
+  lifecycleStatusExpr,
+  parseLifecycleStatuses,
+} from "@/lib/engagement/list-filter";
 import { can } from "@/lib/permissions";
 
 const SORT_COLUMNS = {
@@ -67,6 +72,10 @@ export async function GET(req: NextRequest) {
         .filter((s) => /^\d+$/.test(s))
         .map((s) => Number(s))
     : [];
+  // lifecycle_status=hot,warm — comma-separated, any-of. Whitelisted against
+  // ENGAGEMENT_STATUSES; unknown values are dropped, like every other filter
+  // on this route.
+  const lifecycleStatuses = parseLifecycleStatuses(sp.get("lifecycle_status"));
 
   const conditions = [eq(contacts.org_id, orgId)];
   if (groupIds.length > 0) {
@@ -82,6 +91,12 @@ export async function GET(req: NextRequest) {
       )`,
     );
   }
+  // Pushed into `conditions` on purpose, NOT added as a LEFT JOIN: this array
+  // builds the single `where` that both the page query and the capped count
+  // subquery consume, so the filtered count cannot disagree with the filtered
+  // page. A join would have to be duplicated into both.
+  const lifecycleCondition = lifecycleStatusCondition(orgId, lifecycleStatuses);
+  if (lifecycleCondition) conditions.push(lifecycleCondition);
   if (segmentId !== null) {
     conditions.push(
       exists(
@@ -182,6 +197,16 @@ export async function GET(req: NextRequest) {
     where oo."contact_id" = "contacts"."id" and oo."org_id" = ${orgId}
   )`;
 
+  // Lifecycle status for the column. The page query ONLY — 20 rows, so this is
+  // 20 primary-key probes. Deliberately not a LEFT JOIN: the capped count
+  // below builds its own FROM, and a join added to one and not the other is
+  // how a filtered count and a filtered page drift apart. A contact with no
+  // contact_engagement row is 'new' (db/schema.ts:4106-4108).
+  //
+  // Same expression the filter above is built from, so the column and the
+  // filter cannot disagree.
+  const lifecycleStatusSql = lifecycleStatusExpr(orgId);
+
   // Exact count(*) over an org's contacts is inherently O(rows) — ~670ms on a
   // 752K-row org (an index can't help; measured). Cap the scan: count at most
   // COUNT_CAP+1 rows, so the count stays cheap. Under the cap it's the exact
@@ -211,6 +236,7 @@ export async function GET(req: NextRequest) {
         messaging_status: contacts.messaging_status,
         groups: groupsAggSql,
         statuses: statusesAggSql,
+        lifecycle_status: lifecycleStatusSql,
       })
       .from(contacts)
       .where(where)

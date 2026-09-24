@@ -1,9 +1,12 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-09-23_
+_Last updated: 2026-09-24_
 
-**PR 1 + 2a shipped.** The statuses are computed and stored, and the thresholds
-that decide them are editable (§8). Nothing selects an audience by status yet. Segment rules (PR 3), the campaign lifecycle chips and
+**PR 1 + 2a shipped, PR 2b part 1 shipped.** The statuses are computed and
+stored, the thresholds that decide them are editable (§8), every send records
+the status it was prepared under, and `contacts.lifecycle_status` carries a
+queryable projection of the status (§3a). Nothing selects an audience by status
+yet. Segment rules (PR 3), the campaign lifecycle chips and
 the eligibility layers (PR 4) and the cohort report (PR 5) follow.
 Design: [2026-09-22-contact-lifecycle-status-design.md](../superpowers/specs/2026-09-22-contact-lifecycle-status-design.md).
 
@@ -59,7 +62,8 @@ means Global Suppression. The user-facing label is still "Suppressed".
 | `lifecycle_settings` | org thresholds + `engine_mode` (the job's on/off switch) |
 | `contact_groups.{freeze_after_messages, freeze_cadence_days, suppress_after_days, suppress_min_freeze_messages}` | per-group overrides, NULL = inherit |
 | `contact_offer_campaigns` | per (contact, offer, campaign) exposure — the grain ClickUp 869f53efz needs |
-| `stage_send_lifecycle` | status-at-send for the cohort report (filled in PR 2 / PR 5) |
+| `stage_send_lifecycle` | status-at-send, written at Prepare (§3b); read by the PR 5 cohort report |
+| `contacts.lifecycle_status` | denormalised PROJECTION of `contact_engagement.status` (§3a) |
 | `campaigns.lifecycle_rules` | false on every pre-existing campaign; gates the PR 4 eligibility layers |
 
 Code: [lib/engagement/](../../lib/engagement/) — `constants.ts`, `status-sql.ts`
@@ -71,6 +75,61 @@ and [scripts/engagement-backfill.ts](../../scripts/engagement-backfill.ts).
 the contract, so a contact uploaded seconds ago is correct before the job has
 seen it, and the incremental run never has to create rows for contacts nothing
 has happened to.
+
+### 3a. `contacts.lifecycle_status` — the projection (migration 0188)
+
+`contact_engagement.status` is the source of truth. `contacts.lifecycle_status`
+is a copy of it on the `contacts` row, maintained by the job.
+
+It exists because the contacts list filters by status and sorts newest-first,
+and those two facts live in different tables — so no index can answer "the
+newest 21 contacts whose status is X". Status also correlates strongly with age
+(freeze and suppressed contacts are by definition the old, heavily-messaged
+ones), so the planner had to walk `contacts` by `created_at` a very long way
+before finding a page. Measured on production, page query:
+
+| filter | before 0188 | bar |
+|---|---|---|
+| cold | 18 ms | 300 ms |
+| new | 4 ms | 300 ms |
+| warm | 572 ms | 300 ms |
+| freeze | 3,931 ms | 300 ms |
+| suppressed | 13,413 ms | 300 ms |
+
+Three predicate shapes were measured (correlated `EXISTS`, correlated scalar
+`coalesce`, and both ANDed). Each has a different pathological case, because the
+problem is the absence of an index rather than the spelling of the `WHERE`
+clause. Index `contacts_org_lifecycle_created_idx (org_id, lifecycle_status,
+created_at DESC)` turns every one of those into a range scan.
+
+Rules for anyone touching it:
+
+- **Only [lib/engagement/refresh.ts](../../lib/engagement/refresh.ts) writes it**,
+  in the same transaction as the `contact_engagement_transitions` row, so a
+  status change and its projection commit together or not at all.
+- The write is guarded by `IS DISTINCT FROM`, which keeps it to genuinely
+  changed rows **and** makes the projection **self-healing**: a row that drifted
+  (a failed transaction, or the window between 0188's backfill and the job
+  deploying) is corrected by the next run that evaluates it. A `--mode=full`
+  recount therefore reconciles everything.
+- A contact the job has never seen keeps the column default `'new'`, which is
+  the same contract `contact_engagement`'s missing row follows.
+- Read it for filtering and sorting. Read `contact_engagement` for anything that
+  needs the facts behind the status, and for correctness-critical reads.
+
+### 3b. Status-at-send
+
+`stage_send_lifecycle` records the status a contact held **when the send was
+prepared**, because send rows are never rewritten and the cohort report has to
+group by the status that applied at the time, not today's.
+
+It is written by a CTE inside `bulkInsertStageSends`
+([lib/sends/kickoff.ts](../../lib/sends/kickoff.ts)) — the same statement that
+inserts the sends, so a stamp cannot exist without its send and it costs no
+extra round trip. `ON CONFLICT (stage_send_id) DO NOTHING` keeps
+re-materialization idempotent, matching the send insert's own conflict clause.
+It reads `contact_engagement` directly, not the projection. Stamping changes no
+send behaviour, so it applies to every campaign, legacy ones included.
 
 ## 4. The job
 

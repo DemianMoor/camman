@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-23_
+_Last updated: 2026-09-24_
 
 ## A frozen first column is OPT-IN PER TABLE, and it must stay that way (2026-09-23)
 
@@ -3917,3 +3917,30 @@ Two details that are easy to get wrong:
 - **A fallback onto a SHARED resource must not clean it up.** The dedicated connection is closed in a `finally`; the shared pool handed over on the fallback path must not be, or a cron job tears down the pool the whole app uses. Scope the teardown to the path that owns the thing.
 
 And test it with the notifier injected and the real credentials deleted from the environment — `notifyTelegram` reads `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` at call time, so `delete process.env.…` at the top of the suite makes an accidental real send impossible even if a spy is ever forgotten.
+
+## "Suppressed" means two different things — label them apart
+
+`opt_outs.reason = 'suppressed'` is **Global suppression**: an uploaded
+do-not-contact list. `contact_engagement.status = 'suppressed'` is the **end of
+the lifecycle**: a contact that stopped responding to messages. Both can appear
+on the same contacts row, so they must never both render as "Suppressed".
+
+- Opt-out reasons are labelled from `CONTACT_STATUS_LABELS`
+  ([lib/imports/contact-status.ts](../lib/imports/contact-status.ts)), where
+  `suppressed` reads **"Global suppression"**.
+- Lifecycle statuses are labelled from `ENGAGEMENT_STATUS_LABELS`
+  ([lib/engagement/labels.ts](../lib/engagement/labels.ts)), where `suppressed`
+  reads **"Suppressed"**.
+
+Never hardcode either string in a component; the DB values are unchanged and
+must stay `suppressed` on both sides. The CSV status importer accepts both
+"suppressed" and "global suppression" as input tokens.
+
+## A missing `contact_engagement` row IS `new`
+
+Not "unknown", not "excluded" — `new`. Anything filtering on lifecycle status
+must go through `lifecycleStatusCondition()`
+([lib/engagement/list-filter.ts](../lib/engagement/list-filter.ts)) or read the
+`contacts.lifecycle_status` projection, both of which encode that. A bare
+`EXISTS (SELECT 1 FROM contact_engagement …)` filter silently drops every
+unevaluated contact.

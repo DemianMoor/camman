@@ -223,9 +223,18 @@ export function ContactStatusImportForm({
             value={result.contacts_affected}
             tone="success"
           />
-          <Stat label="Opt-outs" value={result.by_reason.opt_out} />
-          <Stat label="Suppressed" value={result.by_reason.suppressed} />
-          <Stat label="Scrubbed" value={result.by_reason.scrubbed} />
+          <Stat
+            label={CONTACT_STATUS_LABELS.opt_out}
+            value={result.by_reason.opt_out}
+          />
+          <Stat
+            label={CONTACT_STATUS_LABELS.suppressed}
+            value={result.by_reason.suppressed}
+          />
+          <Stat
+            label={CONTACT_STATUS_LABELS.scrubbed}
+            value={result.by_reason.scrubbed}
+          />
           <Stat
             label="Already set"
             value={result.already_set}
@@ -339,7 +348,7 @@ export function ContactStatusImportForm({
           </Label>
           <Textarea
             id="status-paste"
-            placeholder={"+1 202 555 0199, Unsubscribed\n+1 202 555 0200, Landline\n+1 202 555 0201, Suppressed"}
+            placeholder={"+1 202 555 0199, Unsubscribed\n+1 202 555 0200, Landline\n+1 202 555 0201, Global suppression"}
             rows={8}
             value={pasteValue}
             onChange={(e) => setPasteValue(e.target.value)}

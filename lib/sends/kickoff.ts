@@ -856,7 +856,23 @@ const STAGE_SENDS_CHUNK = 1000;
 // windowed materialization idempotent: a concurrent materializer (or a retried
 // window) can't create a second active row for a contact. Returns the number of
 // rows actually inserted (RETURNING count) so the caller's progress is accurate.
-async function bulkInsertStageSends(
+//
+// The `stamp` CTE records the contact's lifecycle status AT PREPARE TIME (spec
+// §10): send rows are never rewritten, so the cohort report has to group by the
+// status that applied when the send was made, not today's. It is part of THIS
+// statement, not a follow-up, so a stamp can never exist without its send or
+// vice versa, and it costs no extra round trip on a path that already inserts
+// 13 columns x 1000 rows per chunk. `coalesce(ce.status, 'new')` is the
+// documented contract for a contact the job has not evaluated yet. Stamping
+// changes no send behaviour, so it applies to every campaign, legacy included.
+//
+// `SELECT id FROM ins` is what keeps the return value meaning "rows actually
+// inserted" — do not turn it into a count.
+//
+// Exported only so scripts/test-engagement-db.ts can exercise the real
+// statement rather than a retyped copy of it. No application code outside this
+// module calls it.
+export async function bulkInsertStageSends(
   tx: DbOrTx,
   rows: StageSendInsertRow[],
 ): Promise<number> {
@@ -871,13 +887,23 @@ async function bulkInsertStageSends(
       )`,
     );
     const res = (await tx.execute(sql`
-      INSERT INTO stage_sends
-        (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
-         rendered_text, status, lead_id, carrier_norm, provider_phone_id, cost_per_sms)
-      VALUES ${sql.join(values, sql`, `)}
-      ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending', 'sending')
-      DO NOTHING
-      RETURNING id
+      WITH ins AS (
+        INSERT INTO stage_sends
+          (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
+           rendered_text, status, lead_id, carrier_norm, provider_phone_id, cost_per_sms)
+        VALUES ${sql.join(values, sql`, `)}
+        ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending', 'sending')
+        DO NOTHING
+        RETURNING id, org_id, contact_id
+      ), stamp AS (
+        INSERT INTO stage_send_lifecycle (stage_send_id, org_id, status)
+        SELECT ins.id, ins.org_id, coalesce(ce.status, 'new')
+        FROM ins
+        LEFT JOIN contact_engagement ce
+          ON ce.contact_id = ins.contact_id AND ce.org_id = ins.org_id
+        ON CONFLICT (stage_send_id) DO NOTHING
+      )
+      SELECT id FROM ins
     `)) as unknown as { id: string }[];
     inserted += Array.isArray(res) ? res.length : 0;
   }

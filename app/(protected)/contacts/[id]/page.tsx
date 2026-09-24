@@ -17,6 +17,7 @@ import {
   ATTRIBUTE_FIELDS,
   INCOME_BAND_LABELS,
 } from "@/lib/contact-attributes";
+import { CONTACT_STATUS_LABELS } from "@/lib/imports/contact-status";
 
 // Contact detail (Drip Phase 1, item 1c).
 //
@@ -217,7 +218,14 @@ export default function ContactDetailPage() {
             <ul className="space-y-1 text-sm">
               {contact.opt_outs.map((o, i) => (
                 <li key={i} className="flex gap-3">
-                  <Badge variant="outline">{o.reason}</Badge>
+                  {/* opt_outs.reason can also be `bounced`, which is not one
+                      of the three importable statuses — hence the fallback,
+                      without which that badge would render empty. */}
+                  <Badge variant="outline">
+                    {CONTACT_STATUS_LABELS[
+                      o.reason as keyof typeof CONTACT_STATUS_LABELS
+                    ] ?? o.reason}
+                  </Badge>
                   <span className="text-muted-foreground">
                     {format(new Date(o.created_at), "d MMM yyyy HH:mm")}
                   </span>

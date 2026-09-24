@@ -529,6 +529,163 @@ async function main() {
     bar("R7 recorded as a transition carrying the NEW thresholds",
       cBotLast.t.freeze_after_messages === 3, JSON.stringify(cBotLast));
     await db.execute(sql`UPDATE lifecycle_settings SET freeze_after_messages = 10 WHERE org_id = ${org}`);
+
+    // ── PART G — status-at-send stamping (PR 2b) ─────────────────────────────
+    // stage_send_lifecycle records what a contact's status WAS when the send
+    // was materialized. It is written by a CTE inside bulkInsertStageSends —
+    // the real statement is imported here, because a test that rebuilds the
+    // SQL only compares the statement against a copy of itself.
+    console.log("\nPART G — stage_send_lifecycle stamping at Prepare");
+    const { bulkInsertStageSends } = await import("@/lib/sends/kickoff");
+
+    // Three known statuses, including the one that has no row at all. Deleting
+    // cWarm's row is how a contact uploaded minutes ago looks: no
+    // contact_engagement record yet, which IS 'new' by contract
+    // (db/schema.ts:4106-4108).
+    await db.execute(sql`UPDATE contact_engagement SET status = 'hot' WHERE contact_id = ${cHot.id}::uuid`);
+    await db.execute(sql`UPDATE contact_engagement SET status = 'freeze' WHERE contact_id = ${cBot.id}::uuid`);
+    await db.execute(sql`DELETE FROM contact_engagement WHERE contact_id = ${cWarm.id}::uuid`);
+
+    const gRows = [cHot, cBot, cWarm].map((c) => ({
+      id: crypto.randomUUID(),
+      orgId,
+      campaignId: K1,
+      stageId: S1,
+      contactId: c.id,
+      phone: c.phone,
+      linkId: null,
+      renderedText: "part G",
+      leadId: `lead-${tag}-${c.id.slice(0, 8)}`,
+      carrierNorm: null,
+      providerPhoneId: null,
+      costPerSms: null,
+    }));
+    const gIds = sql.join(gRows.map((r) => sql`${r.id}`), sql`, `);
+
+    const gInserted = await bulkInsertStageSends(db, gRows);
+    bar("G1 the insert still returns one row per send", gInserted === 3, `got ${gInserted}`);
+
+    const gStamped = await all<{ status: string; reconstructed: boolean }>(sql`
+      SELECT status, reconstructed FROM stage_send_lifecycle
+      WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[]) ORDER BY status`);
+    bar("G2 every inserted send is stamped, and live rows are not reconstructed",
+      gStamped.length === 3 && gStamped.every((r) => r.reconstructed === false),
+      JSON.stringify(gStamped));
+    bar("G3 hot/freeze stamp themselves; a contact with NO engagement row stamps 'new'",
+      gStamped.map((r) => r.status).join(",") === "freeze,hot,new",
+      gStamped.map((r) => r.status).join(","));
+
+    // Re-materialization is idempotent by design: the send insert conflicts
+    // away, so the stamp must too — and must not duplicate or overwrite.
+    await db.execute(sql`UPDATE stage_send_lifecycle SET status = 'cold' WHERE stage_send_id = ${gRows[0].id}::uuid`);
+    const gAgain = await bulkInsertStageSends(db, gRows);
+    const gCount = await one<{ n: number }>(sql`
+      SELECT count(*)::int AS n FROM stage_send_lifecycle WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[])`);
+    const gKept = await one<{ status: string } | undefined>(sql`
+      SELECT status FROM stage_send_lifecycle WHERE stage_send_id = ${gRows[0].id}::uuid`);
+    bar("G4 re-running inserts no send, no duplicate stamp, and does not overwrite",
+      gAgain === 0 && Number(gCount.n) === 3 && gKept?.status === "cold",
+      JSON.stringify({ gAgain, n: gCount.n, kept: gKept?.status ?? null }));
+
+    bar("G5 the stamp is scoped to the send's org",
+      (await one<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM stage_send_lifecycle
+        WHERE stage_send_id = ANY(ARRAY[${gIds}]::uuid[]) AND org_id = ${org}`)).n === 3);
+
+    // ── PART H — the contacts-list status filter ─────────────────────────────
+    // Calls lifecycleStatusCondition, the function the route ships. A test that
+    // rebuilt the SQL would only compare the statement against a copy of itself.
+    // World right now: cHot hot, cBot freeze, cWarm has NO row, and the other
+    // five carry whatever Parts B/E left them.
+    console.log("\nPART H — lifecycleStatusCondition (contacts list filter)");
+    const { lifecycleStatusCondition, parseLifecycleStatuses } = await import(
+      "@/lib/engagement/list-filter"
+    );
+    const { ENGAGEMENT_STATUSES: H_ALL } = await import("@/lib/engagement/constants");
+
+    const countWith = async (statuses: readonly string[]) => {
+      const cond = lifecycleStatusCondition(orgId, statuses as never);
+      return Number(
+        (await one<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM contacts
+          WHERE org_id = ${org}${cond ? sql` AND ${cond}` : sql``}`)).n,
+      );
+    };
+
+    const hStored = await one<{ n: number }>(sql`
+      SELECT count(*)::int AS n FROM contact_engagement WHERE org_id = ${org}`);
+    bar("H1 precondition: one of the 8 contacts has no contact_engagement row",
+      Number(hStored.n) === 7, `${hStored.n} stored rows`);
+
+    const hNew = await countWith(["new"]);
+    bar("H2 'new' finds the contact with NO engagement row — the bug a bare EXISTS causes",
+      hNew === 1, `matched ${hNew}`);
+    const hHot = await countWith(["hot"]);
+    bar("H3 'hot' finds cHot", hHot === 1, `matched ${hHot}`);
+    bar("H4 multi-select is a union", (await countWith(["hot", "new"])) === hHot + hNew,
+      `${await countWith(["hot", "new"])} vs ${hHot}+${hNew}`);
+    const hAll = await countWith(H_ALL);
+    const hNone = await countWith([]);
+    bar("H5 every status selected == no filter at all", hAll === hNone && hAll === 8,
+      `${hAll} vs ${hNone}`);
+    bar("H6 unknown values are dropped, and duplicates collapse",
+      parseLifecycleStatuses("hot,nonsense,hot, warm ").join(",") === "hot,warm",
+      parseLifecycleStatuses("hot,nonsense,hot, warm ").join(","));
+    bar("H7 an empty param means no filter",
+      lifecycleStatusCondition(orgId, parseLifecycleStatuses(null)) === null);
+
+    // ── PART I — the 0188 projection on contacts.lifecycle_status ───────────
+    // contact_engagement.status is the source of truth; contacts.lifecycle_status
+    // is a projection the job maintains in the same transaction as the
+    // transition row. The bar that matters is that they NEVER disagree after a
+    // run — and that a drifted row heals rather than staying wrong forever,
+    // which is what makes the 0188 reconcile safe to run at any time.
+    console.log("\nPART I — contacts.lifecycle_status projection");
+
+    const drift = async () =>
+      Number(
+        (await one<{ n: number }>(sql`
+          SELECT count(*)::int AS n
+          FROM contacts c
+          JOIN contact_engagement ce ON ce.contact_id = c.id AND ce.org_id = c.org_id
+          WHERE c.org_id = ${org} AND c.lifecycle_status IS DISTINCT FROM ce.status`)).n,
+      );
+
+    // Deliberately corrupt one row, the way a failed transaction or the window
+    // between 0188's backfill and this code deploying would.
+    await db.execute(sql`
+      UPDATE contacts SET lifecycle_status = 'suppressed' WHERE id = ${cCold.id}::uuid`);
+    bar("I1 a drifted row is visible before the run", (await drift()) >= 1);
+
+    const iRun = await run({ mode: "full", dryRun: false, asOf: A4 });
+    bar("I2 after a job run the projection and the source do not disagree",
+      (await drift()) === 0, `${await drift()} disagreeing`);
+    bar("I3 the run reports what it re-projected",
+      iRun.projectionWritten >= 1, `projectionWritten=${iRun.projectionWritten}`);
+
+    // A dry run must not touch the projection either.
+    await db.execute(sql`
+      UPDATE contacts SET lifecycle_status = 'hot' WHERE id = ${cCold.id}::uuid`);
+    const iDry = await run({ mode: "full", dryRun: true, asOf: A4 });
+    bar("I4 a dry run writes no projection", iDry.projectionWritten === 0 && (await drift()) === 1,
+      `projectionWritten=${iDry.projectionWritten}`);
+    await run({ mode: "full", dryRun: false, asOf: A4 }); // heal it again
+
+    // A contact the job has never seen: no engagement row, and the column's
+    // default is the same 'new' the rest of the system reads for it.
+    const orphanPhone = fictionalPhones(9)[8];
+    await refuseIfPhonesInUse(db, [orphanPhone]);
+    const orphan = await one<{ id: string; lifecycle_status: string }>(sql`
+      INSERT INTO contacts (org_id, phone_number) VALUES (${org}, ${orphanPhone})
+      RETURNING id, lifecycle_status`);
+    const orphanHasRow = Number(
+      (await one<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM contact_engagement
+        WHERE contact_id = ${orphan.id}::uuid`)).n,
+    );
+    bar("I5 a contact with no engagement row reads 'new'",
+      orphan.lifecycle_status === "new" && orphanHasRow === 0,
+      `${orphan.lifecycle_status}, engagement rows=${orphanHasRow}`);
   } finally {
     if (orgId) {
       const name = (await all<{ name: string }>(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))[0]?.name ?? "";
@@ -545,6 +702,7 @@ async function main() {
               + (SELECT count(*) FROM contact_engagement_transitions WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM contact_offer_campaigns WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM stage_sends WHERE org_id = ${orgId}::uuid)
+              + (SELECT count(*) FROM stage_send_lifecycle WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM lifecycle_settings WHERE org_id = ${orgId}::uuid)) AS n`);
       console.log(`\nTeardown: ${left.n} row(s) left for this run`);
       if (Number(left.n) !== 0) fail++;

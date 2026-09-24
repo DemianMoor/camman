@@ -232,6 +232,17 @@ Auto-generated, **immutable**, structured identifiers separate from the internal
 - Before any destructive operation (DROP TABLE, hard DELETE, force-push), ask for explicit confirmation.
 - If migration-related issues arise (journal/file mismatch, suspected drift, after recovering from a partial apply), run `npx tsx scripts/verify-migration-integrity.ts` to compare DB-recorded hashes against actual file content and verify the snapshot chain. Read-only diagnostic, safe to run anytime.
 
+### 11a. Reporting conventions (chat reports)
+
+A report answers the task. It is not a tour of everything seen along the way.
+
+- **Report only what the task asked for:** the steps, the results, the numbers requested, and any deviation from the plan.
+- **Stay inside the task's scope.** Do not investigate or report on data, tables, uploads, alerts or code outside the task. The single exception is something that directly **blocks, breaks, or changes the outcome** of the current task — then one line at the end under a **"Blocking / affects this task"** heading, and nothing more.
+- **No incidental observations** — not about the contact base, not about other workstreams, not about things noticed in passing.
+- **"Things worth your attention" means decisions the owner has to make.** Everything else belongs in the PR body or the docs, not the chat report.
+
+This is about the report, not about the work: noticing something odd mid-task is still right, and a genuine blocker is still raised. What changes is that non-blocking findings are written down where they belong instead of enlarging the reply.
+
 ## 12. What This Project Is NOT (yet)
 
 To keep scope tight, the following are explicitly OUT of scope for v1. Do not build them, do not stub them, do not "prepare for" them in ways that complicate v1 code:

@@ -156,8 +156,14 @@ export const CONTACT_STATUS_PRIORITY: Record<ContactStatusReason, number> = {
 
 // Human labels for the three statuses — used in the import preview and result
 // summary so the UI doesn't duplicate the mapping.
+//
+// "Global suppression" is spelled out because contact_engagement.status also
+// has a `suppressed` value (migration 0187) meaning something else entirely:
+// the end of the lifecycle, a contact that stopped responding, not a
+// do-not-contact list. Both badges appear on the same contacts row, so they
+// cannot both read "Suppressed". The DB value here stays `suppressed`.
 export const CONTACT_STATUS_LABELS: Record<ContactStatusReason, string> = {
   opt_out: "Opt-out",
-  suppressed: "Suppressed",
+  suppressed: "Global suppression",
   scrubbed: "Scrubbed",
 };

@@ -11,6 +11,7 @@ import {
   stage_sends,
 } from "@/db/schema";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
+import { sentCountsByStage } from "@/lib/reporting/delivery-rollup";
 import { addRowToFunnel, emptyFunnel, type FunnelTally } from "@/lib/keitaro/funnel";
 import {
   lifetimeManualSalesByStage,
@@ -307,20 +308,35 @@ export async function getStageMetricsInRange(
           ),
         )
         .groupBy(opt_out_attributions.stage_id),
-      db
-        .select({ stage_id: stage_sends.stage_id, sent: sql<number>`count(*)::int` })
-        .from(stage_sends)
-        .where(
-          and(
-            eq(stage_sends.org_id, orgId),
-            eq(stage_sends.status, "sent"),
-            inArray(stage_sends.stage_id, stageIds),
-            ...(sendDate
-              ? []
-              : [gte(stage_sends.sent_at, fromUtc), lt(stage_sends.sent_at, toExclusiveUtc)]),
-          ),
-        )
-        .groupBy(stage_sends.stage_id),
+      // TOTAL SENT — hybrid: closed ET days from stage_delivery_rollup, TODAY
+      // counted live. That single count(*) over stage_sends was measured at
+      // 1.6-1.7 GB and 10-12 s on a 92-day window (prod, 2026-09-24) and was
+      // the dominant cost of this whole endpoint.
+      //
+      // Under send_date there is no window at all — a cohort stage's metrics
+      // are everything it has produced to date — so the rollup (whose earliest
+      // cell is its backfill, not the beginning of time) cannot answer it and
+      // the live count stays. The hybrid applies to the windowed basis only.
+      sendDate
+        ? db
+            .select({ stage_id: stage_sends.stage_id, sent: sql<number>`count(*)::int` })
+            .from(stage_sends)
+            .where(
+              and(
+                eq(stage_sends.org_id, orgId),
+                eq(stage_sends.status, "sent"),
+                inArray(stage_sends.stage_id, stageIds),
+              ),
+            )
+            .groupBy(stage_sends.stage_id)
+            .then((rows) => new Map(rows.map((r) => [r.stage_id, Number(r.sent)])))
+        : sentCountsByStage(db, {
+            orgId,
+            stageIds,
+            fromEtDay: from,
+            toEtDay: to,
+            toExclusiveUtc,
+          }),
       sendDate
         ? lifetimeManualSalesByStage({ orgId, stageIds })
         : manualSalesByStageInRange({ orgId, fromUtc, toExclusiveUtc }),
@@ -347,7 +363,7 @@ export async function getStageMetricsInRange(
         .groupBy(stage_sends.stage_id),
     ]);
     const optOutsByStage = new Map(optOutRows.map((o) => [o.stage_id, Number(o.n)]));
-    const sentByStage = new Map(sentRows.map((s) => [s.stage_id, Number(s.sent)]));
+    const sentByStage = sentRows;
     const reachedByStage = new Map(reachedRows.map((r) => [r.stage_id, Number(r.n)]));
     const sentInRange = (sentAt: Date | null): boolean =>
       sentAt != null && sentAt >= fromUtc && sentAt < toExclusiveUtc;

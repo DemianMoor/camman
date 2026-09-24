@@ -259,6 +259,9 @@ volume grew; nothing re-measured it until the Overview reached 30 s.
 
 ## 5b. The stage delivery rollup (migration 0186) — the report read path
 
+⭐ **Since 2026-09-24 this table also serves the Overview's TOTAL SENT**, not just Delivered %. `sentCountsByStage()` reads `sent` for closed ET days and counts today live — see [reports-rollup.md](reports-rollup.md). The freshness contract differs on purpose: Delivered % carries an "as of" label because it is served entirely from the rollup, Total Sent carries none because today is always live.
+
+
 **Status.** Migration 0186 was applied to prod on 2026-09-22, and the backfill wrote 2,122 cells whose `sent` totals match `stage_sends` exactly (5,202,994 sends). The refresh and reconciliation crons have been live since PR #208. **Since the cutover PR, `/reports/delivery` and the Overview's Delivered % column read the rollup** through `getDeliveryByStage` in [lib/reporting/delivery-rollup.ts](../../lib/reporting/delivery-rollup.ts). The tripwire and the reconciliation still read the live `queryDeliveryByStage`. ClickUp `869f5q5au`.
 
 **"As of" and stale.** Both surfaces show how current the cells are, from the two refresh heartbeats in `cron_locks` (`deliveryFreshness`, a pure function with its own test bars):

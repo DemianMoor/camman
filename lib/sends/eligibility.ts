@@ -78,6 +78,40 @@ export const EXCLUSION_PRIORITY = [
 
 export type EligibilityLayerKey = (typeof EXCLUSION_PRIORITY)[number];
 
+// The content-dedup layers (Phase 2). Named so the lifecycle set below can be
+// derived by difference instead of written out a second time.
+const CONTENT_DEDUP_KEYS = ["creative", "in_flight", "offer"] as const;
+
+/**
+ * The LIFECYCLE subset of EXCLUSION_PRIORITY, in priority order.
+ *
+ * DERIVED, never hand-listed: add a lifecycle layer to EXCLUSION_PRIORITY and
+ * it appears here, in every reporting shape that builds from here, and in the
+ * anti-drift test — all at once. A hand-written copy is exactly the fifth copy
+ * this whole arrangement exists to prevent (spec §8.3).
+ */
+export const LIFECYCLE_EXCLUSION_KEYS = EXCLUSION_PRIORITY.filter(
+  (k): k is Exclude<EligibilityLayerKey, (typeof CONTENT_DEDUP_KEYS)[number]> =>
+    !(CONTENT_DEDUP_KEYS as readonly string[]).includes(k),
+);
+
+export type LifecycleExclusionKey = (typeof LIFECYCLE_EXCLUSION_KEYS)[number];
+
+/**
+ * Per-reason counters for the lifecycle layers. EVERY surface that reports why
+ * a lead was not sent to spreads this type rather than listing the keys, so the
+ * four shapes (preflight breakdown, Prepare dialog, eligibility preview,
+ * autopilot) cannot carry different key sets — a missing key is a type error,
+ * not a number that quietly reads zero.
+ */
+export type LifecycleExclusionCounts = Record<LifecycleExclusionKey, number>;
+
+/** All-zero counters, built FROM the keys so it cannot fall out of step. */
+export const ZERO_LIFECYCLE_EXCLUSIONS: LifecycleExclusionCounts =
+  Object.fromEntries(
+    LIFECYCLE_EXCLUSION_KEYS.map((k) => [k, 0]),
+  ) as LifecycleExclusionCounts;
+
 // One layer: a labelled `SELECT contact_id` fragment. A layer that does not
 // apply is simply absent from the list — there is no null member.
 export interface EligibilityLayer {

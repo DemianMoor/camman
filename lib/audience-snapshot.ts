@@ -11,6 +11,9 @@ import { EXIT_TIER, campaignTierExpr, tierLiteral } from "./campaign-tier";
 import {
   buildStageEligibilityExclusions,
   lifecycleExclusionLayers,
+  LIFECYCLE_EXCLUSION_KEYS,
+  ZERO_LIFECYCLE_EXCLUSIONS,
+  type LifecycleExclusionCounts,
   type EligibilityLayer,
   type EligibilityLayerKey,
   type StageEligibilityParams,
@@ -462,9 +465,14 @@ export interface LifecycleAudienceBreakdown {
   // bucket, counted by the FIRST reason that catches it (EXCLUSION_PRIORITY
   // order). That identity is what makes them worth showing, and
   // scripts/test-lifecycle-preview-breakdown.ts asserts it.
-  excluded: {
+  //
+  // The lifecycle reason names come from LifecycleExclusionCounts via Pick/Omit
+  // rather than being retyped. `suppressed` is the ONE layer that keeps a lead
+  // out of the audience entirely, so it is the one named here; every other
+  // layer — including any added later — lands in send_time below, which is the
+  // safe default: reported, never silently dropped.
+  excluded: Pick<LifecycleExclusionCounts, "suppressed"> & {
     opted_out: number;
-    suppressed: number;
     // Their status is not among the selected chips.
     status_not_selected: number;
     // Only counted when exclude_in_use_contacts is ON. With it off these leads
@@ -481,12 +489,9 @@ export interface LifecycleAudienceBreakdown {
   // due-ness moves with the clock, and purchases keep arriving after
   // activation. Freezing either would freeze a decision that has to be made
   // at send time.
-  send_time: {
-    // In Freeze AND inside their own cadence right now.
-    freeze_not_due: number;
-    // Already bought this campaign's offer.
-    bought_offer: number;
-  };
+  // freeze_not_due: in Freeze AND inside their own cadence right now.
+  // bought_offer: already bought this campaign's offer.
+  send_time: Omit<LifecycleExclusionCounts, "suppressed">;
 }
 
 export interface AudienceSnapshotResult {
@@ -1853,6 +1858,9 @@ export interface StageEligibilityPreviewResult {
   will_send: number | null;
   truncated: boolean;
   duration_ms: number;
+  // Spread, not listed — see LifecycleExclusionCounts. All zero for a legacy
+  // campaign and on a timeout.
+  excluded_lifecycle: LifecycleExclusionCounts;
 }
 
 export interface StageEligibilityPreviewInput {
@@ -1929,6 +1937,7 @@ export async function computeStageEligibilityPreview(
         will_send: 0,
         truncated: false,
         duration_ms: 0,
+        excluded_lifecycle: { ...ZERO_LIFECYCLE_EXCLUSIONS },
       };
     }
     const source = await buildAudienceSourceSql({
@@ -1997,6 +2006,46 @@ export async function computeStageEligibilityPreview(
   const creativeRel = layerSql("creative");
   const inFlightRel = layerSql("in_flight");
   const offerRel = layerSql("offer");
+  // The lifecycle layers, emitted generically so adding one needs no edit here.
+  // Absent for a legacy campaign ⇒ the statement is unchanged.
+  const lcLayers = ex.filter((l) =>
+    (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),
+  );
+  const lcCtes = lcLayers.reduce(
+    (acc, l) => drizzleSql`${acc}
+        ${drizzleSql.raw(`el_${l.key}`)} as (${l.sql}),`,
+    drizzleSql``,
+  );
+  const lcCols = lcLayers.reduce(
+    (acc, l) => drizzleSql`${acc},
+            (${drizzleSql.raw(`el_${l.key}`)}.contact_id is not null) as ${drizzleSql.raw(`f_${l.key}`)}`,
+    drizzleSql``,
+  );
+  const lcJoins = lcLayers.reduce(
+    (acc, l) => drizzleSql`${acc}
+          left join ${drizzleSql.raw(`el_${l.key}`)} on ${drizzleSql.raw(`el_${l.key}`)}.contact_id = q.contact_id`,
+    drizzleSql``,
+  );
+  // will_send must subtract these too: the send path EXCEPTs them, so leaving
+  // them in would make the preview promise messages that never go out.
+  const lcNotHit = lcLayers.reduce(
+    (acc, l) => drizzleSql`${acc} and not ${drizzleSql.raw(`f_${l.key}`)}`,
+    drizzleSql``,
+  );
+  // Exclusive, in EXCLUSION_PRIORITY order (lcLayers is already sorted).
+  const lcCounts = lcLayers.reduce(
+    (acc, l, i) => {
+      const earlier = lcLayers
+        .slice(0, i)
+        .reduce(
+          (a, e) => drizzleSql`${a} and not ${drizzleSql.raw(`f_${e.key}`)}`,
+          drizzleSql``,
+        );
+      return drizzleSql`${acc},
+          (select count(*) from joined where ${drizzleSql.raw(`f_${l.key}`)}${earlier})::int as ${drizzleSql.raw(`x_${l.key}`)}`;
+    },
+    drizzleSql``,
+  );
 
   const start = Date.now();
   try {
@@ -2008,23 +2057,24 @@ export async function computeStageEligibilityPreview(
         ec as (${creativeRel}),
         ei as (${inFlightRel}),
         eo as (${offerRel}),
+        ${lcCtes}
         joined as (
           select
             q.contact_id,
             (ec.contact_id is not null) as f_creative,
             (ei.contact_id is not null) as f_inflight,
-            (eo.contact_id is not null) as f_offer
+            (eo.contact_id is not null) as f_offer${lcCols}
           from q
           left join ec on ec.contact_id = q.contact_id
           left join ei on ei.contact_id = q.contact_id
-          left join eo on eo.contact_id = q.contact_id
+          left join eo on eo.contact_id = q.contact_id${lcJoins}
         ),
         -- Post-dedup set, split by the stable hash bucket — exactly the send
         -- path (base EXCEPT layers, THEN split), so will_send == materialized.
         eligible as (
           select contact_id
           from joined
-          where not f_creative and not f_inflight and not f_offer
+          where not f_creative and not f_inflight and not f_offer${lcNotHit}
         )
         select
           (select count(*) from joined)::int as segment_total,
@@ -2033,12 +2083,13 @@ export async function computeStageEligibilityPreview(
           (select count(*) from eligible
             where not ${splitActive}::boolean
               or ${splitBucketMatch(drizzleSql`contact_id`, drizzleSql`${splitTotal ?? 1}`, drizzleSql`${splitIndex ?? 1}`)}
-          )::int as will_send
+          )::int as will_send${lcCounts}
       `)) as unknown as {
         segment_total: number;
         saw_creative: number;
         got_offer: number;
         will_send: number;
+        [layerKey: string]: number;
       }[];
     });
     const r = rows[0] ?? {
@@ -2054,6 +2105,15 @@ export async function computeStageEligibilityPreview(
       will_send: r.will_send,
       truncated: false,
       duration_ms: Date.now() - start,
+      excluded_lifecycle: {
+        ...ZERO_LIFECYCLE_EXCLUSIONS,
+        ...Object.fromEntries(
+          lcLayers.map((l) => [
+            l.key,
+            Number((r as Record<string, unknown>)[`x_${l.key}`] ?? 0),
+          ]),
+        ),
+      } as LifecycleExclusionCounts,
     };
   } catch (err) {
     const duration_ms = Date.now() - start;
@@ -2070,6 +2130,7 @@ export async function computeStageEligibilityPreview(
         will_send: null,
         truncated: true,
         duration_ms,
+        excluded_lifecycle: { ...ZERO_LIFECYCLE_EXCLUSIONS },
       };
     }
     throw err;

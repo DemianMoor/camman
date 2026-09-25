@@ -3,6 +3,10 @@ import { sql } from "drizzle-orm";
 import type { db } from "@/db/client";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import {
+  ZERO_LIFECYCLE_EXCLUSIONS,
+  type LifecycleExclusionCounts,
+} from "@/lib/sends/eligibility";
+import {
   preflightStageSend,
   type PreflightBlocker,
 } from "@/lib/sends/preflight";
@@ -42,7 +46,10 @@ export interface PreflightBreakdown {
   pool_total: number; // frozen campaign_audience_pool size
   materialized_audience: number; // stage_sends rows the kickoff will create
   predicted_sends: number; // materialized_audience − dedup_1h_predicted (≈ actual deliveries)
-  excluded: {
+  // ⚠️ The lifecycle reasons are SPREAD from LifecycleExclusionCounts, never
+  // listed here. Three other surfaces report the same buckets; spelling them
+  // out in each is how they drift. See lib/sends/eligibility.ts.
+  excluded: LifecycleExclusionCounts & {
     opt_out: number;
     stage_filter: number; // include_no_status / include_clickers / exclude_clickers
     split: number;
@@ -119,6 +126,7 @@ export async function computePreflightBreakdown(
     materialized_audience: materialized,
     predicted_sends: materialized,
     excluded: {
+      ...ZERO_LIFECYCLE_EXCLUSIONS,
       opt_out: 0,
       stage_filter: 0,
       split: 0,
@@ -271,6 +279,9 @@ export async function computePreflightBreakdown(
     materialized_audience: materialized,
     predicted_sends: predicted,
     excluded: {
+      // Per-layer, from the reconciliation — NOT folded into content_dedup,
+      // which would label a suppressed lead as a creative repeat.
+      ...recon.excluded_by_layer,
       opt_out: recon.excluded_optout,
       stage_filter: recon.excluded_filter,
       split: recon.excluded_split,

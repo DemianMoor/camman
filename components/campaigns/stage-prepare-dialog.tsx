@@ -17,6 +17,7 @@ import {
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
+import type { PreflightResult as ServerPreflightResult } from "@/lib/sends/preflight";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // WS4 §A2 — the ONE Prepare confirm popup, shared by every entry point (the
@@ -48,6 +49,21 @@ type PreflightResult = {
   // low-rate sending number). Non-blocking — shown, not enforced.
   warnings?: string[];
   estimated_drain_seconds?: number | null;
+  // Why the lifecycle layers removed people, per reason. Reuses the server
+  // type rather than re-listing the buckets, so a bucket added server-side
+  // shows up here instead of silently going missing (spec §8.3).
+  excluded_lifecycle?: ServerPreflightResult["excluded_lifecycle"];
+};
+
+// Human labels for the exclusion reasons. Keyed by the shared type, so a new
+// reason is a compile error here rather than an unlabelled number.
+const EXCLUSION_LABELS: Record<
+  keyof ServerPreflightResult["excluded_lifecycle"],
+  string
+> = {
+  suppressed: "suppressed",
+  bought_offer: "bought this offer",
+  freeze_not_due: "freeze not due",
 };
 
 export function StagePrepareDialog({
@@ -274,11 +290,37 @@ export function StagePrepareDialog({
             {preflight.warnings && preflight.warnings.length > 0 ? (
               <div className="space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5">
                 {preflight.warnings.map((w, i) => (
-                  <div key={i} className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
-                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <div
+                    key={i}
+                    className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400"
+                  >
+                    <AlertTriangle
+                      className="mt-0.5 size-3.5 shrink-0"
+                      aria-hidden
+                    />
                     <span>{w}</span>
                   </div>
                 ))}
+              </div>
+            ) : null}
+
+            {/* Why the lifecycle layers removed people — one line, reasons in
+                EXCLUSION_PRIORITY order, zero-count reasons omitted. */}
+            {preflight.excluded_lifecycle &&
+            Object.values(preflight.excluded_lifecycle).some((n) => n > 0) ? (
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Excluded: </span>
+                {(
+                  Object.keys(
+                    EXCLUSION_LABELS,
+                  ) as (keyof typeof EXCLUSION_LABELS)[]
+                )
+                  .filter((k) => (preflight.excluded_lifecycle?.[k] ?? 0) > 0)
+                  .map(
+                    (k) =>
+                      `${(preflight.excluded_lifecycle?.[k] ?? 0).toLocaleString()} ${EXCLUSION_LABELS[k]}`,
+                  )
+                  .join(" · ")}
               </div>
             ) : null}
 
@@ -293,9 +335,9 @@ export function StagePrepareDialog({
                 </pre>
                 {seg ? (
                   <div className="text-[11px] tabular-nums text-muted-foreground">
-                    {seg.characters.toLocaleString()} characters · {seg.segments}{" "}
-                    segment{seg.segments === 1 ? "" : "s"} ({seg.charset}) · a
-                    unique link is added per recipient
+                    {seg.characters.toLocaleString()} characters ·{" "}
+                    {seg.segments} segment{seg.segments === 1 ? "" : "s"} (
+                    {seg.charset}) · a unique link is added per recipient
                   </div>
                 ) : null}
               </div>
@@ -326,7 +368,9 @@ export function StagePrepareDialog({
                       width: `${Math.min(
                         100,
                         preflight.recipient_count > 0
-                          ? Math.round((materialized / preflight.recipient_count) * 100)
+                          ? Math.round(
+                              (materialized / preflight.recipient_count) * 100,
+                            )
                           : 0,
                       )}%`,
                     }}

@@ -4,6 +4,9 @@ import type { db } from "@/db/client";
 import {
   buildStageEligibilityExclusions,
   eligibilityUnion,
+  LIFECYCLE_EXCLUSION_KEYS,
+  ZERO_LIFECYCLE_EXCLUSIONS,
+  type LifecycleExclusionCounts,
 } from "@/lib/sends/eligibility";
 import type { StageRecipientFilters } from "@/lib/sends/recipients";
 import { splitBucketMatch } from "@/lib/sends/split-bucket";
@@ -33,6 +36,12 @@ export interface StageReconciliation {
   excluded_filter: number;
   excluded_split: number;
   excluded_dedup: number;
+  // The dedup bucket split by the layer that caught each lead, exclusively and
+  // in EXCLUSION_PRIORITY order — so "excluded 4,102" becomes "3,900
+  // suppressed, 202 freeze not due", which is the difference between a number
+  // an operator can act on and one they can only stare at. Sums to
+  // excluded_dedup together with the content-dedup layers.
+  excluded_by_layer: LifecycleExclusionCounts;
   excluded_total: number;
   gap: number; // qualified - attempted; 0 ⇒ closed. >0 ⇒ a materialization drop
   closed: boolean; // gap === 0
@@ -86,6 +95,41 @@ export async function computeStageReconciliation(
     : sql``;
   const dedupExpr = exclUnion ? sql`(elig.contact_id IS NOT NULL)` : sql`false`;
 
+  // One extra LEFT JOIN per LIFECYCLE layer so each lead can be attributed to
+  // the first layer that caught it. Only for a lifecycle campaign: a legacy one
+  // has no such layers, so the emitted SQL is unchanged.
+  const lifecycleLayers = exclusions.filter((l) =>
+    (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),
+  );
+  const layerJoins = lifecycleLayers.reduce(
+    (acc, l) =>
+      sql`${acc}
+      LEFT JOIN (${l.sql}) ${sql.raw(`lyr_${l.key}`)}
+        ON ${sql.raw(`lyr_${l.key}`)}.contact_id = p.contact_id`,
+    sql``,
+  );
+  const layerCols = lifecycleLayers.reduce(
+    (acc, l) =>
+      sql`${acc},
+        (${sql.raw(`lyr_${l.key}`)}.contact_id IS NOT NULL) AS ${sql.raw(`hit_${l.key}`)}`,
+    sql``,
+  );
+  // Exclusive: each layer's FILTER negates every layer ahead of it in
+  // EXCLUSION_PRIORITY, which `lifecycleLayers` is already sorted by.
+  const layerAggs = lifecycleLayers.reduce(
+    (acc, l, i) => {
+      const earlier = lifecycleLayers
+        .slice(0, i)
+        .reduce((a, e) => sql`${a} AND NOT ${sql.raw(`hit_${e.key}`)}`, sql``);
+      return sql`${acc},
+      count(*) FILTER (
+        WHERE NOT opted_out AND passes_filter AND in_split AND deduped${earlier}
+          AND ${sql.raw(`hit_${l.key}`)}
+      )::int AS ${sql.raw(`excl_${l.key}`)}`;
+    },
+    sql``,
+  );
+
   // Single pass over the frozen pool, attributing each member to exactly one
   // bucket by priority: opted-out > fails-filter > out-of-split > deduped > qualified.
   const rows = (await dbc.execute(sql`
@@ -106,9 +150,9 @@ export async function computeStageReconciliation(
             THEN ${splitBucketMatch(sql`p.contact_id`, sql`${f.splitTotal ?? 1}`, sql`${f.splitIndex ?? 1}`)}
           ELSE true
         END AS in_split,
-        ${dedupExpr} AS deduped
+        ${dedupExpr} AS deduped${layerCols}
       FROM campaign_audience_pool p
-      ${dedupJoin}
+      ${dedupJoin}${layerJoins}
       WHERE p.campaign_id = ${campaignId}::int AND p.org_id = ${orgId}::uuid
     )
     SELECT
@@ -117,7 +161,7 @@ export async function computeStageReconciliation(
       count(*) FILTER (WHERE NOT opted_out AND NOT passes_filter)::int AS excluded_filter,
       count(*) FILTER (WHERE NOT opted_out AND passes_filter AND NOT in_split)::int AS excluded_split,
       count(*) FILTER (WHERE NOT opted_out AND passes_filter AND in_split AND deduped)::int AS excluded_dedup,
-      count(*) FILTER (WHERE NOT opted_out AND passes_filter AND in_split AND NOT deduped)::int AS qualified
+      count(*) FILTER (WHERE NOT opted_out AND passes_filter AND in_split AND NOT deduped)::int AS qualified${layerAggs}
     FROM pool
   `)) as unknown as {
     pool_total: number;
@@ -126,6 +170,7 @@ export async function computeStageReconciliation(
     excluded_split: number;
     excluded_dedup: number;
     qualified: number;
+    [layerKey: string]: number;
   }[];
 
   const attemptedRows = (await dbc.execute(sql`
@@ -150,6 +195,15 @@ export async function computeStageReconciliation(
   const qualified = Number(r.qualified);
   const gap = qualified - attempted;
 
+  const excluded_by_layer = {
+    ...ZERO_LIFECYCLE_EXCLUSIONS,
+    ...Object.fromEntries(
+      lifecycleLayers.map((l) => [
+        l.key,
+        Number((r as Record<string, unknown>)[`excl_${l.key}`] ?? 0),
+      ]),
+    ),
+  } as LifecycleExclusionCounts;
   return {
     pool_total: Number(r.pool_total),
     qualified,
@@ -158,6 +212,7 @@ export async function computeStageReconciliation(
     excluded_filter: Number(r.excluded_filter),
     excluded_split: Number(r.excluded_split),
     excluded_dedup: Number(r.excluded_dedup),
+    excluded_by_layer,
     excluded_total,
     gap,
     closed: gap === 0,

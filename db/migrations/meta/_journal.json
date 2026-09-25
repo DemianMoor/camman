@@ -1331,6 +1331,13 @@
       "when": 1792886400000,
       "tag": "0189_segment_rules_lifecycle_types",
       "breakpoints": true
+    },
+    {
+      "idx": 190,
+      "version": "7",
+      "when": 1792972800000,
+      "tag": "0190_stage_sends_skipped_ineligible",
+      "breakpoints": true
     }
   ]
 }

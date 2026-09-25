@@ -31,6 +31,11 @@ function check(name: string, ok: boolean, detail = "") {
   }
 }
 
+// The exclusions are an ordered layer list since PR 4a; a layer that does not
+// apply is absent rather than null. `has` keeps these assertions reading the
+// same way they did against the old three-field record.
+const has = (ex: { key: string }[], key: string) => ex.some((l) => l.key === key);
+
 async function main() {
   const pg = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
   const db = drizzle(pg);
@@ -125,8 +130,8 @@ async function main() {
     );
     check(
       "Test 5 — null creative: no creative/in-flight layer, audience unchanged",
-      exNull.creative === null &&
-        exNull.inFlight === null &&
+      !has(exNull, "creative") &&
+        !has(exNull, "in_flight") &&
         eligibilityUnion(exNull) === null &&
         unchanged === baseCount,
       `base=${baseCount} == unchanged=${unchanged}`,
@@ -149,11 +154,11 @@ async function main() {
     });
     check(
       "Test 3 — offer toggle OFF: no offer layer, creative dedup STILL applies",
-      exOfferOff.offer === null && exOfferOff.creative !== null,
+      !has(exOfferOff, "offer") && has(exOfferOff, "creative"),
     );
     check(
       "Test 3 — offer toggle ON: offer layer present",
-      exOfferOn.offer !== null && exOfferOn.creative !== null,
+      has(exOfferOn, "offer") && has(exOfferOn, "creative"),
     );
 
     // ── Test 4 + 6: preview == reality, on the pooler ───────────────────────

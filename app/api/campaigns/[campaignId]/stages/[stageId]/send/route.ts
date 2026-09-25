@@ -69,7 +69,7 @@ export async function GET(
       -- hasBatch=true and the panel stays stuck on the materialized branch
       -- instead of returning to the editable/Prepare state. Excluding only
       -- 'rejected' left aborted stages pinned there via their opt-out rows.
-      count(*) FILTER (WHERE status NOT IN ('rejected', 'skipped_opted_out'))::int AS total,
+      count(*) FILTER (WHERE status NOT IN ('rejected', 'skipped_opted_out', 'skipped_ineligible'))::int AS total,
       count(*) FILTER (WHERE status = 'pending')::int  AS pending,
       count(*) FILTER (WHERE status = 'sending')::int  AS sending,
       count(*) FILTER (WHERE status = 'sent')::int     AS sent,
@@ -79,7 +79,8 @@ export async function GET(
       -- STOP-cancels: recipients who opted out after materialization, suppressed
       -- at dispatch (drain) or proactively by the opt-out ingester. A distinct
       -- bucket — NOT a delivery failure and NOT a manual recall ('rejected').
-      count(*) FILTER (WHERE status = 'skipped_opted_out')::int AS skipped_opted_out
+      count(*) FILTER (WHERE status = 'skipped_opted_out')::int AS skipped_opted_out,
+      count(*) FILTER (WHERE status = 'skipped_ineligible')::int AS skipped_ineligible
     FROM stage_sends WHERE stage_id = ${stageId} AND org_id = ${orgId}
   `)) as unknown as {
     total: number;
@@ -89,10 +90,12 @@ export async function GET(
     failed: number;
     skipped_duplicate: number;
     skipped_opted_out: number;
+    skipped_ineligible: number;
   }[];
 
   const c = counts[0] ?? {
     total: 0, pending: 0, sending: 0, sent: 0, failed: 0, skipped_duplicate: 0, skipped_opted_out: 0,
+    skipped_ineligible: 0,
   };
 
   // The drain gate is a conjunction (Workstream 1): the env SEND_ENABLED backstop
@@ -147,6 +150,7 @@ export async function GET(
       failed: Number(c.failed),
       skipped_duplicate: Number(c.skipped_duplicate),
       skipped_opted_out: Number(c.skipped_opted_out),
+      skipped_ineligible: Number(c.skipped_ineligible),
     },
     sample_rendered_text: sample[0]?.rendered_text ?? null,
   });

@@ -74,7 +74,7 @@ export async function computeStageReconciliation(
         currentOfferId: e.offer_id ?? null,
         excludePriorOffer: e.exclude_prior_offer_contacts,
       })
-    : { creative: null, inFlight: null, offer: null };
+    : [];
   const exclUnion = eligibilityUnion(exclusions);
   // When no dedup layer applies, `deduped` is a constant false — no extra join.
   const dedupJoin = exclUnion

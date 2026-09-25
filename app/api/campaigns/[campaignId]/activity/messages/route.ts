@@ -22,6 +22,14 @@ const SEND_STATUSES = new Set([
   // Excluded by the global 1-hour dedup gate (migration 0090). Filterable on its
   // own; not in "attention" (the gate firing is expected safety behavior).
   "skipped_duplicate",
+  // PRE-EXISTING OMISSION, fixed here: 'skipped_opted_out' has been a valid
+  // status since migration 0116 and was never filterable on this screen.
+  "skipped_opted_out",
+  // Dropped at dispatch by a lifecycle check — suppressed, freeze cadence or
+  // bought this offer (migration 0190; written from PR 4c). Like the two above
+  // it is expected behaviour, not a row a human must fix, so it is filterable
+  // on its own and absent from "attention".
+  "skipped_ineligible",
 ]);
 
 function parseId(idParam: string) {

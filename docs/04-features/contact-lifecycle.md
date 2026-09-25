@@ -198,6 +198,19 @@ The facts are up to 15 minutes old (§14), so a rule reading them is too.
 
 ### 3e. The audience chips (PR 4b)
 
+The chip row is the **first thing in the Audience block**, directly under the
+AUDIENCE header and above Segments / Contact groups / Audience cap (spec §7.1):
+it is the first decision about who the campaign reaches, and the others narrow
+what it selects.
+
+⚠️ **The create form has THREE states, not two.** While the engine read is in
+flight the answer is *not yet known*, and rendering that as "legacy" is a bug —
+it showed a read-only chip row and the old Filters row with no explanation, for
+as long as the request took. The row now says "checking the lifecycle engine…",
+shows nothing as selected, and withholds the legacy Filters row until the
+answer lands. The read is bounded (8s); on timeout or failure it falls back to
+legacy **with** the engine-off note, never silently.
+
 A campaign with `lifecycle_rules = true` picks its audience with five status
 chips -- **New / Hot / Warm / Cold / Freeze** -- instead of the four legacy
 toggles (`include_no_status`, `include_clickers`, `exclude_clickers`,

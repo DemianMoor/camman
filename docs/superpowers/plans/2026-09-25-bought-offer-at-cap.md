@@ -18,6 +18,12 @@
 
 ⭐ **It will not be a long wait, and that is also the argument for building it.** **566 of 673 campaigns (84%) carry a cap**, 297 of them created in the last 30 days. Capping is the norm here, not an edge case, so this change will apply to most lifecycle campaigns rather than a rare few.
 
+⛔ **DO NOT CREATE A CAMPAIGN TO UNBLOCK THE MEASUREMENT** (owner, 2026-09-25). The three will be ordinary daily campaigns once lifecycle is live; no test campaign. This is the same rule the PR 4b merge gate set — the numbers there were produced read-only by passing `lifecycleRules: true` to the real functions rather than creating or flipping anything on production. A campaign created to satisfy a measurement is a real campaign with a real frozen pool and real sends, and the measurement it produces describes that campaign rather than the operator's actual traffic.
+
+**So the correct behaviour while blocked is to WAIT and say the number is not available yet** — not to manufacture one.
+
+**Status of the plan itself: APPROVED AS WRITTEN** (owner, 2026-09-25). No further review needed before building; the only gate left is #229 merging.
+
 ## Global Constraints
 
 - ⛔ **No merge and no production migration until campaign 1460's post-run comparison is accepted.** This changes what activation freezes.

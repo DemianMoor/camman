@@ -3149,7 +3149,12 @@ export const stage_sends = pgTable(
       "stage_sends_status_check",
       // Migration 0090 added 'skipped_duplicate' (drain 1-hour dedup gate).
       // Migration 0116 added 'skipped_opted_out' (send-time opt-out invariant).
-      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected', 'filtered', 'skipped_duplicate', 'skipped_opted_out')`,
+      // Migration 0190 added 'skipped_ineligible' (the lifecycle send-time
+      // re-check: suppressed / freeze cadence / bought this offer, reason in
+      // last_error). Added NOT VALID + VALIDATE rather than DROP+ADD -- the
+      // table is 2,092 MB of heap and a revalidating ADD holds ACCESS
+      // EXCLUSIVE for the ~15 s scan.
+      sql`${table.status} IN ('pending', 'sending', 'sent', 'failed', 'rejected', 'filtered', 'skipped_duplicate', 'skipped_opted_out', 'skipped_ineligible')`,
     ),
     // Migration 0067: per-recipient sale attribution from Keitaro.
     check(

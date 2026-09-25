@@ -105,6 +105,12 @@ const STATUS_STYLES: Record<string, string> = {
   // 1-hour dedup gate excluded this number (already messaged within the window) —
   // warning amber/orange, distinct from a genuine failure or a provider block.
   skipped_duplicate: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
+  // A STOP arrived after materialization (migration 0116) — same orange family
+  // as the dedup gate: expected safety behaviour, not a failure.
+  skipped_opted_out: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
+  // Dropped at dispatch by a lifecycle check (migration 0190) — suppressed,
+  // freeze cadence or bought this offer. Same family, same reason.
+  skipped_ineligible: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
   pending: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   sending: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
 };
@@ -436,6 +442,8 @@ function MessagesPanel({
             <SelectItem value="rejected">Rejected</SelectItem>
             <SelectItem value="filtered">Filtered</SelectItem>
             <SelectItem value="skipped_duplicate">Skipped (1h dedup)</SelectItem>
+            <SelectItem value="skipped_opted_out">Skipped (opted out)</SelectItem>
+            <SelectItem value="skipped_ineligible">Skipped (lifecycle)</SelectItem>
             <SelectItem value="pending">Pending</SelectItem>
             <SelectItem value="sending">Sending</SelectItem>
           </SelectContent>

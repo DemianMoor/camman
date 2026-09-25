@@ -41,6 +41,7 @@ type SendStatus = {
   counts: {
     total: number; pending: number; sending: number; sent: number; failed: number;
     skipped_duplicate: number; skipped_opted_out: number;
+    skipped_ineligible: number;
   };
   // The real frozen message of one materialized row (null before kickoff).
   sample_rendered_text: string | null;

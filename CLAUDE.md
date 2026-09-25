@@ -243,6 +243,17 @@ A report answers the task. It is not a tour of everything seen along the way.
 
 This is about the report, not about the work: noticing something odd mid-task is still right, and a genuine blocker is still raised. What changes is that non-blocking findings are written down where they belong instead of enlarging the reply.
 
+### 11b. A parameter that changes who is selected or excluded is REQUIRED
+
+Any new parameter that decides **who is selected into an audience, or excluded from a send**, is a required field on its input type. Never optional with a default — not even a default chosen to preserve today's behaviour.
+
+- **The justification for optional is the trap.** "Every existing caller keeps working without being touched" sounds safe and is not: an optional default does not preserve behaviour, it **hides the call sites nobody updated**. Those sites compile, take the default, and the feature is silently inert on exactly the paths that were forgotten.
+- **Required turns the compiler into the audit.** It is the only thing that can enumerate call sites exhaustively; an optional field switches it off precisely where it was needed. Make it required, run `tsc`, and treat the error list as the list of decisions to make — a legacy test gets `false` **with a comment saying why**, a real path gets the real value.
+- **Do not widen a type to satisfy a caller that never reads the field.** Give that function `Omit<Input, "theFlag">` instead. A value invented only to satisfy a type is how a meaningless default gets copied into somewhere that *does* read it.
+- **Pair it with a source bar per call site.** A behaviour test that calls the function directly stays green while the route that should call it does not — which is how the bug below shipped despite passing tests.
+
+Learned the expensive way (2026-09-25). `lifecycleRules` was made **required** on `StageEligibilityParams` and the compiler immediately named two read paths that would have shown legacy numbers. The same flag was left **optional** on `AudiencePreviewInput` in the same series, with a comment defending it. Three call sites never passed it: the create-mode audience preview ignored the chips entirely, and **both activation snapshots would have frozen the legacy audience into a campaign whose own row said `lifecycle_rules = true`** — permanently, because a pool is never recomputed.
+
 ## 12. What This Project Is NOT (yet)
 
 To keep scope tight, the following are explicitly OUT of scope for v1. Do not build them, do not stub them, do not "prepare for" them in ways that complicate v1 code:

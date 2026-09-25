@@ -187,7 +187,17 @@ Given the 4b measurements, the number to watch is `freeze_not_due`: 125,021 cont
 - [ ] **Step 1: Do not start this task until the owner has read the Task 3 dry run and said go.** It is listed here so the plan is complete, not so it runs in sequence.
 - [ ] **Step 2:** New campaigns are created with `lifecycle_rules = true`. ⚠️ The create route's `.values({…})` carries an explicit warning that an unnamed field silently takes its default — name this one.
 - [ ] **Step 3: Existing campaigns are NOT converted.** Their audiences are frozen and their chips were never chosen; flipping them would re-interpret a stored `audience_filters` that was written under different semantics.
-- [ ] **Step 4: Decide with the owner whether the switch is also gated on `lifecycle_settings.engine_mode = 'write'`.** The status facts come from the job; if the engine is off they are stale, and a campaign selecting on a frozen status would quietly target a snapshot of the world from whenever the engine stopped. My recommendation: gate it, and fall back to legacy chips when the engine is off.
+- [ ] **Step 4: GATE THE SWITCH ON `lifecycle_settings.engine_mode = 'write'` (owner decision, 2026-09-25).**
+
+  The status facts come from the job. With the engine off they are frozen, and a campaign selecting on them would quietly target a snapshot of the world from whenever the engine stopped — picking "Hot" and getting whoever was hot in September.
+
+  Three parts, and all three are required:
+
+  1. **The create route writes `lifecycle_rules = false`** when `engine_mode !== 'write'`. Read the setting inside the same transaction as the insert, not before it, so a switch flipped mid-request cannot produce a campaign whose flag disagrees with the engine that was live when it was written.
+  2. **The editor shows the legacy chips plus the note:** _"Lifecycle engine is off — campaign uses legacy filters"_. Copy verbatim. It goes where the lifecycle chip row would have been, so the operator sees why the screen looks like the old one rather than assuming the feature failed to load.
+  3. **An `org_setting_events`-style audit line records the fallback,** so the reason is visible later. ⚠️ This is the part that is easy to drop and expensive to miss: without it, a campaign created during an engine outage is indistinguishable months later from one deliberately made legacy, and the question "why did this campaign use the old filters?" has no answer anywhere. Record the campaign id, the observed `engine_mode`, and the timestamp.
+
+  **Bar:** with `engine_mode = 'off'`, a created campaign has `lifecycle_rules = false` AND an audit row exists. With `'write'`, it has `true` and NO audit row. Both directions asserted — a one-sided test passes on a function that always falls back.
 - [ ] **Step 5: Commit, and stop before merge.**
 
 ---
@@ -197,6 +207,13 @@ Given the 4b measurements, the number to watch is `freeze_not_due`: 125,021 cont
 After 4c merges and the first campaign is created with `lifecycle_rules = true`, the first stage that drains is the only moment the whole chain is exercised together on real traffic. I will watch it live rather than reading it back the next morning.
 
 **Before it fires**
+
+⭐ **The watch is on ONE specific campaign: a deliberately small one the owner creates** — one interest group, one proven offer, a few thousand clickers, one stage (owner decision, 2026-09-25). Not the first lifecycle campaign that happens to drain, and not a large one.
+
+⛔ **No other lifecycle campaign is created until that campaign's post-run comparison has been accepted.** This is a hard gate, not a preference. Every number below is only interpretable against a single known audience: with two lifecycle campaigns in flight, a `freeze_not_due` skip cannot be attributed to either, because the send-time layer reads `stage_sends` org-wide and a second campaign's sends are exactly what it would be counting. A concurrent second campaign does not merely add noise — it makes the first campaign's freeze numbers wrong in a way that cannot be unpicked afterwards.
+
+If a second lifecycle campaign appears before acceptance, I stop and report rather than treating the run as valid.
+
 - Confirm the stage is a lifecycle campaign and record the Prepare-time numbers: `materialized_audience`, `predicted_sends`, and the per-reason exclusion counts from the preflight breakdown. These are the predictions the live run is checked against.
 - Record the audience's status distribution and `freeze_not_due` from the preview.
 - Confirm `SEND_ENABLED`, the provider's `sends_enabled`, and that no circuit breaker is latched — so a stall during the watch is attributable.

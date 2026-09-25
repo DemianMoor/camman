@@ -16,6 +16,7 @@ import {
 import { stageRecipientsSql } from "./sends/recipients";
 import { splitBucketMatch } from "./sends/split-bucket";
 import { buildSegmentAudienceClause } from "./segment-rules-eval";
+import { LIFECYCLE_CHIP_STATUSES } from "./validators/campaigns";
 
 // Compose the audience-source set (contact_ids, before status filters /
 // opt-out / in-use exclusion) from the two selection dimensions:
@@ -137,6 +138,16 @@ function flagSetCtes(
   // itself lives in lib/drip/in-use.ts so the SEGMENT-level in-use definition
   // (lib/segment-rules-eval.ts) cannot drift from this one.
   dripPostureOn = false,
+  // The lifecycle chip set (PR 4b). Opt-in and null/empty by default, on the
+  // same terms as offerExposureOfferId above: when absent the emitted CTE list
+  // is byte-for-byte what it was before, so every legacy campaign's plan is
+  // unchanged BY CONSTRUCTION rather than by measurement.
+  //
+  // It is a SET CTE rather than a join to contacts in the candidate relation
+  // because that is this file's idiom and because a join would change the
+  // emitted SQL for legacy campaigns too. lc_set is one index scan on
+  // contacts_org_lifecycle_created_idx (migration 0188).
+  lifecycleChips?: string[] | null,
 ): SQL {
   const base = drizzleSql`
     oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid),
@@ -144,11 +155,20 @@ function flagSetCtes(
     cl_set as (select distinct contact_id from clickers where org_id = ${orgId}::uuid),
     iu_set as (${inUseSetBody(orgId, dripPostureOn)}
     )`;
-  if (offerExposureOfferId == null) return base;
-  return drizzleSql`${base},
+  const withOffer =
+    offerExposureOfferId == null
+      ? base
+      : drizzleSql`${base},
     oe_set as (
       select distinct contact_id from offer_exposures
       where org_id = ${orgId}::uuid and offer_id = ${offerExposureOfferId}::int
+    )`;
+  if (lifecycleChips == null || lifecycleChips.length === 0) return withOffer;
+  return drizzleSql`${withOffer},
+    lc_set as (
+      select id as contact_id from contacts
+      where org_id = ${orgId}::uuid
+        and lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(lifecycleChips))})
     )`;
 }
 
@@ -156,16 +176,24 @@ function flagSetCtes(
 // `alias` (which must expose a `contact_id` column). Pair with the boolean
 // expressions `<set>.contact_id is not null` in the SELECT list.
 // `includeOfferExposure` must match whether flagSetCtes was given an offer id.
-function flagJoins(alias: string, includeOfferExposure = false): SQL {
+function flagJoins(
+  alias: string,
+  includeOfferExposure = false,
+  includeLifecycle = false,
+): SQL {
   const a = drizzleSql.raw(alias);
   const base = drizzleSql`
     left join oo_set on oo_set.contact_id = ${a}.contact_id
     left join oi_set on oi_set.contact_id = ${a}.contact_id
     left join cl_set on cl_set.contact_id = ${a}.contact_id
     left join iu_set on iu_set.contact_id = ${a}.contact_id`;
-  if (!includeOfferExposure) return base;
-  return drizzleSql`${base}
+  const withOffer = !includeOfferExposure
+    ? base
+    : drizzleSql`${base}
     left join oe_set on oe_set.contact_id = ${a}.contact_id`;
+  if (!includeLifecycle) return withOffer;
+  return drizzleSql`${withOffer}
+    left join lc_set on lc_set.contact_id = ${a}.contact_id`;
 }
 
 export interface AudienceFilters {
@@ -173,6 +201,11 @@ export interface AudienceFilters {
   include_opt_in?: boolean;
   include_clickers?: boolean;
   include_not_clicked?: boolean;
+  // Lifecycle chips (PR 4b). Read only when the campaign has
+  // lifecycle_rules = true; ignored entirely for a legacy campaign, whose
+  // audience is still decided by the four booleans above. 'suppressed' is not
+  // a member: suppressed contacts are always excluded, as an eligibility layer.
+  lifecycle_statuses?: string[];
   // include_opt_out is implicitly false — opt-outs are always excluded.
   // Optional campaign carrier filter (migration 0098). Non-empty ⇒ only these
   // carrier_norm buckets participate; Unidentified always excluded; 'Unknown'
@@ -224,6 +257,13 @@ function applyCarrierFilter(
 
 export interface AudiencePreviewInput {
   orgId: string;
+  // campaigns.lifecycle_rules (migration 0187). When true the lifecycle chips
+  // decide the audience; when false the four legacy chips do, byte-identically
+  // to before PR 4b. Optional here and defaulting to false so every existing
+  // caller keeps today's behaviour without being touched — the REQUIRED
+  // spelling lives on StageEligibilityParams, where missing it would silently
+  // skip an exclusion layer rather than fall back to the status quo.
+  lifecycleRules?: boolean;
   // The INCLUDE segment set (intersected with groups when both present).
   segmentIds: number[];
   // The EXCLUDE segment set (migration 0114). Members are subtracted from the
@@ -361,6 +401,18 @@ async function buildAudienceSourceSql(
 // materialized temp table). The qualifier WHERE clause OR-combines the
 // filter toggles: a contact is in if ANY enabled category includes them,
 // and they're never in if they have any opt-out record for this org.
+// Postgres text[] literal for the lifecycle chip set. The values are already
+// constrained to LIFECYCLE_CHIP_STATUSES by audienceFiltersSchema, and they are
+// re-checked here rather than trusted: this builds a RAW fragment, so a value
+// that reached it unvalidated would be an injection point. Anything unrecognised
+// is dropped, which can only ever narrow the audience.
+function chipStatusArrayLiteral(values: string[]): string {
+  const allowed = new Set<string>(LIFECYCLE_CHIP_STATUSES);
+  const safe = [...new Set(values.filter((v) => allowed.has(v)))];
+  if (safe.length === 0) return "ARRAY[]::text[]";
+  return "ARRAY[" + safe.map((v) => `'${v}'`).join(",") + "]::text[]";
+}
+
 // ── THE audience chip predicate ────────────────────────────────────────────
 // The four campaign-level audience chips (No status / Opt-in / Clickers / Not
 // clicked), OR'd together, evaluated against the per-contact has_opt_in /
@@ -388,12 +440,32 @@ function lifecycleChipPredicate(
     include_opt_in?: boolean | null;
     include_clickers?: boolean | null;
     include_not_clicked?: boolean | null;
+    lifecycle_statuses?: string[] | null;
   },
   opts: { alias?: string; lifecycleRules?: boolean } = {},
 ): SQL {
   if (opts.lifecycleRules) {
-    // PR 4b fills this in. Unreachable in 4a: nothing sets lifecycle_rules.
-    throw new Error("lifecycleChipPredicate: lifecycle_rules is not implemented until PR 4b");
+    // ── The lifecycle chips (PR 4b) ────────────────────────────────────────
+    // Reads contacts.lifecycle_status, the migration-0188 projection: NOT NULL
+    // with default 'new', carrying the same value as contact_engagement.status
+    // (the job writes both in one transaction) and indexed. So no coalesce and
+    // no join — see docs/04-features/contact-lifecycle.md §3a.
+    //
+    // 'suppressed' is never a chip and is always excluded (spec §7.1); that is
+    // an eligibility LAYER, not an audience choice, so it is absent here.
+    const wanted = Array.isArray(filters.lifecycle_statuses)
+      ? filters.lifecycle_statuses.filter((v): v is string => typeof v === "string")
+      : [];
+    // The one-chip minimum is enforced by the form and by the create/PATCH
+    // validators. Reaching here with an empty set means BOTH failed, and of the
+    // two readings "match everybody" is the dangerous one — a campaign that
+    // silently addresses the whole contact base. Match nobody instead.
+    if (wanted.length === 0) return drizzleSql`false`;
+    // Membership in lc_set, the CTE flagSetCtes emits when chips are present —
+    // the same shape as every other flag here, and projected into the candidate
+    // relation by flagJoins as `has_lifecycle`.
+    const q = opts.alias ? `${opts.alias}.` : "";
+    return drizzleSql`${drizzleSql.raw(`${q}has_lifecycle`)}`;
   }
   const q = opts.alias ? `${opts.alias}.` : "";
   const optIn = drizzleSql.raw(`${q}has_opt_in`);
@@ -426,6 +498,7 @@ function buildQualifierFromRelation(
   dripPostureOn = false,
 ): SQL {
   const { orgId, filters } = input;
+  const lifecycleRules = input.lifecycleRules === true;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3, baked into the FROZEN pool (not just the preview).
   // When the campaign opts into offer exclusion AND has an offer, contacts who
@@ -442,9 +515,15 @@ function buildQualifierFromRelation(
   const offerExposureId =
     excludePriorOffer && input.offerId != null ? input.offerId : null;
   const useOfferExposure = offerExposureId != null;
+  // Only emitted for a lifecycle campaign; a legacy one passes null and the CTE
+  // list stays byte-identical to before PR 4b.
+  const lifecycleChips = lifecycleRules
+    ? ((filters.lifecycle_statuses as string[] | undefined) ?? [])
+    : null;
+  const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
 
   return drizzleSql`
-    with ${flagSetCtes(orgId, offerExposureId, dripPostureOn)},
+    with ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips)},
     flagged as (
       select
         cand.contact_id,
@@ -455,8 +534,11 @@ function buildQualifierFromRelation(
         ${useOfferExposure
           ? drizzleSql`(oe_set.contact_id is not null)`
           : drizzleSql`false`} as is_offer_exposed
+        ${useLifecycle
+          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+          : drizzleSql``}
       from ${candidateRelation} cand
-      ${flagJoins("cand", useOfferExposure)}
+      ${flagJoins("cand", useOfferExposure, useLifecycle)}
     )
     select
       contact_id,
@@ -465,7 +547,7 @@ function buildQualifierFromRelation(
       (not has_opt_in and not has_clicker) as was_no_status
     from flagged
     where has_opt_out = false
-      and ${lifecycleChipPredicate(filters)}
+      and ${lifecycleChipPredicate(filters, { lifecycleRules })}
       and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
       and (not ${excludePriorOffer}::boolean or not is_offer_exposed)
   `;
@@ -611,11 +693,14 @@ export async function computeStageAudienceCountForDraft(
     filters: AudienceFilters;
     cap: number | null;
     excludeInUse?: boolean;
+    // campaigns.lifecycle_rules — see AudiencePreviewInput.
+    lifecycleRules?: boolean;
   },
   stageFilters: StageAudienceFilters,
 ): Promise<StageAudienceCountResult> {
   const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
   const excludeSegmentIds = campaign.excludeSegmentIds ?? [];
+  const lifecycleRules = campaign.lifecycleRules === true;
   const excludeInUse = campaign.excludeInUse === true;
   // No audience source on the parent campaign → trivially zero.
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
@@ -683,7 +768,7 @@ export async function computeStageAudienceCountForDraft(
         contact_id
       from flagged
       where has_opt_out = false
-        and ${lifecycleChipPredicate(filters)}
+        and ${lifecycleChipPredicate(filters, { lifecycleRules })}
         and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
         and (
           (${stageIncludeNoStatus}::boolean and not has_opt_in and not has_clicker)
@@ -850,12 +935,15 @@ export async function computeStageAudienceCountsBatchForDraft(
     filters: AudienceFilters;
     cap: number | null;
     excludeInUse?: boolean;
+    // campaigns.lifecycle_rules — see AudiencePreviewInput.
+    lifecycleRules?: boolean;
   },
   stages: StageCountBatchItem[],
 ): Promise<Map<number, number>> {
   if (stages.length === 0) return new Map();
   const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
   const excludeInUse = campaign.excludeInUse === true;
+  const lifecycleRules = campaign.lifecycleRules === true;
   // No audience source on the parent campaign → every stage is trivially zero
   // (mirrors computeStageAudienceCountForDraft's short-circuit).
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
@@ -909,7 +997,7 @@ export async function computeStageAudienceCountsBatchForDraft(
       from st
       join flagged on
         flagged.has_opt_out = false
-        and ${lifecycleChipPredicate(filters, { alias: "flagged" })}
+        and ${lifecycleChipPredicate(filters, { alias: "flagged", lifecycleRules })}
         and (not ${excludeInUse}::boolean or not flagged.is_in_use_elsewhere)
         and (
           (st.inc_ns and not flagged.has_opt_in and not flagged.has_clicker)
@@ -1155,6 +1243,7 @@ export async function previewAudience(
     contactGroupIds = [],
     filters,
   } = input;
+  const lifecycleRules = input.lifecycleRules === true;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
   // set. When off, `offerExposureId` stays null so flagSetCtes/flagJoins emit
@@ -1296,7 +1385,7 @@ export async function previewAudience(
       select
         f.*,
         (
-          not has_opt_out and ${lifecycleChipPredicate(filters)}
+          not has_opt_out and ${lifecycleChipPredicate(filters, { lifecycleRules })}
         ) as qualifies
       from flagged f
     ),

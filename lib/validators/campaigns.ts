@@ -21,12 +21,36 @@ export const CAMPAIGN_CARRIER_FILTER_VALUES = [
   "Unknown",
 ] as const;
 
+// The lifecycle chips (PR 4b). The Hot/Warm chip writes BOTH 'hot' and 'warm',
+// so splitting it into two chips later needs no migration and no backfill.
+// 'suppressed' is deliberately ABSENT: suppressed contacts are always excluded
+// and are never offered as a chip (spec §7.1) — that exclusion is an
+// eligibility layer, not an audience choice.
+export const LIFECYCLE_CHIP_STATUSES = [
+  "new",
+  "hot",
+  "warm",
+  "cold",
+  "freeze",
+] as const;
+export type LifecycleChipStatus = (typeof LIFECYCLE_CHIP_STATUSES)[number];
+
+// ⚠️ NOT .strict(). Zod's default object behaviour SILENTLY STRIPS unknown
+// keys, so a filter key that exists in the UI but not here vanishes on save
+// with no error raised anywhere — it presents as "the chips don't persist".
+// Add the key here FIRST, then the control.
 const audienceFiltersSchema = z
   .object({
+    // The four legacy chips. Kept: 670 campaigns have them stored, and a
+    // campaign with lifecycle_rules = false is still governed by them.
     include_no_status: z.boolean().optional(),
     include_opt_in: z.boolean().optional(),
     include_clickers: z.boolean().optional(),
     include_not_clicked: z.boolean().optional(),
+    lifecycle_statuses: z
+      .array(z.enum(LIFECYCLE_CHIP_STATUSES))
+      .max(LIFECYCLE_CHIP_STATUSES.length)
+      .optional(),
     carrier_filter: z
       .array(z.enum(CAMPAIGN_CARRIER_FILTER_VALUES))
       .max(6)

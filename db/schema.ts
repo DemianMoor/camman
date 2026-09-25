@@ -1886,6 +1886,24 @@ export const campaigns = pgTable(
     exclude_prior_offer_contacts: boolean("exclude_prior_offer_contacts")
       .notNull()
       .default(false),
+
+    // ── Offer cooldown + limit (869f53efz, migration 0191) ────────────────
+    // exclude_prior_offer_contacts above is the ENABLE switch: off ⇒ no offer
+    // limits at all. When it is on, offer_rules_enabled decides WHICH rule:
+    //   true  ⇒ the Y/N rule below
+    //   false ⇒ the legacy "ever got this offer"
+    // It defaults to FALSE and is set true only by the create route, so the
+    // 673 campaigns that predate 0191 keep the semantics they were built with.
+    offer_rules_enabled: boolean("offer_rules_enabled")
+      .notNull()
+      .default(false),
+    // Y. Excluded while the last send of this offer is MORE RECENT than
+    // now() - Y days; exactly Y days ago is INSIDE the cooldown.
+    offer_cooldown_days: integer("offer_cooldown_days").notNull().default(7),
+    // N. Counts CAMPAIGNS, not messages — one sequence = 1 however many
+    // stages it has.
+    offer_limit_times: integer("offer_limit_times").notNull().default(5),
+
     // Migration 0187. true once a campaign is created with the lifecycle chips
     // (PR 4); every campaign that existed before stays false and keeps its
     // legacy audience semantics. Gates the lifecycle eligibility layers, so a

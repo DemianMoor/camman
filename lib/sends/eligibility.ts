@@ -98,6 +98,59 @@ export function orderLayers(
   return [...layers].sort((a, b) => rank.get(a.key)! - rank.get(b.key)!);
 }
 
+/**
+ * The three LIFECYCLE exclusion layers (PR 4b, spec §8.1), as the send path and
+ * the audience preview both need them.
+ *
+ * ⚠️ Separate from buildStageEligibilityExclusions ON PURPOSE: none of these
+ * three depends on the current campaign or creative, and the preview
+ * (lib/audience-snapshot.ts) has no campaign id to pass. Extracting them means
+ * the preview's "excluded because suppressed / bought this offer" buckets are
+ * built from the SAME SQL the send later EXCEPTs, instead of a second copy that
+ * agrees today and drifts later. scripts/test-lifecycle-eligibility-layers.ts
+ * asserts the two stay identical.
+ *
+ * None of them filters messaging_status: gateEligible() gates the whole
+ * audience, the same decision PR 3 made for the segment rules.
+ */
+export function lifecycleExclusionLayers(p: {
+  orgId: string;
+  offerId: number | null;
+}): EligibilityLayer[] {
+  const layers: EligibilityLayer[] = [
+    // Suppressed — the end of the lifecycle. Reads the migration-0188
+    // projection on contacts, like the audience chips do.
+    {
+      key: "suppressed",
+      sql: sql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${p.orgId}::uuid AND lifecycle_status = 'suppressed'
+      `,
+    },
+  ];
+  // Bought this offer. Shares ONE definition with the made_purchase_for_offer
+  // segment rule (spec §8.1) so the two cannot drift about who bought what.
+  if (p.offerId != null) {
+    layers.push({
+      key: "bought_offer",
+      sql: purchasedOfferContacts(p.orgId, p.offerId),
+    });
+  }
+  // In freeze AND messaged inside their OWN effective cadence. The cadence is
+  // stored per contact by the engagement job, so this needs no threshold lookup
+  // and no join to contact_groups.
+  layers.push({
+    key: "freeze_not_due",
+    sql: sql`
+      SELECT contact_id FROM contact_engagement
+      WHERE org_id = ${p.orgId}::uuid
+        AND status = 'freeze'
+        AND last_sent_at > now() - make_interval(days => freeze_cadence_days)
+    `,
+  });
+  return orderLayers(layers);
+}
+
 export function buildStageEligibilityExclusions(
   p: StageEligibilityParams,
 ): StageEligibilityExclusions {
@@ -141,36 +194,12 @@ export function buildStageEligibilityExclusions(
   // gateEligible() gates the whole audience, the same decision PR 3 made for
   // the segment rules and for the same reason.
   if (p.lifecycleRules) {
-    // Suppressed — the end of the lifecycle. Reads the migration-0188
-    // projection on contacts, like the audience chips do.
-    layers.push({
-      key: "suppressed",
-      sql: sql`
-        SELECT id AS contact_id FROM contacts
-        WHERE org_id = ${p.orgId}::uuid AND lifecycle_status = 'suppressed'
-      `,
-    });
-    // Bought this offer. Shares ONE definition with the
-    // made_purchase_for_offer segment rule (spec §8.1) so the two cannot
-    // drift about who has bought what.
-    if (p.currentOfferId != null) {
-      layers.push({
-        key: "bought_offer",
-        sql: purchasedOfferContacts(p.orgId, p.currentOfferId),
-      });
-    }
-    // In freeze AND messaged inside their own effective cadence. The cadence
-    // is stored per contact by the engagement job, so this needs no threshold
-    // lookup and no join to contact_groups.
-    layers.push({
-      key: "freeze_not_due",
-      sql: sql`
-        SELECT contact_id FROM contact_engagement
-        WHERE org_id = ${p.orgId}::uuid
-          AND status = 'freeze'
-          AND last_sent_at > now() - make_interval(days => freeze_cadence_days)
-      `,
-    });
+    layers.push(
+      ...lifecycleExclusionLayers({
+        orgId: p.orgId,
+        offerId: p.currentOfferId,
+      }),
+    );
   }
 
   if (creative) layers.push({ key: "creative", sql: creative });

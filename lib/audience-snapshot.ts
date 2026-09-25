@@ -10,6 +10,8 @@ import { isStatementTimeout } from "@/lib/db/statement-timeout";
 import { EXIT_TIER, campaignTierExpr, tierLiteral } from "./campaign-tier";
 import {
   buildStageEligibilityExclusions,
+  lifecycleExclusionLayers,
+  type EligibilityLayer,
   type EligibilityLayerKey,
   type StageEligibilityParams,
 } from "./sends/eligibility";
@@ -148,6 +150,11 @@ function flagSetCtes(
   // emitted SQL for legacy campaigns too. lc_set is one index scan on
   // contacts_org_lifecycle_created_idx (migration 0188).
   lifecycleChips?: string[] | null,
+  // The three lifecycle EXCLUSION layers (suppressed / bought_offer /
+  // freeze_not_due), when the caller wants to report them. Only the preview
+  // does — the send path EXCEPTs them instead. Null everywhere else, so every
+  // other caller's CTE list is unchanged.
+  lifecycleExclusions?: EligibilityLayer[] | null,
 ): SQL {
   const base = drizzleSql`
     oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid),
@@ -166,10 +173,103 @@ function flagSetCtes(
   if (lifecycleChips == null || lifecycleChips.length === 0) return withOffer;
   return drizzleSql`${withOffer},
     lc_set as (
-      select id as contact_id from contacts
+      select id as contact_id, lifecycle_status from contacts
       where org_id = ${orgId}::uuid
         and lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(lifecycleChips))})
-    )`;
+    )${lifecycleExclusionCtes(lifecycleExclusions)}`;
+}
+
+// The lifecycle exclusion layers as CTEs named lx_<key>. Empty string when
+// absent, so the emitted CTE list is unchanged for every caller that passes
+// nothing. The SQL bodies come from lib/sends/eligibility.ts — the preview
+// reports on the same fragments the send path subtracts.
+function lifecycleExclusionCtes(layers?: EligibilityLayer[] | null): SQL {
+  if (!layers || layers.length === 0) return drizzleSql``;
+  return layers.reduce(
+    (acc, l) =>
+      drizzleSql`${acc},
+    ${drizzleSql.raw(`lx_${l.key}`)} as (${l.sql})`,
+    drizzleSql``,
+  );
+}
+
+// The PR 4b breakdown columns for previewAudience's aggregate. Emits nothing
+// for a legacy campaign, so its statement is byte-identical to before.
+//
+// The excluded_* counters are EXCLUSIVE and ordered: each successive bucket
+// carries `not <every earlier predicate>`, so a lead who is suppressed AND in
+// use elsewhere is counted once, under suppressed. The order is
+// EXCLUSION_PRIORITY's, which is also the order the send path applies them —
+// one ordering, not two.
+function lifecycleBreakdownCols(
+  lifecycleRules: boolean,
+  excludeInUse: boolean,
+  layers?: EligibilityLayer[] | null,
+): SQL {
+  if (!lifecycleRules) return drizzleSql``;
+  const has = (key: string) =>
+    layers?.some((l) => l.key === key)
+      ? drizzleSql.raw(`is_${key}`)
+      : drizzleSql`false`;
+  const suppressed = has("suppressed");
+  const bought = has("bought_offer");
+  const freezeNotDue = has("freeze_not_due");
+  // `has_lifecycle` is only projected when a chip is selected; with none
+  // selected the audience is empty and every lead is "status not selected".
+  const hasChip = layers
+    ? drizzleSql`coalesce(has_lifecycle, false)`
+    : drizzleSql`false`;
+
+  // The sending audience, i.e. exactly what total_matching counts.
+  const sending = drizzleSql`is_eligible and membership_ok`;
+  const byStatus = LIFECYCLE_CHIP_STATUSES.reduce(
+    (acc, st, i) => drizzleSql`${acc}${i === 0 ? drizzleSql`` : drizzleSql`,`}
+        ${drizzleSql.raw(`'${st}'`)}, count(*) filter (where ${sending} and lifecycle_status = ${st})`,
+    drizzleSql``,
+  );
+
+  return drizzleSql`,
+      jsonb_build_object(${byStatus}) as lc_by_status,
+      count(*) filter (where ${sending} and ${freezeNotDue})::int as lc_freeze_not_due,
+      count(*) filter (where ${sending} and ${bought})::int as lc_bought_offer,
+      count(*) filter (where membership_ok and has_opt_out)::int as lc_excl_opted_out,
+      count(*) filter (where membership_ok and not has_opt_out
+        and ${suppressed})::int as lc_excl_suppressed,
+      count(*) filter (where membership_ok and not has_opt_out
+        and not ${suppressed} and not ${hasChip})::int as lc_excl_status_not_selected,
+      count(*) filter (where membership_ok and not has_opt_out
+        and not ${suppressed} and ${hasChip}
+        and ${excludeInUse}::boolean and is_in_use_elsewhere)::int as lc_excl_in_use_elsewhere`;
+}
+
+// `is_<key>` booleans for each lifecycle exclusion layer, to be read by the
+// FILTER clauses in the preview's aggregate.
+function lifecycleFlagCols(layers?: EligibilityLayer[] | null): SQL {
+  if (!layers || layers.length === 0) return drizzleSql``;
+  return layers.reduce(
+    (acc, l) => {
+      const t = drizzleSql.raw(`lx_${l.key}`);
+      const col = drizzleSql.raw(`is_${l.key}`);
+      return drizzleSql`${acc}, (${t}.contact_id is not null) as ${col}`;
+    },
+    drizzleSql``,
+  );
+}
+
+function lifecycleExclusionJoins(
+  alias: string,
+  layers?: EligibilityLayer[] | null,
+): SQL {
+  if (!layers || layers.length === 0) return drizzleSql``;
+  const a = drizzleSql.raw(alias);
+  return layers.reduce(
+    (acc, l) => {
+      const t = drizzleSql.raw(`lx_${l.key}`);
+      return drizzleSql`${acc}
+    left join ${t} on ${t}.contact_id = ${a}.contact_id`;
+    },
+    drizzleSql``,
+  );
 }
 
 // The LEFT JOINs that attach the flagSetCtes to a candidate relation aliased
@@ -180,6 +280,7 @@ function flagJoins(
   alias: string,
   includeOfferExposure = false,
   includeLifecycle = false,
+  lifecycleExclusions?: EligibilityLayer[] | null,
 ): SQL {
   const a = drizzleSql.raw(alias);
   const base = drizzleSql`
@@ -191,9 +292,10 @@ function flagJoins(
     ? base
     : drizzleSql`${base}
     left join oe_set on oe_set.contact_id = ${a}.contact_id`;
-  if (!includeLifecycle) return withOffer;
+  if (!includeLifecycle)
+    return drizzleSql`${withOffer}${lifecycleExclusionJoins(alias, lifecycleExclusions)}`;
   return drizzleSql`${withOffer}
-    left join lc_set on lc_set.contact_id = ${a}.contact_id`;
+    left join lc_set on lc_set.contact_id = ${a}.contact_id${lifecycleExclusionJoins(alias, lifecycleExclusions)}`;
 }
 
 export interface AudienceFilters {
@@ -344,6 +446,47 @@ export interface AudiencePreviewResult {
   // aggregates Unknown+Unmapped. The UI surfaces "N removed as unidentified" and
   // the other non-zero buckets.
   carrier_removed: Record<string, number>;
+  // PR 4b. Present ONLY for a lifecycle campaign (lifecycle_rules = true);
+  // absent for every legacy one, so the legacy result shape is unchanged.
+  lifecycle?: LifecycleAudienceBreakdown;
+}
+
+export interface LifecycleAudienceBreakdown {
+  // The audience split by status. Keys are LIFECYCLE_CHIP_STATUSES; a status
+  // nobody has is 0, not missing. Sums to total_matching.
+  by_status: Record<string, number>;
+  // ⚠️ TWO KINDS OF NUMBER, and the split is deliberate.
+  //
+  // `excluded` PARTITIONS the leads that are NOT in the audience: every lead in
+  // the segment/group base is either in total_matching or under exactly ONE
+  // bucket, counted by the FIRST reason that catches it (EXCLUSION_PRIORITY
+  // order). That identity is what makes them worth showing, and
+  // scripts/test-lifecycle-preview-breakdown.ts asserts it.
+  excluded: {
+    opted_out: number;
+    suppressed: number;
+    // Their status is not among the selected chips.
+    status_not_selected: number;
+    // Only counted when exclude_in_use_contacts is ON. With it off these leads
+    // DO send, so calling them excluded would be a lie.
+    in_use_elsewhere: number;
+  };
+  // `send_time` OVERLAYS the audience: these leads ARE in it and WILL be
+  // snapshotted, but the send-time eligibility layers will skip them on the
+  // day. They are subsets of total_matching, NOT buckets, so they do not
+  // participate in the identity above — exactly like got_offer_in_prior_campaign
+  // already behaves when its toggle is off.
+  //
+  // Neither is baked into the frozen pool, and neither should be: freeze
+  // due-ness moves with the clock, and purchases keep arriving after
+  // activation. Freezing either would freeze a decision that has to be made
+  // at send time.
+  send_time: {
+    // In Freeze AND inside their own cadence right now.
+    freeze_not_due: number;
+    // Already bought this campaign's offer.
+    bought_offer: number;
+  };
 }
 
 export interface AudienceSnapshotResult {
@@ -1288,6 +1431,12 @@ export async function previewAudience(
     ? ((filters.lifecycle_statuses as string[] | undefined) ?? [])
     : null;
   const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
+  // The SAME three fragments the send path EXCEPTs — reported here instead of
+  // subtracted, so "why isn't this lead in the audience" and "why didn't this
+  // lead get the message" can never give different answers.
+  const lifecycleExclusions = lifecycleRules
+    ? lifecycleExclusionLayers({ orgId, offerId: input.offerId ?? null })
+    : null;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
   // set. When off, `offerExposureId` stays null so flagSetCtes/flagJoins emit
@@ -1414,7 +1563,7 @@ export async function previewAudience(
       from unionized
       group by contact_id
     ),
-    ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips)},
+    ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips, lifecycleExclusions)},
     flagged as (
       select
         s.contact_id,
@@ -1432,11 +1581,13 @@ export async function previewAudience(
         } as is_offer_exposed${carrierCol}
         ${
           useLifecycle
-            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle,
+          lc_set.lifecycle_status as lifecycle_status`
             : drizzleSql``
         }
+        ${lifecycleFlagCols(lifecycleExclusions)}
       from sources s
-      ${flagJoins("s", useOfferExposure, useLifecycle)}
+      ${flagJoins("s", useOfferExposure, useLifecycle, lifecycleExclusions)}
       ${carrierJoin}
     ),
     qualified as (
@@ -1502,6 +1653,7 @@ export async function previewAudience(
       -- In-audience leads who already got this offer (post-intersection, pre
       -- offer exclusion). Zero when the toggle is off (is_offer_exposed=false).
       count(*) filter (where qualifies and membership_ok and is_offer_exposed)::int as got_offer_in_prior_campaign
+      ${lifecycleBreakdownCols(lifecycleRules, excludeInUse, lifecycleExclusions)}
     from eligible
   `)) as unknown as {
     total_matching: number;
@@ -1513,6 +1665,13 @@ export async function previewAudience(
     in_use_in_other_campaigns: number;
     got_offer_in_prior_campaign: number;
     carrier_removed: Record<string, number>;
+    lc_by_status?: Record<string, number>;
+    lc_freeze_not_due?: number;
+    lc_bought_offer?: number;
+    lc_excl_opted_out?: number;
+    lc_excl_suppressed?: number;
+    lc_excl_status_not_selected?: number;
+    lc_excl_in_use_elsewhere?: number;
   }[];
 
   const row = Array.isArray(rows) ? rows[0] : null;
@@ -1530,6 +1689,31 @@ export async function previewAudience(
     in_use_in_other_campaigns: row?.in_use_in_other_campaigns ?? 0,
     got_offer_in_prior_campaign: row?.got_offer_in_prior_campaign ?? 0,
     carrier_removed: row?.carrier_removed ?? {},
+    // Absent, not zeroed, for a legacy campaign — see AudiencePreviewResult.
+    ...(lifecycleRules
+      ? {
+          lifecycle: {
+            by_status: Object.fromEntries(
+              LIFECYCLE_CHIP_STATUSES.map((st) => [
+                st,
+                Number(row?.lc_by_status?.[st] ?? 0),
+              ]),
+            ),
+            excluded: {
+              opted_out: Number(row?.lc_excl_opted_out ?? 0),
+              suppressed: Number(row?.lc_excl_suppressed ?? 0),
+              status_not_selected: Number(
+                row?.lc_excl_status_not_selected ?? 0,
+              ),
+              in_use_elsewhere: Number(row?.lc_excl_in_use_elsewhere ?? 0),
+            },
+            send_time: {
+              freeze_not_due: Number(row?.lc_freeze_not_due ?? 0),
+              bought_offer: Number(row?.lc_bought_offer ?? 0),
+            },
+          } satisfies LifecycleAudienceBreakdown,
+        }
+      : {}),
   };
 }
 

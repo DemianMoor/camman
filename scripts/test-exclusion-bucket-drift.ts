@@ -36,8 +36,11 @@ const bar = (name: string, ok: boolean, detail = "") => {
   if (!ok) fail++;
 };
 
-// The one file allowed to name the buckets.
-const CANON = "lib/sends/eligibility.ts";
+// The files allowed to name the buckets. `eligibility.ts` declares them;
+// `exclusion-labels.ts` exists precisely to be the ONE place they get a human
+// label, so it names them by design — and its Record<LifecycleExclusionKey, …>
+// makes a missing one a compile error rather than a blank in the UI.
+const CANON = ["lib/sends/eligibility.ts", "lib/sends/exclusion-labels.ts"];
 
 async function main() {
   const {
@@ -79,6 +82,7 @@ async function main() {
     "preflight.excluded_lifecycle": { ...z2 },
     "preview.excluded_lifecycle": { ...z2 },
     "reconcile.excluded_by_layer": { ...z2 },
+    "sendPanel.skipped_ineligible_by_reason": { ...z2 },
     "breakdown.excluded": {
       ...z2,
       opt_out: 0,
@@ -113,15 +117,17 @@ async function main() {
   const offenders: string[] = [];
   for (const f of files) {
     const rel = f.replace(/\\/g, "/");
-    if (rel.endsWith(CANON)) continue;
+    if (CANON.some((c) => rel.endsWith(c))) continue;
     const src = readFileSync(resolve(f), "utf-8");
     // Strip comments: prose naming the buckets is documentation, not a copy.
     const code = src
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");
-    // A hand-written copy looks like `suppressed: number` / `suppressed: 0`.
+    // A hand-written copy looks like `suppressed: number`, `suppressed: 0`, or
+    // — the shape that slipped past the first version of this bar — a second
+    // LABEL map, `suppressed: "suppressed"`. All three are the same mistake.
     const declared = derived.filter((k) =>
-      new RegExp(`\\b${k}\\s*:\\s*(number|0|\\d)`).test(code),
+      new RegExp(`\\b${k}\\s*:\\s*(number|0|\\d|["'\`])`).test(code),
     );
     if (declared.length >= 2) offenders.push(`${rel} (${declared.join(",")})`);
   }
@@ -129,6 +135,18 @@ async function main() {
     "G4 no file outside the canonical one declares the buckets itself",
     offenders.length === 0,
     offenders.length ? offenders.join(" | ") : `scanned ${files.length} files`,
+  );
+
+  // Every reason must have a label, or the UI prints a bare number with no
+  // word beside it — which reads as a different, smaller problem than it is.
+  const { EXCLUSION_LABELS } = await import("@/lib/sends/exclusion-labels");
+  const unlabelled = derived.filter((k) => !(k in EXCLUSION_LABELS));
+  bar(
+    "G6 every bucket has a human label",
+    unlabelled.length === 0,
+    unlabelled.length
+      ? `UNLABELLED ${unlabelled.join(",")}`
+      : Object.values(EXCLUSION_LABELS).join(" · "),
   );
 
   // ── The bar goes red when a key is removed from any one shape ───────────

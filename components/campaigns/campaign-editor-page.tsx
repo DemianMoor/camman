@@ -162,7 +162,9 @@ function formatFreezeCadence(days: readonly number[] | undefined): string {
   if (list.length === 0) return "the org default";
   const lo = Math.min(...list);
   const hi = Math.max(...list);
-  return lo === hi ? `${lo} days` : `${lo}–${hi} days, depending on the contact's groups,`;
+  return lo === hi
+    ? `${lo} days`
+    : `${lo}–${hi} days, depending on the contact's groups,`;
 }
 
 function mapLegacyFiltersToChips(f: AudienceFilters): Set<string> {
@@ -324,8 +326,14 @@ function Inner({
   const router = useRouter();
   const isEdit = mode === "edit";
 
-  const createApi = useApiCall<{ id: number; audience_snapshot_count: number }>();
-  const activateApi = useApiCall<{ id: number; audience_snapshot_count: number }>();
+  const createApi = useApiCall<{
+    id: number;
+    audience_snapshot_count: number;
+  }>();
+  const activateApi = useApiCall<{
+    id: number;
+    audience_snapshot_count: number;
+  }>();
   const dripConfigApi = useApiCall<{ ok: boolean }>();
   const updateApi = useApiCall<{ id: number }>();
 
@@ -338,7 +346,9 @@ function Inner({
   // with the other type's semantics mid-flight, and the drip settings live in a
   // separate table. Defaults 'regular', the same fail-toward-existing-behaviour
   // direction the column default takes.
-  const [campaignType, setCampaignType] = useState<"regular" | "drip">("regular");
+  const [campaignType, setCampaignType] = useState<"regular" | "drip">(
+    "regular",
+  );
   const [dripAudience, setDripAudience] =
     useState<DripAudienceValue>(EMPTY_DRIP_AUDIENCE);
 
@@ -363,23 +373,30 @@ function Inner({
       const n = Number(t);
       return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
     };
-    const r = await dripConfigApi.execute(`/api/campaigns/${campaignId}/drip-config`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        interest_tag: dripAudience.interest_tag.trim(),
-        partner_key_id: dripAudience.partner_key_id,
-        start_at: dripAudience.start_at
-          ? campaignLocalInputToUtcIso(dripAudience.start_at)
-          : null,
-        end_at: dripAudience.end_at ? campaignLocalInputToUtcIso(dripAudience.end_at) : null,
-        daily_cap: num(dripAudience.daily_cap),
-        campaign_cap: num(dripAudience.campaign_cap),
-        routing_daily_admission_cap: num(dripAudience.routing_daily_admission_cap),
-        priority: num(dripAudience.priority) ?? 100,
-        filters: dripAudience.filters,
-      }),
-    });
+    const r = await dripConfigApi.execute(
+      `/api/campaigns/${campaignId}/drip-config`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          interest_tag: dripAudience.interest_tag.trim(),
+          partner_key_id: dripAudience.partner_key_id,
+          start_at: dripAudience.start_at
+            ? campaignLocalInputToUtcIso(dripAudience.start_at)
+            : null,
+          end_at: dripAudience.end_at
+            ? campaignLocalInputToUtcIso(dripAudience.end_at)
+            : null,
+          daily_cap: num(dripAudience.daily_cap),
+          campaign_cap: num(dripAudience.campaign_cap),
+          routing_daily_admission_cap: num(
+            dripAudience.routing_daily_admission_cap,
+          ),
+          priority: num(dripAudience.priority) ?? 100,
+          filters: dripAudience.filters,
+        }),
+      },
+    );
     if (!r.ok) {
       toastApiError(r, "Campaign saved, but its drip settings did not");
       return false;
@@ -390,7 +407,9 @@ function Inner({
   /** Interest tag is the one drip field routing cannot work without. */
   function dripBlockedReason(): string | null {
     if (campaignType !== "drip") return null;
-    return dripAudience.interest_tag.trim() ? null : "An interest tag is required.";
+    return dripAudience.interest_tag.trim()
+      ? null
+      : "An interest tag is required.";
   }
 
   async function handleCreateDraft(values: CampaignFormValues) {
@@ -432,7 +451,9 @@ function Inner({
       await persistDripConfig(result.data.id);
       // A drip campaign freezes no pool, so quoting a contact count here would
       // report 0 as though something went wrong.
-      toast.success("Drip campaign activated — leads will be routed as they arrive");
+      toast.success(
+        "Drip campaign activated — leads will be routed as they arrive",
+      );
     } else {
       const count = result.data.audience_snapshot_count.toLocaleString();
       toast.success(`Campaign activated — ${count} contacts in audience pool`);
@@ -489,9 +510,9 @@ function Inner({
     handleActivateClick,
   } = state;
 
-  const displayStatus: Status = isEdit ? currentStatus ?? "draft" : "draft";
+  const displayStatus: Status = isEdit ? (currentStatus ?? "draft") : "draft";
   const headerTitle = isEdit
-    ? campaignName ?? "Edit campaign"
+    ? (campaignName ?? "Edit campaign")
     : "New Campaign";
 
   return (
@@ -515,11 +536,7 @@ function Inner({
           }
           // Esc: cancel out. Skip when another element already handled
           // Escape (Radix Select/Popover preventDefault before bubble).
-          if (
-            e.key === "Escape" &&
-            !e.defaultPrevented &&
-            !anySubmitting
-          ) {
+          if (e.key === "Escape" && !e.defaultPrevented && !anySubmitting) {
             if (
               form.formState.isDirty &&
               !window.confirm("Discard unsaved changes?")
@@ -547,9 +564,7 @@ function Inner({
               {headerTitle}
             </h1>
             {isEdit ? (
-              <Badge
-                className={cn("capitalize", STATUS_COLOR[displayStatus])}
-              >
+              <Badge className={cn("capitalize", STATUS_COLOR[displayStatus])}>
                 {displayStatus}
               </Badge>
             ) : null}
@@ -832,7 +847,10 @@ function SetupCard({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="manual">Manual Send</SelectItem>
-                  <SelectItem value="tracked" disabled={!selectedBrandShortDomain}>
+                  <SelectItem
+                    value="tracked"
+                    disabled={!selectedBrandShortDomain}
+                  >
                     API Send
                   </SelectItem>
                 </SelectContent>
@@ -1035,9 +1053,7 @@ function SetupCard({
                 <FormLabel>Assigned</FormLabel>
                 <Select
                   value={field.value === null ? NONE : field.value}
-                  onValueChange={(v) =>
-                    field.onChange(v === NONE ? null : v)
-                  }
+                  onValueChange={(v) => field.onChange(v === NONE ? null : v)}
                   disabled={anySubmitting}
                 >
                   <FormControl>
@@ -1182,284 +1198,303 @@ function AudienceCard({
           </>
         ) : (
           <>
-        {audienceLocked ? (
-          <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs dark:border-amber-900 dark:bg-amber-950/40">
-            <Lock
-              className="size-3.5 mt-0.5 text-amber-700 dark:text-amber-300"
-              aria-hidden
-            />
-            <div className="text-amber-800 dark:text-amber-200">
-              Audience is locked once a campaign is activated.
-            </div>
-          </div>
-        ) : null}
+            {audienceLocked ? (
+              <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs dark:border-amber-900 dark:bg-amber-950/40">
+                <Lock
+                  className="size-3.5 mt-0.5 text-amber-700 dark:text-amber-300"
+                  aria-hidden
+                />
+                <div className="text-amber-800 dark:text-amber-200">
+                  Audience is locked once a campaign is activated.
+                </div>
+              </div>
+            ) : null}
 
-        <div className="grid gap-3 md:grid-cols-3">
-          <div className="grid gap-1.5">
-            <Label>Segments</Label>
-            <SegmentPicker
-              segments={segments}
-              value={segmentPickerValue}
-              onChange={onSegmentSelectionChange}
-              segmentModes={segmentModes}
-              onToggleMode={onToggleSegmentMode}
-              disabled={audienceLocked || anySubmitting}
-            />
-            {watchedSegments.length > 1 ? (
-              <p className="text-xs text-muted-foreground">
-                Included segments <span className="font-medium">narrow</span> each
-                other — a contact must match{" "}
-                <span className="font-medium">all {watchedSegments.length}</span>{" "}
-                to be in the audience.
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="grid gap-1.5">
+                <Label>Segments</Label>
+                <SegmentPicker
+                  segments={segments}
+                  value={segmentPickerValue}
+                  onChange={onSegmentSelectionChange}
+                  segmentModes={segmentModes}
+                  onToggleMode={onToggleSegmentMode}
+                  disabled={audienceLocked || anySubmitting}
+                />
+                {watchedSegments.length > 1 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Included segments{" "}
+                    <span className="font-medium">narrow</span> each other — a
+                    contact must match{" "}
+                    <span className="font-medium">
+                      all {watchedSegments.length}
+                    </span>{" "}
+                    to be in the audience.
+                  </p>
+                ) : null}
+                {watchedExcludeSegments.length > 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Excluded segments are subtracted from the group /
+                    included-segment audience.
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Toggle a selected segment to{" "}
+                    <span className="font-medium">Excl</span> to remove its
+                    contacts from the audience.
+                  </p>
+                )}
+              </div>
+              <div className="grid gap-1.5">
+                <Label>
+                  Contact groups
+                  <span aria-hidden className="text-destructive ml-0.5">
+                    *
+                  </span>
+                </Label>
+                <MultiSelectPicker
+                  options={contactGroups.map((g) => ({
+                    id: g.id,
+                    label: g.name,
+                    color: g.color,
+                  }))}
+                  value={watchedContactGroups}
+                  onChange={(next) =>
+                    form.setValue(
+                      "audience_contact_group_ids",
+                      next as number[],
+                      { shouldDirty: true },
+                    )
+                  }
+                  placeholder="Select groups"
+                  selectedLabel={(n) =>
+                    `${n} group${n === 1 ? "" : "s"} selected`
+                  }
+                  isLoading={contactGroupsLoading && contactGroups.length === 0}
+                  disabled={audienceLocked || anySubmitting}
+                  emptyMessage="No contact groups yet."
+                  searchPlaceholder="Search groups…"
+                />
+              </div>
+              <FormField
+                control={form.control}
+                name="audience_cap"
+                render={({ field }) => (
+                  <FormItem className="grid gap-1.5">
+                    <FormLabel>Audience cap</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        min={1}
+                        step={1}
+                        placeholder="No cap"
+                        disabled={audienceLocked || anySubmitting}
+                        value={field.value ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value.trim();
+                          if (v === "") {
+                            field.onChange(null);
+                            return;
+                          }
+                          const n = Number(v);
+                          field.onChange(
+                            Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
+                          );
+                        }}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-xs">
+                      Blank = full audience. Random sample frozen at activation.
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <div className="flex items-start justify-between gap-3 rounded-md border p-3">
+                <div className="grid gap-0.5">
+                  <span className="text-sm font-medium">
+                    Exclude contacts in use
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Skip contacts already in another active campaign&apos;s
+                    audience. The cap then draws from unused contacts only.
+                  </span>
+                </div>
+                <Switch
+                  checked={watchedExcludeInUse}
+                  onCheckedChange={(v) =>
+                    form.setValue("exclude_in_use_contacts", v, {
+                      shouldDirty: true,
+                    })
+                  }
+                  disabled={audienceLocked || anySubmitting}
+                />
+              </div>
+              <div className="flex items-start justify-between gap-3 rounded-md border p-3">
+                <div className="grid gap-0.5">
+                  <span className="text-sm font-medium">
+                    Exclude leads who already got this offer
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Skip contacts who already received this campaign&apos;s
+                    offer in a previous campaign. The same creative is never
+                    re-sent to a lead regardless of this setting.
+                  </span>
+                </div>
+                <Switch
+                  checked={watchedExcludePriorOffer}
+                  onCheckedChange={(v) =>
+                    form.setValue("exclude_prior_offer_contacts", v, {
+                      shouldDirty: true,
+                    })
+                  }
+                  disabled={audienceLocked || anySubmitting}
+                />
+              </div>
+            </div>
+
+            {/* Lifecycle chips (PR 4b). Editable only for a lifecycle campaign;
+            for a legacy one they are the read-only mapping of the row below. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground">Lifecycle:</span>
+              {LIFECYCLE_CHIP_DEFS.map((c) => {
+                const selected = new Set(
+                  watchedFilters.lifecycle_statuses ?? [],
+                );
+                const active = lifecycleRules
+                  ? c.statuses.every((st) => selected.has(st))
+                  : legacyMappedChips.has(c.id);
+                const editable =
+                  lifecycleRules && !audienceLocked && !anySubmitting;
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    title={
+                      lifecycleRules
+                        ? c.tooltip
+                        : `${c.tooltip} — read-only: this campaign predates lifecycle rules`
+                    }
+                    onClick={() =>
+                      editable && toggleLifecycleChip(c.statuses, !active)
+                    }
+                    disabled={!editable}
+                    className={cn(
+                      "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
+                      active
+                        ? "border-foreground bg-foreground text-background"
+                        : "border-border bg-background text-muted-foreground",
+                      editable
+                        ? "hover:bg-muted"
+                        : "cursor-not-allowed opacity-60",
+                    )}
+                  >
+                    {c.label}
+                  </button>
+                );
+              })}
+              <span className="text-xs text-muted-foreground">
+                {lifecycleRules
+                  ? "· Suppressed and opted-out always excluded"
+                  : "· read-only, mapped from the filters below (approximate)"}
+              </span>
+            </div>
+            {/* ⚠️ WHY the legacy chips are showing. A campaign is legacy either
+            because it predates the feature, or because the engagement engine
+            is off right now — and only the second is something the operator
+            can act on. Saying nothing would leave them assuming the feature
+            failed to load. */}
+            {!lifecycleRules && state.engineMode === "off" ? (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                Lifecycle engine is off — campaign uses legacy filters
               </p>
             ) : null}
-            {watchedExcludeSegments.length > 0 ? (
-              <p className="text-xs text-muted-foreground">
-                Excluded segments are subtracted from the group / included-segment
-                audience.
+            {lifecycleRules &&
+            (watchedFilters.lifecycle_statuses ?? []).length === 0 ? (
+              <p className="text-xs text-destructive">
+                Select at least one lifecycle status.
               </p>
-            ) : (
+            ) : null}
+            {lifecycleRules &&
+            (watchedFilters.lifecycle_statuses ?? []).includes("freeze") ? (
               <p className="text-xs text-muted-foreground">
-                Toggle a selected segment to{" "}
-                <span className="font-medium">Excl</span> to remove its contacts
-                from the audience.
+                Freeze contacts are only eligible at Prepare once their last
+                message is {freezeCadenceNote} old. A contact&apos;s own cadence
+                is the strictest across <em>all</em> its active groups, so one
+                also in an unselected group can wait longer.
               </p>
-            )}
-          </div>
-          <div className="grid gap-1.5">
-            <Label>
-              Contact groups
-              <span aria-hidden className="text-destructive ml-0.5">
-                *
-              </span>
-            </Label>
-            <MultiSelectPicker
-              options={contactGroups.map((g) => ({
-                id: g.id,
-                label: g.name,
-                color: g.color,
-              }))}
-              value={watchedContactGroups}
-              onChange={(next) =>
-                form.setValue(
-                  "audience_contact_group_ids",
-                  next as number[],
-                  { shouldDirty: true },
-                )
-              }
-              placeholder="Select groups"
-              selectedLabel={(n) =>
-                `${n} group${n === 1 ? "" : "s"} selected`
-              }
-              isLoading={contactGroupsLoading && contactGroups.length === 0}
-              disabled={audienceLocked || anySubmitting}
-              emptyMessage="No contact groups yet."
-              searchPlaceholder="Search groups…"
-            />
-          </div>
-          <FormField
-            control={form.control}
-            name="audience_cap"
-            render={({ field }) => (
-              <FormItem className="grid gap-1.5">
-                <FormLabel>Audience cap</FormLabel>
-                <FormControl>
-                  <Input
-                    type="number"
-                    min={1}
-                    step={1}
-                    placeholder="No cap"
-                    disabled={audienceLocked || anySubmitting}
-                    value={field.value ?? ""}
-                    onChange={(e) => {
-                      const v = e.target.value.trim();
-                      if (v === "") {
-                        field.onChange(null);
-                        return;
-                      }
-                      const n = Number(v);
-                      field.onChange(
-                        Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
-                      );
-                    }}
-                  />
-                </FormControl>
-                <FormDescription className="text-xs">
-                  Blank = full audience. Random sample frozen at activation.
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <div className="flex items-start justify-between gap-3 rounded-md border p-3">
-            <div className="grid gap-0.5">
-              <span className="text-sm font-medium">
-                Exclude contacts in use
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Skip contacts already in another active campaign&apos;s
-                audience. The cap then draws from unused contacts only.
-              </span>
-            </div>
-            <Switch
-              checked={watchedExcludeInUse}
-              onCheckedChange={(v) =>
-                form.setValue("exclude_in_use_contacts", v, {
-                  shouldDirty: true,
-                })
-              }
-              disabled={audienceLocked || anySubmitting}
-            />
-          </div>
-          <div className="flex items-start justify-between gap-3 rounded-md border p-3">
-            <div className="grid gap-0.5">
-              <span className="text-sm font-medium">
-                Exclude leads who already got this offer
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Skip contacts who already received this campaign&apos;s offer in
-                a previous campaign. The same creative is never re-sent to a lead
-                regardless of this setting.
-              </span>
-            </div>
-            <Switch
-              checked={watchedExcludePriorOffer}
-              onCheckedChange={(v) =>
-                form.setValue("exclude_prior_offer_contacts", v, {
-                  shouldDirty: true,
-                })
-              }
-              disabled={audienceLocked || anySubmitting}
-            />
-          </div>
-        </div>
+            ) : null}
 
-        {/* Lifecycle chips (PR 4b). Editable only for a lifecycle campaign;
-            for a legacy one they are the read-only mapping of the row below. */}
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground">Lifecycle:</span>
-          {LIFECYCLE_CHIP_DEFS.map((c) => {
-            const selected = new Set(watchedFilters.lifecycle_statuses ?? []);
-            const active = lifecycleRules
-              ? c.statuses.every((st) => selected.has(st))
-              : legacyMappedChips.has(c.id);
-            const editable = lifecycleRules && !audienceLocked && !anySubmitting;
-            return (
-              <button
-                key={c.id}
-                type="button"
-                title={
-                  lifecycleRules
-                    ? c.tooltip
-                    : `${c.tooltip} — read-only: this campaign predates lifecycle rules`
-                }
-                onClick={() =>
-                  editable && toggleLifecycleChip(c.statuses, !active)
-                }
-                disabled={!editable}
-                className={cn(
-                  "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
-                  active
-                    ? "border-foreground bg-foreground text-background"
-                    : "border-border bg-background text-muted-foreground",
-                  editable ? "hover:bg-muted" : "cursor-not-allowed opacity-60",
-                )}
-              >
-                {c.label}
-              </button>
-            );
-          })}
-          <span className="text-xs text-muted-foreground">
-            {lifecycleRules
-              ? "· Suppressed and opted-out always excluded"
-              : "· read-only, mapped from the filters below (approximate)"}
-          </span>
-        </div>
-        {lifecycleRules && (watchedFilters.lifecycle_statuses ?? []).length === 0 ? (
-          <p className="text-xs text-destructive">
-            Select at least one lifecycle status.
-          </p>
-        ) : null}
-        {lifecycleRules &&
-        (watchedFilters.lifecycle_statuses ?? []).includes("freeze") ? (
-          <p className="text-xs text-muted-foreground">
-            Freeze contacts are only eligible at Prepare once their last message
-            is {freezeCadenceNote} old. A contact&apos;s own cadence is the
-            strictest across <em>all</em> its active groups, so one also in an
-            unselected group can wait longer.
-          </p>
-        ) : null}
-
-        {/* Legacy filter chips. Hidden entirely for a lifecycle campaign
+            {/* Legacy filter chips. Hidden entirely for a lifecycle campaign
             (spec §7.1); kept read-only for a legacy one, because they are what
             actually governs that campaign's audience. */}
-        {!lifecycleRules ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground">Filters:</span>
-          {FILTER_DEFS.map((f) => {
-            const active = watchedFilters[f.key];
-            return (
-              <button
-                key={f.key}
-                type="button"
-                title={f.tooltip}
-                // Read-only: editing a legacy campaign's chips would silently
-                // rewrite its audience, and for an active one it is frozen anyway.
-                disabled
-                className={cn(
-                  "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
-                  active
-                    ? "border-foreground bg-foreground text-background"
-                    : "border-border bg-background text-muted-foreground hover:bg-muted",
-                  (audienceLocked || anySubmitting) &&
-                    "cursor-not-allowed opacity-60",
-                )}
-              >
-                {f.label}
-              </button>
-            );
-          })}
-          <span className="text-xs text-muted-foreground">
-            · Opt-outs always excluded
-          </span>
-        </div>
-        ) : null}
+            {!lifecycleRules ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">Filters:</span>
+                {FILTER_DEFS.map((f) => {
+                  const active = watchedFilters[f.key];
+                  return (
+                    <button
+                      key={f.key}
+                      type="button"
+                      title={f.tooltip}
+                      // Read-only: editing a legacy campaign's chips would silently
+                      // rewrite its audience, and for an active one it is frozen anyway.
+                      disabled
+                      className={cn(
+                        "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
+                        active
+                          ? "border-foreground bg-foreground text-background"
+                          : "border-border bg-background text-muted-foreground hover:bg-muted",
+                        (audienceLocked || anySubmitting) &&
+                          "cursor-not-allowed opacity-60",
+                      )}
+                    >
+                      {f.label}
+                    </button>
+                  );
+                })}
+                <span className="text-xs text-muted-foreground">
+                  · Opt-outs always excluded
+                </span>
+              </div>
+            ) : null}
 
-        {/* Carrier filter (optional). Empty = all carriers. */}
-        <div className="grid gap-1.5">
-          <Label>Carrier filter</Label>
-          <MultiSelectPicker
-            options={CAMPAIGN_CARRIER_FILTER_VALUES.map((c) => ({
-              id: c,
-              label: c,
-            }))}
-            value={watchedFilters.carrier_filter}
-            onChange={(next) => setCarrierFilter(next as string[])}
-            placeholder="All carriers (no filter)"
-            selectedLabel={(n) =>
-              `${n} carrier${n === 1 ? "" : "s"} selected`
-            }
-            disabled={audienceLocked || anySubmitting}
-            searchPlaceholder="Search carriers…"
-          />
-          <p className="text-xs text-muted-foreground">
-            Empty = every carrier. When set, only the selected carriers qualify;
-            never-looked-up (unidentified) numbers are excluded.
-          </p>
-          {/* THE AND STATEMENT (Q4). Mirrored on the number's settings, under
+            {/* Carrier filter (optional). Empty = all carriers. */}
+            <div className="grid gap-1.5">
+              <Label>Carrier filter</Label>
+              <MultiSelectPicker
+                options={CAMPAIGN_CARRIER_FILTER_VALUES.map((c) => ({
+                  id: c,
+                  label: c,
+                }))}
+                value={watchedFilters.carrier_filter}
+                onChange={(next) => setCarrierFilter(next as string[])}
+                placeholder="All carriers (no filter)"
+                selectedLabel={(n) =>
+                  `${n} carrier${n === 1 ? "" : "s"} selected`
+                }
+                disabled={audienceLocked || anySubmitting}
+                searchPlaceholder="Search carriers…"
+              />
+              <p className="text-xs text-muted-foreground">
+                Empty = every carrier. When set, only the selected carriers
+                qualify; never-looked-up (unidentified) numbers are excluded.
+              </p>
+              {/* THE AND STATEMENT (Q4). Mirrored on the number's settings, under
               Carrier policy. This filter is frozen into the audience pool at
               activation and says WHO THE CAMPAIGN IS FOR; the number's policy
               is evaluated when each stage materializes and says WHAT THAT
               NUMBER MAY CARRY. Without this sentence, the empty audience
               produced by a contradiction between them looks like a pool bug. */}
-          <p className="text-xs text-muted-foreground">
-            This filter and the sending number&apos;s own carrier policy are
-            combined with <strong>AND</strong>: a contact must be allowed by
-            both. Neither one widens the other, so if this campaign targets a
-            carrier the stage&apos;s number has turned off, that stage&apos;s
-            audience is empty.
-          </p>
-        </div>
+              <p className="text-xs text-muted-foreground">
+                This filter and the sending number&apos;s own carrier policy are
+                combined with <strong>AND</strong>: a contact must be allowed by
+                both. Neither one widens the other, so if this campaign targets
+                a carrier the stage&apos;s number has turned off, that
+                stage&apos;s audience is empty.
+              </p>
+            </div>
           </>
         )}
       </CardContent>
@@ -1639,8 +1674,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                     ) : null}
                   </span>
                 </div>
-                {previewInUseElsewhere !== null &&
-                previewInUseElsewhere > 0 ? (
+                {previewInUseElsewhere !== null && previewInUseElsewhere > 0 ? (
                   watchedExcludeInUse ? (
                     // Toggle ON: the in-use contacts are already dropped from
                     // the pool above. Report it as a confirmation, not a warning.
@@ -1671,8 +1705,8 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                           {previewInUseElsewhere.toLocaleString()}
                         </span>{" "}
                         contact{previewInUseElsewhere === 1 ? "" : "s"} in this
-                        pool {previewInUseElsewhere === 1 ? "is" : "are"} also in
-                        another active campaign&apos;s audience. Turn on{" "}
+                        pool {previewInUseElsewhere === 1 ? "is" : "are"} also
+                        in another active campaign&apos;s audience. Turn on{" "}
                         <span className="font-medium">
                           Exclude contacts in use
                         </span>{" "}
@@ -1720,11 +1754,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                 />
               ) : null}
               {showOverlap && previewOverlap !== null ? (
-                <BreakdownRow
-                  label="In both"
-                  value={previewOverlap}
-                  muted
-                />
+                <BreakdownRow label="In both" value={previewOverlap} muted />
               ) : null}
               {watchedExcludeSegments.length > 0 &&
               previewExcludedBySegments !== null &&
@@ -1735,8 +1765,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                   muted
                 />
               ) : null}
-              {previewExcludedOptOut !== null &&
-              previewExcludedOptOut > 0 ? (
+              {previewExcludedOptOut !== null && previewExcludedOptOut > 0 ? (
                 <BreakdownRow
                   label="Opt-outs excluded"
                   value={previewExcludedOptOut}

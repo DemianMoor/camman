@@ -35,11 +35,28 @@ const ROLLBACK = Symbol("rollback");
 
 // Build a DrainResult from a processed count (the only fields Phase B reads:
 // sent/failed/skipped*/processed/remaining/ok/halted/pausedNow).
-function drained(processed: number, remaining: number, extra?: Partial<DrainResult>): DrainResult {
+function drained(
+  processed: number,
+  remaining: number,
+  extra?: Partial<DrainResult>,
+): DrainResult {
   return {
-    ok: true, sent: processed, failed: 0, filtered: 0, skippedDuplicate: 0,
-    skippedOptedOut: 0, processed, halted: false, stuck: 0, remaining,
-    stopReason: null, pausedNow: false, ...extra,
+    ok: true,
+    sent: processed,
+    failed: 0,
+    filtered: 0,
+    skippedDuplicate: 0,
+    skippedOptedOut: 0,
+    skippedIneligible: 0,
+    skippedIneligibleByReason: {},
+    recheckFailedBatches: 0,
+    processed,
+    halted: false,
+    stuck: 0,
+    remaining,
+    stopReason: null,
+    pausedNow: false,
+    ...extra,
   };
 }
 
@@ -77,7 +94,8 @@ async function main() {
           VALUES (${orgId}, ${`c-${uniq()}`}, ${brand.id}, 'tracked', 'active') RETURNING id
         `);
         const mkProvider = async (maxRun: number | null) =>
-          (await one<{ id: number }>(sql`
+          (
+            await one<{ id: number }>(sql`
             INSERT INTO sms_providers
               (sms_provider_id, org_id, name, supports_api_send, status, max_sends_per_run,
                send_window_weekday_start, send_window_weekday_end,
@@ -85,18 +103,25 @@ async function main() {
             VALUES (${`p-${uniq()}`}, ${orgId}, ${"P"}, true, 'active', ${maxRun},
                     0, 1439, 0, 1439)
             RETURNING id
-          `)).id;
+          `)
+          ).id;
         const mkPhone = async (providerId: number, rate: number | null) =>
-          (await one<{ id: number }>(sql`
+          (
+            await one<{ id: number }>(sql`
             INSERT INTO provider_phones (org_id, provider_id, phone_number, max_sends_per_second)
             VALUES (${orgId}, ${providerId}, ${mkNumber()}, ${rate})
             RETURNING id
-          `)).id;
+          `)
+          ).id;
         let stageSeq = 0;
         // A drainable stage: approved, materialized (so Phase A skips + Phase B
         // drains it), due (scheduled_at in the past), first-fire (sent_at NULL),
         // with `pending` rows so selectDrainableStages picks it up.
-        const mkStage = async (providerId: number, phoneId: number, pendingRows: number) => {
+        const mkStage = async (
+          providerId: number,
+          phoneId: number,
+          pendingRows: number,
+        ) => {
           const st = await one<{ id: number }>(sql`
             INSERT INTO campaign_stages
               (org_id, campaign_id, stage_number, sms_provider_id, provider_phone_id,
@@ -121,10 +146,17 @@ async function main() {
         return { orgId, mkProvider, mkPhone, mkStage };
       };
 
-      const runTick = (orgId: string, runDrain: (s: number, r: number, d?: number) => Promise<DrainResult>) =>
+      const runTick = (
+        orgId: string,
+        runDrain: (s: number, r: number, d?: number) => Promise<DrainResult>,
+      ) =>
         runScheduledSends(dbc, {
-          orgId, now: NOW, isEnabled: () => true, isOrgEnabled: async () => true,
-          runDrain, maxStages: 50,
+          orgId,
+          now: NOW,
+          isEnabled: () => true,
+          isOrgEnabled: async () => true,
+          runDrain,
+          maxStages: 50,
         });
 
       // A BARRIER fake: each call holds until `parties` calls are simultaneously
@@ -133,15 +165,27 @@ async function main() {
       // Sequential drains reach it one at a time → each times out → maxInFlight 1.
       // This makes the concurrency observable WITHOUT depending on DB-vs-timer race
       // ordering (a plain setImmediate hold was defeated by DB round-trip latency).
-      const makeBarrierFake = (rem: Map<number, number>, parties: number, timeoutMs: number) => {
-        let inFlight = 0, maxInFlight = 0, entered = 0;
+      const makeBarrierFake = (
+        rem: Map<number, number>,
+        parties: number,
+        timeoutMs: number,
+      ) => {
+        let inFlight = 0,
+          maxInFlight = 0,
+          entered = 0;
         let release: () => void = () => {};
-        const barrier = new Promise<void>((r) => { release = r; });
+        const barrier = new Promise<void>((r) => {
+          release = r;
+        });
         const fake = async (stageId: number, maxRows: number) => {
-          inFlight++; entered++;
+          inFlight++;
+          entered++;
           maxInFlight = Math.max(maxInFlight, inFlight);
           if (entered >= parties) release();
-          await Promise.race([barrier, new Promise((r) => setTimeout(r, timeoutMs))]);
+          await Promise.race([
+            barrier,
+            new Promise((r) => setTimeout(r, timeoutMs)),
+          ]);
           inFlight--;
           const r0 = rem.get(stageId) ?? 0;
           const p = Math.max(0, Math.min(maxRows, r0));
@@ -160,15 +204,28 @@ async function main() {
         const ph2 = await f.mkPhone(prov, 60);
         const s1 = await f.mkStage(prov, ph1, 1);
         const s2 = await f.mkStage(prov, ph2, 1);
-        const bf = makeBarrierFake(new Map([[s1, 1], [s2, 1]]), 2, 2000);
+        const bf = makeBarrierFake(
+          new Map([
+            [s1, 1],
+            [s2, 1],
+          ]),
+          2,
+          2000,
+        );
         const res = await runTick(f.orgId, bf.fake);
         check("both stages drained", res.drained === 2, JSON.stringify(res));
         check("both sent (1 each)", res.sent === 2, JSON.stringify(res));
-        check("drains OVERLAPPED — maxInFlight 2 (concurrent by phone)", bf.max() === 2, `maxInFlight=${bf.max()}`);
+        check(
+          "drains OVERLAPPED — maxInFlight 2 (concurrent by phone)",
+          bf.max() === 2,
+          `maxInFlight=${bf.max()}`,
+        );
       }
 
       // ── Case 2: two stages on the SAME phone drain SEQUENTIALLY ───────────────
-      console.log("Case 2: stages on one phone drain sequentially (shared carrier rate)");
+      console.log(
+        "Case 2: stages on one phone drain sequentially (shared carrier rate)",
+      );
       {
         const f = await mkFixture();
         const prov = await f.mkProvider(100_000);
@@ -177,14 +234,31 @@ async function main() {
         const s2 = await f.mkStage(prov, ph, 1);
         // parties=2 can NEVER be met (one phone group = one drain at a time), so the
         // first call times out (300ms) then the second releases — maxInFlight 1.
-        const bf = makeBarrierFake(new Map([[s1, 1], [s2, 1]]), 2, 300);
+        const bf = makeBarrierFake(
+          new Map([
+            [s1, 1],
+            [s2, 1],
+          ]),
+          2,
+          300,
+        );
         const res = await runTick(f.orgId, bf.fake);
-        check("both same-phone stages drained", res.drained === 2, JSON.stringify(res));
-        check("drains did NOT overlap — maxInFlight 1 (sequential within phone)", bf.max() === 1, `maxInFlight=${bf.max()}`);
+        check(
+          "both same-phone stages drained",
+          res.drained === 2,
+          JSON.stringify(res),
+        );
+        check(
+          "drains did NOT overlap — maxInFlight 1 (sequential within phone)",
+          bf.max() === 1,
+          `maxInFlight=${bf.max()}`,
+        );
       }
 
       // ── Case 3: round-robin WITHIN a phone (revisit until drained) ────────────
-      console.log("Case 3: a big stage is revisited in-tick (round-robin), not drained in one shot");
+      console.log(
+        "Case 3: a big stage is revisited in-tick (round-robin), not drained in one shot",
+      );
       {
         const f = await mkFixture();
         const prov = await f.mkProvider(100_000);
@@ -202,13 +276,27 @@ async function main() {
           return drained(p, r0 - p);
         };
         const res = await runTick(f.orgId, fake);
-        check("stage fully drained across slices (sent 8)", res.sent === 8, JSON.stringify(res));
-        check("drained counts the stage ONCE (distinct)", res.drained === 1, JSON.stringify(res));
-        check("round-robin revisited the stage 3× (ceil 8/3)", callsByStage.get(s1) === 3, `calls=${callsByStage.get(s1)}`);
+        check(
+          "stage fully drained across slices (sent 8)",
+          res.sent === 8,
+          JSON.stringify(res),
+        );
+        check(
+          "drained counts the stage ONCE (distinct)",
+          res.drained === 1,
+          JSON.stringify(res),
+        );
+        check(
+          "round-robin revisited the stage 3× (ceil 8/3)",
+          callsByStage.get(s1) === 3,
+          `calls=${callsByStage.get(s1)}`,
+        );
       }
 
       // ── Case 4: per-provider per-tick budget is a hard ceiling ────────────────
-      console.log("Case 4: provider per-tick budget caps total sends under revisits");
+      console.log(
+        "Case 4: provider per-tick budget caps total sends under revisits",
+      );
       {
         const f = await mkFixture();
         const prov = await f.mkProvider(10); // cap 10 rows/tick for the whole provider
@@ -223,21 +311,38 @@ async function main() {
           return drained(p, r0 - p);
         };
         const res = await runTick(f.orgId, fake);
-        check("provider budget capped the tick at 10", res.sent === 10, JSON.stringify(res));
-        check("budget exhaustion recorded (budget_held ≥ 1)", res.budget_held >= 1, JSON.stringify(res));
+        check(
+          "provider budget capped the tick at 10",
+          res.sent === 10,
+          JSON.stringify(res),
+        );
+        check(
+          "budget exhaustion recorded (budget_held ≥ 1)",
+          res.budget_held >= 1,
+          JSON.stringify(res),
+        );
       }
 
       console.log("\nAll cases done. Rolling back (no data persisted).");
       throw ROLLBACK;
     });
   } catch (err) {
-    if (err !== ROLLBACK) { console.error("\nCRASHED:", err); failed = 1; }
+    if (err !== ROLLBACK) {
+      console.error("\nCRASHED:", err);
+      failed = 1;
+    }
   } finally {
     await pgConn.end({ timeout: 5 });
   }
 
-  if (failed) { console.log(`\nFAILED: ${failed} check(s).`); process.exit(1); }
+  if (failed) {
+    console.log(`\nFAILED: ${failed} check(s).`);
+    process.exit(1);
+  }
   console.log("\ntest-scheduled-phone-concurrency OK.");
 }
 
-main().catch((err) => { console.error("crashed:", err); process.exit(1); });
+main().catch((err) => {
+  console.error("crashed:", err);
+  process.exit(1);
+});

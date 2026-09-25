@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, CircleSlash, Download, SendHorizonal } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleSlash,
+  Download,
+  SendHorizonal,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
@@ -12,6 +18,8 @@ import {
 } from "@/components/campaigns/stage-prepare-dialog";
 import { StageReadinessChecklist } from "@/components/sends/stage-readiness-checklist";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
+import { EXCLUSION_LABELS } from "@/lib/sends/exclusion-labels";
+import type { LifecycleExclusionKey } from "@/lib/sends/eligibility";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import {
   AlertDialog,
@@ -39,9 +47,20 @@ type SendStatus = {
   sent_at: string | null;
   schedule_missed_at: string | null;
   counts: {
-    total: number; pending: number; sending: number; sent: number; failed: number;
-    skipped_duplicate: number; skipped_opted_out: number;
+    total: number;
+    pending: number;
+    sending: number;
+    sent: number;
+    failed: number;
+    skipped_duplicate: number;
+    skipped_opted_out: number;
     skipped_ineligible: number;
+    // PR 4c — the same total split by the reason the drain wrote. Reuses the
+    // server type rather than re-listing the reasons, so a layer added later
+    // appears here instead of vanishing into the unnamed total.
+    skipped_ineligible_by_reason?: Partial<
+      Record<LifecycleExclusionKey, number>
+    >;
   };
   // The real frozen message of one materialized row (null before kickoff).
   sample_rendered_text: string | null;
@@ -99,7 +118,12 @@ export function StageSendPanel({
     stuck: number;
     remaining: number;
   }>();
-  const retryApi = useApiCall<{ ok: boolean; requeued: number; sent: number; failed: number }>();
+  const retryApi = useApiCall<{
+    ok: boolean;
+    requeued: number;
+    sent: number;
+    failed: number;
+  }>();
   const { execute: statusExec } = statusApi;
 
   const [status, setStatus] = useState<SendStatus | null>(null);
@@ -112,7 +136,9 @@ export function StageSendPanel({
   useEffect(() => {
     let active = true;
     void (async () => {
-      const r = await statusExec(`/api/campaigns/${campaignId}/stages/${stageId}/send`);
+      const r = await statusExec(
+        `/api/campaigns/${campaignId}/stages/${stageId}/send`,
+      );
       if (active && r.ok) setStatus(r.data);
     })();
     return () => {
@@ -165,12 +191,16 @@ export function StageSendPanel({
       toastApiError(r, "Retry failed");
       return;
     }
-    toast.success(`Retried ${r.data.requeued} — sent ${r.data.sent}, failed ${r.data.failed}`);
+    toast.success(
+      `Retried ${r.data.requeued} — sent ${r.data.sent}, failed ${r.data.failed}`,
+    );
     refresh();
   }
 
   if (!status) {
-    return <p className="text-sm text-muted-foreground">Loading send status…</p>;
+    return (
+      <p className="text-sm text-muted-foreground">Loading send status…</p>
+    );
   }
 
   const pending = status.counts.pending;
@@ -183,7 +213,10 @@ export function StageSendPanel({
     status.scheduled_at != null && status.schedule_missed_at == null;
   // Prepared = materialized for a schedule, nothing released/sent yet.
   const prepared =
-    pending > 0 && willSchedule && status.sent_at == null && status.counts.sent === 0;
+    pending > 0 &&
+    willSchedule &&
+    status.sent_at == null &&
+    status.counts.sent === 0;
   // Shared Prepare popup target (§A2). Built from live status so arm-vs-now copy
   // matches; the server still makes the authoritative call at commit.
   const prepareTarget: PrepareTarget | null = prepareOpen
@@ -223,7 +256,9 @@ export function StageSendPanel({
     .join(", ");
 
   const ownerParts = [
-    status.attempts.owners.us ? `${status.attempts.owners.us} transport (ours)` : null,
+    status.attempts.owners.us
+      ? `${status.attempts.owners.us} transport (ours)`
+      : null,
     status.attempts.owners.texthub
       ? `${status.attempts.owners.texthub} TextHub-rejected (escalate)`
       : null,
@@ -242,7 +277,11 @@ export function StageSendPanel({
 
       {/* Per-stage gate state (distinct from the global master switch above). */}
       <div className="flex flex-wrap gap-2 text-xs">
-        <GateBadge on={status.send_approved} onLabel="Approved to send" offLabel="Not approved" />
+        <GateBadge
+          on={status.send_approved}
+          onLabel="Approved to send"
+          offLabel="Not approved"
+        />
       </div>
 
       {/* Schedule state */}
@@ -265,16 +304,20 @@ export function StageSendPanel({
 
       {/* Live counts */}
       <div className="grid grid-cols-5 gap-2 text-center">
-        {([
-          ["Total", status.counts.total],
-          ["Pending", status.counts.pending],
-          ["Sending", status.counts.sending],
-          ["Submitted", status.counts.sent],
-          ["Failed", status.counts.failed],
-        ] as const).map(([label, n]) => (
+        {(
+          [
+            ["Total", status.counts.total],
+            ["Pending", status.counts.pending],
+            ["Sending", status.counts.sending],
+            ["Submitted", status.counts.sent],
+            ["Failed", status.counts.failed],
+          ] as const
+        ).map(([label, n]) => (
           <div key={label} className="rounded-md border p-2">
             <div className="text-lg font-semibold">{n}</div>
-            <div className="text-[11px] uppercase text-muted-foreground">{label}</div>
+            <div className="text-[11px] uppercase text-muted-foreground">
+              {label}
+            </div>
           </div>
         ))}
       </div>
@@ -282,24 +325,48 @@ export function StageSendPanel({
       {/* Suppression buckets — terminal, never sent. Shown only when present so
           they don't clutter a clean send. STOP-cancel = opted out after
           materialization (distinct from a delivery failure or a manual recall). */}
-      {status.counts.skipped_opted_out > 0 || status.counts.skipped_duplicate > 0 ? (
+      {status.counts.skipped_opted_out > 0 ||
+      status.counts.skipped_duplicate > 0 ? (
         <div className="text-xs tabular-nums text-muted-foreground">
           {status.counts.skipped_opted_out > 0 ? (
             <span className="text-amber-600">
               {status.counts.skipped_opted_out} opted-out (STOP)
             </span>
           ) : null}
-          {status.counts.skipped_opted_out > 0 && status.counts.skipped_duplicate > 0 ? " · " : null}
+          {status.counts.skipped_opted_out > 0 &&
+          status.counts.skipped_duplicate > 0
+            ? " · "
+            : null}
           {status.counts.skipped_duplicate > 0 ? (
             <span>{status.counts.skipped_duplicate} skipped (1h dedup)</span>
           ) : null}
         </div>
       ) : null}
 
+      {/* PR 4c — why the send-time lifecycle gate dropped people. Reasons in
+          EXCLUSION_PRIORITY order, zero-count reasons omitted. Distinct from
+          the two lines above: these contacts were eligible when the stage was
+          Prepared and stopped being eligible before dispatch. */}
+      {status.counts.skipped_ineligible > 0 ? (
+        <div className="text-xs tabular-nums text-muted-foreground">
+          <span className="font-medium text-foreground">Skipped at send: </span>
+          {(Object.keys(EXCLUSION_LABELS) as LifecycleExclusionKey[])
+            .filter(
+              (k) => (status.counts.skipped_ineligible_by_reason?.[k] ?? 0) > 0,
+            )
+            .map(
+              (k) =>
+                `${status.counts.skipped_ineligible_by_reason?.[k]} ${EXCLUSION_LABELS[k]}`,
+            )
+            .join(" · ")}
+        </div>
+      ) : null}
+
       {status.counts.sending > 0 ? (
         <p className="flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
           <AlertTriangle className="size-3.5" aria-hidden />
-          {status.counts.sending} stuck in “sending” (a send was interrupted) — never auto-retried; review manually.
+          {status.counts.sending} stuck in “sending” (a send was interrupted) —
+          never auto-retried; review manually.
         </p>
       ) : null}
 
@@ -307,8 +374,12 @@ export function StageSendPanel({
       {rec.pool_total > 0 ? (
         rec.closed ? (
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
-            Pool {rec.pool_total.toLocaleString()} = {rec.attempted.toLocaleString()} attempted +{" "}
+            <CheckCircle2
+              className="size-3.5 shrink-0 text-emerald-600"
+              aria-hidden
+            />
+            Pool {rec.pool_total.toLocaleString()} ={" "}
+            {rec.attempted.toLocaleString()} attempted +{" "}
             {rec.excluded_total.toLocaleString()} excluded
             {excludedBreakdown ? ` (${excludedBreakdown})` : ""}. Closed ✓
           </p>
@@ -317,9 +388,10 @@ export function StageSendPanel({
             <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
             {Math.abs(rec.gap).toLocaleString()} recipient
             {Math.abs(rec.gap) === 1 ? "" : "s"} unaccounted — pool{" "}
-            {rec.pool_total.toLocaleString()} ≠ {rec.attempted.toLocaleString()} attempted +{" "}
-            {rec.excluded_total.toLocaleString()} excluded. This is a materialization bug; don&apos;t
-            rely on this send until it&apos;s resolved.
+            {rec.pool_total.toLocaleString()} ≠ {rec.attempted.toLocaleString()}{" "}
+            attempted + {rec.excluded_total.toLocaleString()} excluded. This is
+            a materialization bug; don&apos;t rely on this send until it&apos;s
+            resolved.
           </p>
         )
       ) : null}
@@ -335,19 +407,25 @@ export function StageSendPanel({
             <ul className="space-y-0.5">
               {status.attempts.groups.map((g, i) => (
                 <li key={i} className="font-mono">
-                  {g.count.toLocaleString()}× {CLASSIFICATION_LABEL[g.classification] ?? g.classification}
+                  {g.count.toLocaleString()}×{" "}
+                  {CLASSIFICATION_LABEL[g.classification] ?? g.classification}
                   {g.error ? `: ${g.error}` : ""}
                 </li>
               ))}
             </ul>
           ) : null}
-          {status.attempts.owners.texthub > 0 || status.attempts.owners.manual > 0 ? (
+          {status.attempts.owners.texthub > 0 ||
+          status.attempts.owners.manual > 0 ? (
             <a
               href={`/api/campaigns/${campaignId}/stages/${stageId}/send/escalation`}
               className="inline-flex items-center gap-1.5 rounded-md border border-amber-400 bg-white/60 px-2 py-1 font-medium text-amber-900 hover:bg-white dark:bg-black/20 dark:text-amber-100"
             >
-              <Download className="size-3.5" aria-hidden /> Export escalation packet (
-              {(status.attempts.owners.texthub + status.attempts.owners.manual).toLocaleString()})
+              <Download className="size-3.5" aria-hidden /> Export escalation
+              packet (
+              {(
+                status.attempts.owners.texthub + status.attempts.owners.manual
+              ).toLocaleString()}
+              )
             </a>
           ) : null}
         </div>
@@ -357,7 +435,9 @@ export function StageSendPanel({
           the actual minted link, not a preview. */}
       {status.sample_rendered_text ? (
         <div className="space-y-1">
-          <div className="text-xs uppercase text-muted-foreground">This is what will send</div>
+          <div className="text-xs uppercase text-muted-foreground">
+            This is what will send
+          </div>
           <pre className="whitespace-pre-wrap rounded-md bg-muted/40 p-3 font-mono text-xs">
             {status.sample_rendered_text}
           </pre>
@@ -365,8 +445,10 @@ export function StageSendPanel({
             const seg = calculateSmsSegments(status.sample_rendered_text);
             return (
               <div className="text-xs tabular-nums text-muted-foreground">
-                {seg.characters.toLocaleString()} characters · {seg.segments} segment
-                {seg.segments === 1 ? "" : "s"} ({seg.charset}) · link is unique per recipient
+                {seg.characters.toLocaleString()} characters · {seg.segments}{" "}
+                segment
+                {seg.segments === 1 ? "" : "s"} ({seg.charset}) · link is unique
+                per recipient
               </div>
             );
           })()}
@@ -378,9 +460,13 @@ export function StageSendPanel({
         <div className="space-y-2">
           <p className="flex items-center gap-1.5 rounded-md border border-blue-300 bg-blue-50 p-2 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
             <CheckCircle2 className="size-3.5 shrink-0" aria-hidden />
-            Prepared — {pending.toLocaleString()} message{pending === 1 ? "" : "s"} will send automatically
-            {status.scheduled_at ? ` at ${formatCampaignDateTime(status.scheduled_at)}` : ""} once the
-            send window is open. To pull it back, use “Cancel send” in the stage’s ⋯ menu.
+            Prepared — {pending.toLocaleString()} message
+            {pending === 1 ? "" : "s"} will send automatically
+            {status.scheduled_at
+              ? ` at ${formatCampaignDateTime(status.scheduled_at)}`
+              : ""}{" "}
+            once the send window is open. To pull it back, use “Cancel send” in
+            the stage’s ⋯ menu.
           </p>
         </div>
       ) : !hasBatch ? (
@@ -408,15 +494,21 @@ export function StageSendPanel({
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
             {willSchedule ? (
               <>
-                <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" aria-hidden />
+                <CheckCircle2
+                  className="size-3.5 shrink-0 text-emerald-600"
+                  aria-hidden
+                />
                 Materializes now and sends automatically at{" "}
-                {status.scheduled_at ? formatCampaignDateTime(status.scheduled_at) : "the scheduled time"}.
+                {status.scheduled_at
+                  ? formatCampaignDateTime(status.scheduled_at)
+                  : "the scheduled time"}
+                .
               </>
             ) : (
               <>
                 <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
-                No schedule set — this sends immediately on confirm. Set a Scheduled time on the stage
-                to prepare it instead.
+                No schedule set — this sends immediately on confirm. Set a
+                Scheduled time on the stage to prepare it instead.
               </>
             )}
           </p>
@@ -429,7 +521,9 @@ export function StageSendPanel({
               disabled={drainBlockedReason !== null || drainApi.isLoading}
               title={drainBlockedReason ?? undefined}
             >
-              {drainApi.isLoading ? "Sending…" : `Send now${pending > 0 ? ` (${pending})` : ""}`}
+              {drainApi.isLoading
+                ? "Sending…"
+                : `Send now${pending > 0 ? ` (${pending})` : ""}`}
             </Button>
             {canSendNow && status.counts.failed > 0 ? (
               <Button
@@ -438,17 +532,21 @@ export function StageSendPanel({
                 disabled={retryApi.isLoading || !status.send_enabled}
                 title={sendOffReason ?? undefined}
               >
-                {retryApi.isLoading ? "Retrying…" : `Retry failed (${status.counts.failed})`}
+                {retryApi.isLoading
+                  ? "Retrying…"
+                  : `Retry failed (${status.counts.failed})`}
               </Button>
             ) : null}
           </div>
           {drainBlockedReason ? (
             <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <CircleSlash className="size-3.5" aria-hidden /> {drainBlockedReason}
+              <CircleSlash className="size-3.5" aria-hidden />{" "}
+              {drainBlockedReason}
             </p>
           ) : pending > 0 ? (
             <p className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
-              <CheckCircle2 className="size-3.5" aria-hidden /> Ready to send {pending} message
+              <CheckCircle2 className="size-3.5" aria-hidden /> Ready to send{" "}
+              {pending} message
               {pending === 1 ? "" : "s"}.
             </p>
           ) : null}
@@ -466,14 +564,18 @@ export function StageSendPanel({
       <AlertDialog open={confirmDrain} onOpenChange={setConfirmDrain}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Send {pending} message{pending === 1 ? "" : "s"} now?</AlertDialogTitle>
+            <AlertDialogTitle>
+              Send {pending} message{pending === 1 ? "" : "s"} now?
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Real SMS will go out to {pending} recipient{pending === 1 ? "" : "s"} via TextHub.
-              This can&apos;t be undone.
+              Real SMS will go out to {pending} recipient
+              {pending === 1 ? "" : "s"} via TextHub. This can&apos;t be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={drainApi.isLoading}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={drainApi.isLoading}>
+              Cancel
+            </AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
@@ -490,7 +592,15 @@ export function StageSendPanel({
   );
 }
 
-function GateBadge({ on, onLabel, offLabel }: { on: boolean; onLabel: string; offLabel: string }) {
+function GateBadge({
+  on,
+  onLabel,
+  offLabel,
+}: {
+  on: boolean;
+  onLabel: string;
+  offLabel: string;
+}) {
   return (
     <span
       className={

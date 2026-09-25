@@ -286,6 +286,64 @@ page" -- which reads to an operator as *nothing to worry about*. The list page
 prefetches `GET /api/campaigns/[campaignId]` when the dialog opens rather than
 widening the list route, and holds the confirm button until it lands.
 
+### 3i. The send-time re-check (PR 4c)
+
+Prepare applies the three layers of 3f when a stage materializes. The drain
+applies them again, once per claimed batch, immediately after the opt-out and
+1-hour-dedup gates. Rows that fail become `skipped_ineligible` with the reason
+in `last_error`.
+
+**Why twice.** The window between materialization and dispatch is often hours,
+because pacing spreads a stage out. In it a contact can become suppressed, buy
+the offer, or be messaged by ANOTHER campaign and land back inside their freeze
+cadence. Prepare cannot know any of that.
+
+⚠️ **The freeze check reads `stage_sends`, not `contact_engagement`, and that
+is the point.** `contact_engagement.last_sent_at` is written by a 15-minute
+cron, so it is stale by construction — it cannot see a message sent ten minutes
+ago. Reading it here would make the re-check agree with Prepare, and agreeing
+with Prepare is exactly what would make it pointless, since Prepare already
+ran. It matches on PHONE, not contact_id, for the same reason the 1-hour dedup
+does: the cadence is a promise to the person holding the handset.
+
+⚠️ **It fails OPEN.** If the check throws, the batch is dispatched anyway. A few
+contacts getting a message they would have been spared is recoverable; a stage
+halting mid-drain with rows stuck in `sending` is not, because `sending` rows
+are never re-claimed. The failure increments `recheckFailedBatches` and is
+logged, so a batch with no numbers reads as **missing**, not as zero.
+
+The module itself throws rather than swallowing — it cannot know whether its
+caller can proceed without it, so the drain owns that decision. The drain takes
+an injectable `recheckEligibility` seam beside `sendSms`/`isEnabled`, because a
+fail-open path that cannot be made to fail on purpose is an untested claim.
+
+The reasons surface in the send panel: "Skipped at send: 340 freeze not due ·
+95 bought this offer · 12 suppressed".
+
+### 3j. When a campaign becomes a lifecycle campaign (PR 4c)
+
+A new campaign gets `lifecycle_rules = true` **only while
+`lifecycle_settings.engine_mode = 'write'`** (owner decision, 2026-09-25). The
+statuses the chips select on are maintained by the job; with the engine off
+they are frozen at whenever it stopped, so a campaign picking "Hot" would
+target whoever was hot that day rather than whoever is hot now.
+
+- The create route reads the engine **inside its insert transaction**. A read
+  before it could disagree with the insert if the switch flipped in between,
+  and nothing downstream could tell which engine was live.
+- When it falls back, the editor shows the legacy chips plus _"Lifecycle engine
+  is off — campaign uses legacy filters"_ — and only when the engine is
+  genuinely off. A campaign that is legacy because it predates the feature gets
+  no such note, because that is not something an operator can act on.
+- The fallback is audited into `org_setting_events` under
+  `lifecycle.campaign_fallback`. Only the fallback: the table is a list of
+  exceptions, not a log of every create. Without it, a campaign created during
+  an engine outage is indistinguishable months later from one deliberately made
+  legacy.
+- **Existing campaigns are never converted.** Their audience recipes were
+  chosen under different semantics, and re-interpreting a stored
+  `audience_filters` would change who they reach.
+
 ## 4. The job
 
 `refreshContactEngagement` ([lib/engagement/refresh.ts](../../lib/engagement/refresh.ts))
@@ -445,6 +503,17 @@ The PR 4b bars:
 - [scripts/test-excl-timing-warning.ts](../../scripts/test-excl-timing-warning.ts)
   -- 16 bars; H10 feeds one campaign through BOTH mount paths and asserts they
   build an identical argument object.
+- [scripts/test-lifecycle-switch.ts](../../scripts/test-lifecycle-switch.ts) --
+  11 bars on the switch. K5/K6 assert the OTHER direction, because a one-sided
+  test passes just as happily on a gate that can never turn on; K9-K11 read the
+  route's SOURCE, because the rest of the file exercises a reproduction of its
+  decision and would pass after the gate was deleted.
+- [scripts/test-lifecycle-send-recheck.ts](../../scripts/test-lifecycle-send-recheck.ts)
+  -- 14 bars on the send-time re-check. Every freeze fixture has
+  `last_sent_at` NULL, so J2/J4 go red if anyone "tidies" the check back into
+  reading `contact_engagement`. J11-J13 run the REAL `runStageDrain` in a
+  rolled-back transaction; J13 proves the fail-open path by injecting a
+  throwing re-check and asserting the batch still dispatched.
 - [scripts/test-eligibility-layers-identical.ts](../../scripts/test-eligibility-layers-identical.ts)
   -- the byte-identical-SQL gate. It captures the SQL every real stage produces
   from `origin/main` and diffs it, so "legacy campaigns are untouched" is a
@@ -456,3 +525,13 @@ a read-only production measurement whose every run rolls back, and
 which produces the chip and per-layer counts against production **without
 creating or flipping a campaign** -- `lifecycleRules` is a parameter on every one
 of these paths, so the hypothetical is evaluated by passing `true`.
+
+[scripts/dryrun-lifecycle-recheck.ts](../../scripts/dryrun-lifecycle-recheck.ts)
+does the same for the send-time re-check: it mirrors the drain's claim
+predicate (same ORDER BY, same batch size, minus `FOR UPDATE SKIP LOCKED` and
+the UPDATE) and reports what each reason WOULD have skipped. It stops at ~10%
+for any one reason, reports a reason that never fires as "never observed"
+rather than as a measured 0, and splits the freeze figure by which signal
+catches it -- both / send-time only / Prepare only -- because the headline
+share alone cannot distinguish "the layers disagree" from "the cadence is
+genuinely being violated".

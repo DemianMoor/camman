@@ -6,6 +6,10 @@ import { campaign_stages } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { getOrgSendsEnabled } from "@/lib/sends/org-send-flag";
+import {
+  LIFECYCLE_EXCLUSION_KEYS,
+  ZERO_LIFECYCLE_EXCLUSIONS,
+} from "@/lib/sends/eligibility";
 import { computeStageReconciliation } from "@/lib/sends/reconcile";
 import { summarizeStageAttempts } from "@/lib/sends/attempt-summary";
 import { can } from "@/lib/permissions";
@@ -37,7 +41,9 @@ export async function GET(
   const { stageId: sParam } = await params;
   const stageId = parseId(sParam);
   if (stageId === null) {
-    return apiError(400, "Invalid stage id", API_ERROR_CODES.VALIDATION, { field: "id" });
+    return apiError(400, "Invalid stage id", API_ERROR_CODES.VALIDATION, {
+      field: "id",
+    });
   }
 
   const stage = await db
@@ -54,11 +60,26 @@ export async function GET(
       split_total: campaign_stages.split_total,
     })
     .from(campaign_stages)
-    .where(and(eq(campaign_stages.id, stageId), eq(campaign_stages.org_id, orgId)))
+    .where(
+      and(eq(campaign_stages.id, stageId), eq(campaign_stages.org_id, orgId)),
+    )
     .limit(1);
   if (!stage[0]) {
-    return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, { entity: "stage" });
+    return apiError(404, "Stage not found", API_ERROR_CODES.NOT_FOUND, {
+      entity: "stage",
+    });
   }
+
+  // One count(*) FILTER per reason, keyed by the canonical list. A reason the
+  // drain writes but this list does not know would land nowhere — which is why
+  // the same list also drives the drain's last_error values.
+  const lifecycleReasonAgg = LIFECYCLE_EXCLUSION_KEYS.reduce(
+    (acc, k, i) => drizzleSql`${acc}${i === 0 ? drizzleSql`` : drizzleSql`,`}
+      ${drizzleSql.raw(`'${k}'`)}, count(*) FILTER (
+        WHERE status = 'skipped_ineligible' AND last_error = ${k}
+      )`,
+    drizzleSql``,
+  );
 
   const counts = (await db.execute(drizzleSql`
     SELECT
@@ -80,7 +101,12 @@ export async function GET(
       -- at dispatch (drain) or proactively by the opt-out ingester. A distinct
       -- bucket — NOT a delivery failure and NOT a manual recall ('rejected').
       count(*) FILTER (WHERE status = 'skipped_opted_out')::int AS skipped_opted_out,
-      count(*) FILTER (WHERE status = 'skipped_ineligible')::int AS skipped_ineligible
+      count(*) FILTER (WHERE status = 'skipped_ineligible')::int AS skipped_ineligible,
+      -- PR 4c: the same rows split by the reason the drain wrote into
+      -- last_error. Built from LIFECYCLE_EXCLUSION_KEYS rather than a literal
+      -- list, so a layer added later reports itself instead of falling into an
+      -- unnamed remainder that renders as zero (see lib/sends/eligibility.ts).
+      jsonb_build_object(${lifecycleReasonAgg}) AS skipped_ineligible_by_reason
     FROM stage_sends WHERE stage_id = ${stageId} AND org_id = ${orgId}
   `)) as unknown as {
     total: number;
@@ -91,11 +117,19 @@ export async function GET(
     skipped_duplicate: number;
     skipped_opted_out: number;
     skipped_ineligible: number;
+    skipped_ineligible_by_reason: Record<string, number>;
   }[];
 
   const c = counts[0] ?? {
-    total: 0, pending: 0, sending: 0, sent: 0, failed: 0, skipped_duplicate: 0, skipped_opted_out: 0,
+    total: 0,
+    pending: 0,
+    sending: 0,
+    sent: 0,
+    failed: 0,
+    skipped_duplicate: 0,
+    skipped_opted_out: 0,
     skipped_ineligible: 0,
+    skipped_ineligible_by_reason: { ...ZERO_LIFECYCLE_EXCLUSIONS },
   };
 
   // The drain gate is a conjunction (Workstream 1): the env SEND_ENABLED backstop
@@ -151,6 +185,15 @@ export async function GET(
       skipped_duplicate: Number(c.skipped_duplicate),
       skipped_opted_out: Number(c.skipped_opted_out),
       skipped_ineligible: Number(c.skipped_ineligible),
+      skipped_ineligible_by_reason: {
+        ...ZERO_LIFECYCLE_EXCLUSIONS,
+        ...Object.fromEntries(
+          Object.entries(c.skipped_ineligible_by_reason ?? {}).map(([k, v]) => [
+            k,
+            Number(v),
+          ]),
+        ),
+      },
     },
     sample_rendered_text: sample[0]?.rendered_text ?? null,
   });

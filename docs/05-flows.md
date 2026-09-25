@@ -92,7 +92,8 @@ sequenceDiagram
   loop batch
     Drain->>TH: GET send(api_key,text,number)
     TH-->>Drain: {ok,messageId,status}
-    Drain->>Drain: mark sent / filtered (status="Suppressed") / failed; ceilings + spike checks
+    Drain->>Drain: re-check lifecycle eligibility (lifecycle campaigns only)<br/>suppressed / bought_offer / freeze_not_due — freeze reads stage_sends LIVE, not contact_engagement<br/>losers → skipped_ineligible + reason in last_error; FAILS OPEN (counted, never halts the batch)
+  Drain->>Drain: mark sent / filtered (status="Suppressed") / failed; ceilings + spike checks
   end
   Rec->>R: GET /r/<code>
   R->>R: first-pass classify (UA/headers)

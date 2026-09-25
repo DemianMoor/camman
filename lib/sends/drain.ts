@@ -22,17 +22,28 @@ import {
   findCarrierCapBreaches,
 } from "@/lib/sends/carrier-policy";
 import { classifyAttempt } from "@/lib/sends/classify-attempt";
-import { isOutsideSendWindow, type ProviderSendWindow } from "@/lib/quiet-hours";
+import {
+  isOutsideSendWindow,
+  type ProviderSendWindow,
+} from "@/lib/quiet-hours";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
-import { getOrgSendsEnabled, getOrgSendsPaused } from "@/lib/sends/org-send-flag";
+import { recheckLifecycleEligibility } from "@/lib/sends/lifecycle-recheck";
+import {
+  getOrgSendsEnabled,
+  getOrgSendsPaused,
+} from "@/lib/sends/org-send-flag";
 import { optOutBreakerAlertText } from "@/lib/sends/optout-rate-breaker";
 import { resolveKeyForStage } from "@/lib/sends/provider-credential";
 import { recordTxrSendRejectOptOuts } from "@/lib/sends/textrequest-dlr-optout";
-import { getAdapter, UnknownProviderError } from "@/lib/sends/providers/registry";
+import {
+  getAdapter,
+  UnknownProviderError,
+} from "@/lib/sends/providers/registry";
 import type { NormalizedSendParams } from "@/lib/sends/providers/types";
 import { buildSendUrl, type SendSmsResult } from "@/lib/sends/texthub";
 
-export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbOrTx =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Dual-auth decision for the drain endpoint, kept PURE so the "no gap between
 // the two paths" guarantee is testable. Either a matching CRON_SECRET Bearer
@@ -54,7 +65,10 @@ export function decideDrainAuth(opts: {
   // approve-send and retry-failed. This is the AUTH decision only: every
   // send-time gate in runStageDrain (SEND_ENABLED, send_approved, credentials,
   // breakers, send window) still applies to whoever passes here.
-  if (!can(opts.sessionRole, "campaigns.drain") && opts.sessionRole !== "operator") {
+  if (
+    !can(opts.sessionRole, "campaigns.drain") &&
+    opts.sessionRole !== "operator"
+  ) {
     return { allow: false, status: 403 };
   }
   return { allow: true, via: "session" };
@@ -115,6 +129,16 @@ export interface DrainResult {
   // 1-hour dedup window (lib/sends/dedup-window.ts). Marked 'skipped_duplicate' —
   // terminal, not sent, not opted-out, not auto-retried.
   skippedDuplicate: number;
+  // PR 4c. Rows NOT sent because a lifecycle layer caught them at dispatch —
+  // suppressed, bought the offer, or back inside their freeze cadence because
+  // another campaign messaged them after this stage was materialized.
+  skippedIneligible: number;
+  // The same total split by reason, keyed by LIFECYCLE_EXCLUSION_KEYS.
+  skippedIneligibleByReason: Record<string, number>;
+  // ⚠️ Batches dispatched WITHOUT the re-check because it threw (it fails
+  // open). Non-zero means skippedIneligibleByReason UNDER-counts for those
+  // batches — the numbers are missing, not zero. Report it, don't sum past it.
+  recheckFailedBatches: number;
   // Rows NOT sent because the contact opted out (STOP) AFTER the stage was
   // materialized. The frozen stage_sends set is filtered for opt-outs only at
   // materialization; this is the send-time re-check that honors a STOP landing in
@@ -157,11 +181,30 @@ function sleep(ms: number): Promise<void> {
 // wins for determinism; otherwise the registry adapter's bound send. Throws
 // UnknownProviderError for an unregistered key — the caller maps it to the
 // `unknown_provider` refusal (G3: never a raw throw out of the drain run).
-export function resolveSenderForStage(providerKey: string, injected?: Sender): Sender {
+export function resolveSenderForStage(
+  providerKey: string,
+  injected?: Sender,
+): Sender {
   if (injected) return injected;
   const adapter = getAdapter(providerKey);
-  return ({ apiKey, text, number, leadId, senderNumber, statusCallbackUrl, metadata }) =>
-    adapter.send({ apiKey, text, recipientE164: number, senderNumber: senderNumber ?? null, leadId, statusCallbackUrl, metadata });
+  return ({
+    apiKey,
+    text,
+    number,
+    leadId,
+    senderNumber,
+    statusCallbackUrl,
+    metadata,
+  }) =>
+    adapter.send({
+      apiKey,
+      text,
+      recipientE164: number,
+      senderNumber: senderNumber ?? null,
+      leadId,
+      statusCallbackUrl,
+      metadata,
+    });
 }
 
 const EMPTY = {
@@ -170,6 +213,9 @@ const EMPTY = {
   filtered: 0,
   skippedDuplicate: 0,
   skippedOptedOut: 0,
+  skippedIneligible: 0,
+  skippedIneligibleByReason: {},
+  recheckFailedBatches: 0,
   processed: 0,
   halted: false,
   stuck: 0,
@@ -208,6 +254,10 @@ export async function runStageDrain(
     // defaults to the real per-org read. Re-checked between batches so engaging the
     // "Today's sends" hard-stop kills an in-flight drain at the next batch.
     isOrgPaused?: (orgId: string) => Promise<boolean>;
+    // PR 4c send-time lifecycle re-check. Injectable like the switches above,
+    // and for the same reason: the FAIL-OPEN path below cannot be proved
+    // without being able to make it fail on purpose. Defaults to the real one.
+    recheckEligibility?: typeof recheckLifecycleEligibility;
     batchSize?: number;
     maxRows?: number;
     // FAIRNESS TIME-BOX: max wall-clock this drain may spend before yielding.
@@ -275,7 +325,11 @@ export async function runStageDrain(
            p.name                      AS provider_name,
            c.name                      AS campaign_name,
            s.stage_number              AS stage_number,
-           s.label                     AS stage_label
+           s.label                     AS stage_label,
+           -- PR 4c: the send-time lifecycle re-check's two inputs. A legacy
+           -- campaign has lifecycle_rules = false and the check never runs.
+           c.lifecycle_rules           AS lifecycle_rules,
+           c.offer_id                  AS offer_id
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
@@ -304,13 +358,16 @@ export async function runStageDrain(
     sender_number: string | null;
     provider_name: string | null;
     campaign_name: string | null;
+    lifecycle_rules: boolean | null;
+    offer_id: number | null;
     stage_number: number | null;
     stage_label: string | null;
   }[];
 
   const stage = ctx[0];
   if (!stage) return { ok: false, reason: "not_found", ...EMPTY };
-  if (!stage.send_approved) return { ok: false, reason: "not_approved", ...EMPTY };
+  if (!stage.send_approved)
+    return { ok: false, reason: "not_approved", ...EMPTY };
   // Two-switch gate (Workstream 1): the env SEND_ENABLED backstop AND the
   // DB-backed daily on/off must BOTH be on. Distinct refusal reasons so the UI
   // can tell the operator which one to flip.
@@ -332,11 +389,14 @@ export async function runStageDrain(
     return { ok: false, reason: "provider_sends_disabled", ...EMPTY };
   // Latching circuit breaker: refuse before claiming anything. A human must
   // resume via the provider UI; nothing here clears it.
-  if (stage.send_paused) return { ok: false, reason: "provider_paused", ...EMPTY };
+  if (stage.send_paused)
+    return { ok: false, reason: "provider_paused", ...EMPTY };
   // P7/P8: per-campaign latch (opt-out-rate breaker or manual). Independent of the
   // provider latch — this refuses only THIS campaign; siblings keep sending.
-  if (stage.campaign_send_paused) return { ok: false, reason: "campaign_paused", ...EMPTY };
-  if (stage.provider_id == null) return { ok: false, reason: "no_provider", ...EMPTY };
+  if (stage.campaign_send_paused)
+    return { ok: false, reason: "campaign_paused", ...EMPTY };
+  if (stage.provider_id == null)
+    return { ok: false, reason: "no_provider", ...EMPTY };
 
   const apiKey = await resolveKeyForStage(dbc, {
     orgId: stage.org_id,
@@ -354,7 +414,9 @@ export async function runStageDrain(
   // delivery). Never throws.
   let txrCallbackBase: string | null = null;
   if (stage.provider_key === "txr") {
-    const origin = (process.env.NEXT_PUBLIC_SITE_URL ?? "").trim().replace(/\/+$/, "");
+    const origin = (process.env.NEXT_PUBLIC_SITE_URL ?? "")
+      .trim()
+      .replace(/\/+$/, "");
     const tokRow = (await dbc.execute(sql`
       SELECT pc.inbound_webhook_token AS token
       FROM provider_phones ph
@@ -363,7 +425,8 @@ export async function runStageDrain(
       LIMIT 1
     `)) as unknown as { token: string | null }[];
     const token = tokRow[0]?.token ?? null;
-    if (origin && token) txrCallbackBase = `${origin}/api/webhooks/textrequest/status/${token}`;
+    if (origin && token)
+      txrCallbackBase = `${origin}/api/webhooks/textrequest/status/${token}`;
   }
 
   let sendSms: Sender;
@@ -381,10 +444,17 @@ export async function runStageDrain(
   try {
     sendSms = resolveSenderForStage(stage.provider_key ?? "", opts.sendSms);
     buildRedacted = opts.sendSms
-      ? (p) => buildSendUrl({ apiKey: p.apiKey, text: p.text, number: p.recipientE164, leadId: p.leadId })
+      ? (p) =>
+          buildSendUrl({
+            apiKey: p.apiKey,
+            text: p.text,
+            number: p.recipientE164,
+            leadId: p.leadId,
+          })
       : (p) => getAdapter(stage.provider_key ?? "").buildRedactedRequest(p);
   } catch (e) {
-    if (e instanceof UnknownProviderError) return { ...EMPTY, ok: false, reason: "unknown_provider" };
+    if (e instanceof UnknownProviderError)
+      return { ...EMPTY, ok: false, reason: "unknown_provider" };
     throw e;
   }
 
@@ -402,13 +472,22 @@ export async function runStageDrain(
   // paces so a slice of N occupies N/rate seconds — never bursting above the
   // number's instantaneous limit. NULL phone/rate ⇒ default. opts.concurrency
   // overrides for tests.
-  const rate = Math.max(1, opts.concurrency ?? resolveSendsPerSecond(stage.max_sends_per_second));
+  const rate = Math.max(
+    1,
+    opts.concurrency ?? resolveSendsPerSecond(stage.max_sends_per_second),
+  );
 
   let sent = 0;
   let failed = 0;
   let filtered = 0;
   let skippedDuplicate = 0;
   let skippedOptedOut = 0;
+  // PR 4c: the send-time lifecycle re-check. The per-reason split is what the
+  // send panel shows; the batch counter is how a FAIL-OPEN shows up as a gap
+  // rather than as a quiet zero.
+  let skippedIneligible = 0;
+  const skippedIneligibleByReason: Record<string, number> = {};
+  let recheckFailedBatches = 0;
   let processed = 0;
   let halted = false;
   let stopReason: DrainStopReason | null = null;
@@ -439,7 +518,10 @@ export async function runStageDrain(
     // FAIRNESS TIME-BOX: yield BEFORE claiming the next batch once this stage has
     // used its wall-clock slice. Leaves remaining rows 'pending' (soft stop, like
     // the pacing cap) so they resume next tick — never abandons a claimed batch.
-    if (opts.maxDurationMs != null && Date.now() - drainStartedAt >= opts.maxDurationMs) {
+    if (
+      opts.maxDurationMs != null &&
+      Date.now() - drainStartedAt >= opts.maxDurationMs
+    ) {
       break;
     }
 
@@ -512,11 +594,21 @@ export async function runStageDrain(
     // SOFT rolling ceilings — stop the run (leave rows pending), do NOT pause.
     // Counted per-provider incl. this run's own sends, so the rate self-throttles
     // without one provider's volume tripping another provider's ceiling.
-    if (ceilingBreached(await countSentSince(dbc, orgId, providerId, 60), minuteCap)) {
+    if (
+      ceilingBreached(
+        await countSentSince(dbc, orgId, providerId, 60),
+        minuteCap,
+      )
+    ) {
       stopReason = "rate_minute";
       break;
     }
-    if (ceilingBreached(await countSentSince(dbc, orgId, providerId, 86_400), cap24h)) {
+    if (
+      ceilingBreached(
+        await countSentSince(dbc, orgId, providerId, 86_400),
+        cap24h,
+      )
+    ) {
       stopReason = "rate_24h";
       break;
     }
@@ -577,7 +669,10 @@ export async function runStageDrain(
     const optedOutRows = (await dbc.execute(sql`
       SELECT DISTINCT contact_id FROM opt_outs
       WHERE org_id = ${orgId}
-        AND contact_id IN (${sql.join(claimedContactIds.map((id) => sql`${id}::uuid`), sql`, `)})
+        AND contact_id IN (${sql.join(
+          claimedContactIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})
     `)) as unknown as { contact_id: string }[];
     const optedOut = new Set(optedOutRows.map((r) => r.contact_id));
     const notOptedOut: ClaimedRow[] = [];
@@ -591,7 +686,10 @@ export async function runStageDrain(
         UPDATE stage_sends
         SET status = 'skipped_opted_out',
             last_error = 'opt_out_cancel'
-        WHERE id IN (${sql.join(optOutIds.map((id) => sql`${id}::uuid`), sql`, `)})
+        WHERE id IN (${sql.join(
+          optOutIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})
       `);
       skippedOptedOut += optOutIds.length;
     }
@@ -614,7 +712,10 @@ export async function runStageDrain(
       WHERE org_id = ${orgId}
         AND status = 'sent'
         AND sent_at >= now() - interval '1 millisecond' * ${SEND_DEDUP_WINDOW_MS}
-        AND phone IN (${sql.join(batchPhones.map((p) => sql`${p}`), sql`, `)})
+        AND phone IN (${sql.join(
+          batchPhones.map((p) => sql`${p}`),
+          sql`, `,
+        )})
     `)) as unknown as { phone: string }[];
     const recentPhones = new Set(recentRows.map((r) => r.phone));
     const seenThisBatch = new Set<string>();
@@ -633,13 +734,91 @@ export async function runStageDrain(
         UPDATE stage_sends
         SET status = 'skipped_duplicate',
             last_error = 'dedup: phone messaged within 1h window'
-        WHERE id IN (${sql.join(skipIds.map((id) => sql`${id}::uuid`), sql`, `)})
+        WHERE id IN (${sql.join(
+          skipIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})
       `);
       skippedDuplicate += skipIds.length;
     }
     // Whole batch was duplicates — claim the next batch (skipped rows left the
     // 'pending' set, so we make progress and can't loop forever).
     if (toSend.length === 0) continue;
+
+    // ── SEND-TIME LIFECYCLE RE-CHECK (spec §8.4) ────────────────────────────
+    // Prepare already applied these layers. What it could not know is what
+    // happened in the window between materialization and now — often hours,
+    // because pacing spreads a stage out. In that window a contact can become
+    // suppressed, buy the offer, or be messaged by ANOTHER campaign and land
+    // back inside their freeze cadence. Structurally the third gate in a row:
+    // partition, bulk-UPDATE the losers, continue if nothing is left.
+    //
+    // ⚠️ FAILS OPEN, deliberately. If this check throws, the batch is sent
+    // ANYWAY. The cost of skipping it is that a few contacts get a message
+    // they would have been spared; the cost of throwing here is a stage that
+    // stops mid-drain with rows stuck in 'sending' — and 'sending' rows are
+    // NEVER re-claimed (at-most-once), so they would need manual repair. The
+    // failure is counted and alerted instead of being allowed to halt a send.
+    let lifecycleSkips = new Map<string, string>();
+    if (stage.lifecycle_rules === true) {
+      try {
+        const recheck = opts.recheckEligibility ?? recheckLifecycleEligibility;
+        lifecycleSkips = await recheck(dbc, {
+          orgId,
+          campaignId: stage.campaign_id,
+          offerId: stage.offer_id ?? null,
+          lifecycleRules: true,
+          rows: toSend.map((c) => ({
+            id: c.id,
+            phone: c.phone,
+            contact_id: c.contact_id,
+          })),
+        });
+      } catch (e) {
+        recheckFailedBatches++;
+        console.error(
+          `[lifecycle-recheck] FAILED for stage ${opts.stageId} — batch dispatched WITHOUT the check:`,
+          e,
+        );
+      }
+    }
+    const eligible: ClaimedRow[] = [];
+    if (lifecycleSkips.size > 0) {
+      // Group by reason so each reason is one UPDATE, and last_error carries
+      // the reason verbatim for the send panel to read back.
+      const byReason = new Map<string, string[]>();
+      for (const c of toSend) {
+        const reason = lifecycleSkips.get(c.id);
+        if (reason) {
+          const list = byReason.get(reason) ?? [];
+          list.push(c.id);
+          byReason.set(reason, list);
+        } else {
+          eligible.push(c);
+        }
+      }
+      for (const [reason, sendIds] of byReason) {
+        await dbc.execute(sql`
+          UPDATE stage_sends
+          SET status = 'skipped_ineligible',
+              last_error = ${reason}
+          WHERE id IN (${sql.join(
+            sendIds.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          )})
+        `);
+        skippedIneligible += sendIds.length;
+        skippedIneligibleByReason[reason] =
+          (skippedIneligibleByReason[reason] ?? 0) + sendIds.length;
+      }
+    } else {
+      eligible.push(...toSend);
+    }
+    // Whole batch was ineligible — claim the next one (these rows left the
+    // 'pending' set, so we still make progress).
+    if (eligible.length === 0) continue;
+    toSend.length = 0;
+    toSend.push(...eligible);
 
     // Build the redacted request shape once per batch — same URL TextHub gets,
     // but with a placeholder key so the api_key is NEVER persisted (the real key
@@ -666,9 +845,14 @@ export async function runStageDrain(
       const results = await Promise.all(
         slice.map((c) =>
           sendSms({
-            apiKey, text: c.rendered_text, number: c.phone, leadId: c.lead_id,
+            apiKey,
+            text: c.rendered_text,
+            number: c.phone,
+            leadId: c.lead_id,
             senderNumber: stage.sender_number,
-            statusCallbackUrl: txrCallbackBase ? `${txrCallbackBase}?ss=${c.id}` : undefined,
+            statusCallbackUrl: txrCallbackBase
+              ? `${txrCallbackBase}?ss=${c.id}`
+              : undefined,
             // Tells's DLR carries NO callback URL and no `?ss=` — its echoed
             // `metadata` is the only correlation handle it has (§5.1). Passed
             // unconditionally rather than gated on provider_key: it needs no
@@ -774,7 +958,8 @@ export async function runStageDrain(
             // after the run (Phase 4 signal 4b, lib/sends/textrequest-dlr-optout.ts).
             // Collected here rather than written inline: this loop is the paced
             // hot path, and an opt-out write is several statements.
-            if (stage.provider_key === "txr") txrSuppressedPhones.push(slice[k].phone);
+            if (stage.provider_key === "txr")
+              txrSuppressedPhones.push(slice[k].phone);
           } else failed++;
           // A non-OK send still feeds the failure-spike breaker regardless of the
           // suppression flag — unchanged from prior behavior.
@@ -855,12 +1040,15 @@ export async function runStageDrain(
     try {
       // dbc is the db singleton in production; when a test passes a tx, the
       // per-phone transactions inside become savepoints, which is fine.
-      const rec = await recordTxrSendRejectOptOuts(dbc as unknown as typeof db, {
-        orgId,
-        credentialId: null,
-        providerId,
-        phones: txrSuppressedPhones,
-      });
+      const rec = await recordTxrSendRejectOptOuts(
+        dbc as unknown as typeof db,
+        {
+          orgId,
+          credentialId: null,
+          providerId,
+          phones: txrSuppressedPhones,
+        },
+      );
       if (rec.suppressed > 0) {
         console.warn(
           `[textrequest-send-reject] recorded ${rec.suppressed} opt-out(s) from send-time rejections ` +
@@ -868,10 +1056,19 @@ export async function runStageDrain(
         );
       }
       for (const trip of rec.trips) {
-        await notifyTelegram(optOutBreakerAlertText(trip.campaignId, stage.campaign_name ?? null, trip.result)).catch(() => {});
+        await notifyTelegram(
+          optOutBreakerAlertText(
+            trip.campaignId,
+            stage.campaign_name ?? null,
+            trip.result,
+          ),
+        ).catch(() => {});
       }
     } catch (e) {
-      console.error("[textrequest-send-reject] failed to record send-time opt-outs:", e);
+      console.error(
+        "[textrequest-send-reject] failed to record send-time opt-outs:",
+        e,
+      );
     }
   }
 
@@ -895,6 +1092,9 @@ export async function runStageDrain(
     filtered,
     skippedDuplicate,
     skippedOptedOut,
+    skippedIneligible,
+    skippedIneligibleByReason,
+    recheckFailedBatches,
     processed,
     halted,
     stuck,

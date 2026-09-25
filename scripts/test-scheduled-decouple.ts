@@ -30,13 +30,31 @@ async function main() {
   const drainCalls: number[] = [];
   const fakeDrain = async (stageId: number): Promise<DrainResult> => {
     drainCalls.push(stageId);
-    return { ok: true, sent: 4, failed: 0, filtered: 0, skippedDuplicate: 0, skippedOptedOut: 0, processed: 4, halted: false, stuck: 0, remaining: 0, stopReason: null, pausedNow: false };
+    return {
+      ok: true,
+      sent: 4,
+      failed: 0,
+      filtered: 0,
+      skippedDuplicate: 0,
+      skippedOptedOut: 0,
+      skippedIneligible: 0,
+      skippedIneligibleByReason: {},
+      recheckFailedBatches: 0,
+      processed: 4,
+      halted: false,
+      stuck: 0,
+      remaining: 0,
+      stopReason: null,
+      pausedNow: false,
+    };
   };
 
   try {
     await db.transaction(async (tx) => {
       const sfx = Date.now().toString().slice(-9);
-      const org = (await tx.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as { id: string }[];
+      const org = (await tx.execute(
+        sql`SELECT id FROM organizations LIMIT 1`,
+      )) as unknown as { id: string }[];
       const orgId = org[0]?.id;
       if (!orgId) throw new Error("no organization");
 
@@ -74,38 +92,84 @@ async function main() {
 
       // TICK 1 — now is BEFORE the scheduled time. Armed stage must be held.
       const t1 = await runScheduledSends(tx as unknown as typeof db, {
-        now: NOON_ET, orgId, isEnabled: () => true, isOrgEnabled: async () => true, runDrain: fakeDrain, maxStages: 50,
+        now: NOON_ET,
+        orgId,
+        isEnabled: () => true,
+        isOrgEnabled: async () => true,
+        runDrain: fakeDrain,
+        maxStages: 50,
       });
-      check("future-armed: not drained before its time", t1.drained === 0, JSON.stringify(t1));
-      check("future-armed: not even a candidate (drain_held 0)", t1.drain_held === 0, `got ${t1.drain_held}`);
-      const a1 = (await tx.execute(sql`SELECT sent_at FROM campaign_stages WHERE id = ${stageId}`)) as unknown as { sent_at: string | null }[];
+      check(
+        "future-armed: not drained before its time",
+        t1.drained === 0,
+        JSON.stringify(t1),
+      );
+      check(
+        "future-armed: not even a candidate (drain_held 0)",
+        t1.drain_held === 0,
+        `got ${t1.drain_held}`,
+      );
+      const a1 = (await tx.execute(
+        sql`SELECT sent_at FROM campaign_stages WHERE id = ${stageId}`,
+      )) as unknown as { sent_at: string | null }[];
       check("future-armed: sent_at still NULL", a1[0].sent_at === null);
       check("future-armed: drain never called", !drainCalls.includes(stageId));
 
       // TICK 2 — now is the scheduled time, in window. Must fire + release.
       const DUE = new Date(FUTURE); // exactly due, noon ET → in window
       const t2 = await runScheduledSends(tx as unknown as typeof db, {
-        now: DUE, orgId, isEnabled: () => true, isOrgEnabled: async () => true, runDrain: fakeDrain, maxStages: 50,
+        now: DUE,
+        orgId,
+        isEnabled: () => true,
+        isOrgEnabled: async () => true,
+        runDrain: fakeDrain,
+        maxStages: 50,
       });
       check("due+in-window: drained 1", t2.drained === 1, JSON.stringify(t2));
-      const a2 = (await tx.execute(sql`SELECT sent_at FROM campaign_stages WHERE id = ${stageId}`)) as unknown as { sent_at: string | null }[];
-      check("due+in-window: sent_at stamped (released)", a2[0].sent_at !== null);
-      check("due+in-window: drain called once for the stage", drainCalls.filter((s) => s === stageId).length === 1);
+      const a2 = (await tx.execute(
+        sql`SELECT sent_at FROM campaign_stages WHERE id = ${stageId}`,
+      )) as unknown as { sent_at: string | null }[];
+      check(
+        "due+in-window: sent_at stamped (released)",
+        a2[0].sent_at !== null,
+      );
+      check(
+        "due+in-window: drain called once for the stage",
+        drainCalls.filter((s) => s === stageId).length === 1,
+      );
 
       // TICK 3 — the stage is now RELEASED (sent_at set from tick 2) and still has
       // a pending row (the injected fake drain doesn't mutate the DB). With now
       // OUTSIDE the window, its leftovers must be HELD, not drained.
       const before = drainCalls.length;
       const t3 = await runScheduledSends(tx as unknown as typeof db, {
-        now: EVENING_ET, orgId, isEnabled: () => true, isOrgEnabled: async () => true, runDrain: fakeDrain, maxStages: 50,
+        now: EVENING_ET,
+        orgId,
+        isEnabled: () => true,
+        isOrgEnabled: async () => true,
+        runDrain: fakeDrain,
+        maxStages: 50,
       });
-      check("released + outside window: held (not drained)", t3.drained === 0 && drainCalls.length === before, JSON.stringify(t3));
+      check(
+        "released + outside window: held (not drained)",
+        t3.drained === 0 && drainCalls.length === before,
+        JSON.stringify(t3),
+      );
 
       throw ROLLBACK;
     });
-  } catch (e) { if (e !== ROLLBACK) throw e; }
+  } catch (e) {
+    if (e !== ROLLBACK) throw e;
+  }
   await pgConn.end({ timeout: 5 });
-  console.log(failed === 0 ? "\nScheduler decoupling verified (rolled back)." : `\nFAILED: ${failed}`);
+  console.log(
+    failed === 0
+      ? "\nScheduler decoupling verified (rolled back)."
+      : `\nFAILED: ${failed}`,
+  );
   if (failed > 0) process.exit(1);
 }
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

@@ -45,7 +45,10 @@ async function main() {
   // Injected drain: behaves like a real per-stage drain bounded by its budget —
   // processes min(maxRows, pending) rows. Does NOT touch the DB (claim/hold is
   // what we're asserting, via campaign_stages.sent_at).
-  const fakeDrain = async (stageId: number, maxRows: number): Promise<DrainResult> => {
+  const fakeDrain = async (
+    stageId: number,
+    maxRows: number,
+  ): Promise<DrainResult> => {
     drainCalls.push({ stageId, maxRows });
     const processed = Math.min(maxRows, PENDING_PER_STAGE);
     return {
@@ -55,6 +58,9 @@ async function main() {
       filtered: 0,
       skippedDuplicate: 0,
       skippedOptedOut: 0,
+      skippedIneligible: 0,
+      skippedIneligibleByReason: {},
+      recheckFailedBatches: 0,
       processed,
       halted: false,
       stuck: 0,
@@ -122,7 +128,11 @@ async function main() {
       // Stages: A1/A2/A3 on provider A (share its budget), B1 on provider B.
       // Distinct scheduled_at (1s apart) gives the ORDER BY scheduled_at a
       // deterministic order: A1, A2, A3, B1.
-      async function mkStage(num: number, providerId: number, offsetSec: number) {
+      async function mkStage(
+        num: number,
+        providerId: number,
+        offsetSec: number,
+      ) {
         const at = new Date(BASE + offsetSec * 1000).toISOString();
         const r = (await tx.execute(sql`
           INSERT INTO campaign_stages
@@ -161,15 +171,31 @@ async function main() {
       // The stages are pre-seeded with pending stage_sends, so they're already
       // materialized — phase A considers none of them; the budget lives in the
       // phase-B drain.
-      check("considered 0 (all pre-materialized)", result.considered === 0, `got ${result.considered}`);
-      check("drained 3 stages (A1, A2, B1)", result.drained === 3, `got ${result.drained}`);
-      check("held 1 stage on budget (A3)", result.budget_held === 1, `got ${result.budget_held}`);
+      check(
+        "considered 0 (all pre-materialized)",
+        result.considered === 0,
+        `got ${result.considered}`,
+      );
+      check(
+        "drained 3 stages (A1, A2, B1)",
+        result.drained === 3,
+        `got ${result.drained}`,
+      );
+      check(
+        "held 1 stage on budget (A3)",
+        result.budget_held === 1,
+        `got ${result.budget_held}`,
+      );
 
       // Drain budgets handed out, in order. A1 gets full cap (5); A2 gets the
       // remainder (cap − A1.processed = 5 − 4 = 1); A3 never drains (held); B1
       // gets provider B's own fresh cap (5).
       const byStage = new Map(drainCalls.map((c) => [c.stageId, c.maxRows]));
-      check("A1 drained with full budget 5", byStage.get(stageA1) === CAP, `got ${byStage.get(stageA1)}`);
+      check(
+        "A1 drained with full budget 5",
+        byStage.get(stageA1) === CAP,
+        `got ${byStage.get(stageA1)}`,
+      );
       check(
         "A2 drained with remaining budget 1",
         byStage.get(stageA2) === 1,
@@ -197,7 +223,10 @@ async function main() {
       // budget-held stage keeps all its pending rows so the next tick re-drains
       // it. Assert the held stage A3 was never drained and still has its 4
       // pending rows, while the drained stages were handed to the fake drain.
-      check("A3 never entered the drain", !drainCalls.some((c) => c.stageId === stageA3));
+      check(
+        "A3 never entered the drain",
+        !drainCalls.some((c) => c.stageId === stageA3),
+      );
       const a3pending = (await tx.execute(sql`
         SELECT count(*)::int AS n FROM stage_sends
         WHERE stage_id = ${stageA3} AND status = 'pending'

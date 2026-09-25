@@ -8,9 +8,20 @@
 
 ---
 
+## Status (owner, 2026-09-25)
+
+**Approved in principle. Build on preview AFTER #229 (PR 4d) merges** — this sits directly on 4d's DELETE ordering inside `snapshotAudience`, so building it first would mean writing against a shape that is still under review. PR stopped before merge, as usual.
+
+**Report the slots-reclaimed number on the first THREE real capped campaigns.**
+
+⚠️ **That number cannot be produced yet, and the plan should not pretend otherwise.** Measured 2026-09-25: **0 lifecycle campaigns have a cap** (campaign 1460 has none). So the three have to be created first — the measurement is gated on real operator use, not on code being ready.
+
+⭐ **It will not be a long wait, and that is also the argument for building it.** **566 of 673 campaigns (84%) carry a cap**, 297 of them created in the last 30 days. Capping is the norm here, not an edge case, so this change will apply to most lifecycle campaigns rather than a rare few.
+
 ## Global Constraints
 
 - ⛔ **No merge and no production migration until campaign 1460's post-run comparison is accepted.** This changes what activation freezes.
+- ⛔ **Do not start until #229 merges.**
 - **No migration needed** — `audience_cap`, `lifecycle_rules` and the `bought_offer` definition all exist.
 - The 4a byte-identical gate must stay green: an **uncapped** campaign's SQL must not move at all.
 - Docs are part of done.
@@ -60,7 +71,8 @@ PR 4b decided deliberately that `bought_offer` is a **send-time overlay**: buyer
 
 ### Task 3: Measure, docs, PR
 
-- [ ] **Step 1: Measure on preview** — activation wall time with and without the extra DELETE, and the number of slots it reclaims on a realistic capped recipe. That second number is the entire justification; if it is ~0 on real data, say so and let the owner decide whether to ship it at all.
+- [ ] **Step 1: Measure on preview** — activation wall time with and without the extra DELETE.
+- [ ] **Step 1b: The slots-reclaimed number, on the FIRST THREE real capped lifecycle campaigns** (owner, 2026-09-25). Read-only, per campaign: how many pooled contacts had already bought the offer at snapshot time, i.e. how many cap slots the change would have reclaimed. That number is the entire justification; if it is ~0 across all three, say so plainly and let the owner decide whether to ship it at all. ⚠️ Blocked until three such campaigns exist — none did on 2026-09-25.
 - [ ] **Step 2:** `contact-lifecycle.md` (the asymmetry and the monotonicity argument), `07-conventions.md`, `CHANGELOG.md`, last-updated dates.
 - [ ] **Step 3:** Full check, 4a gate re-captured, rebase, **open the PR and STOP**.
 

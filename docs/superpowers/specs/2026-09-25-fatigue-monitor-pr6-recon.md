@@ -2,6 +2,18 @@
 
 _Recon only, no plan. Written 2026-09-25; figures read-only from production._
 
+## Status (owner, 2026-09-25) — PARKED as PR 6
+
+**No build now.** It ships after PR 5, and only once the 60-day reconstruction has given the monitor **three weeks of history** — two to compare and one to have a prior. Until then it could not fire, and a monitor that cannot fire reads as "nothing is wrong".
+
+**The design below is LOCKED, not a proposal.** Carry all five into the plan when it is written:
+
+1. **Three states: `ok` / `fatigue` / `insufficient_data`.** The third is a real state and is reported as such — never collapsed into `ok`.
+2. **`notifyOnTransition()`**, not a bare `notifyTelegram()` — so a persisting condition pages once, and a failed delivery retries.
+3. **Cohort from the STAMP** (`stage_send_lifecycle.status`), never from today's `contact_engagement.status`.
+4. **Both signals must move**: opt-out rate up AND click rate down.
+5. **A ~2 SE margin** for that week's `n`, on top of a minimum denominator.
+
 **The idea:** on top of PR 5's report, track weekly opt-out rate and click rate per lifecycle cohort. If **both worsen two weeks running**, raise the existing Telegram alert.
 
 ---

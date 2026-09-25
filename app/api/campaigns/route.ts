@@ -19,6 +19,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { loadLifecycleSettings } from "@/lib/engagement/settings-io";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { snapshotAudience } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
@@ -26,10 +27,7 @@ import { generateCampaignSlug } from "@/lib/campaign-helpers";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { can } from "@/lib/permissions";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
-import {
-  campaignCreateSchema,
-  nullIfEmpty,
-} from "@/lib/validators/campaigns";
+import { campaignCreateSchema, nullIfEmpty } from "@/lib/validators/campaigns";
 
 const SLUG_RETRY_LIMIT = 5;
 
@@ -190,11 +188,16 @@ export async function POST(req: NextRequest) {
       campaignBrandId: input.brand_id ?? null,
     });
     if (mismatch) {
-      return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
-        field: "default_provider_phone_id",
-        phone_brand_id: mismatch.phoneBrandId,
-        campaign_brand_id: mismatch.campaignBrandId,
-      });
+      return apiError(
+        400,
+        mismatch.message,
+        API_ERROR_CODES.PHONE_BRAND_MISMATCH,
+        {
+          field: "default_provider_phone_id",
+          phone_brand_id: mismatch.phoneBrandId,
+          campaign_brand_id: mismatch.campaignBrandId,
+        },
+      );
     }
   }
   const segmentIds = input.audience_segment_ids ?? [];
@@ -266,6 +269,20 @@ export async function POST(req: NextRequest) {
     try {
       const result = await db.transaction(async (tx) => {
         const slug = generateCampaignSlug();
+
+        // ── THE LIFECYCLE SWITCH (PR 4c Task 6) ──────────────────────────
+        // A new campaign is a LIFECYCLE campaign only while the engagement
+        // engine is actually writing. The statuses the chips select on come
+        // from that job; with the engine off they are frozen, so a campaign
+        // picking "Hot" would quietly target whoever was hot on the day the
+        // engine stopped rather than whoever is hot now.
+        //
+        // ⚠️ Read INSIDE the transaction, not before it. A switch flipped
+        // between the read and the insert would otherwise produce a campaign
+        // whose flag disagrees with the engine that was live when it was
+        // written — and nothing downstream could tell.
+        const lifecycleSettings = await loadLifecycleSettings(tx, orgId);
+        const lifecycleRules = lifecycleSettings.engine_mode === "write";
         const [inserted] = await tx
           .insert(campaigns)
           .values({
@@ -297,8 +314,33 @@ export async function POST(req: NextRequest) {
             start_date: input.start_date ?? null,
             end_date: input.end_date ?? null,
             status: "draft",
+            // ⚠️ Named explicitly, per the warning above: omitting it would
+            // take the column default (false) and every campaign would be
+            // legacy no matter what the engine is doing.
+            lifecycle_rules: lifecycleRules,
           })
           .returning();
+
+        // ⚠️ AUDIT THE FALLBACK, in the same transaction as the insert.
+        // Without this, a campaign created during an engine outage is
+        // indistinguishable months later from one that was deliberately made
+        // legacy — and "why did this campaign use the old filters?" has no
+        // answer anywhere. Only the FALLBACK is recorded: a campaign created
+        // normally writes nothing, so the table stays a list of exceptions
+        // rather than a log of every create.
+        if (!lifecycleRules) {
+          await tx.execute(drizzleSql`
+            INSERT INTO org_setting_events
+              (org_id, setting_key, old_value, new_value, actor_user_id)
+            VALUES (
+              ${orgId}::uuid,
+              'lifecycle.campaign_fallback',
+              ${lifecycleSettings.engine_mode},
+              ${`campaign:${inserted.id} created with lifecycle_rules=false`},
+              ${user.id}::uuid
+            )
+          `);
+        }
 
         // Generate the tracking_id in the same transaction so a rolled-back
         // campaign creation doesn't burn a sequence number. Skipped when

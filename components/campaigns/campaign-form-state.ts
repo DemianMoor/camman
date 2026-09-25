@@ -270,15 +270,50 @@ export function useCampaignFormState(props: CampaignFormProps) {
       if (r.ok) setActivePhones(r.data.data);
     })();
   }, [phonesApi.execute, watchedBrandId]);
+  // The engagement engine's posture. Only 'write' means the lifecycle statuses
+  // are current; with it off they are frozen at whenever the job stopped, so a
+  // campaign must not select on them. null = not yet known (the form shows the
+  // legacy chips until it is, which is the safe direction).
+  const [engineMode, setEngineMode] = useState<"off" | "write" | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/settings/lifecycle");
+        if (!res.ok) throw new Error(String(res.status));
+        const j = (await res.json()) as { engine_mode?: string };
+        if (!cancelled)
+          setEngineMode(j.engine_mode === "write" ? "write" : "off");
+      } catch {
+        // Fail toward the legacy chips: showing the old filters when the
+        // engine is actually on is a cosmetic wrong; showing the lifecycle
+        // chips when it is off invites picking a status nothing maintains.
+        if (!cancelled) setEngineMode("off");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const watchedLinkMode = form.watch("link_mode");
   const watchedOfferId = form.watch("offer_id");
   const watchedSegments = form.watch("audience_segment_ids");
   const watchedExcludeSegments = form.watch("audience_exclude_segment_ids");
   const watchedContactGroups = form.watch("audience_contact_group_ids");
 
-  // campaigns.lifecycle_rules, as loaded. Deliberately a PROP, not state:
-  // nothing in the form can turn it on. Only the create route sets it, in 4c.
-  const lifecycleRulesFromLoad = props.lifecycleRules === true;
+  // campaigns.lifecycle_rules. Deliberately not something the form can toggle:
+  // in EDIT mode it is whatever the campaign was created as, and in CREATE
+  // mode it is what the create route WILL decide — which is the engine's
+  // posture, read here so the form shows the chips the new campaign will
+  // actually get rather than guessing false and changing after save.
+  //
+  // ⚠️ The route re-reads the engine inside its own transaction and does NOT
+  // trust this value. This is a preview of its decision, not the decision.
+  const lifecycleRulesFromLoad =
+    props.mode === "create"
+      ? engineMode === "write"
+      : props.lifecycleRules === true;
 
   // The effective freeze cadence of each selected group: its own override,
   // or undefined when it inherits the org default (the note then says so
@@ -409,9 +444,9 @@ export function useCampaignFormState(props: CampaignFormProps) {
   >(null);
   // Leads in the audience who already got this offer (content-dedup LAYER 3).
   // Only nonzero when the exclude-prior-offer toggle is on.
-  const [previewOfferExposed, setPreviewOfferExposed] = useState<
-    number | null
-  >(null);
+  const [previewOfferExposed, setPreviewOfferExposed] = useState<number | null>(
+    null,
+  );
   // Per-bucket counts removed by the carrier filter (bucket → count).
   // "Unidentified" is its own key (never-looked-up numbers). Empty when no
   // carrier filter is active.
@@ -431,10 +466,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const offerKey = watchedOfferId ?? "";
 
   useEffect(() => {
-    if (
-      watchedSegments.length === 0 &&
-      watchedContactGroups.length === 0
-    ) {
+    if (watchedSegments.length === 0 && watchedContactGroups.length === 0) {
       setPreviewCount(null);
       setPreviewTotalMatching(null);
       setPreviewFromSegments(null);
@@ -685,7 +717,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
   // chip can represent.
   function toggleLifecycleChip(values: readonly string[], on: boolean) {
     const current = new Set(
-      (form.getValues("audience_filters")?.lifecycle_statuses ?? []) as string[],
+      (form.getValues("audience_filters")?.lifecycle_statuses ??
+        []) as string[],
     );
     for (const v of values) {
       if (on) current.add(v);
@@ -774,6 +807,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     // campaigns.lifecycle_rules. False for every campaign today; the create
     // route does not set it until PR 4c.
     lifecycleRules: lifecycleRulesFromLoad,
+    engineMode,
     // The effective freeze cadence of each SELECTED group: its override, else
     // the org default. Drives the Freeze chip's helper note.
     selectedGroupCadences,

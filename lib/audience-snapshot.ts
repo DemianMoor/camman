@@ -10,6 +10,7 @@ import { isStatementTimeout } from "@/lib/db/statement-timeout";
 import { EXIT_TIER, campaignTierExpr, tierLiteral } from "./campaign-tier";
 import {
   buildStageEligibilityExclusions,
+  type EligibilityLayerKey,
   type StageEligibilityParams,
 } from "./sends/eligibility";
 import { stageRecipientsSql } from "./sends/recipients";
@@ -1619,9 +1620,14 @@ export async function computeStageEligibilityPreview(
     currentOfferId: input.eligibility.currentOfferId,
     excludePriorOffer: input.eligibility.excludePriorOffer,
   });
-  const creativeRel = ex.creative ?? EMPTY_CONTACTS;
-  const inFlightRel = ex.inFlight ?? EMPTY_CONTACTS;
-  const offerRel = ex.offer ?? EMPTY_CONTACTS;
+  // Look up by key rather than by field: `ex` is an ordered layer list now, so
+  // a layer that does not apply is simply absent. EMPTY_CONTACTS keeps the CTE
+  // shape constant whether or not a layer is present.
+  const layerSql = (key: EligibilityLayerKey): SQL =>
+    ex.find((l) => l.key === key)?.sql ?? EMPTY_CONTACTS;
+  const creativeRel = layerSql("creative");
+  const inFlightRel = layerSql("in_flight");
+  const offerRel = layerSql("offer");
 
   const start = Date.now();
   try {

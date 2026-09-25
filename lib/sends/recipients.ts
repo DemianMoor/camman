@@ -227,7 +227,7 @@ export function stageRecipientsSql(opts: {
         currentOfferId: opts.eligibility.offerId,
         excludePriorOffer: opts.eligibility.excludePriorOffer,
       })
-    : { creative: null, inFlight: null, offer: null };
+    : [];
 
   // base = frozen pool ∩ live opt-outs ∩ stage filter toggles ∩ lane overlays.
   // The phone-number join is deferred to `qualified` so the dedup EXCEPTs operate

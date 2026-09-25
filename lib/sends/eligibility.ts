@@ -41,16 +41,46 @@ export interface StageEligibilityParams {
   excludePriorOffer: boolean;
 }
 
-// The three layers as individually-labeled `SELECT contact_id` fragments (null
-// when not applicable). Returned labeled so the preview can attribute per-layer
-// counts; the send/export path just EXCEPTs all the non-null ones.
-export interface StageEligibilityExclusions {
-  // LAYER 1 — saw this creative in another campaign.
-  creative: SQL | null;
-  // LAYER 2 — in-flight send of this creative in another campaign.
-  inFlight: SQL | null;
-  // LAYER 3 — got this offer in a previous campaign (only when toggle on).
-  offer: SQL | null;
+// Every exclusion layer, in the order they are applied and reported. Adding a
+// layer means adding a key here and a builder below — every consumer iterates
+// this list rather than naming fields, so nothing else has to change.
+//
+// ⚠️ THE ORDER IS THE CONTRACT. Before this was a list, the ordering lived
+// implicitly in two copies of the literal [ex.creative, ex.inFlight, ex.offer]
+// inside applyEligibilityExcept and eligibilityUnion. It is written down once
+// now. Exclusion REPORTING counts each lead against the first layer that
+// catches it, so changing this order changes which bucket a lead lands in.
+//
+// The lifecycle layers (suppressed, bought_offer, freeze_not_due) are declared
+// here but not built until PR 4b; they sort ahead of the content-dedup layers
+// per spec §8.3.
+export const EXCLUSION_PRIORITY = [
+  "suppressed",
+  "bought_offer",
+  "freeze_not_due",
+  "creative",
+  "in_flight",
+  "offer",
+] as const;
+
+export type EligibilityLayerKey = (typeof EXCLUSION_PRIORITY)[number];
+
+// One layer: a labelled `SELECT contact_id` fragment. A layer that does not
+// apply is simply absent from the list — there is no null member.
+export interface EligibilityLayer {
+  key: EligibilityLayerKey;
+  sql: SQL;
+}
+
+// The applicable layers, already in EXCLUSION_PRIORITY order.
+export type StageEligibilityExclusions = EligibilityLayer[];
+
+/** Sort an arbitrary set of layers into the canonical order. */
+export function orderLayers(layers: EligibilityLayer[]): StageEligibilityExclusions {
+  const rank = new Map<EligibilityLayerKey, number>(
+    EXCLUSION_PRIORITY.map((k, i) => [k, i]),
+  );
+  return [...layers].sort((a, b) => rank.get(a.key)! - rank.get(b.key)!);
 }
 
 export function buildStageEligibilityExclusions(
@@ -89,7 +119,11 @@ export function buildStageEligibilityExclusions(
       `
       : null;
 
-  return { creative, inFlight, offer };
+  const layers: EligibilityLayer[] = [];
+  if (creative) layers.push({ key: "creative", sql: creative });
+  if (inFlight) layers.push({ key: "in_flight", sql: inFlight });
+  if (offer) layers.push({ key: "offer", sql: offer });
+  return orderLayers(layers);
 }
 
 // Compose `base` (a `SELECT contact_id …` audience) with the exclusions via
@@ -100,11 +134,8 @@ export function applyEligibilityExcept(
   base: SQL,
   ex: StageEligibilityExclusions,
 ): SQL {
-  const layers = [ex.creative, ex.inFlight, ex.offer].filter(
-    (l): l is SQL => l !== null,
-  );
-  if (layers.length === 0) return base;
-  return layers.reduce((acc, layer) => sql`${acc}\nEXCEPT\n${layer}`, base);
+  if (ex.length === 0) return base;
+  return ex.reduce((acc, layer) => sql`${acc}\nEXCEPT\n${layer.sql}`, base);
 }
 
 // The DISTINCT union of all applicable exclusion layers as a single
@@ -112,10 +143,9 @@ export function applyEligibilityExcept(
 // (e.g. reconciliation's "would this pool member have been deduped?") where the
 // per-layer split doesn't matter — only "is this contact excluded".
 export function eligibilityUnion(ex: StageEligibilityExclusions): SQL | null {
-  const layers = [ex.creative, ex.inFlight, ex.offer].filter(
-    (l): l is SQL => l !== null,
-  );
-  if (layers.length === 0) return null;
-  const unioned = layers.reduce((acc, layer) => sql`${acc}\nUNION\n${layer}`);
+  if (ex.length === 0) return null;
+  const unioned = ex
+    .map((l) => l.sql)
+    .reduce((acc, layer) => sql`${acc}\nUNION\n${layer}`);
   return sql`SELECT DISTINCT contact_id FROM (${unioned}) elig_union`;
 }

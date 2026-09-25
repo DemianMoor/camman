@@ -361,16 +361,71 @@ async function buildAudienceSourceSql(
 // materialized temp table). The qualifier WHERE clause OR-combines the
 // filter toggles: a contact is in if ANY enabled category includes them,
 // and they're never in if they have any opt-out record for this org.
+// ── THE audience chip predicate ────────────────────────────────────────────
+// The four campaign-level audience chips (No status / Opt-in / Clickers / Not
+// clicked), OR'd together, evaluated against the per-contact has_opt_in /
+// has_clicker flags that flagSetCtes + flagJoins produce.
+//
+// This existed as FIVE byte-identical copies — in buildQualifierFromRelation,
+// computeStageAudienceCountForDraft, computeStageAudienceCountsBatchForDraft,
+// previewAudience and computeStageEligibilityPreview — each preceded by the
+// same four-line local block. Five copies of the predicate that decides who a
+// campaign is allowed to message is five chances for them to drift, and the
+// frozen pool (copy 1) and the preview the operator approved (copy 4) drifting
+// apart is exactly the bug nobody notices until a send goes out wrong.
+//
+// `alias` exists because the batch-draft copy evaluates the flags through a
+// joined relation (`flagged.has_opt_in`) while the other four have them in
+// scope unqualified. Same predicate, one extra qualifier.
+//
+// `lifecycleRules` is the PR 4 switch. In 4a it is always false and this
+// function returns exactly today's predicate for every campaign; 4b adds the
+// lifecycle-chip branch. Threading it now keeps 4b to one edit here instead of
+// five edits across this file.
+function lifecycleChipPredicate(
+  filters: {
+    include_no_status?: boolean | null;
+    include_opt_in?: boolean | null;
+    include_clickers?: boolean | null;
+    include_not_clicked?: boolean | null;
+  },
+  opts: { alias?: string; lifecycleRules?: boolean } = {},
+): SQL {
+  if (opts.lifecycleRules) {
+    // PR 4b fills this in. Unreachable in 4a: nothing sets lifecycle_rules.
+    throw new Error("lifecycleChipPredicate: lifecycle_rules is not implemented until PR 4b");
+  }
+  const q = opts.alias ? `${opts.alias}.` : "";
+  const optIn = drizzleSql.raw(`${q}has_opt_in`);
+  const clicker = drizzleSql.raw(`${q}has_clicker`);
+  const includeNoStatus = filters.include_no_status === true;
+  const includeOptIn = filters.include_opt_in === true;
+  const includeClickers = filters.include_clickers === true;
+  const includeNotClicked = filters.include_not_clicked === true;
+  return drizzleSql`(
+        (${includeNoStatus}::boolean and not ${optIn} and not ${clicker})
+        or (${includeOptIn}::boolean and ${optIn})
+        or (${includeClickers}::boolean and ${clicker})
+        or (${includeNotClicked}::boolean and not ${clicker})
+      )`;
+}
+
+/**
+ * TEST SEAM. buildQualifierFromRelation is module-private and is what decides a
+ * campaign's frozen pool — it carries copy 1 of the chip predicate. This exposes
+ * its SQL (never executed) so scripts/test-eligibility-layers-identical.ts can
+ * prove the PR 4a extraction changed nothing. Not used by application code.
+ */
+export function buildAudienceQualifierForTest(input: AudiencePreviewInput): SQL {
+  return buildQualifierFromRelation(input, drizzleSql`audience_candidates`);
+}
+
 function buildQualifierFromRelation(
   input: AudiencePreviewInput,
   candidateRelation: SQL,
   dripPostureOn = false,
 ): SQL {
   const { orgId, filters } = input;
-  const includeNoStatus = filters.include_no_status === true;
-  const includeOptIn = filters.include_opt_in === true;
-  const includeClickers = filters.include_clickers === true;
-  const includeNotClicked = filters.include_not_clicked === true;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3, baked into the FROZEN pool (not just the preview).
   // When the campaign opts into offer exclusion AND has an offer, contacts who
@@ -410,12 +465,7 @@ function buildQualifierFromRelation(
       (not has_opt_in and not has_clicker) as was_no_status
     from flagged
     where has_opt_out = false
-      and (
-        (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
-        or (${includeOptIn}::boolean and has_opt_in)
-        or (${includeClickers}::boolean and has_clicker)
-        or (${includeNotClicked}::boolean and not has_clicker)
-      )
+      and ${lifecycleChipPredicate(filters)}
       and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
       and (not ${excludePriorOffer}::boolean or not is_offer_exposed)
   `;
@@ -575,10 +625,6 @@ export async function computeStageAudienceCountForDraft(
     };
   }
 
-  const includeNoStatus = filters.include_no_status === true;
-  const includeOptIn = filters.include_opt_in === true;
-  const includeClickers = filters.include_clickers === true;
-  const includeNotClicked = filters.include_not_clicked === true;
 
   const stageIncludeNoStatus = stageFilters.include_no_status;
   const stageIncludeClickers = stageFilters.include_clickers;
@@ -637,12 +683,7 @@ export async function computeStageAudienceCountForDraft(
         contact_id
       from flagged
       where has_opt_out = false
-        and (
-          (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
-          or (${includeOptIn}::boolean and has_opt_in)
-          or (${includeClickers}::boolean and has_clicker)
-          or (${includeNotClicked}::boolean and not has_clicker)
-        )
+        and ${lifecycleChipPredicate(filters)}
         and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
         and (
           (${stageIncludeNoStatus}::boolean and not has_opt_in and not has_clicker)
@@ -821,10 +862,6 @@ export async function computeStageAudienceCountsBatchForDraft(
     return new Map(stages.map((s) => [s.stageId, 0]));
   }
 
-  const includeNoStatus = filters.include_no_status === true;
-  const includeOptIn = filters.include_opt_in === true;
-  const includeClickers = filters.include_clickers === true;
-  const includeNotClicked = filters.include_not_clicked === true;
 
   // Identical source composition to computeStageAudienceCountForDraft (it uses
   // the same buildAudienceSourceSql logic inline).
@@ -872,12 +909,7 @@ export async function computeStageAudienceCountsBatchForDraft(
       from st
       join flagged on
         flagged.has_opt_out = false
-        and (
-          (${includeNoStatus}::boolean and not flagged.has_opt_in and not flagged.has_clicker)
-          or (${includeOptIn}::boolean and flagged.has_opt_in)
-          or (${includeClickers}::boolean and flagged.has_clicker)
-          or (${includeNotClicked}::boolean and not flagged.has_clicker)
-        )
+        and ${lifecycleChipPredicate(filters, { alias: "flagged" })}
         and (not ${excludeInUse}::boolean or not flagged.is_in_use_elsewhere)
         and (
           (st.inc_ns and not flagged.has_opt_in and not flagged.has_clicker)
@@ -1123,10 +1155,6 @@ export async function previewAudience(
     contactGroupIds = [],
     filters,
   } = input;
-  const includeNoStatus = filters.include_no_status === true;
-  const includeOptIn = filters.include_opt_in === true;
-  const includeClickers = filters.include_clickers === true;
-  const includeNotClicked = filters.include_not_clicked === true;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
   // set. When off, `offerExposureId` stays null so flagSetCtes/flagJoins emit
@@ -1268,12 +1296,7 @@ export async function previewAudience(
       select
         f.*,
         (
-          not has_opt_out and (
-            (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
-            or (${includeOptIn}::boolean and has_opt_in)
-            or (${includeClickers}::boolean and has_clicker)
-            or (${includeNotClicked}::boolean and not has_clicker)
-          )
+          not has_opt_out and ${lifecycleChipPredicate(filters)}
         ) as qualifies
       from flagged f
     ),
@@ -1576,10 +1599,6 @@ export async function computeStageEligibilityPreview(
       excludeInUse: draft.excludeInUse,
     });
     const dripPostureOn = await isDripPostureOn(orgId);
-    const includeNoStatus = draft.filters.include_no_status === true;
-    const includeOptIn = draft.filters.include_opt_in === true;
-    const includeClickers = draft.filters.include_clickers === true;
-    const includeNotClicked = draft.filters.include_not_clicked === true;
     const excludeInUse = draft.excludeInUse === true;
     // No split here — applied post-dedup in the final query (see above).
     qualifying = drizzleSql`
@@ -1598,12 +1617,7 @@ export async function computeStageEligibilityPreview(
       select contact_id
       from flagged
       where has_opt_out = false
-        and (
-          (${includeNoStatus}::boolean and not has_opt_in and not has_clicker)
-          or (${includeOptIn}::boolean and has_opt_in)
-          or (${includeClickers}::boolean and has_clicker)
-          or (${includeNotClicked}::boolean and not has_clicker)
-        )
+        and ${lifecycleChipPredicate(draft.filters)}
         and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
         and (
           (${sf.include_no_status}::boolean and not has_opt_in and not has_clicker)

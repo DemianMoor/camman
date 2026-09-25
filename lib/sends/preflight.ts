@@ -90,6 +90,9 @@ interface MainRow {
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
   lifecycle_rules: boolean;
+  offer_rules_enabled: boolean;
+  offer_cooldown_days: number;
+  offer_limit_times: number;
   stage_tracking_id: string | null;
   sms_provider_id: number | null;
   provider_phone_id: number | null;
@@ -129,6 +132,9 @@ export async function preflightStageSend(
       c.offer_id          AS offer_id,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
       c.lifecycle_rules AS lifecycle_rules,
+      c.offer_rules_enabled,
+      c.offer_cooldown_days,
+      c.offer_limit_times,
       s.tracking_id       AS stage_tracking_id,
       s.sms_provider_id   AS sms_provider_id,
       s.provider_phone_id AS provider_phone_id,
@@ -203,6 +209,9 @@ export async function preflightStageSend(
           offerId: row.offer_id ?? null,
           excludePriorOffer: row.exclude_prior_offer_contacts,
           lifecycleRules: row.lifecycle_rules === true,
+          offerRulesEnabled: row.offer_rules_enabled === true,
+          offerCooldownDays: Number(row.offer_cooldown_days ?? 7),
+          offerLimitTimes: Number(row.offer_limit_times ?? 5),
         },
         // Q4: the same carrier policy kickoff will apply, so the previewed
         // recipient count equals what materializes. Omitting it here would make
@@ -227,6 +236,9 @@ export async function preflightStageSend(
     currentOfferId: row.offer_id ?? null,
     excludePriorOffer: row.exclude_prior_offer_contacts,
     lifecycleRules: row.lifecycle_rules === true,
+    offerRulesEnabled: row.offer_rules_enabled === true,
+    offerCooldownDays: Number(row.offer_cooldown_days ?? 7),
+    offerLimitTimes: Number(row.offer_limit_times ?? 5),
   }).filter((l) =>
     (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),
   );

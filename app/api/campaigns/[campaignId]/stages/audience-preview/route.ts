@@ -87,6 +87,9 @@ export async function POST(
       offer_id: campaigns.offer_id,
       exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
       lifecycle_rules: campaigns.lifecycle_rules,
+      offer_rules_enabled: campaigns.offer_rules_enabled,
+      offer_cooldown_days: campaigns.offer_cooldown_days,
+      offer_limit_times: campaigns.offer_limit_times,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
@@ -154,6 +157,9 @@ export async function POST(
       currentOfferId: campaignRow[0].offer_id,
       excludePriorOffer: campaignRow[0].exclude_prior_offer_contacts,
       lifecycleRules: campaignRow[0].lifecycle_rules === true,
+      offerRulesEnabled: campaignRow[0].offer_rules_enabled === true,
+      offerCooldownDays: campaignRow[0].offer_cooldown_days,
+      offerLimitTimes: campaignRow[0].offer_limit_times,
     },
     draft: isDraft
       ? {

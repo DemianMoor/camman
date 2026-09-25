@@ -17,4 +17,6 @@ export const EXCLUSION_LABELS: Record<LifecycleExclusionKey, string> = {
   suppressed: "suppressed",
   bought_offer: "bought this offer",
   freeze_not_due: "freeze not due",
+  offer_limit: "offer limit reached",
+  offer_cooldown: "offer cooldown",
 };

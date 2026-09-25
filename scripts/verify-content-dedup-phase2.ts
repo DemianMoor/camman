@@ -79,6 +79,9 @@ async function main() {
       currentOfferId: null,
       excludePriorOffer: false,
       lifecycleRules: false,
+      offerRulesEnabled: false,
+      offerCooldownDays: 7,
+      offerLimitTimes: 5,
     });
     const eligible = applyEligibilityExcept(base, ex);
     const eligibleRows = await exec(
@@ -122,6 +125,9 @@ async function main() {
       currentOfferId: null,
       excludePriorOffer: false,
       lifecycleRules: false,
+      offerRulesEnabled: false,
+      offerCooldownDays: 7,
+      offerLimitTimes: 5,
     });
     const baseCount = Number(
       (await exec(drizzleSql`SELECT count(*)::int AS n FROM (${base}) b`))[0].n,
@@ -150,6 +156,9 @@ async function main() {
       currentOfferId: 999999,
       excludePriorOffer: false,
       lifecycleRules: false,
+      offerRulesEnabled: false,
+      offerCooldownDays: 7,
+      offerLimitTimes: 5,
     });
     const exOfferOn = buildStageEligibilityExclusions({
       orgId,
@@ -158,6 +167,9 @@ async function main() {
       currentOfferId: 999999,
       excludePriorOffer: true,
       lifecycleRules: false,
+      offerRulesEnabled: false,
+      offerCooldownDays: 7,
+      offerLimitTimes: 5,
     });
     check(
       "Test 3 — offer toggle OFF: no offer layer, creative dedup STILL applies",
@@ -210,6 +222,9 @@ async function main() {
         creativeId: sCreative,
         offerId,
         excludePriorOffer: xp,
+        offerRulesEnabled: false,
+        offerCooldownDays: 7,
+        offerLimitTimes: 5,
         lifecycleRules: false,
       };
 
@@ -246,6 +261,9 @@ async function main() {
         currentOfferId: offerId,
         excludePriorOffer: xp,
         lifecycleRules: false,
+        offerRulesEnabled: false,
+        offerCooldownDays: 7,
+        offerLimitTimes: 5,
       });
       const u = eligibilityUnion(layers);
       const previewWillSend = drizzleSql`

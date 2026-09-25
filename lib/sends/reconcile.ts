@@ -66,7 +66,10 @@ export async function computeStageReconciliation(
     SELECT s.creative_id AS creative_id,
            c.offer_id AS offer_id,
            c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
-           c.lifecycle_rules AS lifecycle_rules
+           c.lifecycle_rules AS lifecycle_rules,
+           c.offer_rules_enabled AS offer_rules_enabled,
+           c.offer_cooldown_days AS offer_cooldown_days,
+           c.offer_limit_times AS offer_limit_times
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     WHERE s.id = ${stageId} AND s.org_id = ${orgId}::uuid
@@ -76,6 +79,9 @@ export async function computeStageReconciliation(
     offer_id: number | null;
     exclude_prior_offer_contacts: boolean;
     lifecycle_rules: boolean;
+    offer_rules_enabled: boolean;
+    offer_cooldown_days: number;
+    offer_limit_times: number;
   }[];
   const e = elig[0];
   const exclusions = e
@@ -86,6 +92,9 @@ export async function computeStageReconciliation(
         currentOfferId: e.offer_id ?? null,
         excludePriorOffer: e.exclude_prior_offer_contacts,
         lifecycleRules: e.lifecycle_rules === true,
+        offerRulesEnabled: e.offer_rules_enabled === true,
+        offerCooldownDays: Number(e.offer_cooldown_days ?? 7),
+        offerLimitTimes: Number(e.offer_limit_times ?? 5),
       })
     : [];
   const exclUnion = eligibilityUnion(exclusions);

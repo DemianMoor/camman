@@ -17,6 +17,7 @@ import {
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
+import { EXCLUSION_LABELS } from "@/lib/sends/exclusion-labels";
 import type { PreflightResult as ServerPreflightResult } from "@/lib/sends/preflight";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
@@ -53,17 +54,6 @@ type PreflightResult = {
   // type rather than re-listing the buckets, so a bucket added server-side
   // shows up here instead of silently going missing (spec §8.3).
   excluded_lifecycle?: ServerPreflightResult["excluded_lifecycle"];
-};
-
-// Human labels for the exclusion reasons. Keyed by the shared type, so a new
-// reason is a compile error here rather than an unlabelled number.
-const EXCLUSION_LABELS: Record<
-  keyof ServerPreflightResult["excluded_lifecycle"],
-  string
-> = {
-  suppressed: "suppressed",
-  bought_offer: "bought this offer",
-  freeze_not_due: "freeze not due",
 };
 
 export function StagePrepareDialog({

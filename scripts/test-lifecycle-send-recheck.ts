@@ -397,6 +397,21 @@ async function main() {
       `sent ${real.res.sent}, skipped_ineligible ${real.res.skippedIneligible}, by reason ${JSON.stringify(real.res.skippedIneligibleByReason)}`,
     );
 
+    // ⭐ The footing bar. A reason bucket that does not sum to the total means
+    // the drain wrote a last_error the reporting surfaces cannot name — and an
+    // unnamed reason renders as a silent zero, not as an error.
+    const byReasonSum = Object.values(
+      real.res.skippedIneligibleByReason,
+    ).reduce((a, b) => a + b, 0);
+    bar(
+      "J14 the per-reason split FOOTS to skipped_ineligible",
+      byReasonSum === real.res.skippedIneligible &&
+        Object.keys(real.res.skippedIneligibleByReason).every((k) =>
+          reasons.has(k as never),
+        ),
+      `${byReasonSum} vs ${real.res.skippedIneligible}`,
+    );
+
     // ⭐ THE FAIL-OPEN BAR. A re-check that throws must not stop the send.
     // Asserted on the RESULT (rows dispatched + the failure counted), not on
     // the absence of an exception — "it didn't throw" is also true of a check

@@ -367,6 +367,12 @@ export async function POST(req: NextRequest) {
             {
               campaignId: inserted.id,
               orgId,
+              // ⚠️ THE SAME VALUE JUST WRITTEN TO THE ROW. Omitting it froze
+              // the LEGACY audience into a campaign whose row said
+              // lifecycle_rules = true — the pool and the campaign disagreeing
+              // about which predicate chose it, permanently, because a pool is
+              // never recomputed.
+              lifecycleRules,
               segmentIds,
               excludeSegmentIds,
               contactGroupIds,

@@ -17,17 +17,22 @@ try {
   const p = req.resolve("server-only");
   // @ts-expect-error minimal Module cache entry
   req.cache[p] = { id: p, filename: p, loaded: true, exports: {} };
-} catch { /* noop */ }
+} catch {
+  /* noop */
+}
 
 class Rollback extends Error {}
 
 async function main() {
-  const { previewAudience, snapshotAudience } = await import("@/lib/audience-snapshot");
+  const { previewAudience, snapshotAudience } =
+    await import("@/lib/audience-snapshot");
   type AudienceSnapshotInput = Parameters<typeof snapshotAudience>[0];
   const { db, sql: raw } = await import("@/db/client");
   const { sql } = await import("drizzle-orm");
 
-  async function snapshotTotalRolledBack(input: AudienceSnapshotInput): Promise<number> {
+  async function snapshotTotalRolledBack(
+    input: AudienceSnapshotInput,
+  ): Promise<number> {
     let total = 0;
     try {
       await db.transaction(async (tx) => {
@@ -46,7 +51,9 @@ async function main() {
     if (JSON.stringify(a) === JSON.stringify(b)) console.log(`  ✓ ${m}`);
     else {
       failures++;
-      console.error(`  ✗ ${m} — expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
+      console.error(
+        `  ✗ ${m} — expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`,
+      );
     }
   };
   const ok = (c: boolean, m: string) => eq(!!c, true, m);
@@ -73,13 +80,17 @@ async function main() {
   }[];
 
   if (pair.length === 0) {
-    console.log("No (contact group ∩ offer-exposure) overlap found — skipping (inconclusive).");
+    console.log(
+      "No (contact group ∩ offer-exposure) overlap found — skipping (inconclusive).",
+    );
     await raw.end({ timeout: 5 });
     process.exit(0);
   }
 
   const f = pair[0];
-  console.log(`Using contact group ${f.group_id} ∩ offer ${f.offer_id} (overlap ${f.overlap})`);
+  console.log(
+    `Using contact group ${f.group_id} ∩ offer ${f.offer_id} (overlap ${f.overlap})`,
+  );
 
   // A real campaign id in the org to satisfy the pool FK (the snapshot inserts
   // then rolls back; on-conflict-do-nothing means an active campaign's existing
@@ -90,6 +101,9 @@ async function main() {
   const campaignId = campRow[0]!.id;
 
   const baseInput: AudienceSnapshotInput = {
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     campaignId,
     orgId: f.org_id,
     segmentIds: [],
@@ -124,16 +138,38 @@ async function main() {
   );
   console.log(`  snapshot: ON=${snapOn} OFF=${snapOff}`);
 
-  eq(snapOn, previewOn.total_matching, "FIX: frozen snapshot (ON) == previewed will-send (ON)");
-  eq(snapOff, previewOff.total_matching, "REGRESSION: snapshot (OFF) == preview (OFF) — OFF path unchanged");
-  ok(snapOn < snapOff, `LAYER 3 actually excludes prior-offer leads (${snapOff} → ${snapOn})`);
+  eq(
+    snapOn,
+    previewOn.total_matching,
+    "FIX: frozen snapshot (ON) == previewed will-send (ON)",
+  );
+  eq(
+    snapOff,
+    previewOff.total_matching,
+    "REGRESSION: snapshot (OFF) == preview (OFF) — OFF path unchanged",
+  );
+  ok(
+    snapOn < snapOff,
+    `LAYER 3 actually excludes prior-offer leads (${snapOff} → ${snapOn})`,
+  );
   // got_offer is only populated when the toggle is ON (is_offer_exposed is
   // computed only then); it equals the number removed from the ON total.
-  eq(snapOff - snapOn, previewOn.got_offer_in_prior_campaign, "excluded count == reported got_offer_in_prior_campaign");
+  eq(
+    snapOff - snapOn,
+    previewOn.got_offer_in_prior_campaign,
+    "excluded count == reported got_offer_in_prior_campaign",
+  );
 
   await raw.end({ timeout: 5 });
-  console.log(failures === 0 ? "\nAll snapshot prior-offer tests passed ✅" : `\nFAILED: ${failures} ✗`);
+  console.log(
+    failures === 0
+      ? "\nAll snapshot prior-offer tests passed ✅"
+      : `\nFAILED: ${failures} ✗`,
+  );
   process.exit(failures === 0 ? 0 : 1);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

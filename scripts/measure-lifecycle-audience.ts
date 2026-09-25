@@ -111,6 +111,9 @@ async function main() {
   console.log("1. TODAY — the campaign's current (legacy) filters");
   let t = performance.now();
   const legacy = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     ...baseInput,
     filters: (c.audience_filters ?? {}) as never,
   });

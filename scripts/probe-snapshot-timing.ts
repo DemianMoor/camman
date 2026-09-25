@@ -11,12 +11,16 @@ try {
   const p = req.resolve("server-only");
   // @ts-expect-error minimal Module cache entry
   req.cache[p] = { id: p, filename: p, loaded: true, exports: {} };
-} catch { /* noop */ }
+} catch {
+  /* noop */
+}
 
 const ORG = "b0ce3435-5ea2-4510-ab11-8cdd0d0c125b";
 // Bound each attempt so a pathological plan can't pin a prod connection.
 const TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS ?? 90_000);
-const ONLY = process.env.PROBE_ONLY ? process.env.PROBE_ONLY.split(",").map(Number) : null;
+const ONLY = process.env.PROBE_ONLY
+  ? process.env.PROBE_ONLY.split(",").map(Number)
+  : null;
 
 class Rollback extends Error {}
 
@@ -53,14 +57,20 @@ async function main() {
     const label = `#${r.id} segs=${JSON.stringify(r.audience_segment_ids)} groups=${JSON.stringify(
       r.audience_contact_group_ids,
     )} cap=${r.audience_cap} inUse=${r.exclude_in_use_contacts} priorOffer=${r.exclude_prior_offer_contacts} carrier=${
-      (r.audience_filters as { carrier_filter?: string[] })?.carrier_filter?.length ?? 0
+      (r.audience_filters as { carrier_filter?: string[] })?.carrier_filter
+        ?.length ?? 0
     }`;
     const t0 = Date.now();
     try {
       await db.transaction(async (tx) => {
-        await tx.execute(sql.raw(`set local statement_timeout = ${TIMEOUT_MS}`));
+        await tx.execute(
+          sql.raw(`set local statement_timeout = ${TIMEOUT_MS}`),
+        );
         const snap = await snapshotAudience(
           {
+            // Legacy behaviour is what this bar asserts; the lifecycle predicate
+            // has its own suites. Explicit, because the field is required now.
+            lifecycleRules: false,
             campaignId: r.id,
             orgId: ORG,
             segmentIds: r.audience_segment_ids ?? [],

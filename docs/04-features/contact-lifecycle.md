@@ -232,6 +232,35 @@ Three contracts:
   entirely. This is held by a byte-identical-SQL gate, not by inspection -- see
   section 8.
 
+### 3e2. Who decides `lifecycleRules`, on every path
+
+A campaign that EXISTS carries the answer in `campaigns.lifecycle_rules`. A
+campaign being CREATED has no row yet, so the create-mode preview and the
+create+activate snapshot must ask
+`newCampaignUsesLifecycleRules()`
+([lib/engagement/lifecycle-gate.ts](../../lib/engagement/lifecycle-gate.ts)) —
+the same `engine_mode = 'write'` question the create route answers when it
+writes the row.
+
+| path | source of the flag |
+|---|---|
+| create-mode audience preview | the gate (no row exists yet) |
+| create + activate snapshot | the gate — the same value written to the row |
+| draft → active snapshot | `campaigns.lifecycle_rules` off the row |
+| stage previews, preflight, drain | `campaigns.lifecycle_rules` off the row |
+
+⚠️ **`lifecycleRules` is REQUIRED on `AudiencePreviewInput`, and it was optional
+until that caused a production bug.** Three call sites never passed it and an
+optional default let them compile: the create-mode preview silently used the
+legacy predicate (so toggling chips changed no number on screen), and BOTH
+activation snapshots would have **frozen the legacy audience into a campaign
+whose row said `lifecycle_rules = true`** — a pool and a campaign permanently
+disagreeing about which predicate chose it, since a pool is never recomputed.
+An optional default hides exactly the call sites nobody updated.
+
+A campaign keeps the semantics it was created under: the draft→active snapshot
+reads the row, not the engine's posture today.
+
 ### 3f. The three send-time layers (PR 4b)
 
 For a lifecycle campaign, `buildStageEligibilityExclusions` adds three

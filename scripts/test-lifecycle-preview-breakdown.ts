@@ -32,6 +32,8 @@ async function main() {
     await import("./_fictional-phones");
   const { db } = await import("@/db/client");
   const { previewAudience } = await import("@/lib/audience-snapshot");
+  const { LIFECYCLE_CHIP_STATUSES } =
+    await import("@/lib/validators/campaigns");
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const one = async <T>(q: SQL): Promise<T> =>
@@ -282,6 +284,9 @@ async function main() {
 
     // ── the legacy shape is untouched ──────────────────────────────────────
     const legacy = await previewAudience({
+      // Legacy behaviour is what this bar asserts; the lifecycle predicate
+      // has its own suites. Explicit, because the field is required now.
+      lifecycleRules: false,
       orgId,
       segmentIds: [segId],
       filters: { include_no_status: true },
@@ -291,6 +296,107 @@ async function main() {
       "F11 a legacy campaign gets NO lifecycle key at all",
       legacy.lifecycle === undefined && !("lifecycle" in legacy),
       legacy.lifecycle === undefined ? "absent" : "PRESENT",
+    );
+    // ── PART F2: the CREATE-MODE preview (PR 4c fix) ──────────────────────
+    // ⭐ The bug this guards: a campaign being CREATED has no row, so nothing
+    // could read `lifecycle_rules` off one — and the preview silently used the
+    // legacy predicate, so toggling chips changed no number on screen. Worse,
+    // both activation snapshots had the same gap and would have FROZEN the
+    // legacy audience into a campaign whose row said lifecycle_rules = true.
+    //
+    // The bars are relational, not absolute: a narrower chip set must select
+    // FEWER contacts, and every chip set must be a subset of the same base.
+    // Absolute counts would pass on a predicate that ignores the chips and
+    // returns the same number every time — which is exactly what it did.
+    console.log("\nPART F2 — the create-mode preview applies the chips");
+
+    const previewChips = (chips: string[]) =>
+      previewAudience({
+        orgId,
+        lifecycleRules: true,
+        segmentIds: [segId],
+        filters: { lifecycle_statuses: chips },
+        offerId: offer.id,
+        excludeInUse: false,
+      });
+
+    const allChips = await previewChips([...LIFECYCLE_CHIP_STATUSES]);
+    const hotWarm = await previewChips(["hot", "warm"]);
+    const cold = await previewChips(["cold"]);
+
+    bar(
+      "F12 ⭐ [hot,warm] selects FEWER than [cold] on this fixture",
+      hotWarm.total_matching < cold.total_matching,
+      `hot+warm ${hotWarm.total_matching} < cold ${cold.total_matching}`,
+    );
+    bar(
+      "F13 both chip sets are SUBSETS of the all-chips base",
+      hotWarm.total_matching <= allChips.total_matching &&
+        cold.total_matching <= allChips.total_matching &&
+        allChips.total_matching > 0,
+      `base ${allChips.total_matching}`,
+    );
+    // The number MOVES between chip sets — the bar that would have caught the
+    // production symptom ("pool stays 63,710 whatever you click").
+    bar(
+      "F14 ⭐ different chip sets give DIFFERENT numbers",
+      new Set([
+        hotWarm.total_matching,
+        cold.total_matching,
+        allChips.total_matching,
+      ]).size > 1,
+      `${hotWarm.total_matching} / ${cold.total_matching} / ${allChips.total_matching}`,
+    );
+    // And the gate the create path uses is the SAME one the preview asks.
+    const { newCampaignUsesLifecycleRules } =
+      await import("@/lib/engagement/lifecycle-gate");
+    await db.execute(sql`
+      INSERT INTO lifecycle_settings (org_id, engine_mode) VALUES (${org}, 'write')
+      ON CONFLICT (org_id) DO UPDATE SET engine_mode = 'write'`);
+    const gateOn = await newCampaignUsesLifecycleRules(db, orgId);
+    await db.execute(sql`
+      UPDATE lifecycle_settings SET engine_mode = 'off' WHERE org_id = ${org}`);
+    const gateOff = await newCampaignUsesLifecycleRules(db, orgId);
+    bar(
+      "F15 the create-mode gate follows engine_mode, both ways",
+      gateOn === true && gateOff === false,
+      `write⇒${gateOn}, off⇒${gateOff}`,
+    );
+
+    // ── F16-F18: do the ROUTES actually pass it? ──────────────────────────
+    // ⭐ F12-F15 call previewAudience directly, so they would all stay green
+    // with the routes still broken — which is precisely the state that shipped.
+    // The defect was never in the predicate; it was that three call sites never
+    // supplied the flag and an OPTIONAL field let them compile. These read the
+    // sources. (The field is required now, so tsc is the first line of defence
+    // and these are the second, naming WHICH value each site must pass.)
+    const { readFileSync } = await import("node:fs");
+    const previewRoute = readFileSync(
+      "app/api/campaigns/audience-preview/route.ts",
+      "utf-8",
+    );
+    const createRoute = readFileSync("app/api/campaigns/route.ts", "utf-8");
+    const statusRoute = readFileSync(
+      "app/api/campaigns/[campaignId]/status/route.ts",
+      "utf-8",
+    );
+    bar(
+      "F16 the create-mode PREVIEW route derives the flag from the engine gate",
+      previewRoute.includes("newCampaignUsesLifecycleRules") &&
+        previewRoute.includes("lifecycleRules,"),
+      "no campaign row exists yet, so it must ask the same question the create route answers",
+    );
+    bar(
+      "F17 ⭐ the create+activate SNAPSHOT passes it",
+      /snapshotAudience\([\s\S]{0,600}?lifecycleRules,/.test(createRoute),
+      "without it a lifecycle campaign froze the LEGACY audience",
+    );
+    bar(
+      "F18 ⭐ the draft to active SNAPSHOT passes it, from the campaign ROW",
+      /snapshotAudience\([\s\S]{0,800}?lifecycleRules: c\.lifecycle_rules === true/.test(
+        statusRoute,
+      ),
+      "a campaign keeps the semantics it was created under",
     );
   } finally {
     if (orgId) {

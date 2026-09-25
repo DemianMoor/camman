@@ -96,6 +96,9 @@ export async function POST(
       audience_cap: campaigns.audience_cap,
       exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
       exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
+      // Which predicate chose this campaign's audience. Read here so the
+      // activation snapshot freezes the pool the campaign's own chips describe.
+      lifecycle_rules: campaigns.lifecycle_rules,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
@@ -186,6 +189,11 @@ export async function POST(
               excludeSegmentIds,
               contactGroupIds,
               filters: c.audience_filters ?? {},
+              // From the CAMPAIGN ROW, not from the engine's posture today: a
+              // campaign keeps the semantics it was created under even if the
+              // engine has since been switched off. Its chips were chosen
+              // under those semantics.
+              lifecycleRules: c.lifecycle_rules === true,
               cap: c.audience_cap ?? null,
               excludeInUse: c.exclude_in_use_contacts,
               // Bake the prior-offer exclusion into the frozen pool so the pool
@@ -215,9 +223,7 @@ export async function POST(
             status_changed_at: drizzleSql`now()`,
             audience_snapshot_count: count,
           })
-          .where(
-            and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)),
-          )
+          .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
           .returning();
         await logCampaignEvent(tx, {
           orgId,
@@ -227,7 +233,12 @@ export async function POST(
           summary: isDrip
             ? "Drip campaign activated (draft → active); audience arrives as leads, nothing frozen"
             : `Campaign activated (draft → active), audience frozen at ${count.toLocaleString()}`,
-          metadata: { from, to: "active", audience_count: count, type: c.type ?? null },
+          metadata: {
+            from,
+            to: "active",
+            audience_count: count,
+            type: c.type ?? null,
+          },
         });
         return row;
       });

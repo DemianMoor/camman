@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { contact_groups, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { newCampaignUsesLifecycleRules } from "@/lib/engagement/lifecycle-gate";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { previewAudience } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
@@ -48,9 +49,7 @@ export async function POST(req: NextRequest) {
   const excludeSegmentIds = Array.from(
     new Set(parsed.data.audience_exclude_segment_ids),
   );
-  const groupIds = Array.from(
-    new Set(parsed.data.audience_contact_group_ids),
-  );
+  const groupIds = Array.from(new Set(parsed.data.audience_contact_group_ids));
 
   const allSegmentIds = Array.from(
     new Set([...segmentIds, ...excludeSegmentIds]),
@@ -91,8 +90,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ⚠️ There is no campaign row yet, so `lifecycle_rules` cannot be read from
+  // one — and reading nothing is what made this preview ignore the chips
+  // entirely. It asks the SAME question the create route will answer when it
+  // writes the row, through the same function, so the preview and the campaign
+  // it previews cannot disagree.
+  const lifecycleRules = await newCampaignUsesLifecycleRules(db, orgId);
+
   const result = await previewAudience({
     orgId,
+    lifecycleRules,
     segmentIds,
     excludeSegmentIds,
     contactGroupIds: groupIds,

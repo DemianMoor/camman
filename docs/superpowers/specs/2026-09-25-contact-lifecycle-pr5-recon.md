@@ -37,7 +37,27 @@ At ~100K sends/day for the top days, the per-day batch the spec calls for is a r
 | `opt_out_attributions` | **136,015** with `stage_send_id` | joins directly |
 | `conversion_events` | **1,527** with `stage_send_id` | ⚠️ tiny relative to sends |
 
-⚠️ **Sales and revenue per cohort will be extremely thin.** Only 1,527 ledger rows carry a `stage_send_id` at all. The spec's CR (sales ÷ human clickers) and revenue columns will be near-empty for most periods, and the existing footnote about per-recipient numbers not matching Overview understates it. Worth deciding before building whether those two columns ship, ship with an explicit "attributed only" label, or wait.
+### Sales attribution — measured, and settled
+
+Both candidate sources were counted over the last 60 days (purchase events, counted statuses):
+
+| | rows |
+|---|---:|
+| `stage_sends.sale_status IN ('lead','sale')` | 1,010 |
+| ledger rows with `stage_send_id` | 1,034 |
+| in **both** | 1,006 |
+| legacy only | **4** |
+| ledger only | **28** |
+
+⭐ **The ordering does not change coverage.** Legacy-primary gives 1,010 + 28 = **1,038**; ledger-primary gives 1,034 + 4 = **1,038**. Identical row sets. The only real differences are which column supplies revenue for the 1,006 overlapping rows, and whether a deprecated path gets a new reader.
+
+`sale_status` / `sale_revenue` / `converted_at` are documented in `docs/05-flows.md` as *"a write path kept for parity and rollback, not a source anyone still reads; a later card drops the columns"* — every app-side reader was removed in Phase 3 Task 4.
+
+**Decision (owner, 2026-09-25): ledger PRIMARY, `stage_sends.sale_*` as fallback only for rows with NO ledger event (those 4). Revenue for rows in both = the ledger's approved-only sum.** So the deprecated columns gain no new primary reader and the drop-the-columns card stays unblocked.
+
+Of the 1,010 legacy rows, only **9** are `sale`; 1,001 are `lead` — consistent with the network paying on lead.
+
+Sales per cohort will still be thin in absolute terms (~1,038 across 3.88M sends). Worth labelling the column as attributed-only on the page rather than letting a near-zero CR read as a performance problem.
 
 ## Open questions the plan will have to answer
 
@@ -45,7 +65,7 @@ At ~100K sends/day for the top days, the per-day batch the spec calls for is a r
 2. **Thresholds drift.** "Using current thresholds" means a re-run after a threshold change produces different history for the same day. Either that is accepted and documented, or reconstructed rows record the thresholds used (the transition rows already carry theirs).
 3. **Never suppressed** (spec §10) — the reconstruction must skip that status even where the facts would imply it, because suppression could not have happened before launch.
 4. **"Unclassified"** — sends older than the backfill window need a row count on the page, which means the query must distinguish "no stamp" from "stamped as X".
-5. Whether Sales/CR/Revenue ship at all, per the 1,527 figure above.
+5. ~~Whether Sales/CR/Revenue ship at all~~ — settled above: they ship, ledger-primary, labelled attributed-only.
 
 ## Not blocking, but adjacent
 

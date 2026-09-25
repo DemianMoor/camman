@@ -223,6 +223,11 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "read-only production dry run of the PR 4c send-time lifecycle re-check — mirrors the drain's claim predicate with plain SELECTs (no FOR UPDATE, no UPDATE, nothing claimed) and evaluates the hypothetical by passing lifecycleRules: true, so no campaign is flipped; computes via lib/sends/lifecycle-recheck, so it carries no write token of its own",
   },
   {
+    file: "measure-lifecycle-reconstruction.ts",
+    viaLibrary: true,
+    why: "read-only PR 5 sizing of one ET day's lifecycle reconstruction against production; every statement runs inside a transaction that ALWAYS rolls back and the only tables it creates are TEMP ... ON COMMIT DROP (computes via lib/engagement/status-sql + thresholds-sql, so it carries no write token of its own)",
+  },
+  {
     file: "measure-lifecycle-audience.ts",
     viaLibrary: true,
     why: "read-only production merge-gate numbers for PR 4b — chip counts and per-layer exclusion counts, obtained by passing lifecycleRules: true to previewAudience / buildStageEligibilityExclusions against a real campaign's stored inputs rather than creating or flipping a campaign; issues only SELECT (builds via lib/audience-snapshot + lib/sends/eligibility, so it carries no write token of its own)",

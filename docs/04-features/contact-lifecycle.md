@@ -320,6 +320,30 @@ fail-open path that cannot be made to fail on purpose is an untested claim.
 The reasons surface in the send panel: "Skipped at send: 340 freeze not due ·
 95 bought this offer · 12 suppressed".
 
+### 3j. When a campaign becomes a lifecycle campaign (PR 4c)
+
+A new campaign gets `lifecycle_rules = true` **only while
+`lifecycle_settings.engine_mode = 'write'`** (owner decision, 2026-09-25). The
+statuses the chips select on are maintained by the job; with the engine off
+they are frozen at whenever it stopped, so a campaign picking "Hot" would
+target whoever was hot that day rather than whoever is hot now.
+
+- The create route reads the engine **inside its insert transaction**. A read
+  before it could disagree with the insert if the switch flipped in between,
+  and nothing downstream could tell which engine was live.
+- When it falls back, the editor shows the legacy chips plus _"Lifecycle engine
+  is off — campaign uses legacy filters"_ — and only when the engine is
+  genuinely off. A campaign that is legacy because it predates the feature gets
+  no such note, because that is not something an operator can act on.
+- The fallback is audited into `org_setting_events` under
+  `lifecycle.campaign_fallback`. Only the fallback: the table is a list of
+  exceptions, not a log of every create. Without it, a campaign created during
+  an engine outage is indistinguishable months later from one deliberately made
+  legacy.
+- **Existing campaigns are never converted.** Their audience recipes were
+  chosen under different semantics, and re-interpreting a stored
+  `audience_filters` would change who they reach.
+
 ## 4. The job
 
 `refreshContactEngagement` ([lib/engagement/refresh.ts](../../lib/engagement/refresh.ts))
@@ -479,6 +503,11 @@ The PR 4b bars:
 - [scripts/test-excl-timing-warning.ts](../../scripts/test-excl-timing-warning.ts)
   -- 16 bars; H10 feeds one campaign through BOTH mount paths and asserts they
   build an identical argument object.
+- [scripts/test-lifecycle-switch.ts](../../scripts/test-lifecycle-switch.ts) --
+  11 bars on the switch. K5/K6 assert the OTHER direction, because a one-sided
+  test passes just as happily on a gate that can never turn on; K9-K11 read the
+  route's SOURCE, because the rest of the file exercises a reproduction of its
+  decision and would pass after the gate was deleted.
 - [scripts/test-lifecycle-send-recheck.ts](../../scripts/test-lifecycle-send-recheck.ts)
   -- 14 bars on the send-time re-check. Every freeze fixture has
   `last_sent_at` NULL, so J2/J4 go red if anyone "tidies" the check back into

@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-09-24_
+_Last updated: 2026-09-25_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -83,6 +83,7 @@ sequenceDiagram
   participant Score as score-pending cron
   Op->>Kick: kickoff stage (tracked, send_approved)
   Kick->>Mint: per recipient → links + link_destinations
+  Kick->>Kick: EXCEPT eligibility layers, in EXCLUSION_PRIORITY order<br/>(lifecycle campaign: suppressed, bought_offer, freeze_not_due; then creative, in_flight, offer)
   Kick->>Kick: INSERT stage_sends + stage_send_lifecycle in ONE statement<br/>(rendered_text frozen, send_token=id; status-at-send stamped from contact_engagement)
   Kick->>Kick: last window landed: stamp materialized_at + status draft→pending (skipped if status_set_manually)
   Op->>Drain: drain (SEND_ENABLED + approved + !paused + breakers)

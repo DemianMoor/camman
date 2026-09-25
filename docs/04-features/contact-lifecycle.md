@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-09-24_
+_Last updated: 2026-09-25_
 
 **PR 1, 2a, 2b and 3 shipped.** The statuses are computed and stored, the
 thresholds that decide them are editable (§8), every send records the status it
@@ -196,6 +196,96 @@ Three contracts worth knowing before using them:
 
 The facts are up to 15 minutes old (§14), so a rule reading them is too.
 
+### 3e. The audience chips (PR 4b)
+
+A campaign with `lifecycle_rules = true` picks its audience with five status
+chips -- **New / Hot / Warm / Cold / Freeze** -- instead of the four legacy
+toggles (`include_no_status`, `include_clickers`, `exclude_clickers`,
+`include_opt_in`). The chips OR together and read the 3a projection, so the
+predicate is one indexed equality per chip rather than a join.
+
+Three contracts:
+
+- **An empty chip set matches NOBODY, not everybody.** Of the two readings, the
+  one that silently messages the entire contact base is the one that must not
+  be the default. The form enforces at least one chip, the validator enforces
+  it again, and `scripts/test-lifecycle-chips.ts` C4/C5 assert the SQL does too
+  -- an empty set and a missing key both match nobody.
+- **`suppressed` is not an offerable chip.** It is the end of the lifecycle, not
+  an audience you pick. It is excluded as a *layer* (below) so the reason is
+  reported rather than silently absent from a chip list.
+- **A legacy campaign is completely unaffected.** With `lifecycle_rules = false`
+  the old predicate decides and the `lifecycle_statuses` key is ignored
+  entirely. This is held by a byte-identical-SQL gate, not by inspection -- see
+  section 8.
+
+### 3f. The three send-time layers (PR 4b)
+
+For a lifecycle campaign, `buildStageEligibilityExclusions` adds three
+exclusion layers ahead of the content-dedup ones, ordered by
+`EXCLUSION_PRIORITY` in [lib/sends/eligibility.ts](../../lib/sends/eligibility.ts):
+
+| layer | excludes | source |
+|---|---|---|
+| `suppressed` | `lifecycle_status = 'suppressed'` | the 3a projection |
+| `bought_offer` | bought this campaign's offer | `purchasedOfferContacts()`, shared with the `made_purchase_for_offer` segment rule |
+| `freeze_not_due` | in Freeze AND `last_sent_at > now() - freeze_cadence_days` | `contact_engagement`, per contact |
+
+- **The order is the contract.** A lead caught by two layers is reported under
+  the first. Change the order and you change which bucket the number lands in.
+- **The freeze cadence is read PER CONTACT**, from the column the job stores --
+  no threshold lookup, no join back to `contact_groups`. Two Freeze contacts
+  messaged on the same day can differ purely because their group overrides
+  differ.
+- **`bought_offer` has ONE definition**, shared with the segment rule, so a rule
+  and a send-time exclusion cannot disagree about who has bought what.
+- **None of the three filters `messaging_status`.** `gateEligible()` gates the
+  whole audience -- the same decision PR 3 made for the segment rules, for the
+  same reason.
+
+Neither `freeze_not_due` nor `bought_offer` is baked into the frozen pool, and
+neither should be: freeze due-ness moves with the clock and purchases keep
+arriving after activation, so freezing either would freeze a decision that has
+to be made at send time. `suppressed` never enters the audience in the first
+place, because it is not a chip.
+
+### 3g. Why a lead was not sent to
+
+The reasons are reported in four places -- the preflight breakdown, the Prepare
+dialog, the eligibility preview and the autopilot view. They are the same
+buckets because every shape **spreads** `LifecycleExclusionCounts` rather than
+listing keys, and `LIFECYCLE_EXCLUSION_KEYS` is *derived* from
+`EXCLUSION_PRIORITY` by difference. A missing bucket is a compile error, not a
+number that quietly reads zero -- which is what it would look like, and is
+indistinguishable from "nobody was excluded for that reason".
+
+The audience preview additionally reports (`AudiencePreviewResult.lifecycle`):
+
+- `by_status` -- the audience split by status; sums to `total_matching`.
+- `excluded` -- leads NOT in the audience, **partitioned**: opted out ->
+  suppressed -> status not selected -> in use elsewhere. Audience + buckets =
+  the whole base, each lead counted once. `in_use_elsewhere` is only counted
+  when `exclude_in_use_contacts` is ON, because with it off those leads send.
+- `send_time` -- `freeze_not_due` and `bought_offer`, which **overlay** the
+  audience: those leads ARE in it and WILL be snapshotted, and the send skips
+  them on the day. They are subsets of `total_matching`, not buckets, so they
+  do not participate in the partition identity.
+
+### 3h. The Excl-timing warning
+
+Activating a lifecycle campaign with at least one Excl segment whose earliest
+scheduled stage is more than 24 h away shows: _"Excl segments are applied now,
+not at send."_ A warning, not a block; no scheduled stage means no gap, so no
+warning.
+
+The decision is one pure function
+([lib/campaigns/excl-timing-warning.ts](../../lib/campaigns/excl-timing-warning.ts))
+that both mount sites call, because the failure mode is not "the warning is
+wrong" but "the warning is right on the detail page and absent on the list
+page" -- which reads to an operator as *nothing to worry about*. The list page
+prefetches `GET /api/campaigns/[campaignId]` when the dialog opens rather than
+widening the list route, and holds the confirm button until it lands.
+
 ## 4. The job
 
 `refreshContactEngagement` ([lib/engagement/refresh.ts](../../lib/engagement/refresh.ts))
@@ -332,5 +422,37 @@ introduces them cannot page.
   new threshold, and the same run with `evaluateAll` does, recording a transition
   that carries the new thresholds.
 
+[scripts/test-segment-rule-lifecycle.ts](../../scripts/test-segment-rule-lifecycle.ts)
+covers the eight rule types (3d), 27 bars over L1-L12.
+
+The PR 4b bars:
+
+- [scripts/test-lifecycle-chips.ts](../../scripts/test-lifecycle-chips.ts) -- 10
+  bars on the chip predicate, through the real qualifier. C4/C5 are the ones
+  that matter: an empty and a missing chip set both match nobody.
+- [scripts/test-lifecycle-eligibility-layers.ts](../../scripts/test-lifecycle-eligibility-layers.ts)
+  -- 13 bars on the three layers. E4 pins the per-contact cadence with a pair
+  differing ONLY in `freeze_cadence_days`; E13 compares the emitted SQL TEXT of
+  the `bought_offer` layer against the segment rule's clause, because comparing
+  the rows would only prove one function equals itself.
+- [scripts/test-lifecycle-preview-breakdown.ts](../../scripts/test-lifecycle-preview-breakdown.ts)
+  -- 14 bars on the breakdown, including the partition identity in both
+  `exclude_in_use` states.
+- [scripts/test-exclusion-bucket-drift.ts](../../scripts/test-exclusion-bucket-drift.ts)
+  -- 9 bars that the four reporting shapes carry one bucket set, plus a SOURCE
+  scan that no fifth copy exists. The source half is the load-bearing one: a
+  copy that agrees today is exactly how the previous four drifted.
+- [scripts/test-excl-timing-warning.ts](../../scripts/test-excl-timing-warning.ts)
+  -- 16 bars; H10 feeds one campaign through BOTH mount paths and asserts they
+  build an identical argument object.
+- [scripts/test-eligibility-layers-identical.ts](../../scripts/test-eligibility-layers-identical.ts)
+  -- the byte-identical-SQL gate. It captures the SQL every real stage produces
+  from `origin/main` and diffs it, so "legacy campaigns are untouched" is a
+  measured claim over 5,368 query shapes rather than a reviewed one.
+
 Plus [scripts/measure-lifecycle-preview.ts](../../scripts/measure-lifecycle-preview.ts),
-a read-only production measurement whose every run rolls back.
+a read-only production measurement whose every run rolls back, and
+[scripts/measure-lifecycle-audience.ts](../../scripts/measure-lifecycle-audience.ts),
+which produces the chip and per-layer counts against production **without
+creating or flipping a campaign** -- `lifecycleRules` is a parameter on every one
+of these paths, so the hypothetical is evaluated by passing `true`.

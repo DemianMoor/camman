@@ -2,10 +2,17 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { resolveSendsPerSecond } from "@/lib/sends/circuit-breakers";
+import {
+  buildStageEligibilityExclusions,
+  LIFECYCLE_EXCLUSION_KEYS,
+  ZERO_LIFECYCLE_EXCLUSIONS,
+  type LifecycleExclusionCounts,
+} from "@/lib/sends/eligibility";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
 
-export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbOrTx =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Read-only pre-flight validation for a stage send (WS2). Mirrors the structural
 // refusal reasons of kickoffStageSend WITHOUT materializing, so the operator sees
@@ -52,6 +59,11 @@ export interface PreflightResult {
   // Non-blocking advisories (does NOT set ok=false). Currently the slow-number
   // warning; rendered next to the recipient count in the confirm UI.
   warnings: string[];
+  // Why the lifecycle layers removed people, per reason and counted once each.
+  // Spread from LifecycleExclusionCounts, never listed — see
+  // lib/sends/eligibility.ts. All zero for a legacy stage, and no extra query
+  // runs for one.
+  excluded_lifecycle: LifecycleExclusionCounts;
 }
 
 // Estimated drain time above which the slow-number warning fires (15 min). At a
@@ -77,6 +89,7 @@ interface MainRow {
   creative_id: number | null;
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
+  lifecycle_rules: boolean;
   stage_tracking_id: string | null;
   sms_provider_id: number | null;
   provider_phone_id: number | null;
@@ -100,7 +113,11 @@ interface MainRow {
 
 export async function preflightStageSend(
   dbc: DbOrTx,
-  { orgId, campaignId, stageId }: { orgId: string; campaignId: number; stageId: number },
+  {
+    orgId,
+    campaignId,
+    stageId,
+  }: { orgId: string; campaignId: number; stageId: number },
 ): Promise<PreflightResult> {
   const rows = (await dbc.execute(sql`
     SELECT
@@ -111,6 +128,7 @@ export async function preflightStageSend(
       s.creative_id       AS creative_id,
       c.offer_id          AS offer_id,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
+      c.lifecycle_rules AS lifecycle_rules,
       s.tracking_id       AS stage_tracking_id,
       s.sms_provider_id   AS sms_provider_id,
       s.provider_phone_id AS provider_phone_id,
@@ -146,6 +164,7 @@ export async function preflightStageSend(
       ok: false,
       mode,
       recipient_count: 0,
+      excluded_lifecycle: { ...ZERO_LIFECYCLE_EXCLUSIONS },
       blockers: ["no_creative"],
       checks: [{ key: "stage", ok: false, label: "Stage not found" }],
       preview_text: null,
@@ -183,6 +202,7 @@ export async function preflightStageSend(
           creativeId: row.creative_id ?? null,
           offerId: row.offer_id ?? null,
           excludePriorOffer: row.exclude_prior_offer_contacts,
+          lifecycleRules: row.lifecycle_rules === true,
         },
         // Q4: the same carrier policy kickoff will apply, so the previewed
         // recipient count equals what materializes. Omitting it here would make
@@ -196,15 +216,99 @@ export async function preflightStageSend(
   `)) as unknown as { n: number }[];
   const recipientCount = Number(cnt[0]?.n ?? 0);
 
+  // Per-reason lifecycle exclusion counts for the Prepare dialog. Runs ONLY for
+  // a lifecycle stage: a legacy one has no such layers, so `lcLayers` is empty
+  // and this whole block is skipped rather than executing a query that would
+  // return zeros.
+  const lcLayers = buildStageEligibilityExclusions({
+    orgId,
+    currentCampaignId: campaignId,
+    currentCreativeId: row.creative_id ?? null,
+    currentOfferId: row.offer_id ?? null,
+    excludePriorOffer: row.exclude_prior_offer_contacts,
+    lifecycleRules: row.lifecycle_rules === true,
+  }).filter((l) =>
+    (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),
+  );
+  const excludedLifecycle: LifecycleExclusionCounts = {
+    ...ZERO_LIFECYCLE_EXCLUSIONS,
+  };
+  if (lcLayers.length > 0) {
+    // The base is the SAME recipient query WITHOUT the eligibility overlay, so
+    // the difference between the two is exactly what the layers removed.
+    const base = stageRecipientsSql({
+      campaignId,
+      orgId,
+      filters: {
+        includeNoStatus: row.include_no_status,
+        includeClickers: row.include_clickers,
+        excludeClickers: row.exclude_clickers,
+        splitIndex: row.split_index ?? null,
+        splitTotal: row.split_total ?? null,
+        behavioralTier: row.behavioral_tier ?? null,
+        parentStageId: row.parent_stage_id ?? null,
+        sourceStageIds: row.source_stage_ids ?? null,
+        splitGroupId: row.split_group_id ?? null,
+        laneStageId: stageId,
+      },
+      carrierPolicy: {
+        providerPhoneId: row.provider_phone_id,
+        allowUnknownCarrier: row.allow_unknown_carrier !== false,
+      },
+    });
+    const joins = lcLayers.reduce(
+      (acc, l) => sql`${acc}
+        left join (${l.sql}) ${sql.raw(`lp_${l.key}`)}
+          on ${sql.raw(`lp_${l.key}`)}.contact_id = b.contact_id`,
+      sql``,
+    );
+    // Exclusive: each layer negates every layer ahead of it in the order.
+    const aggs = lcLayers.reduce(
+      (acc, l, i) => {
+        const earlier = lcLayers
+          .slice(0, i)
+          .reduce(
+            (a, e) =>
+              sql`${a} and ${sql.raw(`lp_${e.key}`)}.contact_id is null`,
+            sql``,
+          );
+        return sql`${acc}${i === 0 ? sql`` : sql`,`}
+        count(*) filter (
+          where ${sql.raw(`lp_${l.key}`)}.contact_id is not null${earlier}
+        )::int as ${sql.raw(`n_${l.key}`)}`;
+      },
+      sql``,
+    );
+    const lcRows = (await dbc.execute(sql`
+      select ${aggs}
+      from (${base}) b${joins}
+    `)) as unknown as Record<string, number>[];
+    for (const l of lcLayers) {
+      excludedLifecycle[l.key as keyof LifecycleExclusionCounts] = Number(
+        lcRows[0]?.[`n_${l.key}`] ?? 0,
+      );
+    }
+  }
+
   const checks: PreflightCheck[] = [];
   const blockers: PreflightBlocker[] = [];
-  const add = (key: string, ok: boolean, label: string, blocker?: PreflightBlocker) => {
+  const add = (
+    key: string,
+    ok: boolean,
+    label: string,
+    blocker?: PreflightBlocker,
+  ) => {
     checks.push({ key, ok, label });
     if (!ok && blocker) blockers.push(blocker);
   };
 
   add("creative", !!row.creative_text, "Creative attached", "no_creative");
-  add("recipients", recipientCount > 0, `Recipients: ${recipientCount.toLocaleString()}`, "no_recipients");
+  add(
+    "recipients",
+    recipientCount > 0,
+    `Recipients: ${recipientCount.toLocaleString()}`,
+    "no_recipients",
+  );
 
   if (mode === "tracked") {
     add(
@@ -253,7 +357,12 @@ export async function preflightStageSend(
       WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
       LIMIT 1
     `)) as unknown as { ok: number }[];
-    add("short_domain", sd.length > 0, "Active short domain", "no_short_domain");
+    add(
+      "short_domain",
+      sd.length > 0,
+      "Active short domain",
+      "no_short_domain",
+    );
   }
 
   // Phase 4 throughput guardrail (tracked, sender assigned). Estimate the drain
@@ -285,5 +394,6 @@ export async function preflightStageSend(
     sender_sends_per_second: senderRate,
     estimated_drain_seconds: estimatedDrainSeconds,
     warnings,
+    excluded_lifecycle: excludedLifecycle,
   };
 }

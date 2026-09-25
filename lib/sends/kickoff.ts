@@ -26,8 +26,15 @@ import {
   optOutGateSubject,
   resolveOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
-import { countSegments, hasOptOutLanguage, MAX_SEGMENTS } from "@/lib/sends/segments";
-import { buildLandingPageUrl, isBrandLandingHost } from "@/lib/landing-page-url";
+import {
+  countSegments,
+  hasOptOutLanguage,
+  MAX_SEGMENTS,
+} from "@/lib/sends/segments";
+import {
+  buildLandingPageUrl,
+  isBrandLandingHost,
+} from "@/lib/landing-page-url";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 import {
   buildStageFullUrl,
@@ -36,7 +43,8 @@ import {
 } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 
-export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbOrTx =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Kickoff materializes one stage_sends row per recipient and, in tracked mode,
 // mints one unique link per recipient (send_token = the row id). It does NOT
@@ -181,6 +189,7 @@ interface MainRow {
   creative_text: string | null;
   creative_allow_multi_segment: boolean;
   exclude_prior_offer_contacts: boolean;
+  lifecycle_rules: boolean;
   campaign_name: string | null;
   stage_number: number | null;
   label: string | null;
@@ -239,6 +248,7 @@ export async function kickoffStageSend(
       cr.text                    AS creative_text,
       cr.allow_multi_segment     AS creative_allow_multi_segment,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
+      c.lifecycle_rules AS lifecycle_rules,
       c.name                         AS campaign_name,
       s.stage_number                 AS stage_number,
       s.label                        AS label
@@ -257,7 +267,8 @@ export async function kickoffStageSend(
   const row = main[0];
   if (!row) return { ok: false, reason: "not_found" };
 
-  const mode: "manual" | "tracked" = row.link_mode === "tracked" ? "tracked" : "manual";
+  const mode: "manual" | "tracked" =
+    row.link_mode === "tracked" ? "tracked" : "manual";
   const brandName = row.brand_name ?? "";
 
   // ---- Q3: resolve the opt-out footer ONCE, here, and use the winner for
@@ -317,7 +328,8 @@ export async function kickoffStageSend(
     if (!row.stage_tracking_id || !row.campaign_tracking_id) {
       return { ok: false, reason: "stage_not_ready" };
     }
-    if (row.sms_provider_id == null) return { ok: false, reason: "no_provider" };
+    if (row.sms_provider_id == null)
+      return { ok: false, reason: "no_provider" };
 
     const provider = (await dbc.execute(sql`
       SELECT supports_api_send, sends_enabled, adapter_code AS provider_key
@@ -433,7 +445,8 @@ export async function kickoffStageSend(
       }
     }
     if (row.landing_page_id != null && !destinationUrl) {
-      if (!row.landing_page_kind) return { ok: false, reason: "landing_page_missing" };
+      if (!row.landing_page_kind)
+        return { ok: false, reason: "landing_page_missing" };
       const built = buildLandingPageUrl({
         page: {
           id: row.landing_page_id,
@@ -497,8 +510,10 @@ export async function kickoffStageSend(
       `)) as unknown as { landing_host: string }[];
       const base = ctxResult.ctx.salesPageUrl ?? "";
       const onLandingHost =
-        isBrandLandingHost(base, landingHosts.map((b) => b.landing_host)) ||
-        /\/lp\//i.test(base);
+        isBrandLandingHost(
+          base,
+          landingHosts.map((b) => b.landing_host),
+        ) || /\/lp\//i.test(base);
       destinationUrl = buildStageFullUrl({
         salesPageUrl: base,
         trackingId: row.stage_tracking_id,
@@ -562,7 +577,8 @@ export async function kickoffStageSend(
   });
   if (!gate.verifiable || !hasOptOutLanguage(gate.subject)) {
     const guardKey =
-      providerKey ?? (await resolveProviderKeyForGuard(dbc, row.sms_provider_id, orgId));
+      providerKey ??
+      (await resolveProviderKeyForGuard(dbc, row.sms_provider_id, orgId));
     // An unverifiable provider-appended footer is refused for EVERY provider,
     // not just txr: the dry-run carve-out below exists for stages whose own
     // wording is missing, which an operator can fix by editing text. There is
@@ -610,7 +626,11 @@ export async function kickoffStageSend(
     // stages), or the group is gone. Refusing is correct: materializing now
     // would fall back to the single-parent aliveness and send the WRONG,
     // narrower audience.
-    if (!group || group.state === "failed" || group.source_stage_ids.length === 0) {
+    if (
+      !group ||
+      group.state === "failed" ||
+      group.source_stage_ids.length === 0
+    ) {
       return { ok: false, reason: "split_group_not_ready" };
     }
     // Take the source set from the RESOLVE, not from `row` — `row` was read
@@ -650,6 +670,7 @@ export async function kickoffStageSend(
       creativeId: row.creative_id ?? null,
       offerId: row.offer_id ?? null,
       excludePriorOffer: row.exclude_prior_offer_contacts,
+      lifecycleRules: row.lifecycle_rules === true,
     },
     // Q4: the sending NUMBER's carrier allow-list, applied HERE so an excluded
     // contact never becomes a stage_sends row. ANDs with the campaign-level
@@ -671,7 +692,13 @@ export async function kickoffStageSend(
     `)) as unknown as { n: number }[];
     if (Number(existing[0]?.n ?? 0) > 0) {
       await markMaterialized(dbc, { orgId, campaignId, stageId });
-      return { ok: true, mode, materialized: 0, complete: true, shortDomain: null };
+      return {
+        ok: true,
+        mode,
+        materialized: 0,
+        complete: true,
+        shortDomain: null,
+      };
     }
     return { ok: false, reason: "no_recipients" };
   }
@@ -722,12 +749,17 @@ export async function kickoffStageSend(
           destinationUrl,
           campaignTrackingId: row.campaign_tracking_id,
           stageTrackingId: row.stage_tracking_id,
-          items: tokens.map((t) => ({ contactId: t.contactId, sendToken: t.sendToken })),
+          items: tokens.map((t) => ({
+            contactId: t.contactId,
+            sendToken: t.sendToken,
+          })),
         });
         rows = tokens.map((t) => {
           const link = minted.get(t.sendToken);
           if (!link) {
-            throw new Error(`kickoff: missing minted link for send_token ${t.sendToken}`);
+            throw new Error(
+              `kickoff: missing minted link for send_token ${t.sendToken}`,
+            );
           }
           return {
             id: t.sendToken,

@@ -740,8 +740,10 @@ export const textrequest_inbound_events = pgTable(
   ],
 );
 
-export type TextrequestInboundEvent = typeof textrequest_inbound_events.$inferSelect;
-export type NewTextrequestInboundEvent = typeof textrequest_inbound_events.$inferInsert;
+export type TextrequestInboundEvent =
+  typeof textrequest_inbound_events.$inferSelect;
+export type NewTextrequestInboundEvent =
+  typeof textrequest_inbound_events.$inferInsert;
 
 // Tells.co webhook capture (migration 0130). ONE table with a `kind`
 // discriminator, deliberately unlike the two-table ahoi_*/textrequest_* pattern
@@ -901,7 +903,9 @@ export const provider_phones = pgTable(
     // Covers all three unknown-ish buckets ('Unknown', 'Unmapped',
     // 'Unidentified') with one switch. TRUE on every row = today's behaviour.
     // Never default this to false — unknown must never silently suppress.
-    allow_unknown_carrier: boolean("allow_unknown_carrier").notNull().default(true),
+    allow_unknown_carrier: boolean("allow_unknown_carrier")
+      .notNull()
+      .default(true),
     short_domain_id: integer("short_domain_id").references(
       () => short_domains.id,
       { onDelete: "set null" },
@@ -2064,7 +2068,9 @@ export const campaign_stages = pgTable(
     // 0179 (ClickUp 869evxbgb). True once a person has picked this stage's status
     // (status route / bulk-status). The system's automatic draft ⇄ pending moves
     // (lib/stages/auto-status.ts) refuse a stage carrying it — manual always wins.
-    status_set_manually: boolean("status_set_manually").notNull().default(false),
+    status_set_manually: boolean("status_set_manually")
+      .notNull()
+      .default(false),
     sms_count: integer("sms_count").notNull().default(0),
     total_cost: numeric("total_cost", { precision: 12, scale: 4 })
       .notNull()
@@ -2091,9 +2097,7 @@ export const campaign_stages = pgTable(
     bounced_count: integer("bounced_count").notNull().default(0),
     // Checkout clicks and sales auto-fill from Keitaro (checkouts / sales) by
     // the */5 poll for tracked stages; manual/CSV for untracked stages.
-    checkout_click_count: integer("checkout_click_count")
-      .notNull()
-      .default(0),
+    checkout_click_count: integer("checkout_click_count").notNull().default(0),
     sales_count: integer("sales_count").notNull().default(0),
     // Offer payout-per-sale (CPA) snapshotted at the moment the sales count
     // was last entered, so revenue/ROI reflect the offer's payout "on the
@@ -2192,18 +2196,32 @@ export const campaign_stages = pgTable(
     // breakdown ~15 min before it materializes, posts a Telegram digest, and
     // persists the result here for the /sends/autopilot view. NULL until the
     // stage enters its preflight window (or for non-scheduled stages).
-    // Shape (jsonb): { will_send, excluded: { opt_out, content_dedup, split,
-    //   lane, dedup_1h_predicted }, estimated_drain_seconds, blockers[] }.
+    // Shape (jsonb): the PreflightBreakdown interface in
+    // lib/sends/preflight-breakdown.ts, which is the source of truth — read it
+    // rather than trusting a transcription here. As of PR 4b:
+    //   { computed_at, mode, pool_total, materialized_audience, predicted_sends,
+    //     excluded: { opt_out, stage_filter, split, content_dedup, lane,
+    //       dedup_1h_predicted, carrier, suppressed, bought_offer,
+    //       freeze_not_due },
+    //     estimated_drain_seconds, sender_sends_per_second, blockers[], red }.
+    // (This comment previously named a `will_send` key that has never existed —
+    // the count is `predicted_sends` — and omitted stage_filter and carrier.)
     preflight_result: jsonb("preflight_result"),
     // When the persisted preflight_result was computed.
-    preflight_computed_at: timestamp("preflight_computed_at", { withTimezone: true }),
+    preflight_computed_at: timestamp("preflight_computed_at", {
+      withTimezone: true,
+    }),
     // Set once when the Telegram preflight digest included this stage — the
     // "posted once" dedup so the cron never re-notifies for the same fire.
-    preflight_notified_at: timestamp("preflight_notified_at", { withTimezone: true }),
+    preflight_notified_at: timestamp("preflight_notified_at", {
+      withTimezone: true,
+    }),
     // Operator abort during the preflight window: Phase A's due-selection
     // excludes stages with this set (mirrors slip_hold_at/schedule_missed_at).
     // Cleared to re-arm the stage for its next fire.
-    preflight_aborted_at: timestamp("preflight_aborted_at", { withTimezone: true }),
+    preflight_aborted_at: timestamp("preflight_aborted_at", {
+      withTimezone: true,
+    }),
     // Auto-generated, immutable tracking ID. Format:
     // `<campaign_tracking_id>_s<stage_number>_c<creative_id>`. NULL until
     // the parent campaign has a tracking_id AND the stage has a
@@ -2420,8 +2438,7 @@ export const campaign_audience_pool = pgTable(
   ],
 );
 
-export type CampaignAudiencePool =
-  typeof campaign_audience_pool.$inferSelect;
+export type CampaignAudiencePool = typeof campaign_audience_pool.$inferSelect;
 export type NewCampaignAudiencePool =
   typeof campaign_audience_pool.$inferInsert;
 
@@ -2459,8 +2476,7 @@ export const result_import_mappings = pgTable(
 );
 
 export type ResultImportMapping = typeof result_import_mappings.$inferSelect;
-export type NewResultImportMapping =
-  typeof result_import_mappings.$inferInsert;
+export type NewResultImportMapping = typeof result_import_mappings.$inferInsert;
 
 // One row per import event. Permanent (no hard delete) so the audit trail
 // survives even after revert. reverted_at + reverted_by_user_id are set on
@@ -2518,8 +2534,7 @@ export const stage_results_imports = pgTable(
 );
 
 export type StageResultsImport = typeof stage_results_imports.$inferSelect;
-export type NewStageResultsImport =
-  typeof stage_results_imports.$inferInsert;
+export type NewStageResultsImport = typeof stage_results_imports.$inferInsert;
 
 // Per-row record of what an import wrote. UNIQUE(stage_id, phone_number)
 // is the dedup key: re-importing the same CSV will hit conflicts and skip.
@@ -2617,7 +2632,9 @@ export const keitaro_stage_results = pgTable(
     visit_clicks_raw: integer("visit_clicks_raw").notNull().default(0),
     visit_clicks_clean: integer("visit_clicks_clean").notNull().default(0),
     redirect_clicks_raw: integer("redirect_clicks_raw").notNull().default(0),
-    redirect_clicks_clean: integer("redirect_clicks_clean").notNull().default(0),
+    redirect_clicks_clean: integer("redirect_clicks_clean")
+      .notNull()
+      .default(0),
     // Legacy combined columns. Pre-5b rows hold offer-redirect-only counts here;
     // the new poll mirrors redirect totals into these for back-compat reads.
     raw_clicks: integer("raw_clicks").notNull().default(0),
@@ -2708,7 +2725,12 @@ export const keitaro_stage_results = pgTable(
       .$type<
         Record<
           string,
-          { n: number; pending_n: number; revenue: number | string; pending_revenue: number | string }
+          {
+            n: number;
+            pending_n: number;
+            revenue: number | string;
+            pending_revenue: number | string;
+          }
         >
       >()
       .notNull()
@@ -3114,7 +3136,9 @@ export const stage_sends = pgTable(
     offer_reached_detected_at: timestamp("offer_reached_detected_at", {
       withTimezone: true,
     }),
-    converted_detected_at: timestamp("converted_detected_at", { withTimezone: true }),
+    converted_detected_at: timestamp("converted_detected_at", {
+      withTimezone: true,
+    }),
     offer_reach_event_id: text("offer_reach_event_id"),
     // Migration 0096: carrier bucket stamped at materialization/send time from the
     // contact's carrier_norm. Enables future per-carrier delivery/sales analytics;
@@ -3180,7 +3204,10 @@ export const stage_sends = pgTable(
       .on(table.org_id, table.sent_at)
       .where(sql`sent_at IS NOT NULL`),
     // Migration 0060: campaign-level activity drill-down lists sends newest-first.
-    index("stage_sends_campaign_created_idx").on(table.campaign_id, table.created_at),
+    index("stage_sends_campaign_created_idx").on(
+      table.campaign_id,
+      table.created_at,
+    ),
     // Migration 0075: inbound-STOP attribution looks up sent rows by number,
     // newest-first within the trailing window. Partial — only 'sent' rows match.
     index("stage_sends_org_phone_sent_idx")
@@ -3246,7 +3273,10 @@ export const send_attempts = pgTable(
       .defaultNow(),
   },
   (table) => [
-    index("send_attempts_stage_send_idx").on(table.stage_send_id, table.created_at),
+    index("send_attempts_stage_send_idx").on(
+      table.stage_send_id,
+      table.created_at,
+    ),
     index("send_attempts_org_id_idx").on(table.org_id, table.created_at),
     check(
       "send_attempts_classification_check",
@@ -3281,7 +3311,10 @@ export const send_circuit_events = pgTable(
       .defaultNow(),
   },
   (table) => [
-    index("send_circuit_events_provider_idx").on(table.provider_id, table.created_at),
+    index("send_circuit_events_provider_idx").on(
+      table.provider_id,
+      table.created_at,
+    ),
     index("send_circuit_events_org_id_idx").on(table.org_id),
     // Mirrors the LIVE constraint, widened twice since 0058: migration 0131
     // added the supports_api_send go-live verbs, 0139 the sends_enabled posture
@@ -3322,7 +3355,10 @@ export const campaign_circuit_events = pgTable(
       .defaultNow(),
   },
   (table) => [
-    index("campaign_circuit_events_campaign_idx").on(table.campaign_id, table.created_at),
+    index("campaign_circuit_events_campaign_idx").on(
+      table.campaign_id,
+      table.created_at,
+    ),
     index("campaign_circuit_events_org_id_idx").on(table.org_id),
     check(
       "campaign_circuit_events_event_check",
@@ -3362,7 +3398,9 @@ export const org_settings = pgTable("org_settings", {
   // into the in-use CTEs, which is what keeps R14 identical-by-construction.
   drip_enabled: boolean("drip_enabled").notNull().default(false),
   drip_enabled_updated_by: uuid("drip_enabled_updated_by"),
-  drip_enabled_updated_at: timestamp("drip_enabled_updated_at", { withTimezone: true }),
+  drip_enabled_updated_at: timestamp("drip_enabled_updated_at", {
+    withTimezone: true,
+  }),
   drip_paused: boolean("drip_paused").notNull().default(false),
   drip_paused_reason: text("drip_paused_reason"),
   drip_paused_at: timestamp("drip_paused_at", { withTimezone: true }),
@@ -3420,16 +3458,27 @@ export const notification_settings = pgTable("notification_settings", {
     .primaryKey()
     .references(() => organizations.id, { onDelete: "cascade" }),
   daily_report_enabled: boolean("daily_report_enabled").notNull().default(true),
-  hourly_report_enabled: boolean("hourly_report_enabled").notNull().default(true),
+  hourly_report_enabled: boolean("hourly_report_enabled")
+    .notNull()
+    .default(true),
   stall_alert_enabled: boolean("stall_alert_enabled").notNull().default(true),
-  unjoinable_alert_enabled: boolean("unjoinable_alert_enabled").notNull().default(true),
+  unjoinable_alert_enabled: boolean("unjoinable_alert_enabled")
+    .notNull()
+    .default(true),
   daily_report_hour: smallint("daily_report_hour").notNull().default(10),
   hourly_window_from: smallint("hourly_window_from").notNull().default(16),
   hourly_window_to: smallint("hourly_window_to").notNull().default(1),
   hourly_interval_hours: smallint("hourly_interval_hours").notNull().default(1),
-  active_weekdays: smallint("active_weekdays").array().notNull().default([1, 2, 3, 4, 5, 6]),
-  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  active_weekdays: smallint("active_weekdays")
+    .array()
+    .notNull()
+    .default([1, 2, 3, 4, 5, 6]),
+  created_at: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updated_at: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 export type NotificationSettings = typeof notification_settings.$inferSelect;
@@ -3468,7 +3517,10 @@ export const campaign_events = pgTable(
       .defaultNow(),
   },
   (table) => [
-    index("campaign_events_campaign_idx").on(table.campaign_id, table.created_at),
+    index("campaign_events_campaign_idx").on(
+      table.campaign_id,
+      table.created_at,
+    ),
     index("campaign_events_org_id_idx").on(table.org_id),
   ],
 );
@@ -3593,9 +3645,7 @@ export const offer_exposure_counts = pgTable(
       .notNull()
       .default(0),
   },
-  (table) => [
-    primaryKey({ columns: [table.org_id, table.offer_id] }),
-  ],
+  (table) => [primaryKey({ columns: [table.org_id, table.offer_id] })],
 );
 
 export type OfferExposureCount = typeof offer_exposure_counts.$inferSelect;
@@ -3737,7 +3787,8 @@ export const lookup_group_stats_cache = pgTable("lookup_group_stats_cache", {
     .defaultNow(),
 });
 
-export type LookupGroupStatsCache = typeof lookup_group_stats_cache.$inferSelect;
+export type LookupGroupStatsCache =
+  typeof lookup_group_stats_cache.$inferSelect;
 export type NewLookupGroupStatsCache =
   typeof lookup_group_stats_cache.$inferInsert;
 
@@ -3805,7 +3856,8 @@ export const carrier_classify_queue = pgTable(
 );
 
 export type CarrierClassifyQueue = typeof carrier_classify_queue.$inferSelect;
-export type NewCarrierClassifyQueue = typeof carrier_classify_queue.$inferInsert;
+export type NewCarrierClassifyQueue =
+  typeof carrier_classify_queue.$inferInsert;
 
 // Per-run batch tracking (org-scoped for reporting; the cache it fills is global).
 export const lookup_batches = pgTable(
@@ -3825,8 +3877,14 @@ export const lookup_batches = pgTable(
     // Migration 0102: ledger reconciliation. Telnyx balance captured before the
     // first drain pass + at finalize; billed = before - after (the truth source, vs
     // the rate-computed actual_cost_usd which over-estimates — no mobile surcharge).
-    balance_before_usd: numeric("balance_before_usd", { precision: 10, scale: 4 }),
-    balance_after_usd: numeric("balance_after_usd", { precision: 10, scale: 4 }),
+    balance_before_usd: numeric("balance_before_usd", {
+      precision: 10,
+      scale: 4,
+    }),
+    balance_after_usd: numeric("balance_after_usd", {
+      precision: 10,
+      scale: 4,
+    }),
     status: text("status").notNull().default("pending"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -4090,8 +4148,14 @@ export const counted_clickers = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.stage_id, table.contact_id] }),
-    index("counted_clickers_campaign_idx").on(table.campaign_id, table.contact_id),
-    index("counted_clickers_org_click_at_idx").on(table.org_id, table.first_click_at),
+    index("counted_clickers_campaign_idx").on(
+      table.campaign_id,
+      table.contact_id,
+    ),
+    index("counted_clickers_org_click_at_idx").on(
+      table.org_id,
+      table.first_click_at,
+    ),
   ],
 );
 
@@ -4116,22 +4180,32 @@ export const stage_delivery_rollup = pgTable(
       .references(() => campaign_stages.id, { onDelete: "cascade" }),
     // Mirrors stage_sends.provider_phone_id's FK, so a deleted number degrades
     // the same way in the rollup and in the live query.
-    provider_phone_id: integer("provider_phone_id").references(() => provider_phones.id, {
-      onDelete: "set null",
-    }),
+    provider_phone_id: integer("provider_phone_id").references(
+      () => provider_phones.id,
+      {
+        onDelete: "set null",
+      },
+    ),
     sent_date_et: date("sent_date_et").notNull(),
     sent: integer("sent").notNull(),
     delivered: integer("delivered").notNull(),
     undelivered: integer("undelivered").notNull(),
     no_receipt: integer("no_receipt").notNull(),
-    refreshed_at: timestamp("refreshed_at", { withTimezone: true }).notNull().defaultNow(),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    refreshed_at: timestamp("refreshed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     unique("stage_delivery_rollup_cell_uniq")
       .on(table.stage_id, table.provider_phone_id, table.sent_date_et)
       .nullsNotDistinct(),
-    index("stage_delivery_rollup_org_day_idx").on(table.org_id, table.sent_date_et),
+    index("stage_delivery_rollup_org_day_idx").on(
+      table.org_id,
+      table.sent_date_et,
+    ),
     check(
       "stage_delivery_rollup_foots",
       sql`sent >= 0 AND delivered >= 0 AND undelivered >= 0 AND no_receipt >= 0 AND delivered + undelivered + no_receipt = sent`,
@@ -4156,7 +4230,9 @@ export const lifecycle_settings = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     hot_days: smallint("hot_days").notNull().default(30),
     warm_days: smallint("warm_days").notNull().default(120),
-    freeze_after_messages: smallint("freeze_after_messages").notNull().default(10),
+    freeze_after_messages: smallint("freeze_after_messages")
+      .notNull()
+      .default(10),
     freeze_cadence_days: smallint("freeze_cadence_days").notNull().default(14),
     suppress_after_days: smallint("suppress_after_days").notNull().default(60),
     suppress_min_freeze_messages: smallint("suppress_min_freeze_messages")
@@ -4197,7 +4273,9 @@ export const contact_engagement = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     status: text("status").notNull(),
-    status_changed_at: timestamp("status_changed_at", { withTimezone: true }).notNull(),
+    status_changed_at: timestamp("status_changed_at", {
+      withTimezone: true,
+    }).notNull(),
     msgs_total: integer("msgs_total").notNull().default(0),
     // Messages sent AFTER last_click_at (= msgs_total when never clicked). This,
     // not msgs_total, is what freeze_after_messages is compared against.
@@ -4220,7 +4298,9 @@ export const contact_engagement = pgTable(
     freeze_cadence_days: smallint("freeze_cadence_days").notNull(),
     thresholds: jsonb("thresholds").notNull(),
     time_due_at: timestamp("time_due_at", { withTimezone: true }),
-    computed_at: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+    computed_at: timestamp("computed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     index("contact_engagement_org_status_idx").on(table.org_id, table.status),
@@ -4267,14 +4347,19 @@ export const contact_engagement_transitions = pgTable(
     // groups that overrode them — so a history row can be read years later
     // without guessing which settings were live.
     thresholds: jsonb("thresholds").notNull(),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     index("contact_engagement_transitions_contact_idx").on(
       table.contact_id,
       table.created_at,
     ),
-    index("contact_engagement_transitions_org_idx").on(table.org_id, table.created_at),
+    index("contact_engagement_transitions_org_idx").on(
+      table.org_id,
+      table.created_at,
+    ),
     check(
       "contact_engagement_transitions_to_check",
       sql`${table.to_status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,
@@ -4317,7 +4402,9 @@ export const contact_offer_campaigns = pgTable(
     messages: integer("messages").notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.contact_id, table.offer_id, table.campaign_id] }),
+    primaryKey({
+      columns: [table.contact_id, table.offer_id, table.campaign_id],
+    }),
     index("contact_offer_campaigns_org_offer_contact_idx").on(
       table.org_id,
       table.offer_id,
@@ -4343,7 +4430,9 @@ export const stage_send_lifecycle = pgTable(
     status: text("status").notNull(),
     // true = rebuilt from history by the 60-day backfill, not stamped live.
     reconstructed: boolean("reconstructed").notNull().default(false),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     check(
@@ -4376,7 +4465,9 @@ export const phone_carrier_limits = pgTable(
     carrier_norm: text("carrier_norm").notNull(),
     allowed: boolean("allowed").notNull().default(true),
     daily_limit: integer("daily_limit"),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex("phone_carrier_limits_phone_carrier_uniq").on(
@@ -4416,7 +4507,9 @@ export const contact_org_stats = pgTable("contact_org_stats", {
   // JSONB updated by the 1-min cron; null until first run.
   // Shape: { by_line_type, by_carrier_norm, by_messaging_status }
   carrier_breakdown: jsonb("carrier_breakdown"),
-  updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 export type ContactOrgStats = typeof contact_org_stats.$inferSelect;
@@ -4494,8 +4587,14 @@ export const contact_attributes = pgTable(
     index("contact_attributes_org_idx").on(table.org_id),
     // The two dimensions Drip routes on: interest_tag is the REQUIRED drip
     // audience field, partner_slug the optional filter. Hot by design.
-    index("contact_attributes_org_interest_idx").on(table.org_id, table.interest_tag),
-    index("contact_attributes_org_partner_idx").on(table.org_id, table.partner_slug),
+    index("contact_attributes_org_interest_idx").on(
+      table.org_id,
+      table.interest_tag,
+    ),
+    index("contact_attributes_org_partner_idx").on(
+      table.org_id,
+      table.partner_slug,
+    ),
     // Highest-cardinality optional filter.
     index("contact_attributes_org_state_idx").on(table.org_id, table.state),
     // Load-bearing for age bands: the band predicate is a RANGE on dob
@@ -4545,8 +4644,12 @@ export const contact_attribute_import_mappings = pgTable(
     mapping: jsonb("mapping").$type<Record<string, string>>().notNull(),
     // Nullable + SET NULL: a saved mapping must outlive the person who made it.
     created_by: uuid("created_by"),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     check(
@@ -4580,19 +4683,32 @@ export const offer_landing_pages = pgTable(
     external_url: text("external_url"),
     is_default: boolean("is_default").notNull().default(false),
     status: text("status").notNull().default("active"),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     index("offer_landing_pages_org_offer_idx").on(table.org_id, table.offer_id),
-    check("offer_landing_pages_kind_check", sql`${table.kind} IN ('slug', 'external_url')`),
-    check("offer_landing_pages_status_check", sql`${table.status} IN ('active', 'disabled')`),
+    check(
+      "offer_landing_pages_kind_check",
+      sql`${table.kind} IN ('slug', 'external_url')`,
+    ),
+    check(
+      "offer_landing_pages_status_check",
+      sql`${table.status} IN ('active', 'disabled')`,
+    ),
     check(
       "offer_landing_pages_shape_check",
       sql`(${table.kind} = 'slug' AND ${table.slug} IS NOT NULL AND ${table.external_url} IS NULL) OR (${table.kind} = 'external_url' AND ${table.external_url} IS NOT NULL AND ${table.slug} IS NULL)`,
     ),
     // An underscore is the signature of the tracking-id-in-path bug 0094 stops.
-    check("offer_landing_pages_slug_shape_check", sql`${table.slug} IS NULL OR ${table.slug} ~ '^[a-z0-9]+$'`),
+    check(
+      "offer_landing_pages_slug_shape_check",
+      sql`${table.slug} IS NULL OR ${table.slug} ~ '^[a-z0-9]+$'`,
+    ),
   ],
 );
 
@@ -4637,7 +4753,9 @@ export const partner_keys = pgTable(
     rate_per_day: integer("rate_per_day").notNull().default(50000),
     max_payload_bytes: integer("max_payload_bytes").notNull().default(262144),
     status: text("status").notNull().default("active"),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     created_by: uuid("created_by"),
     rotated_at: timestamp("rotated_at", { withTimezone: true }),
     last_seen_at: timestamp("last_seen_at", { withTimezone: true }),
@@ -4646,15 +4764,24 @@ export const partner_keys = pgTable(
     // unrecoverable, so a database read cannot yield a working report link.
     // NULL = no link issued (the safe default).
     report_token_hash: text("report_token_hash"),
-    report_token_issued_at: timestamp("report_token_issued_at", { withTimezone: true }),
+    report_token_issued_at: timestamp("report_token_issued_at", {
+      withTimezone: true,
+    }),
     /** NULL = no expiry. Checked on every request, so shortening it is immediate. */
-    report_token_expires_at: timestamp("report_token_expires_at", { withTimezone: true }),
+    report_token_expires_at: timestamp("report_token_expires_at", {
+      withTimezone: true,
+    }),
     /** Revenue is our margin, not the partner's number — opt-in per key (R2). */
-    report_show_revenue: boolean("report_show_revenue").notNull().default(false),
+    report_show_revenue: boolean("report_show_revenue")
+      .notNull()
+      .default(false),
   },
   (table) => [
     uniqueIndex("partner_keys_token_uniq").on(table.token),
-    uniqueIndex("partner_keys_org_slug_uniq").on(table.org_id, table.partner_slug),
+    uniqueIndex("partner_keys_org_slug_uniq").on(
+      table.org_id,
+      table.partner_slug,
+    ),
     index("partner_keys_org_status_idx").on(table.org_id, table.status),
     check(
       "partner_keys_interest_tag_mode_check",
@@ -4664,7 +4791,10 @@ export const partner_keys = pgTable(
       "partner_keys_force_needs_tag_check",
       sql`${table.interest_tag_mode} <> 'force' OR ${table.interest_tag} IS NOT NULL`,
     ),
-    check("partner_keys_status_check", sql`${table.status} IN ('active', 'disabled')`),
+    check(
+      "partner_keys_status_check",
+      sql`${table.status} IN ('active', 'disabled')`,
+    ),
     check("partner_keys_rate_per_sec_check", sql`${table.rate_per_sec} > 0`),
     check("partner_keys_rate_per_day_check", sql`${table.rate_per_day} > 0`),
     check(
@@ -4698,7 +4828,9 @@ export const lead_inbox = pgTable(
       .references(() => partner_keys.id, { onDelete: "restrict" }),
     // Denormalized so provenance survives a rename of the key above.
     partner_slug: text("partner_slug").notNull(),
-    received_at: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    received_at: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     raw: jsonb("raw").notNull(),
     // NULL until Phase 3. Phase 2 normalizes nothing.
     normalized: jsonb("normalized"),
@@ -4774,12 +4906,16 @@ export const alert_state = pgTable(
   {
     alert_key: text("alert_key").primaryKey(),
     // Nullable: some alerts are global rather than per-org.
-    org_id: uuid("org_id").references(() => organizations.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id").references(() => organizations.id, {
+      onDelete: "cascade",
+    }),
     state: text("state").notNull(),
     since: timestamp("since", { withTimezone: true }).notNull().defaultNow(),
     last_notified_at: timestamp("last_notified_at", { withTimezone: true }),
   },
-  (table) => [check("alert_state_state_check", sql`${table.state} IN ('ok', 'firing')`)],
+  (table) => [
+    check("alert_state_state_check", sql`${table.state} IN ('ok', 'firing')`),
+  ],
 );
 
 export type PartnerKey = typeof partner_keys.$inferSelect;
@@ -4820,13 +4956,17 @@ export const lead_events = pgTable(
     interest_tag: text("interest_tag"),
     // The PARTNER's arrival time, not when we processed it.
     received_at: timestamp("received_at", { withTimezone: true }).notNull(),
-    inbox_id: uuid("inbox_id").references(() => lead_inbox.id, { onDelete: "set null" }),
+    inbox_id: uuid("inbox_id").references(() => lead_inbox.id, {
+      onDelete: "set null",
+    }),
     sandbox: boolean("sandbox").notNull().default(false),
     // Stamped per ruling G19: voip and unknown are processed like mobile, so
     // Phase 4 can filter per campaign rather than the call being made
     // irreversibly at intake.
     line_type: text("line_type"),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex("lead_events_inbox_uniq")
@@ -4891,11 +5031,22 @@ export const lead_intake_daily = pgTable(
   (table) => [
     primaryKey({
       name: "lead_intake_daily_pk",
-      columns: [table.org_id, table.partner_key_id, table.day_et, table.interest_tag],
+      columns: [
+        table.org_id,
+        table.partner_key_id,
+        table.day_et,
+        table.interest_tag,
+      ],
     }),
-    index("lead_intake_daily_org_day_idx").on(table.org_id, table.day_et.desc()),
+    index("lead_intake_daily_org_day_idx").on(
+      table.org_id,
+      table.day_et.desc(),
+    ),
     index("lead_intake_daily_org_partner_tag_day_idx").on(
-      table.org_id, table.partner_key_id, table.interest_tag, table.day_et.desc(),
+      table.org_id,
+      table.partner_key_id,
+      table.interest_tag,
+      table.day_et.desc(),
     ),
     check(
       "lead_intake_daily_nonneg_check",
@@ -4933,9 +5084,12 @@ export const drip_campaign_configs = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     interest_tag: text("interest_tag").notNull(),
-    partner_key_id: integer("partner_key_id").references(() => partner_keys.id, {
-      onDelete: "set null",
-    }),
+    partner_key_id: integer("partner_key_id").references(
+      () => partner_keys.id,
+      {
+        onDelete: "set null",
+      },
+    ),
     // Hard window: eligible when received_at ∈ [start_at, end_at).
     start_at: timestamp("start_at", { withTimezone: true }),
     end_at: timestamp("end_at", { withTimezone: true }),
@@ -4954,11 +5108,18 @@ export const drip_campaign_configs = pgTable(
     // DEFAULT FALSE: an existing drip campaign gains no children and no
     // follow-ups until an operator opts in.
     behavioral_enabled: boolean("behavioral_enabled").notNull().default(false),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
-    index("drip_campaign_configs_org_tag_idx").on(table.org_id, table.interest_tag),
+    index("drip_campaign_configs_org_tag_idx").on(
+      table.org_id,
+      table.interest_tag,
+    ),
     index("drip_campaign_configs_org_priority_idx").on(
       table.org_id,
       table.priority,
@@ -5027,16 +5188,21 @@ export const drip_journeys = pgTable(
     // Free text on purpose: the STATE is the machine-readable part, and a second
     // constrained vocabulary would have to be widened in lockstep with the first.
     close_reason: text("close_reason"),
-    routed_at: timestamp("routed_at", { withTimezone: true }).notNull().defaultNow(),
+    routed_at: timestamp("routed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     // Drip Phase 5. Which stage sent the first message, and when.
     //
     // ⚠️ Recorded on the JOURNEY rather than derived from stage_sends, for two
     // reasons: stage_sends is what the September retention card starts deleting
     // from, and Phase 6's behavioural follow-ups will put more rows there, so
     // "has this lead had its first send?" cannot be a count over that table.
-    first_stage_id: integer("first_stage_id").references(() => campaign_stages.id, {
-      onDelete: "set null",
-    }),
+    first_stage_id: integer("first_stage_id").references(
+      () => campaign_stages.id,
+      {
+        onDelete: "set null",
+      },
+    ),
     first_send_at: timestamp("first_send_at", { withTimezone: true }),
     // Correlation only — deliberately NOT an FK, so it survives retention.
     first_send_id: uuid("first_send_id"),
@@ -5044,7 +5210,9 @@ export const drip_journeys = pgTable(
     // tool. Carries creative_check:"deferred_p5" in Phase 4 — the creative half
     // of the same-offer-same-creative rule has no operand until drip stages exist.
     reason: jsonb("reason").notNull().default({}),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex("drip_journeys_lead_event_uniq").on(table.lead_event_id),
@@ -5118,7 +5286,9 @@ export const drip_campaign_numbers = pgTable(
     // Rotation order. Lower first — the operator's ordering is the preference,
     // so rotation is "first with headroom", not round-robin.
     position: integer("position").notNull().default(0),
-    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     primaryKey({
@@ -5244,7 +5414,10 @@ export const audit_log = pgTable(
       table.action,
       table.created_at,
     ),
-    check("audit_log_action_not_blank", sql`length(btrim(${table.action})) > 0`),
+    check(
+      "audit_log_action_not_blank",
+      sql`length(btrim(${table.action})) > 0`,
+    ),
   ],
 );
 
@@ -5404,7 +5577,10 @@ export const api_token_usage = pgTable(
       table.window_kind,
       table.window_start,
     ),
-    index("api_token_usage_org_window_idx").on(table.org_id, table.window_start),
+    index("api_token_usage_org_window_idx").on(
+      table.org_id,
+      table.window_start,
+    ),
     check(
       "api_token_usage_window_kind_check",
       sql`${table.window_kind} IN ('request', 'denied')`,
@@ -5494,8 +5670,14 @@ export const event_types = pgTable(
   },
   (table) => [
     unique("event_types_org_key_uniq").on(table.org_id, table.key),
-    check("event_types_status_check", sql`${table.status} IN ('active', 'archived')`),
-    check("event_types_key_format_check", sql`${table.key} ~ '^[a-z][a-z0-9_]*$'`),
+    check(
+      "event_types_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+    check(
+      "event_types_key_format_check",
+      sql`${table.key} ~ '^[a-z][a-z0-9_]*$'`,
+    ),
   ],
 );
 
@@ -5551,7 +5733,8 @@ export const conversion_event_mappings = pgTable(
   ],
 );
 
-export type ConversionEventMapping = typeof conversion_event_mappings.$inferSelect;
+export type ConversionEventMapping =
+  typeof conversion_event_mappings.$inferSelect;
 
 export const conversion_events = pgTable(
   "conversion_events",
@@ -5596,8 +5779,12 @@ export const conversion_events = pgTable(
       () => event_types.id,
       { onDelete: "restrict" },
     ),
-    event_type_conflict_at: timestamp("event_type_conflict_at", { withTimezone: true }),
-    revenue: numeric("revenue", { precision: 12, scale: 4 }).notNull().default("0"),
+    event_type_conflict_at: timestamp("event_type_conflict_at", {
+      withTimezone: true,
+    }),
+    revenue: numeric("revenue", { precision: 12, scale: 4 })
+      .notNull()
+      .default("0"),
     currency: text("currency"),
     // ORIGINAL conversion time (earliest status_history entry); never moved.
     occurred_at: timestamp("occurred_at", { withTimezone: true }).notNull(),
@@ -5612,20 +5799,28 @@ export const conversion_events = pgTable(
       .defaultNow(),
   },
   (table) => [
-    uniqueIndex("conversion_events_keitaro_event_id_uniq").on(table.keitaro_event_id),
+    uniqueIndex("conversion_events_keitaro_event_id_uniq").on(
+      table.keitaro_event_id,
+    ),
     index("conversion_events_org_idx").on(table.org_id),
     index("conversion_events_campaign_event_idx").on(
       table.campaign_id,
       table.event_type_id,
       table.contact_id,
     ),
-    index("conversion_events_contact_event_idx").on(table.contact_id, table.event_type_id),
+    index("conversion_events_contact_event_idx").on(
+      table.contact_id,
+      table.event_type_id,
+    ),
     index("conversion_events_offer_event_occurred_idx").on(
       table.offer_id,
       table.event_type_id,
       table.occurred_at,
     ),
-    index("conversion_events_stage_occurred_idx").on(table.stage_id, table.occurred_at),
+    index("conversion_events_stage_occurred_idx").on(
+      table.stage_id,
+      table.occurred_at,
+    ),
     index("conversion_events_stage_send_idx").on(table.stage_send_id),
     index("conversion_events_unmapped_idx")
       .on(table.org_id, table.created_at)

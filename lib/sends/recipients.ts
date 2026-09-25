@@ -19,11 +19,18 @@ export interface StageEligibilityOverlay {
   creativeId: number | null;
   offerId: number | null;
   excludePriorOffer: boolean;
+  // campaigns.lifecycle_rules. REQUIRED so a caller cannot silently skip the
+  // lifecycle exclusion layers — see StageEligibilityParams.
+  lifecycleRules: boolean;
 }
 
-import { carrierPolicyClause, type CarrierPolicy } from "@/lib/sends/carrier-policy";
+import {
+  carrierPolicyClause,
+  type CarrierPolicy,
+} from "@/lib/sends/carrier-policy";
 
-export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbOrTx =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // The stage-level audience toggles + split partition that narrow the frozen
 // campaign_audience_pool down to a single stage's recipients.
@@ -113,7 +120,8 @@ export function stageRecipientsSql(opts: {
           and ss.status <> 'rejected'
       )`
       : sql``;
-  const limitClause = opts.limit !== undefined ? sql`limit ${opts.limit}` : sql``;
+  const limitClause =
+    opts.limit !== undefined ? sql`limit ${opts.limit}` : sql``;
   const offsetClause =
     opts.offset !== undefined ? sql`offset ${opts.offset}` : sql``;
 
@@ -226,6 +234,7 @@ export function stageRecipientsSql(opts: {
         currentCreativeId: opts.eligibility.creativeId,
         currentOfferId: opts.eligibility.offerId,
         excludePriorOffer: opts.eligibility.excludePriorOffer,
+        lifecycleRules: opts.eligibility.lifecycleRules,
       })
     : [];
 

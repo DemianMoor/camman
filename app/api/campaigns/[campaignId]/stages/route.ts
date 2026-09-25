@@ -19,19 +19,29 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
-import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
+import {
+  checkStageLandingPage,
+  LANDING_PAGE_INVALID_CODE,
+} from "@/lib/api/landing-page-guard";
 import {
   computeStageAudienceCountsBatch,
   computeStageAudienceCountsBatchForDraft,
 } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { can } from "@/lib/permissions";
-import { denominatorFor, getCountedClickers } from "@/lib/reporting/counted-clickers";
+import {
+  denominatorFor,
+  getCountedClickers,
+} from "@/lib/reporting/counted-clickers";
 import { loadEventTypes } from "@/lib/reporting/event-columns";
 import { gradingRates } from "@/lib/reporting/grading-rates";
 import { getStageKeitaroTotals } from "@/lib/reporting/stage-keitaro-aggregate";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
-import { buildStageFullUrl, validateBrandLpShape, validateDestination } from "@/lib/stage-url";
+import {
+  buildStageFullUrl,
+  validateBrandLpShape,
+  validateDestination,
+} from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import {
   generateCampaignTrackingId,
@@ -109,6 +119,7 @@ export async function GET(
       audience_filters: campaigns.audience_filters,
       audience_cap: campaigns.audience_cap,
       exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
+      lifecycle_rules: campaigns.lifecycle_rules,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
@@ -129,6 +140,7 @@ export async function GET(
     filters: campaignRow[0].audience_filters ?? {},
     cap: campaignRow[0].audience_cap ?? null,
     excludeInUse: campaignRow[0].exclude_in_use_contacts,
+    lifecycleRules: campaignRow[0].lifecycle_rules === true,
   };
 
   const listParams = parseListParams(req);
@@ -283,13 +295,16 @@ export async function GET(
   }));
 
   const plainCounts = isDraft
-    ? await computeStageAudienceCountsBatchForDraft(draftAudienceInput, plainBatchItems)
+    ? await computeStageAudienceCountsBatchForDraft(
+        draftAudienceInput,
+        plainBatchItems,
+      )
     : await computeStageAudienceCountsBatch(cid, orgId, plainBatchItems);
 
   // Reassemble in the original row order. Lane rows are null (deferred → filled
   // client-side); non-lane rows get their batched count.
   const audienceCounts = rows.map((r) =>
-    r.behavioral_tier != null ? null : plainCounts.get(r.id) ?? 0,
+    r.behavioral_tier != null ? null : (plainCounts.get(r.id) ?? 0),
   );
 
   // Inbound STOPs attributed to this campaign (migration 0075). Per-stage counts
@@ -399,7 +414,7 @@ export async function GET(
   const gradingFor = (r: (typeof rows)[number]) => {
     const tracked = linkMode === "tracked";
     const keitaro = keitaroByStage.get(r.id);
-    const reached = tracked ? reachedByStage.get(r.id) ?? 0 : null;
+    const reached = tracked ? (reachedByStage.get(r.id) ?? 0) : null;
     const clicksHuman = denominatorFor(
       linkMode,
       countedClickersByStage.get(r.id),
@@ -409,7 +424,9 @@ export async function GET(
       reached,
       clicks_human: clicksHuman,
       ...gradingRates({
-        sent: tracked ? sendCountsByStage.get(r.id)?.sent ?? 0 : r.sms_count ?? 0,
+        sent: tracked
+          ? (sendCountsByStage.get(r.id)?.sent ?? 0)
+          : (r.sms_count ?? 0),
         opt_outs: r.inbound_opt_out_count ?? 0,
         clicks_human: clicksHuman,
         reached,
@@ -432,7 +449,8 @@ export async function GET(
     keitaro_revenue: keitaroByStage.get(r.id)?.revenue ?? "0.0000",
     // Approved revenue is keitaro_revenue; this is the same money still pending
     // (lib/sale-attribution.ts). Never add them — ROI and EPC count approved only.
-    keitaro_pending_revenue: keitaroByStage.get(r.id)?.pendingRevenue ?? "0.0000",
+    keitaro_pending_revenue:
+      keitaroByStage.get(r.id)?.pendingRevenue ?? "0.0000",
     // The same sales/revenue numbers, split per event_types.key (migration
     // 0185), plus the conversions that matched NO mapping. A missing row reads
     // {} / 0 — never "unknown" — for the same reason the visit columns below do:
@@ -574,7 +592,9 @@ export async function POST(
     const r = await db
       .select({ id: creatives.id })
       .from(creatives)
-      .where(and(eq(creatives.id, input.creative_id), eq(creatives.org_id, orgId)))
+      .where(
+        and(eq(creatives.id, input.creative_id), eq(creatives.org_id, orgId)),
+      )
       .limit(1);
     if (!r[0]) {
       return apiError(
@@ -632,11 +652,16 @@ export async function POST(
       campaignBrandId: campaignRow[0].brand_id,
     });
     if (mismatch) {
-      return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
-        field: "provider_phone_id",
-        phone_brand_id: mismatch.phoneBrandId,
-        campaign_brand_id: mismatch.campaignBrandId,
-      });
+      return apiError(
+        400,
+        mismatch.message,
+        API_ERROR_CODES.PHONE_BRAND_MISMATCH,
+        {
+          field: "provider_phone_id",
+          phone_brand_id: mismatch.phoneBrandId,
+          campaign_brand_id: mismatch.campaignBrandId,
+        },
+      );
     }
   }
 
@@ -649,7 +674,9 @@ export async function POST(
       landingPageId: input.landing_page_id,
     });
     if (refusal) {
-      return apiError(400, refusal.message, LANDING_PAGE_INVALID_CODE, { field: refusal.field });
+      return apiError(400, refusal.message, LANDING_PAGE_INVALID_CODE, {
+        field: refusal.field,
+      });
     }
   }
 
@@ -682,9 +709,14 @@ export async function POST(
     // Same app/DB disagreement as the PATCH route -- see the note there.
     const shapeErr = validateBrandLpShape(nullIfEmpty(input.full_url) ?? "");
     if (shapeErr) {
-      return apiError(400, shapeErr, API_ERROR_CODES.VALIDATION, { field: "full_url" });
+      return apiError(400, shapeErr, API_ERROR_CODES.VALIDATION, {
+        field: "full_url",
+      });
     }
-    const destErr = validateDestination(nullIfEmpty(input.full_url) ?? "", null);
+    const destErr = validateDestination(
+      nullIfEmpty(input.full_url) ?? "",
+      null,
+    );
     if (destErr) {
       return apiError(400, destErr, API_ERROR_CODES.VALIDATION, {
         field: "full_url",

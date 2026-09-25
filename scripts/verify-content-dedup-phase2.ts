@@ -34,7 +34,8 @@ function check(name: string, ok: boolean, detail = "") {
 // The exclusions are an ordered layer list since PR 4a; a layer that does not
 // apply is absent rather than null. `has` keeps these assertions reading the
 // same way they did against the old three-field record.
-const has = (ex: { key: string }[], key: string) => ex.some((l) => l.key === key);
+const has = (ex: { key: string }[], key: string) =>
+  ex.some((l) => l.key === key);
 
 async function main() {
   const pg = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
@@ -53,7 +54,9 @@ async function main() {
       LIMIT 1
     `);
     if (top.length === 0) {
-      console.log("No creative_exposures rows — cannot run data-driven checks.");
+      console.log(
+        "No creative_exposures rows — cannot run data-driven checks.",
+      );
       return;
     }
     const orgId = String(top[0].org_id);
@@ -75,6 +78,7 @@ async function main() {
       currentCreativeId: creativeId,
       currentOfferId: null,
       excludePriorOffer: false,
+      lifecycleRules: false,
     });
     const eligible = applyEligibilityExcept(base, ex);
     const eligibleRows = await exec(
@@ -117,6 +121,7 @@ async function main() {
       currentCreativeId: null,
       currentOfferId: null,
       excludePriorOffer: false,
+      lifecycleRules: false,
     });
     const baseCount = Number(
       (await exec(drizzleSql`SELECT count(*)::int AS n FROM (${base}) b`))[0].n,
@@ -144,6 +149,7 @@ async function main() {
       currentCreativeId: creativeId,
       currentOfferId: 999999,
       excludePriorOffer: false,
+      lifecycleRules: false,
     });
     const exOfferOn = buildStageEligibilityExclusions({
       orgId,
@@ -151,6 +157,7 @@ async function main() {
       currentCreativeId: creativeId,
       currentOfferId: 999999,
       excludePriorOffer: true,
+      lifecycleRules: false,
     });
     check(
       "Test 3 — offer toggle OFF: no offer layer, creative dedup STILL applies",
@@ -203,6 +210,7 @@ async function main() {
         creativeId: sCreative,
         offerId,
         excludePriorOffer: xp,
+        lifecycleRules: false,
       };
 
       // Reality: the exact send query (base EXCEPT layers, then split).
@@ -237,6 +245,7 @@ async function main() {
         currentCreativeId: sCreative,
         currentOfferId: offerId,
         excludePriorOffer: xp,
+        lifecycleRules: false,
       });
       const u = eligibilityUnion(layers);
       const previewWillSend = drizzleSql`
@@ -254,7 +263,9 @@ async function main() {
 
       try {
         const cmp = await db.transaction(async (tx) => {
-          await tx.execute(drizzleSql.raw("SET LOCAL statement_timeout = 20000"));
+          await tx.execute(
+            drizzleSql.raw("SET LOCAL statement_timeout = 20000"),
+          );
           const rr = (await tx.execute(
             drizzleSql`SELECT count(*)::int AS n FROM (${real}) r`,
           )) as unknown as { n: number }[];
@@ -285,7 +296,9 @@ async function main() {
       }
     }
 
-    console.log(`\n${fail === 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED"}: ${pass} passed, ${fail} failed.`);
+    console.log(
+      `\n${fail === 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED"}: ${pass} passed, ${fail} failed.`,
+    );
     if (fail > 0) process.exitCode = 1;
   } finally {
     await pg.end({ timeout: 5 });

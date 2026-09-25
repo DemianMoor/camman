@@ -1,5 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
+import { purchasedOfferContacts } from "@/lib/sale-attribution";
+
 // ── Content-dedup eligibility (Phase 2, migration 0086/0087) ──────────────────
 // The SINGLE shared definition of "which contacts must be suppressed for this
 // stage" — consumed by the send/export recipient query (stageRecipientsSql), the
@@ -39,6 +41,17 @@ export interface StageEligibilityParams {
   currentOfferId: number | null;
   // campaigns.exclude_prior_offer_contacts — gates LAYER 3.
   excludePriorOffer: boolean;
+  // campaigns.lifecycle_rules (migration 0187). Gates the three lifecycle
+  // layers below.
+  //
+  // ⚠️ REQUIRED, not optional-defaulting-to-false, and deliberately so. Five
+  // call sites reach this builder and none of them knew the flag before PR 4b;
+  // an optional field would let any one of them keep compiling while silently
+  // skipping every lifecycle exclusion, forever. The symptom — "some sends
+  // exclude suppressed contacts and some don't" — is close to unfindable from
+  // the outside. Required turns that into a compile error that enumerates the
+  // callers for you.
+  lifecycleRules: boolean;
 }
 
 // Every exclusion layer, in the order they are applied and reported. Adding a
@@ -65,6 +78,40 @@ export const EXCLUSION_PRIORITY = [
 
 export type EligibilityLayerKey = (typeof EXCLUSION_PRIORITY)[number];
 
+// The content-dedup layers (Phase 2). Named so the lifecycle set below can be
+// derived by difference instead of written out a second time.
+const CONTENT_DEDUP_KEYS = ["creative", "in_flight", "offer"] as const;
+
+/**
+ * The LIFECYCLE subset of EXCLUSION_PRIORITY, in priority order.
+ *
+ * DERIVED, never hand-listed: add a lifecycle layer to EXCLUSION_PRIORITY and
+ * it appears here, in every reporting shape that builds from here, and in the
+ * anti-drift test — all at once. A hand-written copy is exactly the fifth copy
+ * this whole arrangement exists to prevent (spec §8.3).
+ */
+export const LIFECYCLE_EXCLUSION_KEYS = EXCLUSION_PRIORITY.filter(
+  (k): k is Exclude<EligibilityLayerKey, (typeof CONTENT_DEDUP_KEYS)[number]> =>
+    !(CONTENT_DEDUP_KEYS as readonly string[]).includes(k),
+);
+
+export type LifecycleExclusionKey = (typeof LIFECYCLE_EXCLUSION_KEYS)[number];
+
+/**
+ * Per-reason counters for the lifecycle layers. EVERY surface that reports why
+ * a lead was not sent to spreads this type rather than listing the keys, so the
+ * four shapes (preflight breakdown, Prepare dialog, eligibility preview,
+ * autopilot) cannot carry different key sets — a missing key is a type error,
+ * not a number that quietly reads zero.
+ */
+export type LifecycleExclusionCounts = Record<LifecycleExclusionKey, number>;
+
+/** All-zero counters, built FROM the keys so it cannot fall out of step. */
+export const ZERO_LIFECYCLE_EXCLUSIONS: LifecycleExclusionCounts =
+  Object.fromEntries(
+    LIFECYCLE_EXCLUSION_KEYS.map((k) => [k, 0]),
+  ) as LifecycleExclusionCounts;
+
 // One layer: a labelled `SELECT contact_id` fragment. A layer that does not
 // apply is simply absent from the list — there is no null member.
 export interface EligibilityLayer {
@@ -76,11 +123,66 @@ export interface EligibilityLayer {
 export type StageEligibilityExclusions = EligibilityLayer[];
 
 /** Sort an arbitrary set of layers into the canonical order. */
-export function orderLayers(layers: EligibilityLayer[]): StageEligibilityExclusions {
+export function orderLayers(
+  layers: EligibilityLayer[],
+): StageEligibilityExclusions {
   const rank = new Map<EligibilityLayerKey, number>(
     EXCLUSION_PRIORITY.map((k, i) => [k, i]),
   );
   return [...layers].sort((a, b) => rank.get(a.key)! - rank.get(b.key)!);
+}
+
+/**
+ * The three LIFECYCLE exclusion layers (PR 4b, spec §8.1), as the send path and
+ * the audience preview both need them.
+ *
+ * ⚠️ Separate from buildStageEligibilityExclusions ON PURPOSE: none of these
+ * three depends on the current campaign or creative, and the preview
+ * (lib/audience-snapshot.ts) has no campaign id to pass. Extracting them means
+ * the preview's "excluded because suppressed / bought this offer" buckets are
+ * built from the SAME SQL the send later EXCEPTs, instead of a second copy that
+ * agrees today and drifts later. scripts/test-lifecycle-eligibility-layers.ts
+ * asserts the two stay identical.
+ *
+ * None of them filters messaging_status: gateEligible() gates the whole
+ * audience, the same decision PR 3 made for the segment rules.
+ */
+export function lifecycleExclusionLayers(p: {
+  orgId: string;
+  offerId: number | null;
+}): EligibilityLayer[] {
+  const layers: EligibilityLayer[] = [
+    // Suppressed — the end of the lifecycle. Reads the migration-0188
+    // projection on contacts, like the audience chips do.
+    {
+      key: "suppressed",
+      sql: sql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${p.orgId}::uuid AND lifecycle_status = 'suppressed'
+      `,
+    },
+  ];
+  // Bought this offer. Shares ONE definition with the made_purchase_for_offer
+  // segment rule (spec §8.1) so the two cannot drift about who bought what.
+  if (p.offerId != null) {
+    layers.push({
+      key: "bought_offer",
+      sql: purchasedOfferContacts(p.orgId, p.offerId),
+    });
+  }
+  // In freeze AND messaged inside their OWN effective cadence. The cadence is
+  // stored per contact by the engagement job, so this needs no threshold lookup
+  // and no join to contact_groups.
+  layers.push({
+    key: "freeze_not_due",
+    sql: sql`
+      SELECT contact_id FROM contact_engagement
+      WHERE org_id = ${p.orgId}::uuid
+        AND status = 'freeze'
+        AND last_sent_at > now() - make_interval(days => freeze_cadence_days)
+    `,
+  });
+  return orderLayers(layers);
 }
 
 export function buildStageEligibilityExclusions(
@@ -120,6 +222,20 @@ export function buildStageEligibilityExclusions(
       : null;
 
   const layers: EligibilityLayer[] = [];
+
+  // ── The lifecycle layers (PR 4b, spec §8.1) ────────────────────────────
+  // Only for a lifecycle campaign. None of them filters messaging_status:
+  // gateEligible() gates the whole audience, the same decision PR 3 made for
+  // the segment rules and for the same reason.
+  if (p.lifecycleRules) {
+    layers.push(
+      ...lifecycleExclusionLayers({
+        orgId: p.orgId,
+        offerId: p.currentOfferId,
+      }),
+    );
+  }
+
   if (creative) layers.push({ key: "creative", sql: creative });
   if (inFlight) layers.push({ key: "in_flight", sql: inFlight });
   if (offer) layers.push({ key: "offer", sql: offer });

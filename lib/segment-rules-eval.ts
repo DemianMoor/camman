@@ -6,7 +6,10 @@ import type { SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import { dripInUseSubquery, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
-import { purchasedClause } from "@/lib/sale-attribution";
+import {
+  purchasedClause,
+  purchasedOfferContacts,
+} from "@/lib/sale-attribution";
 import { segment_rules, segments } from "@/db/schema";
 
 import {
@@ -51,10 +54,7 @@ const CAMPAIGN_USE_PERIOD_INTERVAL: Record<CampaignUsePeriod, SQL> = {
 // a group yet) are persisted with value=null so the rule_type change
 // survives tab switches; this filter excludes them from evaluation so
 // they don't accidentally match-everything via NOT IN (empty set).
-function isRuleComplete(rule: {
-  rule_type: string;
-  value: unknown;
-}): boolean {
+function isRuleComplete(rule: { rule_type: string; value: unknown }): boolean {
   const shape = getValueShapeForRuleType(rule.rule_type);
   if (!shape) return false;
   if (shape === "none") return rule.value == null;
@@ -119,7 +119,9 @@ function isRuleComplete(rule: {
 function textArrayLiteral(values: string[]): string {
   if (values.length === 0) return "ARRAY[]::text[]";
   return (
-    "ARRAY[" + values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") + "]::text[]"
+    "ARRAY[" +
+    values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") +
+    "]::text[]"
   );
 }
 
@@ -128,7 +130,9 @@ function textArrayLiteral(values: string[]): string {
 // is belt-and-braces before the value reaches drizzleSql.raw.
 function intArrayLiteral(values: number[]): string {
   if (values.length === 0) return "ARRAY[]::int[]";
-  return "ARRAY[" + values.map((n) => String(Math.trunc(n))).join(",") + "]::int[]";
+  return (
+    "ARRAY[" + values.map((n) => String(Math.trunc(n))).join(",") + "]::int[]"
+  );
 }
 
 // Build the contact_id subquery for one rule. The returned fragment is a
@@ -186,18 +190,10 @@ function ruleInnerQuery(
           AND ca.brand_id = ${Number(v)}::int
       `;
     case "made_purchase_for_offer":
-      // Offer scope via the CAMPAIGN's offer, not conversion_events.offer_id:
-      // the ledger column is the offer at ingest time, while this rule has always
-      // meant "the campaign's offer". Keeping the join keeps the rule's meaning.
-      return drizzleSql`
-        SELECT DISTINCT ce.contact_id
-        FROM conversion_events ce
-        JOIN campaigns ca ON ca.id = ce.campaign_id
-        WHERE ce.org_id = ${orgId}::uuid
-          AND ce.contact_id IS NOT NULL
-          AND ${purchasedClause()}
-          AND ca.offer_id = ${Number(v)}::int
-      `;
+      // ONE definition, shared with the bought_offer eligibility layer
+      // (spec §8.1) so a rule and a send-time exclusion cannot disagree about
+      // who has bought an offer.
+      return purchasedOfferContacts(orgId, Number(v));
     case "reached_offer":
       // Reached the offer page: ≥1 send row stamped offer_reached_at. DISTINCT
       // because a contact can have many send rows. Empty until real sends
@@ -452,9 +448,17 @@ function ruleInnerQuery(
     // is male` removes only people we positively know are male — it does not
     // sweep in the ~815K contacts we know nothing about.
     case "gender":
-      return attributeSetClause(orgId, "gender", isStringSubsetOf(v, GENDER_VALUES) ? v : []);
+      return attributeSetClause(
+        orgId,
+        "gender",
+        isStringSubsetOf(v, GENDER_VALUES) ? v : [],
+      );
     case "income_band":
-      return attributeSetClause(orgId, "income_band", isStringSubsetOf(v, INCOME_BAND_VALUES) ? v : []);
+      return attributeSetClause(
+        orgId,
+        "income_band",
+        isStringSubsetOf(v, INCOME_BAND_VALUES) ? v : [],
+      );
     case "contact_state":
       return attributeSetClause(orgId, "state", isTextSet(v) ? v : []);
     case "contact_country":
@@ -464,13 +468,23 @@ function ruleInnerQuery(
     case "partner_slug":
       return attributeSetClause(orgId, "partner_slug", isTextSet(v) ? v : []);
     case "has_kids":
-      return attributeBoolClause(orgId, "kids", isStringSubsetOf(v, YES_NO_VALUES) ? v : []);
+      return attributeBoolClause(
+        orgId,
+        "kids",
+        isStringSubsetOf(v, YES_NO_VALUES) ? v : [],
+      );
     case "is_married":
-      return attributeBoolClause(orgId, "married", isStringSubsetOf(v, YES_NO_VALUES) ? v : []);
+      return attributeBoolClause(
+        orgId,
+        "married",
+        isStringSubsetOf(v, YES_NO_VALUES) ? v : [],
+      );
     case "age_band": {
       // ⚠️ NEVER a per-row age(): the band is turned into a RANGE on dob so
       // contact_attributes_org_dob_idx applies. See ageBandClause.
-      const bands = isStringSubsetOf(v, AGE_BAND_VALUES) ? (v as AgeBandValue[]) : [];
+      const bands = isStringSubsetOf(v, AGE_BAND_VALUES)
+        ? (v as AgeBandValue[])
+        : [];
       return ageBandClause(orgId, bands);
     }
     default: {
@@ -504,8 +518,13 @@ function attributeBase(orgId: string): SQL {
 // contradiction rather than matching everything — an incomplete rule must
 // never widen an audience (isRuleComplete already drops it upstream; this is
 // defense in depth for the same invariant).
-function attributeSetClause(orgId: string, column: string, set: readonly string[]): SQL {
-  if (set.length === 0) return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+function attributeSetClause(
+  orgId: string,
+  column: string,
+  set: readonly string[],
+): SQL {
+  if (set.length === 0)
+    return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
   return drizzleSql`
     SELECT ca.contact_id ${attributeBase(orgId)}
       AND ca.${drizzleSql.raw(column)} = ANY(${drizzleSql.raw(textArrayLiteral([...set]))})
@@ -515,11 +534,16 @@ function attributeSetClause(orgId: string, column: string, set: readonly string[
 // yes/no set over a BOOLEAN column. Selecting BOTH means "known either way",
 // which still excludes NULL (unknown) — the intended reading, and the reason
 // this is a set rather than a tri-state.
-function attributeBoolClause(orgId: string, column: string, set: readonly string[]): SQL {
+function attributeBoolClause(
+  orgId: string,
+  column: string,
+  set: readonly string[],
+): SQL {
   const wants: boolean[] = [];
   if (set.includes("yes")) wants.push(true);
   if (set.includes("no")) wants.push(false);
-  if (wants.length === 0) return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+  if (wants.length === 0)
+    return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
   const literal = `ARRAY[${wants.map((b) => (b ? "true" : "false")).join(",")}]::boolean[]`;
   return drizzleSql`
     SELECT ca.contact_id ${attributeBase(orgId)}
@@ -555,7 +579,8 @@ function attributeBoolClause(orgId: string, column: string, set: readonly string
 const ET_TODAY = `(now() AT TIME ZONE 'America/New_York')::date`;
 
 function ageBandClause(orgId: string, bands: readonly AgeBandValue[]): SQL {
-  if (bands.length === 0) return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+  if (bands.length === 0)
+    return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
   // age >= minAge  ⇔  dob <= ET_today - minAge years
   // age <= maxAge  ⇔  dob >  ET_today - (maxAge + 1) years
   const ranges = bands.map((b) => {
@@ -696,12 +721,14 @@ export async function buildSegmentAudienceClause(
   // Zero-rule short-circuit: identical to pre-rules behavior — manual only.
   // Tested explicitly in scripts/test-segment-rules-api.ts.
   if (rules.length === 0) {
-    return gateEligible(applyInUseExclusion(drizzleSql`
+    return gateEligible(
+      applyInUseExclusion(drizzleSql`
       SELECT sc.contact_id
       FROM segment_contacts sc
       WHERE sc.segment_id = ${segmentId}::int
         AND sc.org_id = ${orgId}::uuid
-    `));
+    `),
+    );
   }
 
   // Combine rules via SQL set arithmetic (UNION / INTERSECT / EXCEPT) so
@@ -764,17 +791,21 @@ export async function buildSegmentAudienceClause(
     return ruleSet(rule);
   }
 
-  const ruleMatches = rules.reduce<SQL>((acc, rule, i) => {
-    if (i === 0) return ruleSet(rule);
-    const op = combinedOp(rule);
-    const next = operandFor(rule);
-    return drizzleSql`(${acc}) ${drizzleSql.raw(op)} (${next})`;
-  }, drizzleSql``);
+  const ruleMatches = rules.reduce<SQL>(
+    (acc, rule, i) => {
+      if (i === 0) return ruleSet(rule);
+      const op = combinedOp(rule);
+      const next = operandFor(rule);
+      return drizzleSql`(${acc}) ${drizzleSql.raw(op)} (${next})`;
+    },
+    drizzleSql``,
+  );
 
   // Manual membership ∪ rule-matched. UNION dedupes; UNION ALL would be
   // cheaper but the dedup is needed when a manual member also matches a
   // rule (otherwise the count is inflated).
-  return gateEligible(applyInUseExclusion(drizzleSql`
+  return gateEligible(
+    applyInUseExclusion(drizzleSql`
     SELECT contact_id FROM (
       SELECT sc.contact_id AS contact_id
       FROM segment_contacts sc
@@ -783,7 +814,8 @@ export async function buildSegmentAudienceClause(
       UNION
       (${ruleMatches})
     ) AS combined
-  `));
+  `),
+  );
 }
 
 // Drop opt-outs from a segment audience clause (which is always a plain
@@ -853,9 +885,7 @@ export async function previewSegmentAudienceCount(
       // SET LOCAL doesn't accept bound params — inline via raw, after
       // coercing to a clean positive integer.
       const ms = Math.max(1, Math.floor(timeoutMs));
-      await tx.execute(
-        drizzleSql.raw(`SET LOCAL statement_timeout = ${ms}`),
-      );
+      await tx.execute(drizzleSql.raw(`SET LOCAL statement_timeout = ${ms}`));
       const rows = (await tx.execute(drizzleSql`
         with audience as (${clause}),
         oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid),

@@ -80,68 +80,246 @@ const LEGACY_REF_LITERALS: ReadonlyArray<string> = [];
  * signal it was excluded for: an exclusion that quietly stops matching is either
  * a stale entry or the tell of a WRITE_SIGNAL needle that has been narrowed.
  */
-const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }> = [
+const EXCLUSIONS: ReadonlyArray<{
+  file: string;
+  why: string;
+  viaLibrary?: true;
+}> = [
   // ── production operations tooling: changing production IS the purpose ──────
-  { file: "apply-0099.ts", why: "controlled apply of migration 0099 against the production database" },
-  { file: "apply-ahoi-stage-sends-index-concurrent.ts", why: "builds a production index with CREATE INDEX CONCURRENTLY" },
-  { file: "apply-carrier-day-index-concurrent.ts", why: "builds a production index with CREATE INDEX CONCURRENTLY" },
-  { file: "apply-eligible-indexes-concurrent.ts", why: "builds production indexes with CREATE INDEX CONCURRENTLY" },
-  { file: "apply-links-short-domain-index-concurrent.ts", why: "builds a production index with CREATE INDEX CONCURRENTLY" },
-  { file: "apply-lookup-migrations.ts", why: "controlled, ordered apply of migrations 0095–0098 against production" },
-  { file: "apply-trgm-concurrent.ts", why: "builds production indexes with CREATE INDEX CONCURRENTLY" },
-  { file: "backfill-carrier-v2.ts", why: "one-shot production rollout of carrier resolver v2 (docs/04-features/phone-lookup-carrier.md); dry-run default, writes only behind --apply, snapshots contacts.carrier_norm to a rollback table first" },
-  { file: "backfill-content-dedup-exposures.ts", why: "one-shot production backfill of the content-dedup ledgers" },
-  { file: "backfill-conversion-events.ts", viaLibrary: true, why: "one-shot production backfill; writes only behind --apply (writes via lib/conversions/ingest, so it carries no write token of its own)" },
-  { file: "backfill-creative-spam-scores.ts", why: "one-shot production backfill of creatives.spam_score" },
-  { file: "backfill-delivery-rollup.ts", viaLibrary: true, why: "one-shot production backfill of stage_delivery_rollup (migration 0186); dry-run default, writes only behind --apply, through lib/reporting/delivery-rollup (so it carries no write token of its own)" },
-  { file: "backfill-drip-journey-lifecycle.ts", why: "one-shot production backfill; closes journeys already terminal in fact" },
-  { file: "backfill-guidekn-destinations.ts", why: "one-shot production repair; writes only behind --apply" },
-  { file: "backfill-optout-attributions.ts", why: "one-shot production backfill of opt_out_attributions" },
-  { file: "backfill-optout-latest-stage.ts", why: "one-shot production backfill; writes only behind --apply" },
-  { file: "backfill-provider-credentials-encryption.ts", why: "one-shot production backfill; writes only behind --apply" },
-  { file: "backfill-rescore-datacenter.ts", why: "one-shot production rescore; writes only behind --apply" },
-  { file: "backfill-stage-results.ts", why: "one-shot production backfill of the per-stage Results counters" },
-  { file: "backfill-stage-send-provider-phone.ts", why: "one-shot production backfill; writes only behind --apply" },
-  { file: "backfill-stage-total-cost.ts", why: "one-shot production backfill of campaign_stages.total_cost" },
-  { file: "backfill-tracking-ids.ts", why: "one-shot production backfill of tracking_ids (CLAUDE.md §10g)" },
-  { file: "cleanup-stage-test-fixtures.ts", why: "exists to delete test fixtures left in PRODUCTION; --apply, hardcoded reviewed ids" },
-  { file: "delete-orphan-test-offers.ts", why: "exists to delete orphan test rows left in PRODUCTION" },
-  { file: "drain-texthub-inbox.ts", why: "ingests real STOPs from the live provider inbox into production; --apply" },
-  { file: "engagement-backfill.ts", why: "production dry-run report + one-off backfill of contact_engagement (migration 0187); the dry run always rolls back, and --apply writes only after the owner approves the numbers" },
-  { file: "test-eligibility-layers-identical.ts", why: "the PR 4a regression gate: reads production deliberately (SELECTs only) and BUILDS SQL strings it never executes; the write signal is createHash().update() and a writeFileSync of the before-snapshot into TEMP, neither of which touches a database" },
-  { file: "apply-engagement-rule-indexes-concurrent.ts", why: "builds migration 0189's two contact_engagement indexes with CREATE INDEX CONCURRENTLY, which cannot run inside drizzle-kit's migration transaction; dry run by default and it issues only CREATE INDEX" },
-  { file: "engagement-cron-pause.ts", why: "pauses/resumes the contact-engagement cron against production for the migration 0188 window by holding the lease row the job already respects (cron_locks.contact-engagement-run); writes only that one lease row, and its 30-minute TTL self-clears" },
-  { file: "apply-lifecycle-status-column.ts", why: "production application of migration 0188 — adds contacts.lifecycle_status, backfills it from contact_engagement in batches, then builds its index CONCURRENTLY (none of which fits drizzle-kit's migration transaction); dry run by default, and --apply writes only after the owner approves the SQL" },
-  { file: "import-texthub-optouts.ts", why: "imports real opt-outs from a provider export into production; --apply" },
-  { file: "measure-lifecycle-preview.ts", viaLibrary: true, why: "read-only production measurement of the lifecycle settings preview; every run is inside a transaction that always rolls back (computes via lib/engagement/preview, so it carries no write token of its own)" },
-  { file: "measure-lifecycle-list.ts", viaLibrary: true, why: "read-only production measurement of the contacts-list lifecycle column and filter; issues only SELECT and EXPLAIN (ANALYZE) over those SELECTs (builds predicates via lib/engagement/list-filter, so it carries no write token of its own)" },
-  { file: "resync-stage-day-conversions.ts", viaLibrary: true, why: "one-shot production re-derive of the stage-day conversion columns; dry-run default, writes only behind --apply (writes via lib/keitaro/stage-day-conversions, so it carries no write token of its own)" },
-  { file: "seed-ahoi-number-credential.ts", why: "seeds the real Ahoi sending number + credential in production" },
-  { file: "seed-ahoi-webhook-token.ts", why: "mints the real production inbound-webhook token" },
-  { file: "seed-tells-webhook-token.ts", why: "mints the real production inbound-webhook token" },
-  { file: "set-textrequest-phone-config.ts", why: "one-off production data repair; writes only behind --apply" },
+  {
+    file: "apply-0099.ts",
+    why: "controlled apply of migration 0099 against the production database",
+  },
+  {
+    file: "apply-ahoi-stage-sends-index-concurrent.ts",
+    why: "builds a production index with CREATE INDEX CONCURRENTLY",
+  },
+  {
+    file: "apply-carrier-day-index-concurrent.ts",
+    why: "builds a production index with CREATE INDEX CONCURRENTLY",
+  },
+  {
+    file: "apply-eligible-indexes-concurrent.ts",
+    why: "builds production indexes with CREATE INDEX CONCURRENTLY",
+  },
+  {
+    file: "apply-links-short-domain-index-concurrent.ts",
+    why: "builds a production index with CREATE INDEX CONCURRENTLY",
+  },
+  {
+    file: "apply-lookup-migrations.ts",
+    why: "controlled, ordered apply of migrations 0095–0098 against production",
+  },
+  {
+    file: "apply-trgm-concurrent.ts",
+    why: "builds production indexes with CREATE INDEX CONCURRENTLY",
+  },
+  {
+    file: "backfill-carrier-v2.ts",
+    why: "one-shot production rollout of carrier resolver v2 (docs/04-features/phone-lookup-carrier.md); dry-run default, writes only behind --apply, snapshots contacts.carrier_norm to a rollback table first",
+  },
+  {
+    file: "backfill-content-dedup-exposures.ts",
+    why: "one-shot production backfill of the content-dedup ledgers",
+  },
+  {
+    file: "backfill-conversion-events.ts",
+    viaLibrary: true,
+    why: "one-shot production backfill; writes only behind --apply (writes via lib/conversions/ingest, so it carries no write token of its own)",
+  },
+  {
+    file: "backfill-creative-spam-scores.ts",
+    why: "one-shot production backfill of creatives.spam_score",
+  },
+  {
+    file: "backfill-delivery-rollup.ts",
+    viaLibrary: true,
+    why: "one-shot production backfill of stage_delivery_rollup (migration 0186); dry-run default, writes only behind --apply, through lib/reporting/delivery-rollup (so it carries no write token of its own)",
+  },
+  {
+    file: "backfill-drip-journey-lifecycle.ts",
+    why: "one-shot production backfill; closes journeys already terminal in fact",
+  },
+  {
+    file: "backfill-guidekn-destinations.ts",
+    why: "one-shot production repair; writes only behind --apply",
+  },
+  {
+    file: "backfill-optout-attributions.ts",
+    why: "one-shot production backfill of opt_out_attributions",
+  },
+  {
+    file: "backfill-optout-latest-stage.ts",
+    why: "one-shot production backfill; writes only behind --apply",
+  },
+  {
+    file: "backfill-provider-credentials-encryption.ts",
+    why: "one-shot production backfill; writes only behind --apply",
+  },
+  {
+    file: "backfill-rescore-datacenter.ts",
+    why: "one-shot production rescore; writes only behind --apply",
+  },
+  {
+    file: "backfill-stage-results.ts",
+    why: "one-shot production backfill of the per-stage Results counters",
+  },
+  {
+    file: "backfill-stage-send-provider-phone.ts",
+    why: "one-shot production backfill; writes only behind --apply",
+  },
+  {
+    file: "backfill-stage-total-cost.ts",
+    why: "one-shot production backfill of campaign_stages.total_cost",
+  },
+  {
+    file: "backfill-tracking-ids.ts",
+    why: "one-shot production backfill of tracking_ids (CLAUDE.md §10g)",
+  },
+  {
+    file: "cleanup-stage-test-fixtures.ts",
+    why: "exists to delete test fixtures left in PRODUCTION; --apply, hardcoded reviewed ids",
+  },
+  {
+    file: "delete-orphan-test-offers.ts",
+    why: "exists to delete orphan test rows left in PRODUCTION",
+  },
+  {
+    file: "drain-texthub-inbox.ts",
+    why: "ingests real STOPs from the live provider inbox into production; --apply",
+  },
+  {
+    file: "engagement-backfill.ts",
+    why: "production dry-run report + one-off backfill of contact_engagement (migration 0187); the dry run always rolls back, and --apply writes only after the owner approves the numbers",
+  },
+  {
+    file: "test-eligibility-layers-identical.ts",
+    why: "the PR 4a regression gate: reads production deliberately (SELECTs only) and BUILDS SQL strings it never executes; the write signal is createHash().update() and a writeFileSync of the before-snapshot into TEMP, neither of which touches a database",
+  },
+  {
+    file: "apply-engagement-rule-indexes-concurrent.ts",
+    why: "builds migration 0189's two contact_engagement indexes with CREATE INDEX CONCURRENTLY, which cannot run inside drizzle-kit's migration transaction; dry run by default and it issues only CREATE INDEX",
+  },
+  {
+    file: "engagement-cron-pause.ts",
+    why: "pauses/resumes the contact-engagement cron against production for the migration 0188 window by holding the lease row the job already respects (cron_locks.contact-engagement-run); writes only that one lease row, and its 30-minute TTL self-clears",
+  },
+  {
+    file: "apply-lifecycle-status-column.ts",
+    why: "production application of migration 0188 — adds contacts.lifecycle_status, backfills it from contact_engagement in batches, then builds its index CONCURRENTLY (none of which fits drizzle-kit's migration transaction); dry run by default, and --apply writes only after the owner approves the SQL",
+  },
+  {
+    file: "import-texthub-optouts.ts",
+    why: "imports real opt-outs from a provider export into production; --apply",
+  },
+  {
+    file: "measure-lifecycle-preview.ts",
+    viaLibrary: true,
+    why: "read-only production measurement of the lifecycle settings preview; every run is inside a transaction that always rolls back (computes via lib/engagement/preview, so it carries no write token of its own)",
+  },
+  {
+    file: "measure-lifecycle-audience.ts",
+    viaLibrary: true,
+    why: "read-only production merge-gate numbers for PR 4b — chip counts and per-layer exclusion counts, obtained by passing lifecycleRules: true to previewAudience / buildStageEligibilityExclusions against a real campaign's stored inputs rather than creating or flipping a campaign; issues only SELECT (builds via lib/audience-snapshot + lib/sends/eligibility, so it carries no write token of its own)",
+  },
+  {
+    file: "measure-lifecycle-list.ts",
+    viaLibrary: true,
+    why: "read-only production measurement of the contacts-list lifecycle column and filter; issues only SELECT and EXPLAIN (ANALYZE) over those SELECTs (builds predicates via lib/engagement/list-filter, so it carries no write token of its own)",
+  },
+  {
+    file: "resync-stage-day-conversions.ts",
+    viaLibrary: true,
+    why: "one-shot production re-derive of the stage-day conversion columns; dry-run default, writes only behind --apply (writes via lib/keitaro/stage-day-conversions, so it carries no write token of its own)",
+  },
+  {
+    file: "seed-ahoi-number-credential.ts",
+    why: "seeds the real Ahoi sending number + credential in production",
+  },
+  {
+    file: "seed-ahoi-webhook-token.ts",
+    why: "mints the real production inbound-webhook token",
+  },
+  {
+    file: "seed-tells-webhook-token.ts",
+    why: "mints the real production inbound-webhook token",
+  },
+  {
+    file: "set-textrequest-phone-config.ts",
+    why: "one-off production data repair; writes only behind --apply",
+  },
 
   // ── deliberate production proofs: preview cannot prove the deployed system ─
-  { file: "verify-delivery-rollup.ts", viaLibrary: true, why: "production gate for stage_delivery_rollup: its refresh (via lib/reporting/delivery-rollup) runs inside a REPEATABLE READ tx that always rolls back; --persisted is read-only" },
-  { file: "verify-drip-enrichment-production.ts", why: "production proof of the deployed enrichment sweeper; synthetic +1999 numbers, self-cleaning" },
-  { file: "verify-drip-routing-production.ts", why: "production proof of the deployed routing rules; synthetic fixtures, self-cleaning" },
-  { file: "verify-intake-production.ts", why: "production proof of the deployed intake endpoint; sandbox leads through a sandbox key" },
+  {
+    file: "verify-delivery-rollup.ts",
+    viaLibrary: true,
+    why: "production gate for stage_delivery_rollup: its refresh (via lib/reporting/delivery-rollup) runs inside a REPEATABLE READ tx that always rolls back; --persisted is read-only",
+  },
+  {
+    file: "verify-drip-enrichment-production.ts",
+    why: "production proof of the deployed enrichment sweeper; synthetic +1999 numbers, self-cleaning",
+  },
+  {
+    file: "verify-drip-routing-production.ts",
+    why: "production proof of the deployed routing rules; synthetic fixtures, self-cleaning",
+  },
+  {
+    file: "verify-intake-production.ts",
+    why: "production proof of the deployed intake endpoint; sandbox leads through a sandbox key",
+  },
 
   // ── writes only inside an always-rolled-back tx, AND assert about real rows ─
-  { file: "test-brand-number-guard.ts", why: "probe row is written inside a tx that always rolls back; asserts about a real production brand/number mismatch" },
-  { file: "test-drip-regular-unaffected.ts", why: "fixtures written inside a tx that always rolls back; asserts SET EQUALITY against production" },
-  { file: "verify-keitaro-batch-update.ts", why: "UPDATEs inside a BEGIN…ROLLBACK; needs real stage_sends rows to mean anything" },
-  { file: "verify-purchase-rule-definition.ts", why: "deliberately reads live data; its one synthesized write is inside a tx that always rolls back" },
+  {
+    file: "test-brand-number-guard.ts",
+    why: "probe row is written inside a tx that always rolls back; asserts about a real production brand/number mismatch",
+  },
+  {
+    file: "test-drip-regular-unaffected.ts",
+    why: "fixtures written inside a tx that always rolls back; asserts SET EQUALITY against production",
+  },
+  {
+    file: "verify-keitaro-batch-update.ts",
+    why: "UPDATEs inside a BEGIN…ROLLBACK; needs real stage_sends rows to mean anything",
+  },
+  {
+    file: "verify-purchase-rule-definition.ts",
+    why: "deliberately reads live data; its one synthesized write is inside a tx that always rolls back",
+  },
 
   // ── read-only: matched the scan, issue no write ────────────────────────────
-  { file: "perf-baseline.ts", why: "read-only: EXPLAIN ANALYZE over SELECTs (the .unsafe( token is the match)" },
-  { file: "perf-baseline-tier2.ts", why: "read-only: EXPLAIN ANALYZE over SELECTs" },
-  { file: "perf-baseline-tier3.ts", why: "read-only: EXPLAIN ANALYZE over SELECTs" },
-  { file: "test-creative-metrics-cache.ts", why: "read-only: the .unsafe( call is the ground-truth SELECT" },
-  { file: "verify-audience-report.ts", why: "read-only and server-enforced: every query runs inside begin(\"… read only\")" },
-  { file: "verify-conversion-events.ts", viaLibrary: true, why: "read-only conversion verification against production; every statement is a SELECT, so it carries no write token (the entry is belt-and-braces)" },
-  { file: "verify-migration-integrity.ts", why: "read-only diagnostic (CLAUDE.md §11); the match is createHash().update()" },
-  { file: "verify-send-state-perf.ts", why: "read-only: EXPLAIN ANALYZE over a SELECT" },
+  {
+    file: "perf-baseline.ts",
+    why: "read-only: EXPLAIN ANALYZE over SELECTs (the .unsafe( token is the match)",
+  },
+  {
+    file: "perf-baseline-tier2.ts",
+    why: "read-only: EXPLAIN ANALYZE over SELECTs",
+  },
+  {
+    file: "perf-baseline-tier3.ts",
+    why: "read-only: EXPLAIN ANALYZE over SELECTs",
+  },
+  {
+    file: "test-creative-metrics-cache.ts",
+    why: "read-only: the .unsafe( call is the ground-truth SELECT",
+  },
+  {
+    file: "verify-audience-report.ts",
+    why: 'read-only and server-enforced: every query runs inside begin("… read only")',
+  },
+  {
+    file: "verify-conversion-events.ts",
+    viaLibrary: true,
+    why: "read-only conversion verification against production; every statement is a SELECT, so it carries no write token (the entry is belt-and-braces)",
+  },
+  {
+    file: "verify-migration-integrity.ts",
+    why: "read-only diagnostic (CLAUDE.md §11); the match is createHash().update()",
+  },
+  {
+    file: "verify-send-state-perf.ts",
+    why: "read-only: EXPLAIN ANALYZE over a SELECT",
+  },
 ];
 
 /**
@@ -153,7 +331,10 @@ const EXCLUSIONS: ReadonlyArray<{ file: string; why: string; viaLibrary?: true }
  * library write.
  */
 const GUARDED_VIA_LIBRARY: ReadonlyArray<{ file: string; why: string }> = [
-  { file: "test-lookup-stats.ts", why: "refreshLookupGroupStats (lib/telnyx/lookup-stats) upserts lookup_group_stats_cache" },
+  {
+    file: "test-lookup-stats.ts",
+    why: "refreshLookupGroupStats (lib/telnyx/lookup-stats) upserts lookup_group_stats_cache",
+  },
 ];
 
 let failures = 0;
@@ -174,7 +355,9 @@ interface ImportLine {
 
 /** Source with comments blanked, so prose never counts as a write. */
 function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " ")).replace(/^\s*\/\/.*$/gm, "");
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(/^\s*\/\/.*$/gm, "");
 }
 
 function importsOf(src: string): ImportLine[] {
@@ -188,7 +371,9 @@ function importsOf(src: string): ImportLine[] {
 
 /** Imports allowed to precede the guard: they cannot reach a database. */
 function mayPrecedeGuard(spec: string): boolean {
-  return spec === "./_env-preload" || spec === "dotenv" || spec.startsWith("node:");
+  return (
+    spec === "./_env-preload" || spec === "dotenv" || spec.startsWith("node:")
+  );
 }
 
 /**
@@ -242,10 +427,26 @@ interface Needle {
  * turns its own sample bar red instead of hiding behind the other.
  */
 const DB_REACH: ReadonlyArray<Needle> = [
-  { id: "db/client", re: /from\s+["'](?:@\/|\.\.\/|\.\/)db\/client["']/, sample: `import { db } from "../db/client";` },
-  { id: "_env-preload", re: /import\s+["']\.\/_env-preload["']/, sample: `import "./_env-preload";` },
-  { id: "postgres", re: /from\s+["']postgres["']/, sample: `import pg from "postgres";` },
-  { id: "drizzle-postgres-js", re: /from\s+["']drizzle-orm\/postgres-js["']/, sample: `import { drizzle } from "drizzle-orm/postgres-js";` },
+  {
+    id: "db/client",
+    re: /from\s+["'](?:@\/|\.\.\/|\.\/)db\/client["']/,
+    sample: `import { db } from "../db/client";`,
+  },
+  {
+    id: "_env-preload",
+    re: /import\s+["']\.\/_env-preload["']/,
+    sample: `import "./_env-preload";`,
+  },
+  {
+    id: "postgres",
+    re: /from\s+["']postgres["']/,
+    sample: `import pg from "postgres";`,
+  },
+  {
+    id: "drizzle-postgres-js",
+    re: /from\s+["']drizzle-orm\/postgres-js["']/,
+    sample: `import { drizzle } from "drizzle-orm/postgres-js";`,
+  },
   {
     id: "import(@/db/client)",
     re: /import\s*\(\s*["']@\/db\/client["']/,
@@ -266,15 +467,47 @@ const DB_REACH: ReadonlyArray<Needle> = [
  * are few enough to name in EXCLUSIONS.
  */
 const WRITE_SIGNAL: ReadonlyArray<Needle> = [
-  { id: "orm-write", re: /\.\s*(insert|update|delete)\s*\(/i, sample: `await db.insert(rows).values({});` },
-  { id: "sql-insert", re: /insert\s+into\b/i, sample: "sql`INSERT INTO contacts (id) VALUES (1)`" },
-  { id: "sql-delete", re: /delete\s+from\b/i, sample: "sql`DELETE FROM contacts WHERE id = 1`" },
-  { id: "sql-update", re: /update\s+[a-z_"][\w".]*(\s+(as\s+)?[a-z_][\w]*)?\s+set\b/i, sample: "sql`UPDATE contacts SET name = 'x'`" },
+  {
+    id: "orm-write",
+    re: /\.\s*(insert|update|delete)\s*\(/i,
+    sample: `await db.insert(rows).values({});`,
+  },
+  {
+    id: "sql-insert",
+    re: /insert\s+into\b/i,
+    sample: "sql`INSERT INTO contacts (id) VALUES (1)`",
+  },
+  {
+    id: "sql-delete",
+    re: /delete\s+from\b/i,
+    sample: "sql`DELETE FROM contacts WHERE id = 1`",
+  },
+  {
+    id: "sql-update",
+    re: /update\s+[a-z_"][\w".]*(\s+(as\s+)?[a-z_][\w]*)?\s+set\b/i,
+    sample: "sql`UPDATE contacts SET name = 'x'`",
+  },
   { id: "truncate", re: /truncate\b/i, sample: "sql`TRUNCATE spam_scores`" },
-  { id: "create-ddl", re: /create\s+(table|index|unique\s+index|or\s+replace)/i, sample: "sql`CREATE INDEX probe_idx ON links (code)`" },
-  { id: "drop-ddl", re: /drop\s+(table|index)/i, sample: "sql`DROP INDEX probe_idx`" },
-  { id: "alter-table", re: /alter\s+table/i, sample: "sql`ALTER TABLE contacts ADD COLUMN probe int`" },
-  { id: "refresh-matview", re: /refresh\s+materialized\s+view/i, sample: "sql`REFRESH MATERIALIZED VIEW offer_report_mv`" },
+  {
+    id: "create-ddl",
+    re: /create\s+(table|index|unique\s+index|or\s+replace)/i,
+    sample: "sql`CREATE INDEX probe_idx ON links (code)`",
+  },
+  {
+    id: "drop-ddl",
+    re: /drop\s+(table|index)/i,
+    sample: "sql`DROP INDEX probe_idx`",
+  },
+  {
+    id: "alter-table",
+    re: /alter\s+table/i,
+    sample: "sql`ALTER TABLE contacts ADD COLUMN probe int`",
+  },
+  {
+    id: "refresh-matview",
+    re: /refresh\s+materialized\s+view/i,
+    sample: "sql`REFRESH MATERIALIZED VIEW offer_report_mv`",
+  },
   { id: "unsafe", re: /\.unsafe\s*\(/i, sample: "await conn.unsafe(text);" },
   { id: "on-conflict", re: /onConflict/i, sample: `.onConflictDoNothing()` },
 ];
@@ -293,7 +526,10 @@ function writesDb(src: string): boolean {
 function moduleScopeQueryLines(src: string): number[] {
   const out: number[] = [];
   src.split(/\r?\n/).forEach((text, i) => {
-    if (/^\S/.test(text) && /\b\w+\.(execute|transaction|insert|update|delete)\s*\(/.test(text)) {
+    if (
+      /^\S/.test(text) &&
+      /\b\w+\.(execute|transaction|insert|update|delete)\s*\(/.test(text)
+    ) {
       out.push(i + 1);
     }
   });
@@ -312,10 +548,13 @@ interface Verdict {
 function verdictFor(src: string): Verdict {
   const imports = importsOf(src);
   const guard = imports.find((i) => i.from.includes(HELPER));
-  if (!guard) return { importsHelper: false, importedAhead: [], queriesAhead: [] };
+  if (!guard)
+    return { importsHelper: false, importedAhead: [], queriesAhead: [] };
   return {
     importsHelper: true,
-    importedAhead: imports.filter((i) => i.line < guard.line && !mayPrecedeGuard(i.from)).map((i) => i.from),
+    importedAhead: imports
+      .filter((i) => i.line < guard.line && !mayPrecedeGuard(i.from))
+      .map((i) => i.from),
     queriesAhead: moduleScopeQueryLines(src).filter((l) => l < guard.line),
   };
 }
@@ -323,17 +562,28 @@ function verdictFor(src: string): Verdict {
 // ── the corpus ───────────────────────────────────────────────────────────────
 
 const files = readdirSync("scripts").filter((f) => f.endsWith(".ts"));
-const sources = new Map<string, string>(files.map((f) => [f, readFileSync(`scripts/${f}`, "utf8")]));
-const code = new Map<string, string>(files.map((f) => [f, stripComments(sources.get(f)!)]));
+const sources = new Map<string, string>(
+  files.map((f) => [f, readFileSync(`scripts/${f}`, "utf8")]),
+);
+const code = new Map<string, string>(
+  files.map((f) => [f, stripComments(sources.get(f)!)]),
+);
 
 const excluded = new Set(EXCLUSIONS.map((e) => e.file));
 const writers = files.filter(
-  (f) => f !== HELPER_FILE && f !== SELF && touchesDb(code.get(f)!) && writesDb(code.get(f)!),
+  (f) =>
+    f !== HELPER_FILE &&
+    f !== SELF &&
+    touchesDb(code.get(f)!) &&
+    writesDb(code.get(f)!),
 );
 const population = writers.filter((f) => !excluded.has(f));
 /** Also ordering-check anything that opted IN without a write signal. */
 const alsoEnrolled = files.filter(
-  (f) => f !== HELPER_FILE && !population.includes(f) && sources.get(f)!.includes(`"./${HELPER}"`),
+  (f) =>
+    f !== HELPER_FILE &&
+    !population.includes(f) &&
+    sources.get(f)!.includes(`"./${HELPER}"`),
 );
 
 function main() {
@@ -345,7 +595,11 @@ function main() {
   console.log(`  + named via a library:    ${GUARDED_VIA_LIBRARY.length}\n`);
 
   // An empty population would make every check below vacuously true.
-  check("the derived population is non-empty", population.length > 0, `${population.length} scripts`);
+  check(
+    "the derived population is non-empty",
+    population.length > 0,
+    `${population.length} scripts`,
+  );
 
   // ── 1. the literal lives in exactly one file ───────────────────────────────
   // A Supabase project ref is 20 lowercase letters. Anywhere else in scripts/,
@@ -354,23 +608,44 @@ function main() {
   const strayLiteral: string[] = [];
   for (const f of files) {
     if (f === HELPER_FILE || legacy.has(f)) continue;
-    for (const m of sources.get(f)!.matchAll(/["'`]([a-z]{20})["'`]/g)) strayLiteral.push(`${f}:${m[1]}`);
+    for (const m of sources.get(f)!.matchAll(/["'`]([a-z]{20})["'`]/g))
+      strayLiteral.push(`${f}:${m[1]}`);
   }
-  check("⭐ no NEW project-ref literal outside the helper (a re-copied guard)", strayLiteral.length === 0,
-        strayLiteral.join(", "));
-  // The legacy list may only shrink, and never protects a script on its own.
-  const legacyGone = LEGACY_REF_LITERALS.filter((f) => !existsSync(`scripts/${f}`));
-  const legacyClean = LEGACY_REF_LITERALS.filter(
-    (f) => existsSync(`scripts/${f}`) && !/["'`]([a-z]{20})["'`]/.test(sources.get(f) ?? ""),
+  check(
+    "⭐ no NEW project-ref literal outside the helper (a re-copied guard)",
+    strayLiteral.length === 0,
+    strayLiteral.join(", "),
   );
-  check("the legacy inline-guard list has no stale entries", legacyGone.length === 0 && legacyClean.length === 0,
-        [...legacyGone.map((f) => `${f} (gone)`), ...legacyClean.map((f) => `${f} (cleaned — remove it from the list)`)].join(", "));
-  const legacyUnguarded = LEGACY_REF_LITERALS.filter((f) => !(sources.get(f) ?? "").includes(`"./${HELPER}"`));
-  check("⭐ every legacy inline guard is backed by the real helper import", legacyUnguarded.length === 0,
-        legacyUnguarded.join(", "));
+  // The legacy list may only shrink, and never protects a script on its own.
+  const legacyGone = LEGACY_REF_LITERALS.filter(
+    (f) => !existsSync(`scripts/${f}`),
+  );
+  const legacyClean = LEGACY_REF_LITERALS.filter(
+    (f) =>
+      existsSync(`scripts/${f}`) &&
+      !/["'`]([a-z]{20})["'`]/.test(sources.get(f) ?? ""),
+  );
+  check(
+    "the legacy inline-guard list has no stale entries",
+    legacyGone.length === 0 && legacyClean.length === 0,
+    [
+      ...legacyGone.map((f) => `${f} (gone)`),
+      ...legacyClean.map((f) => `${f} (cleaned — remove it from the list)`),
+    ].join(", "),
+  );
+  const legacyUnguarded = LEGACY_REF_LITERALS.filter(
+    (f) => !(sources.get(f) ?? "").includes(`"./${HELPER}"`),
+  );
+  check(
+    "⭐ every legacy inline guard is backed by the real helper import",
+    legacyUnguarded.length === 0,
+    legacyUnguarded.join(", "),
+  );
   const helperSrc = sources.get(HELPER_FILE);
-  check(`${HELPER_FILE} exists and still spells at least one allowlisted ref`,
-        !!helperSrc && /["']([a-z]{20})["']/.test(helperSrc));
+  check(
+    `${HELPER_FILE} exists and still spells at least one allowlisted ref`,
+    !!helperSrc && /["']([a-z]{20})["']/.test(helperSrc),
+  );
 
   // ── 2/3/4. the idiom, per script ───────────────────────────────────────────
   const missing: string[] = [];
@@ -379,72 +654,124 @@ function main() {
   for (const f of [...population, ...alsoEnrolled]) {
     const v = verdictFor(sources.get(f)!);
     if (!v.importsHelper) missing.push(f);
-    if (v.importedAhead.length) outOfOrder.push(`${f} (after ${v.importedAhead.join(", ")})`);
-    if (v.queriesAhead.length) queriesFirst.push(`${f}:${v.queriesAhead.join(",")}`);
+    if (v.importedAhead.length)
+      outOfOrder.push(`${f} (after ${v.importedAhead.join(", ")})`);
+    if (v.queriesAhead.length)
+      queriesFirst.push(`${f}:${v.queriesAhead.join(",")}`);
   }
-  check(`⭐ every write-capable script imports ${HELPER} (${population.length} scripts)`,
-        missing.length === 0, missing.join(", "));
-  check("⭐ the guard import precedes every import that can open a connection",
-        outOfOrder.length === 0, outOfOrder.join("; "));
-  check("no module-scope query runs before the guard import",
-        queriesFirst.length === 0, queriesFirst.join(", "));
+  check(
+    `⭐ every write-capable script imports ${HELPER} (${population.length} scripts)`,
+    missing.length === 0,
+    missing.join(", "),
+  );
+  check(
+    "⭐ the guard import precedes every import that can open a connection",
+    outOfOrder.length === 0,
+    outOfOrder.join("; "),
+  );
+  check(
+    "no module-scope query runs before the guard import",
+    queriesFirst.length === 0,
+    queriesFirst.join(", "),
+  );
   // The scripts the scan cannot see writing: present AND guarded, by name.
   const viaLibraryBad = GUARDED_VIA_LIBRARY.filter(
-    (e) => !sources.has(e.file) || !verdictFor(sources.get(e.file)!).importsHelper,
-  ).map((e) => (sources.has(e.file) ? `${e.file} (no guard import)` : `${e.file} (gone)`));
-  check(`⭐ every script named in GUARDED_VIA_LIBRARY exists and imports ${HELPER} (${GUARDED_VIA_LIBRARY.length} scripts)`,
-        viaLibraryBad.length === 0, viaLibraryBad.join(", "));
+    (e) =>
+      !sources.has(e.file) || !verdictFor(sources.get(e.file)!).importsHelper,
+  ).map((e) =>
+    sources.has(e.file) ? `${e.file} (no guard import)` : `${e.file} (gone)`,
+  );
+  check(
+    `⭐ every script named in GUARDED_VIA_LIBRARY exists and imports ${HELPER} (${GUARDED_VIA_LIBRARY.length} scripts)`,
+    viaLibraryBad.length === 0,
+    viaLibraryBad.join(", "),
+  );
 
   // ── 5. the exclusion list cannot rot ───────────────────────────────────────
-  const goneExclusions = EXCLUSIONS.filter((e) => !existsSync(`scripts/${e.file}`)).map((e) => e.file);
-  check("every exclusion names a script that still exists", goneExclusions.length === 0, goneExclusions.join(", "));
-  const unreasoned = EXCLUSIONS.filter((e) => e.why.trim().length < 20).map((e) => e.file);
-  check("every exclusion states a reason", unreasoned.length === 0, unreasoned.join(", "));
-  const contradictory = EXCLUSIONS.filter((e) => (sources.get(e.file) ?? "").includes(`"./${HELPER}"`)).map((e) => e.file);
-  check("no script is both excluded and guarded", contradictory.length === 0, contradictory.join(", "));
+  const goneExclusions = EXCLUSIONS.filter(
+    (e) => !existsSync(`scripts/${e.file}`),
+  ).map((e) => e.file);
+  check(
+    "every exclusion names a script that still exists",
+    goneExclusions.length === 0,
+    goneExclusions.join(", "),
+  );
+  const unreasoned = EXCLUSIONS.filter((e) => e.why.trim().length < 20).map(
+    (e) => e.file,
+  );
+  check(
+    "every exclusion states a reason",
+    unreasoned.length === 0,
+    unreasoned.join(", "),
+  );
+  const contradictory = EXCLUSIONS.filter((e) =>
+    (sources.get(e.file) ?? "").includes(`"./${HELPER}"`),
+  ).map((e) => e.file);
+  check(
+    "no script is both excluded and guarded",
+    contradictory.length === 0,
+    contradictory.join(", "),
+  );
 
   // ── 6. prove each check can go red ─────────────────────────────────────────
   // Everything above passes, which on its own proves nothing: a bar that cannot
   // fail is decoration. Build the mistakes it exists to catch, out of a REAL
   // script's source, and confirm each is rejected.
-  console.log("\ncan-go-red controls (mutations held in memory; no file is written):");
+  console.log(
+    "\ncan-go-red controls (mutations held in memory; no file is written):",
+  );
   const sample = population.find((f) => /^test-/.test(f))!;
   const src = sources.get(sample)!;
   console.log(`  mutating ${sample}`);
 
   const dropped = src.replace(/^.*_require-preview-db.*$\r?\n/m, "");
-  check("⭐ deleting the guard import IS caught", verdictFor(dropped).importsHelper === false);
+  check(
+    "⭐ deleting the guard import IS caught",
+    verdictFor(dropped).importsHelper === false,
+  );
 
   // Move the guard below an app import: the shape that silently reopens the
   // hoisting hole, and the one a reviewer's eye slides straight past.
   const guardLine = src.split(/\r?\n/).find((l) => l.includes(HELPER))!;
   const eol = src.includes("\r\n") ? "\r\n" : "\n";
-  const moved = src.replace(`${guardLine}${eol}`, "").replace(
-    /^(.*from ["'](?:@\/|\.\.\/)(?:db|lib)\/[^"']+["'];.*)$/m,
-    `$1${eol}${guardLine}`,
-  );
+  const moved = src
+    .replace(`${guardLine}${eol}`, "")
+    .replace(
+      /^(.*from ["'](?:@\/|\.\.\/)(?:db|lib)\/[^"']+["'];.*)$/m,
+      `$1${eol}${guardLine}`,
+    );
   const movedVerdict = verdictFor(moved);
-  check("⭐ moving the guard below an app import IS caught",
-        movedVerdict.importsHelper && movedVerdict.importedAhead.length > 0,
-        `importedAhead=${movedVerdict.importedAhead.join(", ") || "(none — mutation did not apply)"}`);
+  check(
+    "⭐ moving the guard below an app import IS caught",
+    movedVerdict.importsHelper && movedVerdict.importedAhead.length > 0,
+    `importedAhead=${movedVerdict.importedAhead.join(", ") || "(none — mutation did not apply)"}`,
+  );
 
   // A module-scope query ahead of the guard — the hazard the ordering closes.
   const withEarlyQuery = `await db.execute(sql\`select 1\`);${eol}${src}`;
-  check("⭐ a module-scope query ahead of the guard IS caught",
-        verdictFor(withEarlyQuery).queriesAhead.length > 0);
+  check(
+    "⭐ a module-scope query ahead of the guard IS caught",
+    verdictFor(withEarlyQuery).queriesAhead.length > 0,
+  );
 
   // And a re-copied literal. Assembled at runtime on purpose — spelled out here
   // it would be a 20-letter literal in scripts/, and check 1 would fail on this
   // very file.
   const fakeRef = "abcdefghij" + "klmnopqrst";
   const recopied = `const PREVIEW_REF = "${fakeRef}";${eol}${src}`;
-  check("⭐ a re-copied project-ref literal IS caught",
-        /["'`]([a-z]{20})["'`]/.test(recopied));
+  check(
+    "⭐ a re-copied project-ref literal IS caught",
+    /["'`]([a-z]{20})["'`]/.test(recopied),
+  );
 
   // A new write-capable script that forgot the guard.
   const newcomer = `import { db } from "../db/client";${eol}await db.insert(foo).values({});${eol}`;
-  check("⭐ a brand-new write-capable script with no guard IS caught",
-        touchesDb(newcomer) && writesDb(newcomer) && verdictFor(newcomer).importsHelper === false);
+  check(
+    "⭐ a brand-new write-capable script with no guard IS caught",
+    touchesDb(newcomer) &&
+      writesDb(newcomer) &&
+      verdictFor(newcomer).importsHelper === false,
+  );
 
   // …and the shape that slipped through until 2026-09-22: dotenv, a server-only
   // stub, and db/client reached ONLY through a dynamic import().
@@ -453,8 +780,12 @@ function main() {
       `async function main() {${eol}  const { db } = await import("@/db/client");${eol}` +
       `  await db.execute(sql\`DELETE FROM lookup_queue WHERE id = 1\`);${eol}}${eol}`,
   );
-  check("⭐ a write-capable script that reaches db/client only via import() IS caught",
-        touchesDb(dynamicNewcomer) && writesDb(dynamicNewcomer) && verdictFor(dynamicNewcomer).importsHelper === false);
+  check(
+    "⭐ a write-capable script that reaches db/client only via import() IS caught",
+    touchesDb(dynamicNewcomer) &&
+      writesDb(dynamicNewcomer) &&
+      verdictFor(dynamicNewcomer).importsHelper === false,
+  );
 
   // ── ⭐ …AND EVERY CLASSIFIER NEEDLE SEPARATELY ─────────────────────────────
   //
@@ -479,28 +810,48 @@ function main() {
     const shared: string[] = [];
     const widened: string[] = [];
     for (const n of list) {
-      for (const [ending, nl] of [["LF", "\n"], ["CRLF", "\r\n"]] as const) {
+      for (const [ending, nl] of [
+        ["LF", "\n"],
+        ["CRLF", "\r\n"],
+      ] as const) {
         const mod = `import "./_x";${nl}${n.sample}${nl}`;
         if (!n.re.test(mod)) dead.push(`${n.id}@${ending}`);
-        const others = list.filter((o) => o.id !== n.id && o.re.test(n.sample)).map((o) => o.id);
-        if (others.length > 0) shared.push(`${n.id} also matched by ${others.join("/")}`);
-        if (n.negative !== undefined && n.re.test(`import "./_x";${nl}${n.negative}${nl}`)) widened.push(`${n.id}@${ending}`);
+        const others = list
+          .filter((o) => o.id !== n.id && o.re.test(n.sample))
+          .map((o) => o.id);
+        if (others.length > 0)
+          shared.push(`${n.id} also matched by ${others.join("/")}`);
+        if (
+          n.negative !== undefined &&
+          n.re.test(`import "./_x";${nl}${n.negative}${nl}`)
+        )
+          widened.push(`${n.id}@${ending}`);
       }
     }
-    check(`⭐ every ${label} needle matches its own sample and NO sibling's (${list.length} needles × LF/CRLF)`,
-          dead.length === 0 && shared.length === 0,
-          `dead: ${dead.join(", ") || "none"} | not isolated: ${[...new Set(shared)].join("; ") || "none"}`);
+    check(
+      `⭐ every ${label} needle matches its own sample and NO sibling's (${list.length} needles × LF/CRLF)`,
+      dead.length === 0 && shared.length === 0,
+      `dead: ${dead.join(", ") || "none"} | not isolated: ${[...new Set(shared)].join("; ") || "none"}`,
+    );
     const withNegative = list.filter((n) => n.negative !== undefined).length;
     if (withNegative > 0) {
-      check(`⭐ …and every ${label} needle with a near miss rejects it (${withNegative} needles × LF/CRLF)`,
-            widened.length === 0, `widened: ${widened.join(", ")}`);
+      check(
+        `⭐ …and every ${label} needle with a near miss rejects it (${withNegative} needles × LF/CRLF)`,
+        widened.length === 0,
+        `widened: ${widened.join(", ")}`,
+      );
     }
     // Negative control on the matcher itself: a read-only script must classify
     // as neither, or "everything matches" would satisfy the bar above.
     const readOnly = `import { readFileSync } from "node:fs";${eol}const rows = await client.query(select);${eol}`;
-    check(`⭐ …and no ${label} needle fires on a read-only module (negative control)`,
-          !list.some((n) => n.re.test(readOnly)),
-          list.filter((n) => n.re.test(readOnly)).map((n) => n.id).join(", "));
+    check(
+      `⭐ …and no ${label} needle fires on a read-only module (negative control)`,
+      !list.some((n) => n.re.test(readOnly)),
+      list
+        .filter((n) => n.re.test(readOnly))
+        .map((n) => n.id)
+        .join(", "),
+    );
   };
   needleBars("DB_REACH", DB_REACH);
   needleBars("WRITE_SIGNAL", WRITE_SIGNAL);
@@ -511,14 +862,23 @@ function main() {
   // write-capable set and every check still passed). The roster is therefore
   // spelled out: dropping or renaming a needle is a two-place edit a reviewer
   // sees, and adding one is a deliberate bump here rather than a silent widening.
-  const roster = (list: ReadonlyArray<Needle>) => list.map((n) => n.id).sort().join(",");
-  check("⭐ the DB_REACH roster is intact (a deleted needle is not a narrowed one)",
-        roster(DB_REACH) === "_env-preload,db/client,drizzle-postgres-js,import(../db/client),import(@/db/client),postgres",
-        roster(DB_REACH));
-  check("⭐ the WRITE_SIGNAL roster is intact",
-        roster(WRITE_SIGNAL) ===
-          "alter-table,create-ddl,drop-ddl,on-conflict,orm-write,refresh-matview,sql-delete,sql-insert,sql-update,truncate,unsafe",
-        roster(WRITE_SIGNAL));
+  const roster = (list: ReadonlyArray<Needle>) =>
+    list
+      .map((n) => n.id)
+      .sort()
+      .join(",");
+  check(
+    "⭐ the DB_REACH roster is intact (a deleted needle is not a narrowed one)",
+    roster(DB_REACH) ===
+      "_env-preload,db/client,drizzle-postgres-js,import(../db/client),import(@/db/client),postgres",
+    roster(DB_REACH),
+  );
+  check(
+    "⭐ the WRITE_SIGNAL roster is intact",
+    roster(WRITE_SIGNAL) ===
+      "alter-table,create-ddl,drop-ddl,on-conflict,orm-write,refresh-matview,sql-delete,sql-insert,sql-update,truncate,unsafe",
+    roster(WRITE_SIGNAL),
+  );
 
   // ⭐ SECOND-ORDER: an exclusion that no longer carries a write signal is
   // either a stale entry or the tell of a dead needle — the `.unsafe(`-only and
@@ -526,22 +886,32 @@ function main() {
   // rots, so this bar reddens for a cause the population counts cannot show.
   // `viaLibrary` names the entries that deliberately have no token of their own.
   const signalless = EXCLUSIONS.filter(
-    (e) => !e.viaLibrary && existsSync(`scripts/${e.file}`) && !writesDb(code.get(e.file) ?? ""),
+    (e) =>
+      !e.viaLibrary &&
+      existsSync(`scripts/${e.file}`) &&
+      !writesDb(code.get(e.file) ?? ""),
   ).map((e) => e.file);
-  check("⭐ every exclusion still carries the write signal it was excluded for",
-        signalless.length === 0,
-        `${signalless.join(", ")} — either the entry is stale, or a WRITE_SIGNAL needle died`);
+  check(
+    "⭐ every exclusion still carries the write signal it was excluded for",
+    signalless.length === 0,
+    `${signalless.join(", ")} — either the entry is stale, or a WRITE_SIGNAL needle died`,
+  );
   // The same, one axis over: 16 of these reach a database ONLY through the
   // `postgres` needle, so this is where that needle's death lands — and
   // backfill-carrier-v2.ts reaches one ONLY through `import(@/db/client)`.
   const unreachable = EXCLUSIONS.filter(
-    (e) => existsSync(`scripts/${e.file}`) && !touchesDb(code.get(e.file) ?? ""),
+    (e) =>
+      existsSync(`scripts/${e.file}`) && !touchesDb(code.get(e.file) ?? ""),
   ).map((e) => e.file);
-  check("⭐ every exclusion still reaches a database at all",
-        unreachable.length === 0,
-        `${unreachable.join(", ")} — either the entry is stale, or a DB_REACH needle died`);
+  check(
+    "⭐ every exclusion still reaches a database at all",
+    unreachable.length === 0,
+    `${unreachable.join(", ")} — either the entry is stale, or a DB_REACH needle died`,
+  );
 
-  console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
+  console.log(
+    failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`,
+  );
   if (failures > 0) process.exitCode = 1;
 }
 

@@ -74,6 +74,10 @@ export async function GET(req: NextRequest) {
         status: contact_groups.status,
         archived_at: contact_groups.archived_at,
         created_at: contact_groups.created_at,
+        // Lifecycle override (migration 0187). NULL = inherit the org default.
+        // Returned so the campaign form's Freeze note can show the effective
+        // cadence of the SELECTED groups without a second round trip.
+        freeze_cadence_days: contact_groups.freeze_cadence_days,
         // Distinct contacts that carry this tag. Replaces the previous
         // segment_count (count of segments in this group), which is moot
         // after the 0031 flip — groups are on contacts now, not segments.

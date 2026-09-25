@@ -6,10 +6,7 @@ import { db } from "@/db/client";
 import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
-import {
-  chunkedQuery,
-  streamCsvResponse,
-} from "@/lib/csv/stream-export";
+import { chunkedQuery, streamCsvResponse } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
@@ -41,9 +38,7 @@ const querySchema = z.object({
 // live opt-outs.
 export async function GET(
   req: NextRequest,
-  {
-    params,
-  }: { params: Promise<{ campaignId: string; stageId: string }> },
+  { params }: { params: Promise<{ campaignId: string; stageId: string }> },
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -87,6 +82,7 @@ export async function GET(
       creative_id: campaign_stages.creative_id,
       offer_id: campaigns.offer_id,
       exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
+      lifecycle_rules: campaigns.lifecycle_rules,
       provider_phone_id: campaign_stages.provider_phone_id,
     })
     .from(campaign_stages)
@@ -172,6 +168,7 @@ export async function GET(
             creativeId: stage.creative_id ?? null,
             offerId: stage.offer_id ?? null,
             excludePriorOffer: stage.exclude_prior_offer_contacts,
+            lifecycleRules: stage.lifecycle_rules === true,
           },
           limit: effectiveLimit,
           offset,

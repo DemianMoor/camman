@@ -202,7 +202,17 @@ Recon confirms **four** independent shapes, not three: `PreflightBreakdown` (`pr
 
 - [ ] **Step 1:** Show it when a lifecycle campaign has ≥1 Excl segment **and** its earliest scheduled stage is more than 24 h after activation. Text: _"Excl segments are applied now, not at send."_ A warning, not a block. No scheduled stage ⇒ nothing to compare ⇒ no warning.
 
-- [ ] **Step 2: Mind where the data is.** On the **detail page** both inputs are already in client state — the stages list carries `scheduled_at` and the campaign object can carry `audience_exclude_segment_ids` with one added field on `CampaignDetail` (`campaigns/[id]/page.tsx:182-221`). On the **list page** neither is available: `campaigns/list/route.ts:109-143` selects no exclude ids and no stages. **Decide explicitly**: either prefetch `GET /api/campaigns/[campaignId]` when the list dialog opens, or widen the list route. Do not silently show the warning on one page and not the other — 8 campaigns use Excl segments today and an inconsistent warning is worse than none.
+- [ ] **Step 2: PREFETCH on the list page — do not widen the list route** (owner decision, 2026-09-25).
+
+  On the **detail page** both inputs are already in client state: the stages list carries `scheduled_at` (`campaigns/[id]/page.tsx:245`, fetched at `:598`) and the campaign object needs one added field on `CampaignDetail` (`:182-221`) to carry `audience_exclude_segment_ids`, which `GET /api/campaigns/[campaignId]:94` already returns.
+
+  On the **list page** neither is available. Fetch `GET /api/campaigns/[campaignId]` when the dialog opens, rather than adding `audience_exclude_segment_ids` and a stages join to `campaigns/list/route.ts` — that route serves every row of a 670-campaign list on every page load, and widening it to carry data only 8 campaigns use, only at the moment a dialog opens, is the wrong trade.
+
+  While the prefetch is in flight the dialog renders without the warning and then shows it — so the confirm button stays disabled until the prefetch settles. A dialog that could confirm before its warning appears is worse than one that waits.
+
+- [ ] **Step 2a: One computation, two call sites, and a test that says so.** Extract the decision into a pure function — `shouldWarnExclTiming({ lifecycleRules, excludeSegmentIds, earliestScheduledAt, now })` — so neither mount site decides anything itself. Then test that **both mount sites receive the same inputs** for the same campaign: given one campaign fixture, the detail page's props and the list page's post-prefetch props produce an identical argument object, and therefore an identical verdict.
+
+  That test is the point of the decision: the failure mode being guarded against is not "the warning is wrong" but "the warning is right on one page and absent on the other", which no single-page test can catch.
 
 - [ ] **Step 3: Commit.**
 
@@ -221,6 +231,18 @@ Bring to that conversation:
 - the chip counts for a representative campaign — what each chip selects, against what the old filters selected;
 - the three layers' exclusion counts on a real stage, per layer;
 - confirmation that the 4a byte-identical gate is still green, which is what proves legacy campaigns are untouched.
+
+### How those numbers are produced (owner decision, 2026-09-25)
+
+**Read-only, by calling the functions — never by creating or flipping a campaign on production.**
+
+A `scripts/measure-lifecycle-audience.ts`, modelled on `scripts/measure-lifecycle-list.ts`, takes a real campaign's stored inputs (its segments, contact groups, filters, offer, flags) and calls `previewAudience` / the eligibility builders **with `lifecycleRules: true` passed as an argument**. The flag is a parameter on every one of these paths — that is exactly why Task 3 makes it a required field — so the hypothetical can be evaluated without a single write.
+
+Hard rules for that script:
+- **No INSERT, UPDATE or DELETE.** Not on `campaigns.lifecycle_rules`, not a throwaway campaign, not a transaction that rolls back. A rolled-back write still burns an id sequence and still races the drain.
+- It reads a real campaign's inputs and substitutes the flag **in memory only**.
+- It is listed in `EXCLUSIONS` in `scripts/test-preview-db-guard.ts` with that reason, like the other production measurement scripts.
+- Run off-peak, and report per layer rather than as one total — "340 excluded" is unactionable; "12 suppressed · 320 freeze not due · 8 bought offer" says whether a rule is behaving sensibly.
 
 **Spec coverage.** §7.1's chips, the OR semantics, the one-chip minimum, the Cold-only default, the Freeze cadence note and the stored shape → Task 1. §7.1's "suppressed and opted-out are never chips" → Task 2 Step 1 (suppressed is a layer, not a chip). §7.2's single shared predicate → Task 2, one edit, because 4a already collapsed the five copies. §7.3's legacy mapping → Task 1 Step 3; the draft conversion is a no-op with 0 drafts. §7.4's preview breakdown → Task 4. §8.1's three new layers → Task 3. §8.2's where-each-rule-runs → Task 3 (Prepare) with send-time deferred to 4c. §8.3's reasons → Task 5. The activate warning → Task 6.
 

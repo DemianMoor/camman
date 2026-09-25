@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-24_
+_Last updated: 2026-09-25_
 
 ## A frozen first column is OPT-IN PER TABLE, and it must stay that way (2026-09-23)
 
@@ -3979,3 +3979,44 @@ nothing, so it must match "at most N messages". Driving the rule from `contact_e
 gating it with `EXISTS` — silently drops every one of them. The rule therefore selects from
 `contacts` with a `LEFT JOIN` and `coalesce(ce.msgs_total, 0)`. Same trap as the contacts-list
 lifecycle filter; see [04-features/contact-lifecycle.md](04-features/contact-lifecycle.md).
+
+## Stage eligibility is an ordered list of layers, and the order is the contract
+
+`StageEligibilityExclusions` ([lib/sends/eligibility.ts](../lib/sends/eligibility.ts)) is
+`EligibilityLayer[]`, ordered by `EXCLUSION_PRIORITY`. Adding an exclusion means adding a key to
+that constant and a builder beside it — every consumer iterates the list, so nothing else changes.
+
+**The order is not cosmetic.** Exclusion REPORTING counts each lead against the first layer that
+catches it, so reordering `EXCLUSION_PRIORITY` changes which bucket a lead lands in on the Prepare
+dialog, the stage preview and the preflight result. Before PR 4a the ordering was implied by two
+copies of the literal `[ex.creative, ex.inFlight, ex.offer]`; it is written down once now.
+
+A layer that does not apply is **absent from the list** — there is no null member and no
+`{ creative: null, … }` empty literal.
+
+## One chip predicate, not five
+
+The four campaign audience chips (No status / Opt-in / Clickers / Not clicked) are emitted by
+`lifecycleChipPredicate()` in [lib/audience-snapshot.ts](../lib/audience-snapshot.ts) and nowhere
+else. It used to be spelled out five times in that one file. The frozen pool and the preview the
+operator approved come from different copies, so a drift between them is invisible until a send goes
+out to the wrong people.
+
+`alias` exists for the batch-draft path, which reads the flags through a joined relation
+(`flagged.has_opt_in`) rather than in scope. Do not add a sixth copy to work around it.
+
+## A refactor of the send path needs a gate that compares against something that does not move
+
+[scripts/test-eligibility-layers-identical.ts](../scripts/test-eligibility-layers-identical.ts)
+captures the SQL text and bound parameters that `stageRecipientsSql` and the audience qualifier
+produce for every real stage and campaign, then diffs a BEFORE capture (taken by running the same
+script on the pre-refactor code) against AFTER. Byte-identical SQL is a stronger claim than "the same
+rows came back today": it holds for every input, not just the data that exists right now.
+
+Two things that shape it, both learned the hard way on 2026-09-25:
+
+- **Hash whitespace-normalised.** Extracting a helper reindents the SQL it emits, and SQL semantics
+  do not depend on whitespace. Tokens and parameters still have to match exactly.
+- **Compare the INTERSECTION of shapes, not the whole set.** It reads live production, where
+  campaigns are created mid-run. Campaign 1451 appeared between capture and compare and was counted
+  as a difference — a false failure. Keys present on only one side are reported, not failed.

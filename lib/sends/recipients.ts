@@ -22,6 +22,11 @@ export interface StageEligibilityOverlay {
   // campaigns.lifecycle_rules. REQUIRED so a caller cannot silently skip the
   // lifecycle exclusion layers — see StageEligibilityParams.
   lifecycleRules: boolean;
+  // campaigns.offer_rules_enabled / offer_cooldown_days / offer_limit_times
+  // (869f53efz). Required for the same reason — they decide who is excluded.
+  offerRulesEnabled: boolean;
+  offerCooldownDays: number;
+  offerLimitTimes: number;
 }
 
 import {
@@ -234,6 +239,9 @@ export function stageRecipientsSql(opts: {
         currentCreativeId: opts.eligibility.creativeId,
         currentOfferId: opts.eligibility.offerId,
         excludePriorOffer: opts.eligibility.excludePriorOffer,
+        offerRulesEnabled: opts.eligibility.offerRulesEnabled,
+        offerCooldownDays: opts.eligibility.offerCooldownDays,
+        offerLimitTimes: opts.eligibility.offerLimitTimes,
         lifecycleRules: opts.eligibility.lifecycleRules,
       })
     : [];

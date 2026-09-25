@@ -11,6 +11,7 @@ import { EXIT_TIER, campaignTierExpr, tierLiteral } from "./campaign-tier";
 import {
   buildStageEligibilityExclusions,
   lifecycleExclusionLayers,
+  offerRuleLayers,
   LIFECYCLE_EXCLUSION_KEYS,
   ZERO_LIFECYCLE_EXCLUSIONS,
   type LifecycleExclusionCounts,
@@ -217,6 +218,8 @@ function lifecycleBreakdownCols(
   const suppressed = has("suppressed");
   const bought = has("bought_offer");
   const freezeNotDue = has("freeze_not_due");
+  const offerLimit = has("offer_limit");
+  const offerCooldown = has("offer_cooldown");
   // `has_lifecycle` is only projected when a chip is selected; with none
   // selected the audience is empty and every lead is "status not selected".
   const hasChip = layers
@@ -238,10 +241,18 @@ function lifecycleBreakdownCols(
       count(*) filter (where membership_ok and has_opt_out)::int as lc_excl_opted_out,
       count(*) filter (where membership_ok and not has_opt_out
         and ${suppressed})::int as lc_excl_suppressed,
+
       count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and not ${hasChip})::int as lc_excl_status_not_selected,
+        and not ${suppressed} and ${offerLimit})::int as lc_excl_offer_limit,
       count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and ${hasChip}
+        and not ${suppressed} and not ${offerLimit}
+        and ${offerCooldown})::int as lc_excl_offer_cooldown,
+      count(*) filter (where membership_ok and not has_opt_out
+        and not ${suppressed} and not ${offerLimit} and not ${offerCooldown}
+        and not ${hasChip})::int as lc_excl_status_not_selected,
+      count(*) filter (where membership_ok and not has_opt_out
+        and not ${suppressed} and not ${offerLimit} and not ${offerCooldown}
+        and ${hasChip}
         and ${excludeInUse}::boolean and is_in_use_elsewhere)::int as lc_excl_in_use_elsewhere`;
 }
 
@@ -405,6 +416,15 @@ export interface AudiencePreviewInput {
   // it catches anyone exposed AFTER activation and protects pools frozen before
   // this change; for a fresh pool it removes ~nobody.
   excludePriorOffer?: boolean;
+  // campaigns.offer_rules_enabled + its two numbers (869f53efz). When
+  // excludePriorOffer is on, this picks WHICH rule: true ⇒ the Y/N pair,
+  // false ⇒ the legacy "ever got this offer". Optional here ONLY because a
+  // preview with them absent is a legacy preview by definition; the required
+  // spelling lives on StageEligibilityParams, where a missing value would skip
+  // an exclusion rather than fall back to the documented status quo.
+  offerRulesEnabled?: boolean;
+  offerCooldownDays?: number;
+  offerLimitTimes?: number;
   // The campaign's offer. Only consumed when excludePriorOffer is true.
   offerId?: number | null;
 }
@@ -478,7 +498,14 @@ export interface LifecycleAudienceBreakdown {
   // out of the audience entirely, so it is the one named here; every other
   // layer — including any added later — lands in send_time below, which is the
   // safe default: reported, never silently dropped.
-  excluded: Pick<LifecycleExclusionCounts, "suppressed"> & {
+  // ⚠️ `suppressed`, `offer_limit` and `offer_cooldown` are AUDIENCE
+  // exclusions: all three keep a lead out of the pool at activation (the offer
+  // rules replace the permanent "ever got this offer" DELETE — PR 4d Task 3).
+  // Everything else is a send-time overlay, below.
+  excluded: Pick<
+    LifecycleExclusionCounts,
+    "suppressed" | "offer_limit" | "offer_cooldown"
+  > & {
     opted_out: number;
     // Their status is not among the selected chips.
     status_not_selected: number;
@@ -498,7 +525,10 @@ export interface LifecycleAudienceBreakdown {
   // at send time.
   // freeze_not_due: in Freeze AND inside their own cadence right now.
   // bought_offer: already bought this campaign's offer.
-  send_time: Omit<LifecycleExclusionCounts, "suppressed">;
+  send_time: Omit<
+    LifecycleExclusionCounts,
+    "suppressed" | "offer_limit" | "offer_cooldown"
+  >;
 }
 
 export interface AudienceSnapshotResult {
@@ -1451,8 +1481,28 @@ export async function previewAudience(
   // The SAME three fragments the send path EXCEPTs — reported here instead of
   // subtracted, so "why isn't this lead in the audience" and "why didn't this
   // lead get the message" can never give different answers.
+  // ⚠️ The offer rules are reported here too, because PR 4d makes them
+  // AUDIENCE exclusions — they replace the permanent "ever got this offer"
+  // DELETE, so a lead they catch never reaches the pool. Reporting them beside
+  // the send-time layers would say the opposite.
+  const offerRulesOn =
+    input.excludePriorOffer === true && input.offerRulesEnabled === true;
   const lifecycleExclusions = lifecycleRules
-    ? lifecycleExclusionLayers({ orgId, offerId: input.offerId ?? null })
+    ? [
+        ...lifecycleExclusionLayers({ orgId, offerId: input.offerId ?? null }),
+        ...(offerRulesOn
+          ? offerRuleLayers({
+              orgId,
+              offerId: input.offerId ?? null,
+              // No campaign exists yet at preview time, so nothing can be
+              // "the current campaign" to carve out. Every row counts — which
+              // is the honest preview of a campaign that has sent nothing.
+              currentCampaignId: -1,
+              cooldownDays: input.offerCooldownDays ?? 7,
+              limitTimes: input.offerLimitTimes ?? 5,
+            })
+          : []),
+      ]
     : null;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
@@ -1688,6 +1738,8 @@ export async function previewAudience(
     lc_excl_opted_out?: number;
     lc_excl_suppressed?: number;
     lc_excl_status_not_selected?: number;
+    lc_excl_offer_limit?: number;
+    lc_excl_offer_cooldown?: number;
     lc_excl_in_use_elsewhere?: number;
   }[];
 
@@ -1723,6 +1775,8 @@ export async function previewAudience(
                 row?.lc_excl_status_not_selected ?? 0,
               ),
               in_use_elsewhere: Number(row?.lc_excl_in_use_elsewhere ?? 0),
+              offer_limit: Number(row?.lc_excl_offer_limit ?? 0),
+              offer_cooldown: Number(row?.lc_excl_offer_cooldown ?? 0),
             },
             send_time: {
               freeze_not_due: Number(row?.lc_freeze_not_due ?? 0),
@@ -1809,15 +1863,46 @@ export async function snapshotAudience(
   // same recipe, byte-identical rows out.
   if (input.excludePriorOffer === true && input.offerId != null) {
     await runner.execute(drizzleSql`analyze audience_qualified`);
-    await runner.execute(drizzleSql`
-      delete from audience_qualified q
-      where exists (
-        select 1 from offer_exposures oe
-        where oe.org_id = ${input.orgId}::uuid
-          and oe.offer_id = ${input.offerId}::int
-          and oe.contact_id = q.contact_id
-      )
-    `);
+    if (input.offerRulesEnabled === true) {
+      // ── 869f53efz: the Y/N rule REPLACES "ever got this offer" ───────────
+      // Not stacked with it. Stacking would leave the old permanent DELETE in
+      // place, so a contact past their cooldown would still be excluded
+      // forever and the whole feature would be inert — the failure mode that
+      // looks like "the new rule does nothing".
+      //
+      // Still a SEPARATE statement after ANALYZE, for the planner reason in
+      // the comment above: this is a second anti-join over the same temp
+      // table, and folding it into the qualifier reproduces the nested-loop
+      // blow-up that timed activation out at 84s.
+      //
+      // The current campaign is carved out of both counts so stage 2 is never
+      // blocked by stage 1. At activation the campaign has sent nothing, so
+      // the carve-out removes nothing — it is here so the predicate is the
+      // SAME one the send path applies later.
+      await runner.execute(drizzleSql`
+        delete from audience_qualified q
+        where exists (
+          select 1 from contact_offer_campaigns coc
+          where coc.org_id = ${input.orgId}::uuid
+            and coc.offer_id = ${input.offerId}::int
+            and coc.contact_id = q.contact_id
+            and coc.campaign_id <> ${input.campaignId}::int
+          group by coc.contact_id
+          having count(*) >= ${input.offerLimitTimes ?? 5}::int
+             or max(coc.last_sent_at) > now() - make_interval(days => ${input.offerCooldownDays ?? 7}::int)
+        )
+      `);
+    } else {
+      await runner.execute(drizzleSql`
+        delete from audience_qualified q
+        where exists (
+          select 1 from offer_exposures oe
+          where oe.org_id = ${input.orgId}::uuid
+            and oe.offer_id = ${input.offerId}::int
+            and oe.contact_id = q.contact_id
+        )
+      `);
+    }
   }
 
   const totalRows = (await runner.execute(drizzleSql`
@@ -1888,6 +1973,9 @@ export interface StageEligibilityPreviewInput {
     | "currentCreativeId"
     | "currentOfferId"
     | "excludePriorOffer"
+    | "offerRulesEnabled"
+    | "offerCooldownDays"
+    | "offerLimitTimes"
     // campaigns.lifecycle_rules. Required, so a new call site cannot forget it
     // and silently preview the legacy predicate for a lifecycle campaign.
     | "lifecycleRules"
@@ -2009,6 +2097,9 @@ export async function computeStageEligibilityPreview(
     currentOfferId: input.eligibility.currentOfferId,
     excludePriorOffer: input.eligibility.excludePriorOffer,
     lifecycleRules: input.eligibility.lifecycleRules === true,
+    offerRulesEnabled: input.eligibility.offerRulesEnabled === true,
+    offerCooldownDays: input.eligibility.offerCooldownDays,
+    offerLimitTimes: input.eligibility.offerLimitTimes,
   });
   // Look up by key rather than by field: `ex` is an ordered layer list now, so
   // a layer that does not apply is simply absent. EMPTY_CONTACTS keeps the CTE

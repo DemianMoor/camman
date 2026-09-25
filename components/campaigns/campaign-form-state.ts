@@ -84,6 +84,9 @@ export interface CampaignFormValues {
   // Exclude leads who already received this offer in a previous campaign
   // (Phase-2 content dedup, LAYER 3). Off by default; opt-in per campaign.
   exclude_prior_offer_contacts: boolean;
+  // 869f53efz — parameters of the toggle above, not independent switches.
+  offer_cooldown_days: number;
+  offer_limit_times: number;
   // Send method: 'manual' (pasted Short URL) or 'tracked' (API Send — mints a
   // per-recipient link). 'tracked' requires the brand to have an active short
   // domain (gated in the UI + on the server).
@@ -241,6 +244,10 @@ export function useCampaignFormState(props: CampaignFormProps) {
       exclude_in_use_contacts: initialValues?.exclude_in_use_contacts ?? true,
       exclude_prior_offer_contacts:
         initialValues?.exclude_prior_offer_contacts ?? false,
+      // Mirror migration 0191's column defaults so a new campaign's form and
+      // the row the create route writes start from the same numbers.
+      offer_cooldown_days: initialValues?.offer_cooldown_days ?? 7,
+      offer_limit_times: initialValues?.offer_limit_times ?? 5,
       link_mode: initialValues?.link_mode ?? "manual",
       start_date: initialValues?.start_date ?? "",
       end_date: initialValues?.end_date ?? "",
@@ -513,6 +520,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
             audience_cap: watchedCap,
             exclude_in_use_contacts: watchedExcludeInUse,
             exclude_prior_offer_contacts: watchedExcludePriorOffer,
+            offer_cooldown_days: form.getValues("offer_cooldown_days"),
+            offer_limit_times: form.getValues("offer_limit_times"),
             offer_id: watchedOfferId,
           }),
         },

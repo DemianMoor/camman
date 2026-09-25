@@ -107,12 +107,8 @@ const campaignCreateBaseSchema = z.object({
   // subtracted from the positive base. NOT NULL DEFAULT '{}' in the DB, so a
   // missing field means "no change" (PATCH) / "no excludes" (create). Must be
   // disjoint from audience_segment_ids (a segment is include XOR exclude).
-  audience_exclude_segment_ids: z
-    .array(z.number().int().positive())
-    .optional(),
-  audience_contact_group_ids: z
-    .array(z.number().int().positive())
-    .optional(),
+  audience_exclude_segment_ids: z.array(z.number().int().positive()).optional(),
+  audience_contact_group_ids: z.array(z.number().int().positive()).optional(),
   // Campaign type (Drip Phase 4). Absent ⇒ the DB default 'regular'. Only
   // settable at CREATE: changing an existing campaign's type would leave a
   // drip campaign with regular semantics (or vice versa) mid-flight, and the
@@ -130,6 +126,12 @@ const campaignCreateBaseSchema = z.object({
   // campaign" (Phase-2 content dedup, LAYER 3). DB column NOT NULL DEFAULT false;
   // a missing field means "no change" (PATCH) / "use default false" (create).
   exclude_prior_offer_contacts: z.boolean().optional(),
+  // 869f53efz. Parameters of exclude_prior_offer_contacts, not independent
+  // switches: they are read only when that toggle is on AND the campaign was
+  // created with offer_rules_enabled. Bounds mirror migration 0191's CHECKs.
+  offer_cooldown_days: z.number().int().min(0).max(365).optional(),
+  offer_limit_times: z.number().int().min(1).max(100).optional(),
+
   // Send method. 'manual' (default) uses the pasted Short URL; 'tracked' mints
   // a per-recipient link. Accepted on create + update; the route guards that
   // 'tracked' requires the brand to have an active short domain.
@@ -246,7 +248,11 @@ export const campaignUpdateSchema = campaignCreateBaseSchema
         params: { code: "TRACKING_ID_IMMUTABLE" },
       });
     }
-    if (!Object.entries(d).some(([k, v]) => k !== "tracking_id" && v !== undefined)) {
+    if (
+      !Object.entries(d).some(
+        ([k, v]) => k !== "tracking_id" && v !== undefined,
+      )
+    ) {
       ctx.addIssue({
         path: [],
         code: z.ZodIssueCode.custom,
@@ -276,6 +282,12 @@ export const audiencePreviewSchema = z
     audience_cap: z.number().int().positive().nullable().optional(),
     exclude_in_use_contacts: z.boolean().optional(),
     exclude_prior_offer_contacts: z.boolean().optional(),
+    // 869f53efz. Parameters of exclude_prior_offer_contacts, not independent
+    // switches: they are read only when that toggle is on AND the campaign was
+    // created with offer_rules_enabled. Bounds mirror migration 0191's CHECKs.
+    offer_cooldown_days: z.number().int().min(0).max(365).optional(),
+    offer_limit_times: z.number().int().min(1).max(100).optional(),
+
     // Consumed only when exclude_prior_offer_contacts is true, to count/drop
     // leads who already received this offer (content-dedup LAYER 3 preview).
     offer_id: z.number().int().positive().nullable().optional(),

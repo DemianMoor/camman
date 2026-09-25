@@ -279,7 +279,12 @@ export function useCampaignFormState(props: CampaignFormProps) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch("/api/settings/lifecycle");
+        // ⚠️ Bounded. Without a timeout a hung request parks the form in
+        // "checking…" forever, which is a different silent failure from the
+        // one this whole change is fixing. 8s then fall back, with the note.
+        const res = await fetch("/api/settings/lifecycle", {
+          signal: AbortSignal.timeout(8000),
+        });
         if (!res.ok) throw new Error(String(res.status));
         const j = (await res.json()) as { engine_mode?: string };
         if (!cancelled)
@@ -314,6 +319,18 @@ export function useCampaignFormState(props: CampaignFormProps) {
     props.mode === "create"
       ? engineMode === "write"
       : props.lifecycleRules === true;
+
+  // ⚠️ In CREATE mode the answer is NOT KNOWN until the engine read lands, and
+  // "not known" is a third state — not a quiet "legacy". Rendering the legacy
+  // path while this is true is the bug this flag exists to prevent: the form
+  // showed read-only chips and the old Filters row with no explanation for as
+  // long as the fetch took (reproduced on production 2026-09-25 by delaying
+  // the response — a cold serverless function does it for free).
+  //
+  // EDIT mode never pends: the campaign's own flag is already loaded, and the
+  // engine's current posture cannot change what that campaign is.
+  const lifecycleDecisionPending =
+    props.mode === "create" && engineMode === null;
 
   // The effective freeze cadence of each selected group: its own override,
   // or undefined when it inherits the org default (the note then says so
@@ -808,6 +825,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     // route does not set it until PR 4c.
     lifecycleRules: lifecycleRulesFromLoad,
     engineMode,
+    lifecycleDecisionPending,
     // The effective freeze cadence of each SELECTED group: its override, else
     // the org default. Drives the Freeze chip's helper note.
     selectedGroupCadences,

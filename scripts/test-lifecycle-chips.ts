@@ -180,6 +180,39 @@ async function main() {
       legacyNone.size === 0,
       named(legacyNone),
     );
+    // ── C11-C13: the CREATE form's three states, guarded at the source ────
+    // ⭐ These are source checks on purpose. The bug they guard against is a
+    // RENDER race — while the engine read is in flight the form used to show
+    // the read-only legacy path with no explanation, which is exactly what an
+    // operator reported on production (2026-09-25). No SQL bar can see that,
+    // and a behaviour test of the predicate would not either: the defect was
+    // that a THIRD state (not-yet-known) was being rendered as one of the two
+    // known ones.
+    const { readFileSync } = await import("node:fs");
+    const editor = readFileSync(
+      "components/campaigns/campaign-editor-page.tsx",
+      "utf-8",
+    );
+    const formState = readFileSync(
+      "components/campaigns/campaign-form-state.ts",
+      "utf-8",
+    );
+    bar(
+      "C11 the pending decision is a THIRD state, not a quiet false",
+      formState.includes("lifecycleDecisionPending") &&
+        formState.includes('props.mode === "create" && engineMode === null'),
+      "create mode + engineMode null",
+    );
+    bar(
+      "C12 ⭐ the legacy Filters row is gated on NOT pending",
+      /!lifecycleRules && !state\.lifecycleDecisionPending \?/.test(editor),
+      "rendering it while pending announces an outcome not yet decided",
+    );
+    bar(
+      "C13 the engine read is BOUNDED, so it cannot park the form forever",
+      /AbortSignal\.timeout\(/.test(formState),
+      "a hung request would be a different silent failure",
+    );
   } finally {
     if (orgId) {
       const name =

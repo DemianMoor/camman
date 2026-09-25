@@ -1210,6 +1210,91 @@ function AudienceCard({
               </div>
             ) : null}
 
+            {/* ⭐ THE LIFECYCLE CHIPS LEAD THE AUDIENCE BLOCK (spec §7.1).
+            They are the first decision about who this campaign reaches, so
+            they sit directly under the AUDIENCE header — above Segments,
+            Contact groups and the cap, which narrow what the chips select. */}
+            {/* Lifecycle chips (PR 4b). Editable only for a lifecycle campaign;
+            for a legacy one they are the read-only mapping of the row below. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground">Lifecycle:</span>
+              {LIFECYCLE_CHIP_DEFS.map((c) => {
+                const selected = new Set(
+                  watchedFilters.lifecycle_statuses ?? [],
+                );
+                // While the decision is pending, NOTHING is shown as
+                // selected: highlighting the legacy mapping would assert an
+                // outcome that has not been decided yet.
+                const active = state.lifecycleDecisionPending
+                  ? false
+                  : lifecycleRules
+                    ? c.statuses.every((st) => selected.has(st))
+                    : legacyMappedChips.has(c.id);
+                const editable =
+                  lifecycleRules && !audienceLocked && !anySubmitting;
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    title={
+                      lifecycleRules
+                        ? c.tooltip
+                        : `${c.tooltip} — read-only: this campaign predates lifecycle rules`
+                    }
+                    onClick={() =>
+                      editable && toggleLifecycleChip(c.statuses, !active)
+                    }
+                    disabled={!editable}
+                    className={cn(
+                      "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
+                      active
+                        ? "border-foreground bg-foreground text-background"
+                        : "border-border bg-background text-muted-foreground",
+                      editable
+                        ? "hover:bg-muted"
+                        : "cursor-not-allowed opacity-60",
+                    )}
+                  >
+                    {c.label}
+                  </button>
+                );
+              })}
+              <span className="text-xs text-muted-foreground">
+                {state.lifecycleDecisionPending
+                  ? "· checking the lifecycle engine…"
+                  : lifecycleRules
+                    ? "· Suppressed and opted-out always excluded"
+                    : "· read-only, mapped from the filters below (approximate)"}
+              </span>
+            </div>
+            {/* ⚠️ WHY the legacy chips are showing. A campaign is legacy either
+            because it predates the feature, or because the engagement engine
+            is off right now — and only the second is something the operator
+            can act on. Saying nothing would leave them assuming the feature
+            failed to load. */}
+            {!lifecycleRules &&
+            !state.lifecycleDecisionPending &&
+            state.engineMode === "off" ? (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                Lifecycle engine is off — campaign uses legacy filters
+              </p>
+            ) : null}
+            {lifecycleRules &&
+            (watchedFilters.lifecycle_statuses ?? []).length === 0 ? (
+              <p className="text-xs text-destructive">
+                Select at least one lifecycle status.
+              </p>
+            ) : null}
+            {lifecycleRules &&
+            (watchedFilters.lifecycle_statuses ?? []).includes("freeze") ? (
+              <p className="text-xs text-muted-foreground">
+                Freeze contacts are only eligible at Prepare once their last
+                message is {freezeCadenceNote} old. A contact&apos;s own cadence
+                is the strictest across <em>all</em> its active groups, so one
+                also in an unselected group can wait longer.
+              </p>
+            ) : null}
+
             <div className="grid gap-3 md:grid-cols-3">
               <div className="grid gap-1.5">
                 <Label>Segments</Label>
@@ -1353,82 +1438,10 @@ function AudienceCard({
               </div>
             </div>
 
-            {/* Lifecycle chips (PR 4b). Editable only for a lifecycle campaign;
-            for a legacy one they are the read-only mapping of the row below. */}
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-muted-foreground">Lifecycle:</span>
-              {LIFECYCLE_CHIP_DEFS.map((c) => {
-                const selected = new Set(
-                  watchedFilters.lifecycle_statuses ?? [],
-                );
-                const active = lifecycleRules
-                  ? c.statuses.every((st) => selected.has(st))
-                  : legacyMappedChips.has(c.id);
-                const editable =
-                  lifecycleRules && !audienceLocked && !anySubmitting;
-                return (
-                  <button
-                    key={c.id}
-                    type="button"
-                    title={
-                      lifecycleRules
-                        ? c.tooltip
-                        : `${c.tooltip} — read-only: this campaign predates lifecycle rules`
-                    }
-                    onClick={() =>
-                      editable && toggleLifecycleChip(c.statuses, !active)
-                    }
-                    disabled={!editable}
-                    className={cn(
-                      "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
-                      active
-                        ? "border-foreground bg-foreground text-background"
-                        : "border-border bg-background text-muted-foreground",
-                      editable
-                        ? "hover:bg-muted"
-                        : "cursor-not-allowed opacity-60",
-                    )}
-                  >
-                    {c.label}
-                  </button>
-                );
-              })}
-              <span className="text-xs text-muted-foreground">
-                {lifecycleRules
-                  ? "· Suppressed and opted-out always excluded"
-                  : "· read-only, mapped from the filters below (approximate)"}
-              </span>
-            </div>
-            {/* ⚠️ WHY the legacy chips are showing. A campaign is legacy either
-            because it predates the feature, or because the engagement engine
-            is off right now — and only the second is something the operator
-            can act on. Saying nothing would leave them assuming the feature
-            failed to load. */}
-            {!lifecycleRules && state.engineMode === "off" ? (
-              <p className="text-xs text-amber-700 dark:text-amber-400">
-                Lifecycle engine is off — campaign uses legacy filters
-              </p>
-            ) : null}
-            {lifecycleRules &&
-            (watchedFilters.lifecycle_statuses ?? []).length === 0 ? (
-              <p className="text-xs text-destructive">
-                Select at least one lifecycle status.
-              </p>
-            ) : null}
-            {lifecycleRules &&
-            (watchedFilters.lifecycle_statuses ?? []).includes("freeze") ? (
-              <p className="text-xs text-muted-foreground">
-                Freeze contacts are only eligible at Prepare once their last
-                message is {freezeCadenceNote} old. A contact&apos;s own cadence
-                is the strictest across <em>all</em> its active groups, so one
-                also in an unselected group can wait longer.
-              </p>
-            ) : null}
-
             {/* Legacy filter chips. Hidden entirely for a lifecycle campaign
             (spec §7.1); kept read-only for a legacy one, because they are what
             actually governs that campaign's audience. */}
-            {!lifecycleRules ? (
+            {!lifecycleRules && !state.lifecycleDecisionPending ? (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-muted-foreground">Filters:</span>
                 {FILTER_DEFS.map((f) => {

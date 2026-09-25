@@ -148,6 +148,24 @@ The statuses (`new`/`cold`/`hot`/`warm`/`freeze`/`suppressed`, migration 0187) a
 - **The lifecycle exclusion layers never filter `messaging_status`, and the freeze cadence is read per contact.** `gateEligible()` gates the whole audience (the same call PR 3 made for the segment rules), and `freeze_cadence_days` comes off the contact's own `contact_engagement` row -- no threshold lookup, no join back to `contact_groups`. Two Freeze contacts messaged the same day can differ purely by group override.
 - **Neither `freeze_not_due` nor `bought_offer` is baked into the frozen pool.** Freeze due-ness moves with the clock and purchases keep arriving after activation, so freezing either would freeze a decision that has to be made at send time. The audience preview reports them as `send_time` OVERLAYS on the audience, distinct from the `excluded` buckets, which PARTITION the leads that are not in it.
 
+## A check added to the send path must fail OPEN, and the bar must prove it (2026-09-25)
+
+The drain dispatches real messages. Any gate added to it inherits a failure mode the gate itself does not have: if it throws, the stage stops mid-drain with rows already flipped to `sending` — and `sending` rows are NEVER re-claimed (at-most-once), so they need manual repair. The gate's own purpose is almost never worth that.
+
+- **The costs are asymmetric, so the choice is not a judgement call.** A handful of contacts getting a message they would have been spared is recoverable. A half-drained stage with stranded rows is a person woken up. The send-time lifecycle re-check ([lib/sends/lifecycle-recheck.ts](../lib/sends/lifecycle-recheck.ts)) therefore fails open.
+- **The module throws; the CALLER decides.** A helper that swallows its own errors has taken a decision it lacks the context to take. `recheckLifecycleEligibility` throws and [lib/sends/drain.ts](../lib/sends/drain.ts) catches.
+- ⭐ **Count the failure, and treat the resulting numbers as MISSING rather than zero.** `DrainResult.recheckFailedBatches` exists so a batch that skipped the check is visible. Without it, a check that silently never ran is indistinguishable from a check that found nothing — and the second reading is the comforting one, which is why it is the one people reach for.
+- ⭐ **A fail-open path that cannot be made to fail on purpose is an untested claim.** The drain takes an injectable `recheckEligibility` seam beside `sendSms`/`isEnabled` for exactly this: `scripts/test-lifecycle-send-recheck.ts` J13 injects a throwing re-check and asserts the batch STILL dispatched and the failure was counted. Asserting "it didn't throw" would also pass for a check that quietly did nothing.
+
+## A dry run must mirror the predicate it is rehearsing, and name its world-state (2026-09-25)
+
+[scripts/dryrun-lifecycle-recheck.ts](../scripts/dryrun-lifecycle-recheck.ts) measures what the send-time re-check WOULD skip before it is allowed to skip anyone.
+
+- **Mirror the real claim, do not sample.** It reads the drain's `status='pending'` / `ORDER BY created_at, id` / batch-of-50 predicate, minus `FOR UPDATE SKIP LOCKED` and the UPDATE. A dry run with its own batching measures a population the drain never sees.
+- **≥3 batches per reason, and "never observed" is not a rate of 0.** A reason seen once is an anecdote. A reason that never fires is reported as never observed — reporting it as 0% claims a measurement that was never made.
+- **A stop threshold is a reporting trigger, not a dial.** If a reason exceeds ~10% of claimed rows the run stops and reports. Raising the threshold to make the run pass converts a finding into a silence.
+- ⭐ **A headline share cannot diagnose itself — carry the discriminator in the same run.** The first production run tripped at 26% with no way to tell whether the Prepare-time and send-time layers disagreed or the cadence was genuinely being violated. Splitting the figure by WHICH signal catches each row (both / send-time only / Prepare only) answered it in one line: send-time only was 0, so the layers agree exactly and the 26% was an artifact of measuring batches that legacy campaigns materialized without ever applying the Prepare-time layers. See [feedback_corpus_assertions_name_their_world_state] — the number was right and its obvious reading was wrong.
+
 ## A reported bucket that can go missing reads as zero, so derive the key set (2026-09-25)
 
 Four independent surfaces report why a lead was not sent to: `PreflightBreakdown.excluded`, the Prepare dialog's result, `StageEligibilityPreviewResult`, and the autopilot page's client type. Adding a reason to three of them and forgetting the fourth does not throw -- the fourth renders **zero**, which is indistinguishable from "nobody was excluded for that reason". That is the worst possible failure for a number an operator uses to decide whether to send.

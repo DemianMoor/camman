@@ -35,7 +35,13 @@ export async function verifyValueOwnership(
     !shape ||
     shape === "none" ||
     shape === "positive_integer" ||
-    shape === "campaign_use_period"
+    shape === "campaign_use_period" ||
+    // Contact lifecycle (0189): count_in_period is two numbers and
+    // lifecycle_status_set's members are validated against
+    // ENGAGEMENT_STATUSES by the Zod refinement. Neither carries an
+    // entity id, so there is nothing to own.
+    shape === "count_in_period" ||
+    shape === "lifecycle_status_set"
   ) {
     // No FK reference to verify — value is a scalar/enum, not an entity id.
     return { ok: true };

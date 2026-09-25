@@ -35,6 +35,8 @@ import {
   isProviderPhoneSet,
   isStringSubsetOf,
   isValidOperatorForRuleType,
+  COUNT_IN_PERIOD_DAYS,
+  isCountInPeriod,
   PHONE_TYPE_VALUES,
   RULE_TYPES,
   RULE_TYPE_KEYS,
@@ -51,6 +53,24 @@ const RULE_TYPE_OPTIONS = RULE_TYPE_KEYS.map((k) => ({
 }));
 
 // Display labels for the phone_type set editor. Carrier codes are shown as-is.
+// Lifecycle status pills (0189). Same treatment as carrier_set, which is a
+// seven-option string set rendered as pills — six statuses sit comfortably
+// inside that precedent.
+import { ENGAGEMENT_STATUSES } from "@/lib/engagement/constants";
+import { ENGAGEMENT_STATUS_LABELS } from "@/lib/engagement/labels";
+
+const ENGAGEMENT_STATUS_PILL_LABELS: Record<string, string> = {
+  ...ENGAGEMENT_STATUS_LABELS,
+};
+
+// The unit shown beside a positive_integer input. Most time rules count days;
+// the two lifecycle message-count rules do not, and labelling those "days"
+// would be a plain lie about what the number means.
+const POSITIVE_INTEGER_UNITS: Record<string, string> = {
+  messages_sent_at_least: "messages",
+  messages_sent_at_most: "messages",
+};
+
 const PHONE_TYPE_LABELS: Record<string, string> = {
   mobile: "Mobile",
   voip: "VoIP",
@@ -129,6 +149,14 @@ function coerceValueForShape(
   if (shape === "campaign_use_period") {
     return isCampaignUsePeriod(prior) ? prior : "1w";
   }
+  if (shape === "count_in_period") {
+    // 30 days rather than 7: it is the window an operator reaches for first,
+    // and msgs_30d is the column most likely to be non-zero.
+    return isCountInPeriod(prior) ? prior : { count: 1, days: 30 };
+  }
+  if (shape === "lifecycle_status_set") {
+    return isStringSubsetOf(prior, ENGAGEMENT_STATUSES) ? prior : [];
+  }
   if (shape === "phone_type_set") {
     return isStringSubsetOf(prior, PHONE_TYPE_VALUES) ? prior : [];
   }
@@ -179,6 +207,10 @@ function isRuleReadyToSave(
   if (shape === "campaign_use_period") return isCampaignUsePeriod(value);
   // Set shapes require a non-empty valid array (no "incomplete" state is
   // accepted server-side); an empty set stays local and doesn't PATCH.
+  if (shape === "count_in_period") return isCountInPeriod(value);
+  if (shape === "lifecycle_status_set") {
+    return isStringSubsetOf(value, ENGAGEMENT_STATUSES);
+  }
   if (shape === "phone_type_set") return isStringSubsetOf(value, PHONE_TYPE_VALUES);
   if (shape === "carrier_set") return isStringSubsetOf(value, CARRIER_VALUES);
   if (shape === "provider_phone_set") return isProviderPhoneSet(value);
@@ -201,6 +233,10 @@ function isRuleIncomplete(
     shape === "campaign_use_period"
   ) {
     return false;
+  }
+  if (shape === "count_in_period") return !isCountInPeriod(value);
+  if (shape === "lifecycle_status_set") {
+    return !isStringSubsetOf(value, ENGAGEMENT_STATUSES);
   }
   if (shape === "phone_type_set") return !isStringSubsetOf(value, PHONE_TYPE_VALUES);
   if (shape === "carrier_set") return !isStringSubsetOf(value, CARRIER_VALUES);
@@ -744,6 +780,16 @@ function RuleRow({
     }
   }
 
+  // count_in_period editor. Same contract as the two above: the value is one
+  // object, so a partial edit (count cleared while the window changes) stays
+  // local and the row reads incomplete until it is valid again.
+  function handleCountInPeriodChange(next: { count: number; days: number }) {
+    setValue(next);
+    if (isCountInPeriod(next)) {
+      void savePatch({ rule_type: ruleType, operator, value: next });
+    }
+  }
+
   // Rule is "incomplete" (persisted but doesn't yet have a valid FK value).
   // The eval skips incomplete rules; mark the row so the user sees they
   // need to pick a value before it affects audience.
@@ -845,12 +891,14 @@ function RuleRow({
       {/* Value */}
       <ValueControl
         shape={shape}
+        ruleType={ruleType}
         value={value}
         onChange={setValue}
         onBlur={handleValueBlur}
         onValueCommit={(next) => void savePatch({ value: next })}
         onSetChange={handleSetChange}
         onPhoneSetChange={handlePhoneSetChange}
+        onCountInPeriodChange={handleCountInPeriodChange}
         disabled={!canEdit || saving}
         brands={brands}
         offers={offers}
@@ -900,6 +948,9 @@ function RuleRow({
 
 interface ValueControlProps {
   shape: ValueShape | null;
+  // Needed only to label a positive_integer input: two of the lifecycle
+  // rules count messages, not days.
+  ruleType: string;
   value: unknown;
   onChange: (next: unknown) => void;
   // Fired after the user commits a value via blur (number input) or
@@ -913,6 +964,9 @@ interface ValueControlProps {
   // Commit handler for the provider-phone set editor. Receives the merged
   // {provider_id, phone_ids} next state.
   onPhoneSetChange: (next: ProviderPhoneSet) => void;
+  // Commit handler for the count_in_period editor. Receives the whole
+  // {count, days} next state, like onPhoneSetChange.
+  onCountInPeriodChange: (next: { count: number; days: number }) => void;
   disabled: boolean;
   brands: PickerOption[];
   offers: PickerOption[];
@@ -935,6 +989,8 @@ function ValueControl({
   onValueCommit,
   onSetChange,
   onPhoneSetChange,
+  ruleType,
+  onCountInPeriodChange,
   disabled,
   brands,
   offers,
@@ -949,6 +1005,18 @@ function ValueControl({
   currentRef,
 }: ValueControlProps) {
   if (shape === "none") return null;
+  if (shape === "lifecycle_status_set") {
+    const arr = Array.isArray(value) ? (value as string[]) : [];
+    return (
+      <SetPills
+        options={ENGAGEMENT_STATUSES}
+        labels={ENGAGEMENT_STATUS_PILL_LABELS}
+        value={arr}
+        disabled={disabled}
+        onChange={onSetChange}
+      />
+    );
+  }
   if (shape === "phone_type_set" || shape === "carrier_set") {
     const arr = Array.isArray(value) ? (value as string[]) : [];
     const options =
@@ -1072,7 +1140,66 @@ function ValueControl({
           disabled={disabled}
           className="h-9 w-20"
         />
-        <span className="text-xs text-muted-foreground">days</span>
+        <span className="text-xs text-muted-foreground">
+          {POSITIVE_INTEGER_UNITS[ruleType] ?? "days"}
+        </span>
+      </div>
+    );
+  }
+  if (shape === "count_in_period") {
+    const cur = isCountInPeriod(value) ? value : null;
+    const count = cur ? cur.count : "";
+    const days = cur ? cur.days : 30;
+    // One value, two controls: every change rebuilds the whole {count,
+    // days} object, so a half-edited state can never be committed.
+    return (
+      <div className="flex items-center gap-1.5">
+        <Input
+          type="number"
+          min={1}
+          max={100000}
+          step={1}
+          value={count}
+          onChange={(e) => {
+            const raw = e.target.value;
+            if (raw === "") {
+              onChange({ count: 0, days });
+              return;
+            }
+            const parsed = Number.parseInt(raw, 10);
+            if (Number.isInteger(parsed) && parsed >= 1) {
+              onChange({ count: parsed, days });
+            }
+          }}
+          onBlur={() => {
+            if (isCountInPeriod(value)) onCountInPeriodChange(value);
+            else onBlur();
+          }}
+          disabled={disabled}
+          className="h-9 w-20"
+        />
+        <span className="text-xs text-muted-foreground">messages in the last</span>
+        <Select
+          value={String(days)}
+          onValueChange={(next) => {
+            const d = Number.parseInt(next, 10);
+            const merged = { count: cur?.count ?? 0, days: d };
+            if (isCountInPeriod(merged)) onCountInPeriodChange(merged);
+            else onChange(merged);
+          }}
+          disabled={disabled}
+        >
+          <SelectTrigger className="h-9 w-[110px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {COUNT_IN_PERIOD_DAYS.map((d) => (
+              <SelectItem key={d} value={String(d)}>
+                {d} days
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
     );
   }

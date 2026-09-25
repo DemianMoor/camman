@@ -15,7 +15,9 @@ import {
   RULE_TYPE_KEYS,
   YES_NO_VALUES,
   type ValueShape,
+  isCountInPeriod,
 } from "./segment-rule-types";
+import { ENGAGEMENT_STATUSES } from "@/lib/engagement/constants";
 
 // Per-value-shape validation. Used by the refinement to cross-check
 // `value` against the resolved value_shape for the chosen rule_type.
@@ -51,6 +53,10 @@ function validateValueByShape(shape: ValueShape, value: unknown): boolean {
         Number.isInteger(value) &&
         value >= 1
       );
+    case "count_in_period":
+      return isCountInPeriod(value);
+    case "lifecycle_status_set":
+      return isStringSubsetOf(value, ENGAGEMENT_STATUSES);
     case "phone_type_set":
       return isStringSubsetOf(value, PHONE_TYPE_VALUES);
     case "carrier_set":

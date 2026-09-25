@@ -20,6 +20,7 @@ import {
   isProviderPhoneSet,
   isStringSubsetOf,
   isTextSet,
+  isCountInPeriod,
   PHONE_TYPE_VALUES,
   YES_NO_VALUES,
 } from "./validators/segment-rule-types";
@@ -68,6 +69,15 @@ function isRuleComplete(rule: {
   // Set shapes hold arrays/objects, not numbers — without these the fall-through
   // below silently drops every phone_type / carrier / sent_from_provider_phone
   // rule from evaluation.
+  // Contact lifecycle (0189). count_in_period and lifecycle_status_set are
+  // set-shaped; without these they hit the numeric fall-through below, the
+  // rule is treated as INCOMPLETE and silently dropped — and a dropped
+  // is_not rule under EXCEPT turns "nobody" into EVERYBODY. lifecycle_status
+  // is the first new type carrying is_not, so this is where that bites.
+  if (shape === "count_in_period") return isCountInPeriod(rule.value);
+  if (shape === "lifecycle_status_set") {
+    return isStringSubsetOf(rule.value, ENGAGEMENT_STATUSES);
+  }
   if (shape === "phone_type_set") {
     return isStringSubsetOf(rule.value, PHONE_TYPE_VALUES);
   }
@@ -126,6 +136,18 @@ function intArrayLiteral(values: number[]): string {
 // the running result via SQL set arithmetic (UNION / INTERSECT / EXCEPT),
 // not by wrapping it in `contact_id IN (...)` / `NOT IN (...)` — see
 // ruleSet/combinedOp/operandFor in buildSegmentAudienceClause below.
+// The stored msgs_Nd columns, keyed by the window count_in_period allows.
+// Keeping this beside the emitter means the validator's allowed days and
+// the columns they select cannot drift apart silently.
+import { ENGAGEMENT_STATUSES } from "@/lib/engagement/constants";
+
+const MSGS_WINDOW_COLUMNS: Record<7 | 14 | 30 | 90, string> = {
+  7: "msgs_7d",
+  14: "msgs_14d",
+  30: "msgs_30d",
+  90: "msgs_90d",
+};
+
 function ruleInnerQuery(
   rule: {
     rule_type: string;
@@ -307,6 +329,78 @@ function ruleInnerQuery(
         FROM contact_contact_groups
         WHERE org_id = ${orgId}::uuid AND contact_group_id = ${Number(v)}::int
       `;
+    // ── Contact lifecycle (0187/0188/0189, spec §9) ───────────────────────
+    // None of these filters messaging_status: gateEligible() below gates the
+    // whole audience, and neither contacts-driven case has an eligible-PARTIAL
+    // index to match (which is the only reason phone_type / carrier carry the
+    // literal). Owner decision, 2026-09-24 — one behaviour for all eight.
+    case "messages_sent_at_least":
+      return drizzleSql`
+        SELECT contact_id FROM contact_engagement
+        WHERE org_id = ${orgId}::uuid AND msgs_total >= ${Number(v)}::int
+      `;
+    case "messages_sent_at_most":
+      // A contact the job has not reached has NO contact_engagement row and
+      // has been sent nothing, so it MUST match "at most N". An EXISTS or
+      // inner-join form silently drops every one of them. Driven from contacts
+      // so the row-less case is representable at all.
+      return drizzleSql`
+        SELECT c.id AS contact_id FROM contacts c
+        LEFT JOIN contact_engagement ce
+          ON ce.contact_id = c.id AND ce.org_id = c.org_id
+        WHERE c.org_id = ${orgId}::uuid
+          AND coalesce(ce.msgs_total, 0) <= ${Number(v)}::int
+      `;
+    case "messages_sent_in_period_at_least": {
+      const p = v as { count: number; days: number };
+      // The window selects a STORED column. days is validated to 7|14|30|90 by
+      // isCountInPeriod, so this raw() cannot become arbitrary text.
+      const col = MSGS_WINDOW_COLUMNS[p.days as 7 | 14 | 30 | 90];
+      if (!col) return drizzleSql`SELECT NULL::uuid AS contact_id WHERE false`;
+      return drizzleSql`
+        SELECT contact_id FROM contact_engagement
+        WHERE org_id = ${orgId}::uuid
+          AND ${drizzleSql.raw(col)} >= ${Number(p.count)}::int
+      `;
+    }
+    case "last_message_more_than_n_days_ago":
+      // last_sent_at IS NULL fails this AND its opposite, which IS the spec's
+      // "never messaged matches neither direction" (§16 choice 1).
+      return drizzleSql`
+        SELECT contact_id FROM contact_engagement
+        WHERE org_id = ${orgId}::uuid
+          AND last_sent_at < now() - make_interval(days => ${Number(v)})
+      `;
+    case "last_message_in_last_n_days":
+      return drizzleSql`
+        SELECT contact_id FROM contact_engagement
+        WHERE org_id = ${orgId}::uuid
+          AND last_sent_at >= now() - make_interval(days => ${Number(v)})
+      `;
+    case "last_click_more_than_n_days_ago":
+      return drizzleSql`
+        SELECT contact_id FROM contact_engagement
+        WHERE org_id = ${orgId}::uuid
+          AND last_click_at < now() - make_interval(days => ${Number(v)})
+      `;
+    case "last_click_in_last_n_days":
+      return drizzleSql`
+        SELECT contact_id FROM contact_engagement
+        WHERE org_id = ${orgId}::uuid
+          AND last_click_at >= now() - make_interval(days => ${Number(v)})
+      `;
+    case "lifecycle_status": {
+      // Reads the 0188 PROJECTION on contacts, not contact_engagement: same
+      // value (the job writes both in one transaction), NOT NULL so the
+      // "missing row is new" contract needs no coalesce, and indexed by
+      // contacts_org_lifecycle_created_idx. Spec §9 predates 0188.
+      const set = Array.isArray(v) ? (v as string[]) : [];
+      return drizzleSql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${orgId}::uuid
+          AND lifecycle_status = ANY(${drizzleSql.raw(textArrayLiteral(set))})
+      `;
+    }
     case "phone_type": {
       // Set membership over the eligible-partial-indexed line_type. messaging_status
       // literal → uses contacts_org_linetype_eligible_idx (migration 0096).

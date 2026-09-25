@@ -1650,7 +1650,19 @@ export const segment_rules = pgTable(
         'contact_state',
         'contact_country',
         'interest_tag',
-        'partner_slug'
+        'partner_slug',
+        -- Contact lifecycle (migration 0189, spec §9). The guard
+        -- scripts/test-segment-rule-type-registration.ts parses this
+        -- template textually, so each value stays single-quoted on its
+        -- own line.
+        'messages_sent_at_least',
+        'messages_sent_at_most',
+        'messages_sent_in_period_at_least',
+        'last_message_more_than_n_days_ago',
+        'last_message_in_last_n_days',
+        'last_click_more_than_n_days_ago',
+        'last_click_in_last_n_days',
+        'lifecycle_status'
       )`,
     ),
     check(
@@ -4210,6 +4222,20 @@ export const contact_engagement = pgTable(
     index("contact_engagement_org_time_due_idx")
       .on(table.org_id, table.time_due_at)
       .where(sql`${table.time_due_at} IS NOT NULL`),
+    // Migration 0189: spec §4 asked for these and 0187 did not create
+    // them. They serve the selective direction of the four lifecycle
+    // time rules (last_message_* / last_click_*), which without them
+    // seq-scan 467 MB per rule against a 10 s preview budget. Built
+    // CONCURRENTLY in production by
+    // scripts/apply-engagement-rule-indexes-concurrent.ts.
+    index("contact_engagement_org_last_sent_idx").on(
+      table.org_id,
+      table.last_sent_at,
+    ),
+    index("contact_engagement_org_last_click_idx").on(
+      table.org_id,
+      table.last_click_at,
+    ),
     check(
       "contact_engagement_status_check",
       sql`${table.status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,

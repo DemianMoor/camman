@@ -108,6 +108,74 @@ const STATUS_COLOR: Record<Status, string> = {
     "border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
 };
 
+// The lifecycle chips (PR 4b, spec §7.1). Rendered INSTEAD of FILTER_DEFS for
+// a campaign with lifecycle_rules = true.
+//
+// Hot/Warm is ONE chip owning TWO statuses, so splitting it later needs no
+// migration. 'suppressed' is deliberately absent: suppressed contacts are
+// always excluded, which is an eligibility layer rather than an audience
+// choice, and offering it as a chip would imply it could be opted into.
+const LIFECYCLE_CHIP_DEFS: {
+  id: string;
+  label: string;
+  statuses: readonly string[];
+  tooltip: string;
+}[] = [
+  {
+    id: "new",
+    label: "New",
+    statuses: ["new"],
+    tooltip: "Never messaged, or messaged only outside this system",
+  },
+  {
+    id: "hotwarm",
+    label: "Hot/Warm",
+    statuses: ["hot", "warm"],
+    tooltip: "Clicked recently — Hot within 30 days, Warm within 120",
+  },
+  {
+    id: "cold",
+    label: "Cold",
+    statuses: ["cold"],
+    tooltip: "Messaged, but no human click in a long time",
+  },
+  {
+    id: "freeze",
+    label: "Freeze",
+    statuses: ["freeze"],
+    tooltip: "Too many unanswered messages — sent only on their cadence",
+  },
+];
+
+// How a LEGACY campaign's four booleans read in lifecycle vocabulary. Shown
+// read-only beside the (also read-only) legacy row so an operator can read an
+// old campaign in the new terms.
+//
+// ⚠️ APPROXIMATE BY NATURE, and labelled as such in the UI: the old chips meant
+// "ever clicked", the new ones mean recency. include_opt_in has no lifecycle
+// equivalent and is ignored (3 campaigns in production carry it).
+// "14 days" when every selected group resolves to the same effective cadence,
+// "14–21 days" when they differ, and the org default when no group is selected.
+// The caller supplies already-resolved numbers; this only renders them.
+function formatFreezeCadence(days: readonly number[] | undefined): string {
+  const list = (days ?? []).filter((d) => Number.isFinite(d) && d > 0);
+  if (list.length === 0) return "the org default";
+  const lo = Math.min(...list);
+  const hi = Math.max(...list);
+  return lo === hi ? `${lo} days` : `${lo}–${hi} days, depending on the contact's groups,`;
+}
+
+function mapLegacyFiltersToChips(f: AudienceFilters): Set<string> {
+  const out = new Set<string>();
+  if (f.include_clickers) out.add("hotwarm");
+  if (f.include_not_clicked || f.include_no_status) {
+    out.add("new");
+    out.add("cold");
+    out.add("freeze");
+  }
+  return out;
+}
+
 const FILTER_DEFS: {
   key: Exclude<keyof AudienceFilters, "carrier_filter">;
   label: string;
@@ -205,6 +273,10 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
       include_opt_in: data.audience_filters?.include_opt_in ?? false,
       include_clickers: data.audience_filters?.include_clickers ?? false,
       include_not_clicked: data.audience_filters?.include_not_clicked ?? true,
+      // Empty for an existing campaign that predates the chips — a legacy
+      // campaign is governed by the four booleans above, and its mapped chips
+      // are shown read-only rather than stored.
+      lifecycle_statuses: data.audience_filters?.lifecycle_statuses ?? [],
       carrier_filter: data.audience_filters?.carrier_filter ?? [],
     },
     audience_cap: data.audience_cap ?? null,
@@ -1063,9 +1135,21 @@ function AudienceCard({
     watchedFilters,
     watchedExcludeInUse,
     watchedExcludePriorOffer,
-    setFilter,
+    // setFilter is deliberately NOT destructured: the legacy chips are
+    // read-only now (owner decision 2026-09-24) because editing them would
+    // silently rewrite a legacy campaign's audience.
     setCarrierFilter,
+    toggleLifecycleChip,
   } = state;
+
+  // campaigns.lifecycle_rules. FALSE for every campaign that exists today —
+  // the create route does not set it until PR 4c — so this whole branch is
+  // dead code until then, by design.
+  const lifecycleRules = state.lifecycleRules === true;
+  const legacyMappedChips = mapLegacyFiltersToChips(watchedFilters);
+  // The Freeze note: the effective cadence of the SELECTED contact groups,
+  // shown as a range when they differ. Informational only — see the note text.
+  const freezeCadenceNote = formatFreezeCadence(state.selectedGroupCadences);
 
   return (
     <Card>
@@ -1250,7 +1334,66 @@ function AudienceCard({
           </div>
         </div>
 
-        {/* Filter chips */}
+        {/* Lifecycle chips (PR 4b). Editable only for a lifecycle campaign;
+            for a legacy one they are the read-only mapping of the row below. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">Lifecycle:</span>
+          {LIFECYCLE_CHIP_DEFS.map((c) => {
+            const selected = new Set(watchedFilters.lifecycle_statuses ?? []);
+            const active = lifecycleRules
+              ? c.statuses.every((st) => selected.has(st))
+              : legacyMappedChips.has(c.id);
+            const editable = lifecycleRules && !audienceLocked && !anySubmitting;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                title={
+                  lifecycleRules
+                    ? c.tooltip
+                    : `${c.tooltip} — read-only: this campaign predates lifecycle rules`
+                }
+                onClick={() =>
+                  editable && toggleLifecycleChip(c.statuses, !active)
+                }
+                disabled={!editable}
+                className={cn(
+                  "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
+                  active
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border bg-background text-muted-foreground",
+                  editable ? "hover:bg-muted" : "cursor-not-allowed opacity-60",
+                )}
+              >
+                {c.label}
+              </button>
+            );
+          })}
+          <span className="text-xs text-muted-foreground">
+            {lifecycleRules
+              ? "· Suppressed and opted-out always excluded"
+              : "· read-only, mapped from the filters below (approximate)"}
+          </span>
+        </div>
+        {lifecycleRules && (watchedFilters.lifecycle_statuses ?? []).length === 0 ? (
+          <p className="text-xs text-destructive">
+            Select at least one lifecycle status.
+          </p>
+        ) : null}
+        {lifecycleRules &&
+        (watchedFilters.lifecycle_statuses ?? []).includes("freeze") ? (
+          <p className="text-xs text-muted-foreground">
+            Freeze contacts are only eligible at Prepare once their last message
+            is {freezeCadenceNote} old. A contact&apos;s own cadence is the
+            strictest across <em>all</em> its active groups, so one also in an
+            unselected group can wait longer.
+          </p>
+        ) : null}
+
+        {/* Legacy filter chips. Hidden entirely for a lifecycle campaign
+            (spec §7.1); kept read-only for a legacy one, because they are what
+            actually governs that campaign's audience. */}
+        {!lifecycleRules ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">Filters:</span>
           {FILTER_DEFS.map((f) => {
@@ -1260,8 +1403,9 @@ function AudienceCard({
                 key={f.key}
                 type="button"
                 title={f.tooltip}
-                onClick={() => setFilter(f.key, !active)}
-                disabled={audienceLocked || anySubmitting}
+                // Read-only: editing a legacy campaign's chips would silently
+                // rewrite its audience, and for an active one it is frozen anyway.
+                disabled
                 className={cn(
                   "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
                   active
@@ -1279,6 +1423,7 @@ function AudienceCard({
             · Opt-outs always excluded
           </span>
         </div>
+        ) : null}
 
         {/* Carrier filter (optional). Empty = all carriers. */}
         <div className="grid gap-1.5">

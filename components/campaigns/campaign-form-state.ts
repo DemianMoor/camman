@@ -9,6 +9,9 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 // =============== Types ===============
 
 export type Info = { id: number; name: string; color: string | null };
+// A contact group also carries its lifecycle cadence override (0187);
+// null means it inherits the org default.
+export type ContactGroupInfo = Info & { freeze_cadence_days?: number | null };
 // Brands carry their active short domain (from /api/brands/list) so the form
 // can gate "API Send" without an extra fetch.
 export type BrandOption = Info & { short_domain: string | null };
@@ -45,6 +48,10 @@ export interface AudienceFilters {
   include_opt_in: boolean;
   include_clickers: boolean;
   include_not_clicked: boolean;
+  // Lifecycle chips (PR 4b). Only read when the campaign has
+  // lifecycle_rules = true; a legacy campaign's audience is still decided by
+  // the four booleans above. The Hot/Warm chip stores BOTH 'hot' and 'warm'.
+  lifecycle_statuses: string[];
   // Optional carrier allow-list (migration 0098). Empty = no carrier filter.
   // When non-empty, only contacts whose carrier_norm is in the set qualify;
   // Unidentified (never looked up) is always excluded once a filter is set.
@@ -88,6 +95,9 @@ export interface CampaignFormValues {
 export interface CampaignFormProps {
   mode: "create" | "edit";
   initialValues?: Partial<CampaignFormValues>;
+  // campaigns.lifecycle_rules for the campaign being edited. Read-only here;
+  // the form never sets it.
+  lifecycleRules?: boolean;
   // Edit-mode only: gates the audience section as read-only when the
   // campaign has moved past draft.
   currentStatus?: string;
@@ -110,6 +120,9 @@ export const DEFAULT_FILTERS: AudienceFilters = {
   // Clickers pre-selected on new campaigns (product decision 2026-07-22).
   include_clickers: true,
   include_not_clicked: true,
+  // New campaigns start with Cold selected only (owner decision, spec §7.1).
+  // Inert until lifecycle_rules is set, which 4c does.
+  lifecycle_statuses: ["cold"],
   carrier_filter: [],
 };
 
@@ -147,7 +160,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const [routingTypes, setRoutingTypes] = useState<Info[]>([]);
   const [trafficTypes, setTrafficTypes] = useState<Info[]>([]);
   const [segments, setSegments] = useState<SegmentInfo[]>([]);
-  const [contactGroups, setContactGroups] = useState<Info[]>([]);
+  const [contactGroups, setContactGroups] = useState<ContactGroupInfo[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [activePhones, setActivePhones] = useState<ActivePhone[]>([]);
 
@@ -262,6 +275,17 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const watchedSegments = form.watch("audience_segment_ids");
   const watchedExcludeSegments = form.watch("audience_exclude_segment_ids");
   const watchedContactGroups = form.watch("audience_contact_group_ids");
+
+  // campaigns.lifecycle_rules, as loaded. Deliberately a PROP, not state:
+  // nothing in the form can turn it on. Only the create route sets it, in 4c.
+  const lifecycleRulesFromLoad = props.lifecycleRules === true;
+
+  // The effective freeze cadence of each selected group: its own override,
+  // or undefined when it inherits the org default (the note then says so
+  // rather than inventing a number).
+  const selectedGroupCadences = (watchedContactGroups ?? [])
+    .map((id) => contactGroups.find((g) => g.id === id)?.freeze_cadence_days)
+    .filter((d): d is number => typeof d === "number" && d > 0);
   const watchedFilters = form.watch("audience_filters");
   const watchedCap = form.watch("audience_cap");
   const watchedExcludeInUse = form.watch("exclude_in_use_contacts");
@@ -655,6 +679,28 @@ export function useCampaignFormState(props: CampaignFormProps) {
     );
   }
 
+  // Lifecycle chips (PR 4b). Toggling a chip rewrites the whole
+  // lifecycle_statuses array, because the Hot/Warm chip owns TWO values —
+  // toggling one key at a time could leave 'hot' set and 'warm' clear, which no
+  // chip can represent.
+  function toggleLifecycleChip(values: readonly string[], on: boolean) {
+    const current = new Set(
+      (form.getValues("audience_filters")?.lifecycle_statuses ?? []) as string[],
+    );
+    for (const v of values) {
+      if (on) current.add(v);
+      else current.delete(v);
+    }
+    form.setValue(
+      "audience_filters",
+      {
+        ...form.getValues("audience_filters"),
+        lifecycle_statuses: [...current],
+      },
+      { shouldDirty: true },
+    );
+  }
+
   function setCarrierFilter(next: string[]) {
     form.setValue(
       "audience_filters",
@@ -724,6 +770,13 @@ export function useCampaignFormState(props: CampaignFormProps) {
     filteredSegments,
     toggleSegment,
     setFilter,
+    toggleLifecycleChip,
+    // campaigns.lifecycle_rules. False for every campaign today; the create
+    // route does not set it until PR 4c.
+    lifecycleRules: lifecycleRulesFromLoad,
+    // The effective freeze cadence of each SELECTED group: its override, else
+    // the org default. Drives the Freeze chip's helper note.
+    selectedGroupCadences,
     setCarrierFilter,
     handleDraftClick,
     handleActivateClick,

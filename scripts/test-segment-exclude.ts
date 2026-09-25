@@ -19,7 +19,9 @@ try {
   const p = req.resolve("server-only");
   // @ts-expect-error minimal Module cache entry
   req.cache[p] = { id: p, filename: p, loaded: true, exports: {} };
-} catch { /* noop */ }
+} catch {
+  /* noop */
+}
 
 async function main() {
   const { previewAudience } = await import("@/lib/audience-snapshot");
@@ -31,7 +33,9 @@ async function main() {
     if (JSON.stringify(a) === JSON.stringify(b)) console.log(`  ✓ ${m}`);
     else {
       failures++;
-      console.error(`  ✗ ${m} — expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
+      console.error(
+        `  ✗ ${m} — expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`,
+      );
     }
   };
   const ok = (c: boolean, m: string) => eq(!!c, true, m);
@@ -57,12 +61,16 @@ async function main() {
   }[];
 
   if (pair.length === 0) {
-    console.log("No (contact group ∩ segment membership) overlap found — skipping (inconclusive).");
+    console.log(
+      "No (contact group ∩ segment membership) overlap found — skipping (inconclusive).",
+    );
     await raw.end({ timeout: 5 });
     process.exit(0);
   }
   const f = pair[0];
-  console.log(`Using contact group ${f.group_id} ∩ segment ${f.segment_id} (overlap ${f.overlap})`);
+  console.log(
+    `Using contact group ${f.group_id} ∩ segment ${f.segment_id} (overlap ${f.overlap})`,
+  );
 
   const filters = {
     include_no_status: true,
@@ -73,22 +81,34 @@ async function main() {
   const base = { orgId: f.org_id, filters, cap: null, excludeInUse: false };
 
   const groupOnly = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     ...base,
     segmentIds: [],
     contactGroupIds: [f.group_id],
   });
   const include = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     ...base,
     segmentIds: [f.segment_id],
     contactGroupIds: [f.group_id],
   });
   const exclude = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     ...base,
     segmentIds: [],
     excludeSegmentIds: [f.segment_id],
     contactGroupIds: [f.group_id],
   });
   const excludeOnly = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     ...base,
     segmentIds: [],
     excludeSegmentIds: [f.segment_id],
@@ -100,7 +120,10 @@ async function main() {
       `exclude(G\\S)=${exclude.total_matching} excluded_by_segments=${exclude.excluded_by_segments}`,
   );
 
-  ok(include.total_matching > 0, "include base is non-empty (has overlap to test)");
+  ok(
+    include.total_matching > 0,
+    "include base is non-empty (has overlap to test)",
+  );
   eq(
     include.total_matching + exclude.total_matching,
     groupOnly.total_matching,
@@ -116,7 +139,11 @@ async function main() {
     groupOnly.total_matching - include.total_matching,
     "exclude(G\\S) == group - (G∩S)",
   );
-  eq(groupOnly.excluded_by_segments, 0, "group-only reports 0 excluded_by_segments");
+  eq(
+    groupOnly.excluded_by_segments,
+    0,
+    "group-only reports 0 excluded_by_segments",
+  );
   eq(excludeOnly.total_matching, 0, "exclude-only (no positive base) is empty");
 
   await raw.end({ timeout: 5 });

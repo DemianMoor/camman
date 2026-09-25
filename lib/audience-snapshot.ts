@@ -366,11 +366,18 @@ export interface AudiencePreviewInput {
   orgId: string;
   // campaigns.lifecycle_rules (migration 0187). When true the lifecycle chips
   // decide the audience; when false the four legacy chips do, byte-identically
-  // to before PR 4b. Optional here and defaulting to false so every existing
-  // caller keeps today's behaviour without being touched — the REQUIRED
-  // spelling lives on StageEligibilityParams, where missing it would silently
-  // skip an exclusion layer rather than fall back to the status quo.
-  lifecycleRules?: boolean;
+  // to before PR 4b.
+  //
+  // ⚠️ REQUIRED, and it was optional until it caused a production bug. The
+  // "every existing caller keeps today's behaviour without being touched"
+  // reasoning was wrong in the one way that mattered: the create-mode PREVIEW
+  // and BOTH activation snapshots never passed it, so they silently used the
+  // legacy predicate — the chips changed nothing on screen, and a campaign
+  // written with lifecycle_rules = true would have FROZEN THE LEGACY AUDIENCE.
+  // Optional defaults hide exactly the call sites that were never updated.
+  // Required makes the compiler name them, which is how the same field on
+  // StageEligibilityParams found its missing callers in 4b.
+  lifecycleRules: boolean;
   // The INCLUDE segment set (intersected with groups when both present).
   segmentIds: number[];
   // The EXCLUDE segment set (migration 0114). Members are subtracted from the
@@ -508,7 +515,12 @@ export interface AudienceSnapshotResult {
 // Pulled out of the qualifier so the snapshot path can materialize it into a
 // temp table (see snapshotAudience).
 async function buildAudienceSourceSql(
-  input: AudiencePreviewInput,
+  // Narrower than AudiencePreviewInput on purpose: this builds the SEGMENT ∩
+  // GROUP source set, which is the same whichever predicate then filters it.
+  // Taking the full input would force every caller to supply a lifecycleRules
+  // this function never reads — and a value invented to satisfy a type is how
+  // a meaningless default gets copied into a place that DOES read it.
+  input: Omit<AudiencePreviewInput, "lifecycleRules">,
 ): Promise<SQL> {
   const {
     orgId,

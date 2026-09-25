@@ -37,12 +37,10 @@ try {
 }
 
 async function main() {
-  const { previewAudience, computeStageAudienceCountForDraft } = await import(
-    "@/lib/audience-snapshot"
-  );
-  const { previewSegmentAudienceCount } = await import(
-    "@/lib/segment-rules-eval"
-  );
+  const { previewAudience, computeStageAudienceCountForDraft } =
+    await import("@/lib/audience-snapshot");
+  const { previewSegmentAudienceCount } =
+    await import("@/lib/segment-rules-eval");
   const { db } = await import("@/db/client");
   const { sql } = await import("drizzle-orm");
 
@@ -60,7 +58,11 @@ async function main() {
   // Pick the two segments by name so the test survives id churn. SEG_FILTER is
   // the "filter-shaped" one: a single is_not rule matching nearly the whole org
   // — precisely the shape that made UNION explode.
-  const segRows = await db.execute<{ id: number; org_id: string; name: string }>(
+  const segRows = await db.execute<{
+    id: number;
+    org_id: string;
+    name: string;
+  }>(
     sql`SELECT id, org_id, name FROM segments
         WHERE name IN ('Clickers excl Buyers','Not Used Last 1 Week')
         ORDER BY name`,
@@ -123,7 +125,11 @@ async function main() {
   const segCounts = await previewSegmentAudienceCount(segNarrow.id, orgId);
   ok(!segCounts.truncated, "segment audience count did not time out");
   eq(segCounts.total, rawSeg.full, "reported full audience");
-  eq(segCounts.opt_out_count, rawSeg.opted_out, "reported opt-outs in audience");
+  eq(
+    segCounts.opt_out_count,
+    rawSeg.opted_out,
+    "reported opt-outs in audience",
+  );
   eq(
     segCounts.count,
     rawSeg.sendable,
@@ -144,12 +150,18 @@ async function main() {
   console.log("\n(2) Multiple segments INTERSECT (preview path)");
 
   const one = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     orgId,
     segmentIds: [segNarrow.id],
     contactGroupIds: groupIds,
     filters: allFilters,
   });
   const two = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     orgId,
     segmentIds: [segNarrow.id, segFilter.id],
     contactGroupIds: groupIds,
@@ -157,6 +169,9 @@ async function main() {
   });
   // Order must not matter for an INTERSECT.
   const twoSwapped = await previewAudience({
+    // Legacy behaviour is what this bar asserts; the lifecycle predicate
+    // has its own suites. Explicit, because the field is required now.
+    lifecycleRules: false,
     orgId,
     segmentIds: [segFilter.id, segNarrow.id],
     contactGroupIds: groupIds,
@@ -165,7 +180,10 @@ async function main() {
 
   eq(one.total_matching, rawSeg.sendable, "single segment matches raw SQL");
 
-  const [rawBoth] = await db.execute<{ intersect_n: number; union_n: number }>(sql`
+  const [rawBoth] = await db.execute<{
+    intersect_n: number;
+    union_n: number;
+  }>(sql`
     with grp as (
       select distinct ccg.contact_id
       from contact_contact_groups ccg
@@ -351,11 +369,7 @@ async function main() {
     `draft stage count only narrows: ${draftOne.count} -> ${draftTwo.count}`,
   );
 
-  console.log(
-    failures === 0
-      ? "\nALL PASS"
-      : `\n${failures} FAILURE(S)`,
-  );
+  console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
 }
 

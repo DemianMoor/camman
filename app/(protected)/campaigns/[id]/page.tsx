@@ -118,6 +118,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import { exclTimingInput } from "@/lib/campaigns/excl-timing-warning";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { formatPhoneInternational } from "@/lib/phone-validation";
@@ -195,6 +196,9 @@ type CampaignDetail = {
   assigned_to_user_id: string | null;
   created_by_user_id: string | null;
   audience_segment_ids: number[];
+  // Needed by the Excl-timing warning; GET /api/campaigns/[campaignId] has
+  // always returned it, the client type just never carried it.
+  audience_exclude_segment_ids: number[] | null;
   audience_contact_group_ids: number[];
   audience_filters: AudienceFilters;
   audience_snapshot_count: number;
@@ -206,6 +210,8 @@ type CampaignDetail = {
   status_changed_at: string;
   tracking_id: string | null;
   link_mode: "manual" | "tracked";
+  // campaigns.lifecycle_rules (migration 0187).
+  lifecycle_rules?: boolean;
   // Default send-from phone for new stages (Task 7/9, migration 0115). NULL
   // when the campaign has no default — new stages then fall back to
   // StageForm's own null defaults.
@@ -318,7 +324,12 @@ type Stage = {
     phone_number: string;
     cost_per_sms: string;
   } | null;
-  offer: { id: number; name: string; color: string | null; payout_cpa: string | null } | null;
+  offer: {
+    id: number;
+    name: string;
+    color: string | null;
+    payout_cpa: string | null;
+  } | null;
 };
 
 /**
@@ -374,8 +385,7 @@ const STAGE_STATUS_COLOR: Record<StageStatus, string> = {
     "border-slate-200 bg-slate-100 text-slate-800 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200",
   pending:
     "border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200",
-  sent:
-    "border-sky-200 bg-sky-100 text-sky-800 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200",
+  sent: "border-sky-200 bg-sky-100 text-sky-800 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200",
   success:
     "border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200",
   cancelled:
@@ -480,7 +490,11 @@ export default function CampaignDetailPage() {
   const stageStatusApi = useApiCall<Stage>();
   const stageArchiveApi = useApiCall<Stage>();
   const stageRestoreApi = useApiCall<Stage>();
-  const stageDeleteApi = useApiCall<{ deleted: boolean; id: number; split_reset_stage_id: number | null }>();
+  const stageDeleteApi = useApiCall<{
+    deleted: boolean;
+    id: number;
+    split_reset_stage_id: number | null;
+  }>();
   const stageCancelApi = useApiCall<{ ok: boolean; discarded: number }>();
   const stageDuplicateApi = useApiCall<Stage>();
   const behavioralSplitApi = useApiCall<{
@@ -495,10 +509,7 @@ export default function CampaignDetailPage() {
   const [campaign, setCampaign] = useState<CampaignDetail | null>(null);
   const [campaignError, setCampaignError] = useState<string | null>(null);
   const [campaignTick, setCampaignTick] = useState(0);
-  const refetchCampaign = useCallback(
-    () => setCampaignTick((n) => n + 1),
-    [],
-  );
+  const refetchCampaign = useCallback(() => setCampaignTick((n) => n + 1), []);
 
   const [stages, setStages] = useState<Stage[]>([]);
   // Campaign-level distinct contacts who STOPped (server-computed; see the
@@ -551,11 +562,17 @@ export default function CampaignDetailPage() {
       toast.success(`${succeeded.length} stages updated`);
     } else if (succeeded.length > 0) {
       toast.warning(
-        `${succeeded.length} updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`,
+        `${succeeded.length} updated, ${failed.length} skipped: ${failed
+          .map((f) => f.reason)
+          .slice(0, 3)
+          .join(", ")}${failed.length > 3 ? "…" : ""}`,
       );
     } else {
       toast.error(
-        `0 updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}`,
+        `0 updated, ${failed.length} skipped: ${failed
+          .map((f) => f.reason)
+          .slice(0, 3)
+          .join(", ")}`,
       );
     }
     setSelectedStageIds(new Set());
@@ -644,6 +661,10 @@ export default function CampaignDetailPage() {
   }, [membersApi.execute]);
 
   // ============ Dialog state ============
+  // When the transition dialog was opened. Captured in the handler because
+  // Date.now() during render is impure (react-hooks/purity) AND would re-run on
+  // every render, quietly moving the 24h boundary under the dialog.
+  const [transitionOpenedAt, setTransitionOpenedAt] = useState(0);
   const [campaignTransition, setCampaignTransition] =
     useState<CampaignTransition | null>(null);
   const [campaignArchiveConfirm, setCampaignArchiveConfirm] = useState<
@@ -676,12 +697,18 @@ export default function CampaignDetailPage() {
     kind: "archive" | "restore";
     stage: Stage;
   } | null>(null);
-  const [stageDeleteConfirm, setStageDeleteConfirm] = useState<Stage | null>(null);
-  const [stageCancelConfirm, setStageCancelConfirm] = useState<Stage | null>(null);
+  const [stageDeleteConfirm, setStageDeleteConfirm] = useState<Stage | null>(
+    null,
+  );
+  const [stageCancelConfirm, setStageCancelConfirm] = useState<Stage | null>(
+    null,
+  );
   // 0174: the split is CAMPAIGN-level now, so there is no target stage — just
   // "is the confirm modal open" plus the provisional preview it renders.
   const [behavioralSplitOpen, setBehavioralSplitOpen] = useState(false);
-  const [splitPreview, setSplitPreview] = useState<SplitLanePreview | null>(null);
+  const [splitPreview, setSplitPreview] = useState<SplitLanePreview | null>(
+    null,
+  );
   // Which behavioural lanes the split will create — DEFAULT_SELECTED_TIERS, the
   // client's named copy of the server's DEFAULT_LANE_TIERS. Tier 0 ("Ignored")
   // starts OFF because the operator deleted it by hand after all but 4 of the
@@ -689,14 +716,17 @@ export default function CampaignDetailPage() {
   // siblings. Tier 3 ("Registered", Phase 4) starts OFF too, so adding the lane
   // changes nobody's workflow until it is ticked deliberately. Reset in
   // openBehavioralSplit (an event handler), never in an effect.
-  const [selectedTiers, setSelectedTiers] =
-    useState<number[]>([...DEFAULT_SELECTED_TIERS]);
+  const [selectedTiers, setSelectedTiers] = useState<number[]>([
+    ...DEFAULT_SELECTED_TIERS,
+  ]);
   const [importStage, setImportStage] = useState<Stage | null>(null);
   const [manualStage, setManualStage] = useState<Stage | null>(null);
   const [historyStage, setHistoryStage] = useState<Stage | null>(null);
   const [sendStage, setSendStage] = useState<Stage | null>(null);
   // WS4 §A4: one-click Prepare target from the stages-list row (Orange rows).
-  const [prepareTarget, setPrepareTarget] = useState<PrepareTarget | null>(null);
+  const [prepareTarget, setPrepareTarget] = useState<PrepareTarget | null>(
+    null,
+  );
   const [uploadContactsOpen, setUploadContactsOpen] = useState(false);
 
   const canUpdateCampaign = can("campaigns.update");
@@ -943,7 +973,11 @@ export default function CampaignDetailPage() {
   // on screen still has a non-zero entry for it, so retiring a type eventually
   // retires its segment without erasing history that is still displayed.
   const shownEventTypes = useMemo(
-    () => visibleEventTypes(eventTypes, stages.map((s) => s.keitaro_events ?? {})),
+    () =>
+      visibleEventTypes(
+        eventTypes,
+        stages.map((s) => s.keitaro_events ?? {}),
+      ),
     [eventTypes, stages],
   );
 
@@ -1019,60 +1053,64 @@ export default function CampaignDetailPage() {
               : undefined;
           const laneCount = lanesByParent.get(s.id)?.length ?? 0;
           return (
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-1.5">
-              {/* Lane chip: a lane belongs to a parent position. The ↳ + "from #N"
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {/* Lane chip: a lane belongs to a parent position. The ↳ + "from #N"
                   makes the parent→lanes relationship obvious in the flat table. */}
-              {tierMeta ? (
-                <Badge
-                  variant="outline"
-                  className={cn("text-[10px]", tierMeta.className)}
-                  title={
-                    parentNumber != null
-                      ? `Behavioral lane (tier ${s.behavioral_tier}) from stage #${parentNumber}`
-                      : `Behavioral lane (tier ${s.behavioral_tier})`
-                  }
+                {tierMeta ? (
+                  <Badge
+                    variant="outline"
+                    className={cn("text-[10px]", tierMeta.className)}
+                    title={
+                      parentNumber != null
+                        ? `Behavioral lane (tier ${s.behavioral_tier}) from stage #${parentNumber}`
+                        : `Behavioral lane (tier ${s.behavioral_tier})`
+                    }
+                  >
+                    ↳ {tierMeta.label}
+                    {parentNumber != null ? (
+                      <span className="ml-1 opacity-70">
+                        · from #{parentNumber}
+                      </span>
+                    ) : null}
+                  </Badge>
+                ) : null}
+                {row.original.label ? (
+                  <span className="text-sm">{row.original.label}</span>
+                ) : (
+                  <span className="text-sm text-muted-foreground">
+                    (no label)
+                  </span>
+                )}
+                {row.original.split_total && row.original.split_index ? (
+                  <Badge variant="secondary" className="text-[10px]">
+                    Split {row.original.split_index}/{row.original.split_total}
+                  </Badge>
+                ) : null}
+                {/* Parent position: announce that this stage spawned lanes. */}
+                {laneCount > 0 ? (
+                  <Badge variant="secondary" className="text-[10px]">
+                    {laneCount} behavioral lane{laneCount === 1 ? "" : "s"}
+                  </Badge>
+                ) : null}
+              </div>
+              {row.original.tracking_id ? (
+                <button
+                  type="button"
+                  className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+                  title="Click to copy"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigator.clipboard
+                      .writeText(row.original.tracking_id as string)
+                      .then(() => toast.success("Tracking ID copied"))
+                      .catch(() => toast.error("Couldn't copy"));
+                  }}
                 >
-                  ↳ {tierMeta.label}
-                  {parentNumber != null ? (
-                    <span className="ml-1 opacity-70">· from #{parentNumber}</span>
-                  ) : null}
-                </Badge>
-              ) : null}
-              {row.original.label ? (
-                <span className="text-sm">{row.original.label}</span>
-              ) : (
-                <span className="text-sm text-muted-foreground">(no label)</span>
-              )}
-              {row.original.split_total && row.original.split_index ? (
-                <Badge variant="secondary" className="text-[10px]">
-                  Split {row.original.split_index}/{row.original.split_total}
-                </Badge>
-              ) : null}
-              {/* Parent position: announce that this stage spawned lanes. */}
-              {laneCount > 0 ? (
-                <Badge variant="secondary" className="text-[10px]">
-                  {laneCount} behavioral lane{laneCount === 1 ? "" : "s"}
-                </Badge>
+                  {row.original.tracking_id}
+                </button>
               ) : null}
             </div>
-            {row.original.tracking_id ? (
-              <button
-                type="button"
-                className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
-                title="Click to copy"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  navigator.clipboard
-                    .writeText(row.original.tracking_id as string)
-                    .then(() => toast.success("Tracking ID copied"))
-                    .catch(() => toast.error("Couldn't copy"));
-                }}
-              >
-                {row.original.tracking_id}
-              </button>
-            ) : null}
-          </div>
           );
         },
       },
@@ -1279,9 +1317,7 @@ export default function CampaignDetailPage() {
           const s = row.original;
           if (s.status === "archived") {
             return (
-              <Badge
-                className={cn("capitalize", STAGE_STATUS_COLOR.archived)}
-              >
+              <Badge className={cn("capitalize", STAGE_STATUS_COLOR.archived)}>
                 archived
               </Badge>
             );
@@ -1360,8 +1396,14 @@ export default function CampaignDetailPage() {
           // one reading this cell must never give it.
           const hasEvents = Object.values(events ?? {}).some((t) => t.n > 0);
           const hasResults =
-            sms > 0 || delivered > 0 || oo > 0 || cl > 0 || chk > 0 || sales > 0 ||
-            hasEvents || unmapped > 0;
+            sms > 0 ||
+            delivered > 0 ||
+            oo > 0 ||
+            cl > 0 ||
+            chk > 0 ||
+            sales > 0 ||
+            hasEvents ||
+            unmapped > 0;
           if (!hasResults)
             return <span className="text-muted-foreground">—</span>;
           // Rate denominator: delivered, falling back to SMS sent.
@@ -1436,9 +1478,7 @@ export default function CampaignDetailPage() {
                 variant="ghost"
                 size="sm"
                 disabled={audienceEmpty}
-                title={
-                  exportTitle ?? "Export this stage's phones as a CSV"
-                }
+                title={exportTitle ?? "Export this stage's phones as a CSV"}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (audienceEmpty) return;
@@ -1523,7 +1563,7 @@ export default function CampaignDetailPage() {
                       history
                     </DropdownMenuItem>
                   ) : null}
-                  {(showArchive || showRestore) ? (
+                  {showArchive || showRestore ? (
                     <DropdownMenuSeparator />
                   ) : null}
                   {showArchive ? (
@@ -1733,8 +1773,7 @@ export default function CampaignDetailPage() {
   // whose SMS/Delivered/Clickers tiles read 0 — a breakdown shown beside an
   // empty frame. Leave the gate coarse; if it ever needs to widen, widen it to
   // "any stage has any activity", never to one component of the breakdown.
-  const hasResults =
-    campaignTotals.sms > 0 || campaignTotals.inboundStops > 0;
+  const hasResults = campaignTotals.sms > 0 || campaignTotals.inboundStops > 0;
 
   if (!auth) return null;
 
@@ -1890,12 +1929,8 @@ export default function CampaignDetailPage() {
           {/* Tracked-clicker export — only for tracked campaigns, where clicks
               are attributed via minted links. Manual campaigns have no tracked
               clicks (use the manual clicker CSV workflow instead). */}
-          {campaign.link_mode === "tracked" &&
-          campaign.status !== "draft" ? (
-            <ExportClickersDialog
-              campaignId={campaign.id}
-              stages={stages}
-            />
+          {campaign.link_mode === "tracked" && campaign.status !== "draft" ? (
+            <ExportClickersDialog campaignId={campaign.id} stages={stages} />
           ) : null}
           {possibleCampaignTransitions.length > 0 ? (
             <DropdownMenu>
@@ -1909,7 +1944,10 @@ export default function CampaignDetailPage() {
                 {possibleCampaignTransitions.map((tr) => (
                   <DropdownMenuItem
                     key={tr.t}
-                    onSelect={() => setCampaignTransition(tr.t)}
+                    onSelect={() => {
+                      setTransitionOpenedAt(Date.now());
+                      setCampaignTransition(tr.t);
+                    }}
                   >
                     {tr.icon} {tr.label}
                   </DropdownMenuItem>
@@ -1949,10 +1987,7 @@ export default function CampaignDetailPage() {
       />
 
       {/* ============ Metadata (compact two-line summary + expand) ============ */}
-      <CampaignMetaCompact
-        campaign={campaign}
-        memberLabel={memberLabel}
-      />
+      <CampaignMetaCompact campaign={campaign} memberLabel={memberLabel} />
 
       {/* ============ Drip settings (drip campaigns only) ============ */}
       {campaign.type === "drip" ? (
@@ -1960,11 +1995,15 @@ export default function CampaignDetailPage() {
           <div>
             <h2 className="text-lg font-medium">Drip settings</h2>
             <p className="text-sm text-muted-foreground">
-              Which leads this campaign accepts, and what it has routed so far. Sending is not
-              wired yet — a routed lead is an assignment, not a message.
+              Which leads this campaign accepts, and what it has routed so far.
+              Sending is not wired yet — a routed lead is an assignment, not a
+              message.
             </p>
           </div>
-          <DripConfigPanel campaignId={campaign.id} canEdit={can("campaigns.update")} />
+          <DripConfigPanel
+            campaignId={campaign.id}
+            canEdit={can("campaigns.update")}
+          />
         </section>
       ) : null}
 
@@ -1992,12 +2031,12 @@ export default function CampaignDetailPage() {
               — <span className="font-medium">Ignored</span> /{" "}
               <span className="font-medium">Clicked</span> /{" "}
               <span className="font-medium">Reached offer</span> /{" "}
-              <span className="font-medium">Registered</span>. A contact lands in
-              exactly one lane (their highest tier reached), and{" "}
+              <span className="font-medium">Registered</span>. A contact lands
+              in exactly one lane (their highest tier reached), and{" "}
               <span className="font-medium">Registered</span> outranks{" "}
-              <span className="font-medium">Reached offer</span> — so someone who
-              registered is <em>not</em> in the Reached-offer lane and gets no
-              message unless a Registered lane exists.{" "}
+              <span className="font-medium">Reached offer</span> — so someone
+              who registered is <em>not</em> in the Reached-offer lane and gets
+              no message unless a Registered lane exists.{" "}
               {/* The space after this span is an explicit {" "} because the
                   words rendered JOINED without it. WHAT WAS ESTABLISHED: the
                   symptom, read out of the rendered DOM of a DEV build — the copy
@@ -2007,10 +2046,9 @@ export default function CampaignDetailPage() {
                   mode-specific, and nobody has confirmed a production build ever
                   rendered them joined. The {" "} fix is transform-independent and
                   correct either way, which is why it stays without the diagnosis. */}
-              <span className="font-medium">Purchased</span>{" "}
-              contacts exit the sequence (no lane) and opted-out contacts are
-              suppressed, so lane counts won&apos;t sum to the full audience.{" "}
-              The{" "}
+              <span className="font-medium">Purchased</span> contacts exit the
+              sequence (no lane) and opted-out contacts are suppressed, so lane
+              counts won&apos;t sum to the full audience. The{" "}
               <span className="font-mono">live</span> audience numbers are a
               preview computed from current behavior — they change until the
               stage is sent.
@@ -2026,10 +2064,7 @@ export default function CampaignDetailPage() {
                 label="Delivered"
                 value={campaignTotals.delivered}
               />
-              <TotalsMetric
-                label="Opt-outs"
-                value={campaignTotals.optOuts}
-              />
+              <TotalsMetric label="Opt-outs" value={campaignTotals.optOuts} />
               <TotalsMetric
                 label="Inbound STOPs"
                 value={campaignTotals.inboundStops}
@@ -2047,14 +2082,8 @@ export default function CampaignDetailPage() {
                     : undefined
                 }
               />
-              <TotalsMetric
-                label="Scrubbed"
-                value={campaignTotals.scrubbed}
-              />
-              <TotalsMetric
-                label="Bounced"
-                value={campaignTotals.bounced}
-              />
+              <TotalsMetric label="Scrubbed" value={campaignTotals.scrubbed} />
+              <TotalsMetric label="Bounced" value={campaignTotals.bounced} />
               <TotalsMetric
                 label="Checkout Clicks"
                 value={campaignTotals.checkoutClicks}
@@ -2070,7 +2099,12 @@ export default function CampaignDetailPage() {
                 types={shownEventTypes}
                 source={campaignTotals}
                 renderTile={({ key, label, value, title }) => (
-                  <TotalsMetric key={key} label={label} value={value} title={title} />
+                  <TotalsMetric
+                    key={key}
+                    label={label}
+                    value={value}
+                    title={title}
+                  />
                 )}
               />
               <TotalsMetric
@@ -2110,10 +2144,10 @@ export default function CampaignDetailPage() {
               // the operator can act rather than just distrust the figure.
               <CardContent className="border-t pt-3 text-xs text-muted-foreground">
                 <span className="font-medium">*</span> Keitaro recorded no
-                landing-page visits, so Clickers shows CamMan&apos;s own count of
-                human clickers on the tracked link. Usually means the landing
-                page is missing the Keitaro visit script — sales, checkout clicks
-                and revenue stay unreported until it&apos;s added.
+                landing-page visits, so Clickers shows CamMan&apos;s own count
+                of human clickers on the tracked link. Usually means the landing
+                page is missing the Keitaro visit script — sales, checkout
+                clicks and revenue stay unreported until it&apos;s added.
               </CardContent>
             ) : null}
           </Card>
@@ -2173,8 +2207,7 @@ export default function CampaignDetailPage() {
                   Show archived
                 </Label>
               </div>
-              {(stageFilters.statuses.length > 0 ||
-                stageFilters.showArchived) ? (
+              {stageFilters.statuses.length > 0 || stageFilters.showArchived ? (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -2204,7 +2237,10 @@ export default function CampaignDetailPage() {
               // current filter set hides all of them. Surface the count and
               // a one-click reset so the user isn't stranded.
               <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed py-10 text-center">
-                <Send className="size-10 text-muted-foreground/40" aria-hidden />
+                <Send
+                  className="size-10 text-muted-foreground/40"
+                  aria-hidden
+                />
                 <div className="space-y-1">
                   <p className="text-sm font-medium">
                     No stages match the current filters
@@ -2220,8 +2256,8 @@ export default function CampaignDetailPage() {
                     them.
                   </p>
                 </div>
-                {(stageFilters.statuses.length > 0 ||
-                  stageFilters.showArchived) ? (
+                {stageFilters.statuses.length > 0 ||
+                stageFilters.showArchived ? (
                   <Button
                     variant="outline"
                     size="sm"
@@ -2331,87 +2367,87 @@ export default function CampaignDetailPage() {
 
         {canCreateStage && campaign.status !== "archived" ? (
           <div className="flex flex-wrap items-center gap-2">
-          <StageInlineEditor
-            campaign={campaign}
-            campaignId={campaignId}
-            campaignType={campaign.type}
-            siblingWindows={stages
-              .filter(
-                (s) =>
-                  s.drip_active === true &&
-                  s.window_start_min != null &&
-                  s.window_end_min != null &&
-                  s.id !== editingStage?.id,
-              )
-              .map((s) => ({
-                stage_id: s.id,
-                window_start_min: s.window_start_min as number,
-                window_end_min: s.window_end_min as number,
-              }))}
-            campaignTrackingId={campaign.tracking_id}
-            nextStageNumber={
-              stages.reduce((m, s) => Math.max(m, s.stage_number), 0) + 1
-            }
-            stage={editingStage}
-            isOpen={addStageOpen}
-            onOpenChange={(open) => {
-              setAddStageOpen(open);
-              if (!open) setEditingStage(null);
-            }}
-            onSaved={() => {
-              refetchStages();
-              refetchCampaign();
-            }}
-            onImportResults={
-              canImportResults && editingStage
-                ? () => {
-                    setImportStage(editingStage);
-                    setAddStageOpen(false);
-                    setEditingStage(null);
-                  }
-                : undefined
-            }
-            onManualResults={
-              canImportResults && editingStage
-                ? () => {
-                    setManualStage(editingStage);
-                    setAddStageOpen(false);
-                    setEditingStage(null);
-                  }
-                : undefined
-            }
-            onViewImportHistory={
-              canViewImports && editingStage
-                ? () => {
-                    setHistoryStage(editingStage);
-                    setAddStageOpen(false);
-                    setEditingStage(null);
-                  }
-                : undefined
-            }
-          />
-          {/* 0174: the behavioural split lives HERE, at campaign level, beside
+            <StageInlineEditor
+              campaign={campaign}
+              campaignId={campaignId}
+              campaignType={campaign.type}
+              siblingWindows={stages
+                .filter(
+                  (s) =>
+                    s.drip_active === true &&
+                    s.window_start_min != null &&
+                    s.window_end_min != null &&
+                    s.id !== editingStage?.id,
+                )
+                .map((s) => ({
+                  stage_id: s.id,
+                  window_start_min: s.window_start_min as number,
+                  window_end_min: s.window_end_min as number,
+                }))}
+              campaignTrackingId={campaign.tracking_id}
+              nextStageNumber={
+                stages.reduce((m, s) => Math.max(m, s.stage_number), 0) + 1
+              }
+              stage={editingStage}
+              isOpen={addStageOpen}
+              onOpenChange={(open) => {
+                setAddStageOpen(open);
+                if (!open) setEditingStage(null);
+              }}
+              onSaved={() => {
+                refetchStages();
+                refetchCampaign();
+              }}
+              onImportResults={
+                canImportResults && editingStage
+                  ? () => {
+                      setImportStage(editingStage);
+                      setAddStageOpen(false);
+                      setEditingStage(null);
+                    }
+                  : undefined
+              }
+              onManualResults={
+                canImportResults && editingStage
+                  ? () => {
+                      setManualStage(editingStage);
+                      setAddStageOpen(false);
+                      setEditingStage(null);
+                    }
+                  : undefined
+              }
+              onViewImportHistory={
+                canViewImports && editingStage
+                  ? () => {
+                      setHistoryStage(editingStage);
+                      setAddStageOpen(false);
+                      setEditingStage(null);
+                    }
+                  : undefined
+              }
+            />
+            {/* 0174: the behavioural split lives HERE, at campaign level, beside
               "Add stage" — it is taken against the campaign's completed stages,
               not against one chosen predecessor, so a per-stage entry point would
               misrepresent what it does. The A/B split stays inside the stage
               editor because it genuinely IS per-stage. Two entry points for two
               different actions; deliberately not two for the same one.
               Hidden while the editor is open so the row stays a single action. */}
-          {!addStageOpen && campaign.link_mode === "tracked" ? (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => void openBehavioralSplit()}
-              disabled={!hasCompletedStage}
-              title={
-                hasCompletedStage
-                  ? "Split this campaign into Ignored / Clicked / Reached offer / Registered lanes"
-                  : "Needs at least one stage that has finished sending"
-              }
-            >
-              <Split className="size-4" aria-hidden /> Behavioral split…
-            </Button>
-          ) : null}
+            {!addStageOpen && campaign.link_mode === "tracked" ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void openBehavioralSplit()}
+                disabled={!hasCompletedStage}
+                title={
+                  hasCompletedStage
+                    ? "Split this campaign into Ignored / Clicked / Reached offer / Registered lanes"
+                    : "Needs at least one stage that has finished sending"
+                }
+              >
+                <Split className="size-4" aria-hidden /> Behavioral split…
+              </Button>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -2460,22 +2496,22 @@ export default function CampaignDetailPage() {
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <p>
-                  Pick the behavioural lanes to stamp out for this campaign. Each
-                  lane starts as a copy of the most recently completed stage; edit
-                  its message and set its send time afterward.
+                  Pick the behavioural lanes to stamp out for this campaign.
+                  Each lane starts as a copy of the most recently completed
+                  stage; edit its message and set its send time afterward.
                 </p>
                 <p>
-                  <span className="font-medium">Ignored</span> is off by default —
-                  a lane you create but never schedule can never be prepared, and
-                  the split holds <em>every</em> lane back until all of them are,
-                  so it would silently block the ones you did schedule.
+                  <span className="font-medium">Ignored</span> is off by default
+                  — a lane you create but never schedule can never be prepared,
+                  and the split holds <em>every</em> lane back until all of them
+                  are, so it would silently block the ones you did schedule.
                 </p>
                 <p>
                   <span className="font-medium">Registered</span> is a new lane:
                   someone who registered but has not purchased. It outranks{" "}
                   <span className="font-medium">Reached offer</span>, so those
-                  contacts are no longer in that lane — leave Registered unticked
-                  and they get nothing at this position.
+                  contacts are no longer in that lane — leave Registered
+                  unticked and they get nothing at this position.
                 </p>
 
                 {splitPreviewApi.isLoading || splitPreview === null ? (
@@ -2484,23 +2520,24 @@ export default function CampaignDetailPage() {
                   </div>
                 ) : !splitPreview.can_split ? (
                   <div className="rounded-md border border-dashed p-3 text-xs">
-                    This campaign has no completed stages yet. A behavioral split
-                    classifies contacts by how they behaved in stages that have
-                    already sent, so at least one must finish first.
+                    This campaign has no completed stages yet. A behavioral
+                    split classifies contacts by how they behaved in stages that
+                    have already sent, so at least one must finish first.
                   </div>
                 ) : (
                   <>
                     <div className="grid gap-1.5 rounded-md border border-dashed p-3">
                       <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                        Source scope — {splitPreview.source_stages.length} completed
-                        stage{splitPreview.source_stages.length === 1 ? "" : "s"}
+                        Source scope — {splitPreview.source_stages.length}{" "}
+                        completed stage
+                        {splitPreview.source_stages.length === 1 ? "" : "s"}
                       </span>
                       <p className="text-xs text-muted-foreground">
                         {splitPreview.source_stages
                           .map((st) => `#${st.stage_number}`)
                           .join(", ")}{" "}
-                        · {splitPreview.source_contacts.toLocaleString()} contacts
-                        reached
+                        · {splitPreview.source_contacts.toLocaleString()}{" "}
+                        contacts reached
                       </p>
                     </div>
 
@@ -2539,7 +2576,9 @@ export default function CampaignDetailPage() {
                               </span>
                               <span
                                 className={
-                                  checked ? "text-foreground" : "text-muted-foreground"
+                                  checked
+                                    ? "text-foreground"
+                                    : "text-muted-foreground"
                                 }
                               >
                                 {ln.label}
@@ -2570,20 +2609,20 @@ export default function CampaignDetailPage() {
                         <span className="font-medium">
                           These completed stages reached nobody.
                         </span>{" "}
-                        Every lane would be empty right now. This usually means the
-                        stage that actually sent still has messages in flight, so it
-                        doesn&apos;t count as completed yet. You can still create the
-                        split — the source scope is re-resolved shortly before the
-                        lanes send — but nothing will go out unless more stages
-                        finish first.
+                        Every lane would be empty right now. This usually means
+                        the stage that actually sent still has messages in
+                        flight, so it doesn&apos;t count as completed yet. You
+                        can still create the split — the source scope is
+                        re-resolved shortly before the lanes send — but nothing
+                        will go out unless more stages finish first.
                       </div>
                     ) : null}
                     <p className="text-xs text-muted-foreground">
                       These numbers are a live preview and will change until the
-                      lanes are prepared. The source scope is re-resolved shortly
-                      before they send, so a stage that finishes in the meantime is
-                      included. A lane that ends up with nobody is skipped, not
-                      failed — its siblings still send.
+                      lanes are prepared. The source scope is re-resolved
+                      shortly before they send, so a stage that finishes in the
+                      meantime is included. A lane that ends up with nobody is
+                      skipped, not failed — its siblings still send.
                     </p>
                   </>
                 )}
@@ -2654,8 +2693,7 @@ export default function CampaignDetailPage() {
           <DialogDescription>
             Paste or upload a CSV of phone numbers. New numbers are created,
             existing ones are reused, and all are tagged with the selected
-            contact group(s) — which are added to this campaign&apos;s
-            audience.
+            contact group(s) — which are added to this campaign&apos;s audience.
           </DialogDescription>
         </DialogHeader>
         <PhoneUploadForm
@@ -2679,6 +2717,15 @@ export default function CampaignDetailPage() {
         isPending={campaignStatusApi.isLoading}
         onCancel={() => setCampaignTransition(null)}
         onConfirm={handleCampaignTransition}
+        // Both inputs are already in client state here; the list page has to
+        // prefetch them. Both build the argument through exclTimingInput so
+        // neither page decides anything itself.
+        exclTiming={exclTimingInput({
+          lifecycleRules: campaign.lifecycle_rules === true,
+          excludeSegmentIds: campaign.audience_exclude_segment_ids,
+          stageScheduledAt: stages.map((s) => s.scheduled_at),
+          now: transitionOpenedAt,
+        })}
       />
 
       <AlertDialog
@@ -2744,9 +2791,7 @@ export default function CampaignDetailPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel
-              disabled={
-                stageArchiveApi.isLoading || stageRestoreApi.isLoading
-              }
+              disabled={stageArchiveApi.isLoading || stageRestoreApi.isLoading}
             >
               Cancel
             </AlertDialogCancel>
@@ -2755,9 +2800,7 @@ export default function CampaignDetailPage() {
                 e.preventDefault();
                 void handleStageArchiveRestore();
               }}
-              disabled={
-                stageArchiveApi.isLoading || stageRestoreApi.isLoading
-              }
+              disabled={stageArchiveApi.isLoading || stageRestoreApi.isLoading}
             >
               {stageArchiveConfirm?.kind === "archive" ? "Archive" : "Restore"}
             </AlertDialogAction>
@@ -2814,11 +2857,11 @@ export default function CampaignDetailPage() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               Discards the{" "}
-              {(stageCancelConfirm?.send_counts.pending ?? 0).toLocaleString()} pending
-              message
-              {stageCancelConfirm?.send_counts.pending === 1 ? "" : "s"} materialized for
-              this stage and un-approves it, so you can edit and re-prepare. Nothing has
-              been sent yet. The schedule is kept.
+              {(stageCancelConfirm?.send_counts.pending ?? 0).toLocaleString()}{" "}
+              pending message
+              {stageCancelConfirm?.send_counts.pending === 1 ? "" : "s"}{" "}
+              materialized for this stage and un-approves it, so you can edit
+              and re-prepare. Nothing has been sent yet. The schedule is kept.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -2989,7 +3032,11 @@ function TotalsMetric({
     <div title={title}>
       <div className="text-xs uppercase text-muted-foreground">{label}</div>
       <div className="font-mono text-lg tabular-nums">
-        {raw ? value : typeof value === "number" ? value.toLocaleString() : value}
+        {raw
+          ? value
+          : typeof value === "number"
+            ? value.toLocaleString()
+            : value}
       </div>
     </div>
   );
@@ -3006,13 +3053,7 @@ function BackLink() {
   );
 }
 
-function MetaCell({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode;
-}) {
+function MetaCell({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="grid gap-0.5">
       <span className="text-xs uppercase text-muted-foreground">{label}</span>
@@ -3189,12 +3230,8 @@ function CampaignMetaCompact({
 
         {campaign.notes ? (
           <div className="border-t pt-3">
-            <div className="text-xs uppercase text-muted-foreground">
-              Notes
-            </div>
-            <p className="mt-1 whitespace-pre-wrap text-sm">
-              {campaign.notes}
-            </p>
+            <div className="text-xs uppercase text-muted-foreground">Notes</div>
+            <p className="mt-1 whitespace-pre-wrap text-sm">{campaign.notes}</p>
           </div>
         ) : null}
       </CardContent>

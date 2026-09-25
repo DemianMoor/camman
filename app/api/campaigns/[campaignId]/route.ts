@@ -19,15 +19,15 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
-import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
+import {
+  checkPhoneBrandMatch,
+  pairIsChanging,
+} from "@/lib/api/brand-number-guard";
 import { computeBrandChangeImpact } from "@/lib/api/campaign-brand-change";
 import { can } from "@/lib/permissions";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
-import {
-  campaignUpdateSchema,
-  nullIfEmpty,
-} from "@/lib/validators/campaigns";
+import { campaignUpdateSchema, nullIfEmpty } from "@/lib/validators/campaigns";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -165,19 +165,34 @@ export async function GET(
   }
 
   // Aggregate stage counts per status. One small query, easy to read.
+  //
+  // `earliest` rides along on the SAME aggregate for the Excl-timing warning
+  // (PR 4b): the campaigns LIST route deliberately does NOT carry this — it
+  // serves every row of a 670-campaign list on every page load, and widening it
+  // for data 8 campaigns use, only when a dialog opens, is the wrong trade
+  // (owner decision, 2026-09-25). This route already serves one campaign and
+  // already runs this query, so the column is free here.
   const stageStats = await db
     .select({
       status: campaign_stages.status,
       count: drizzleSql<number>`count(*)::int`,
+      earliest: drizzleSql<string | null>`min(${campaign_stages.scheduled_at})`,
     })
     .from(campaign_stages)
     .where(eq(campaign_stages.campaign_id, campaignId))
     .groupBy(campaign_stages.status);
   const stage_count_by_status: Record<string, number> = {};
   let stage_count_total = 0;
+  let earliest_scheduled_at: string | null = null;
   for (const row of stageStats) {
     stage_count_by_status[row.status] = row.count;
     stage_count_total += row.count;
+    if (
+      row.earliest &&
+      (earliest_scheduled_at === null || row.earliest < earliest_scheduled_at)
+    ) {
+      earliest_scheduled_at = row.earliest;
+    }
   }
 
   const r = rows[0];
@@ -189,6 +204,8 @@ export async function GET(
     traffic_type: r.traffic_type?.id ? r.traffic_type : null,
     stage_count_total,
     stage_count_by_status,
+    // Earliest scheduled_at across all stages, or null when none is scheduled.
+    earliest_scheduled_at,
   });
 }
 
@@ -376,10 +393,12 @@ export async function PATCH(
   // by product ruling, and re-validating an untouched pair would lock them.
   {
     const nextBrandId =
-      input.brand_id !== undefined ? input.brand_id ?? null : current[0].brand_id;
+      input.brand_id !== undefined
+        ? (input.brand_id ?? null)
+        : current[0].brand_id;
     const nextPhoneId =
       input.default_provider_phone_id !== undefined
-        ? input.default_provider_phone_id ?? null
+        ? (input.default_provider_phone_id ?? null)
         : current[0].default_provider_phone_id;
     if (
       pairIsChanging({
@@ -395,14 +414,20 @@ export async function PATCH(
         campaignBrandId: nextBrandId,
       });
       if (mismatch) {
-        return apiError(400, mismatch.message, API_ERROR_CODES.PHONE_BRAND_MISMATCH, {
-          field:
-            input.brand_id !== undefined && input.brand_id !== current[0].brand_id
-              ? "brand_id"
-              : "default_provider_phone_id",
-          phone_brand_id: mismatch.phoneBrandId,
-          campaign_brand_id: mismatch.campaignBrandId,
-        });
+        return apiError(
+          400,
+          mismatch.message,
+          API_ERROR_CODES.PHONE_BRAND_MISMATCH,
+          {
+            field:
+              input.brand_id !== undefined &&
+              input.brand_id !== current[0].brand_id
+                ? "brand_id"
+                : "default_provider_phone_id",
+            phone_brand_id: mismatch.phoneBrandId,
+            campaign_brand_id: mismatch.campaignBrandId,
+          },
+        );
       }
     }
   }
@@ -432,7 +457,7 @@ export async function PATCH(
   if (input.link_mode === "tracked") {
     const resolvedBrandId =
       input.brand_id !== undefined
-        ? input.brand_id ?? null
+        ? (input.brand_id ?? null)
         : current[0].brand_id;
     if (resolvedBrandId == null) {
       return apiError(
@@ -475,9 +500,13 @@ export async function PATCH(
     // uses the campaign's ORIGINAL created_at (not "now") so the ID
     // reflects creation, not finalization.
     const resolvedBrandId =
-      input.brand_id !== undefined ? input.brand_id ?? null : current[0].brand_id;
+      input.brand_id !== undefined
+        ? (input.brand_id ?? null)
+        : current[0].brand_id;
     const resolvedOfferId =
-      input.offer_id !== undefined ? input.offer_id ?? null : current[0].offer_id;
+      input.offer_id !== undefined
+        ? (input.offer_id ?? null)
+        : current[0].offer_id;
     const needsTrackingId =
       current[0].tracking_id == null &&
       resolvedBrandId != null &&
@@ -524,14 +553,18 @@ export async function PATCH(
     //                 to report.
     //   • legacy    — a frozen absolute full_url cannot self-correct: warn only.
     const brandChanged =
-      input.brand_id !== undefined && (input.brand_id ?? null) !== current[0].brand_id;
+      input.brand_id !== undefined &&
+      (input.brand_id ?? null) !== current[0].brand_id;
     if (brandChanged) {
       const impact = await computeBrandChangeImpact(db, {
         orgId,
         campaignId,
         newBrandId: input.brand_id ?? null,
       });
-      if (impact.staleNumberStages.length > 0 || impact.legacyDestinationStages.length > 0) {
+      if (
+        impact.staleNumberStages.length > 0 ||
+        impact.legacyDestinationStages.length > 0
+      ) {
         return NextResponse.json({ ...updated, brand_change_impact: impact });
       }
     }

@@ -58,6 +58,10 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
+import {
+  exclTimingInput,
+  type ExclTimingInput,
+} from "@/lib/campaigns/excl-timing-warning";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
@@ -239,8 +243,7 @@ export default function CampaignsPage() {
   // Resolve the assigned-to filter into the API's expected query value.
   const assignedQueryParam = useMemo(() => {
     if (filters.assigned_to_user_id === null) return null;
-    if (filters.assigned_to_user_id === FILTER_ME)
-      return auth?.user.id ?? null;
+    if (filters.assigned_to_user_id === FILTER_ME) return auth?.user.id ?? null;
     if (filters.assigned_to_user_id === FILTER_UNASSIGNED) return "unassigned";
     return filters.assigned_to_user_id;
   }, [filters.assigned_to_user_id, auth?.user.id]);
@@ -257,10 +260,8 @@ export default function CampaignsPage() {
     if (filters.search) sp.set("search", filters.search);
     if (filters.statuses.length > 0)
       sp.set("status", filters.statuses.join(","));
-    if (filters.brand_id !== null)
-      sp.set("brand_id", String(filters.brand_id));
-    if (filters.offer_id !== null)
-      sp.set("offer_id", String(filters.offer_id));
+    if (filters.brand_id !== null) sp.set("brand_id", String(filters.brand_id));
+    if (filters.offer_id !== null) sp.set("offer_id", String(filters.offer_id));
     if (assignedQueryParam !== null)
       sp.set("assigned_to_user_id", assignedQueryParam);
     if (filters.showArchived) sp.set("showArchived", "true");
@@ -304,10 +305,59 @@ export default function CampaignsPage() {
     campaign: Campaign;
     transition: CampaignTransition;
   } | null>(null);
+  // PR 4b — the Excl-timing warning's inputs, PREFETCHED when the dialog opens
+  // rather than carried by the list route for all 670 rows (owner decision,
+  // 2026-09-25). `undefined` while in flight holds the confirm button; the
+  // dialog must never be confirmable before its warning could appear.
+  // Keyed by campaign id: "no entry for the campaign now in the dialog" IS the
+  // in-flight state, derived rather than written. Writing `undefined` from the
+  // effect body would be a synchronous setState in an effect
+  // (react-hooks/set-state-in-effect); this shape avoids it entirely.
+  const [exclTimingFor, setExclTimingFor] = useState<{
+    campaignId: number;
+    input: ExclTimingInput | null;
+  } | null>(null);
   const [archiveConfirm, setArchiveConfirm] = useState<{
     kind: "archive" | "restore";
     campaign: Campaign;
   } | null>(null);
+
+  // Only `activate` freezes the audience, so only it needs the check. A
+  // superseded or failed fetch resolves to null (no warning) rather than
+  // leaving the button stuck on "Checking…".
+  useEffect(() => {
+    if (transitionTarget?.transition !== "activate") return;
+    const id = transitionTarget.campaign.id;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/campaigns/${id}`);
+        if (!res.ok) throw new Error(String(res.status));
+        const c = (await res.json()) as {
+          lifecycle_rules?: boolean;
+          audience_exclude_segment_ids?: number[] | null;
+          earliest_scheduled_at?: string | null;
+        };
+        if (cancelled) return;
+        setExclTimingFor({
+          campaignId: id,
+          input: exclTimingInput({
+            lifecycleRules: c.lifecycle_rules === true,
+            excludeSegmentIds: c.audience_exclude_segment_ids,
+            stageScheduledAt: [c.earliest_scheduled_at],
+            now: Date.now(),
+          }),
+        });
+      } catch {
+        // A failed prefetch resolves to "nothing to warn about" rather than
+        // leaving the confirm button stuck on "Checking…" forever.
+        if (!cancelled) setExclTimingFor({ campaignId: id, input: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [transitionTarget]);
 
   // Bulk-selection state. Set of campaign IDs currently checked.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -321,7 +371,9 @@ export default function CampaignsPage() {
     succeeded: number[];
     failed: { id: number; reason: string }[];
   }>();
-  async function runBulk(target: "paused" | "active" | "completed" | "archived" | "draft") {
+  async function runBulk(
+    target: "paused" | "active" | "completed" | "archived" | "draft",
+  ) {
     if (selectedIds.size === 0) return;
     setBulkBusy(true);
     const result = await bulkApi.execute("/api/campaigns/bulk-status", {
@@ -343,11 +395,17 @@ export default function CampaignsPage() {
       toast.success(`${succeeded.length} campaigns updated`);
     } else if (succeeded.length > 0) {
       toast.warning(
-        `${succeeded.length} updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`,
+        `${succeeded.length} updated, ${failed.length} skipped: ${failed
+          .map((f) => f.reason)
+          .slice(0, 3)
+          .join(", ")}${failed.length > 3 ? "…" : ""}`,
       );
     } else {
       toast.error(
-        `0 updated, ${failed.length} skipped: ${failed.map((f) => f.reason).slice(0, 3).join(", ")}`,
+        `0 updated, ${failed.length} skipped: ${failed
+          .map((f) => f.reason)
+          .slice(0, 3)
+          .join(", ")}`,
       );
     }
     setSelectedIds(new Set());
@@ -442,7 +500,11 @@ export default function CampaignsPage() {
         toast.error(body.error ?? "Could not change sending state");
         return;
       }
-      toast.success(c.send_paused ? "Sending resumed" : "Sending paused — leads keep accumulating");
+      toast.success(
+        c.send_paused
+          ? "Sending resumed"
+          : "Sending paused — leads keep accumulating",
+      );
       refetch();
     } finally {
       setDripBusyId(null);
@@ -565,9 +627,7 @@ export default function CampaignsPage() {
           const n = row.original.audience_snapshot_count;
           if (n === 0) return <span className="text-muted-foreground">—</span>;
           return (
-            <span className="font-mono tabular-nums">
-              {n.toLocaleString()}
-            </span>
+            <span className="font-mono tabular-nums">{n.toLocaleString()}</span>
           );
         },
       },
@@ -735,9 +795,7 @@ export default function CampaignsPage() {
                     </DropdownMenuItem>
                   ) : null}
                   {canCreate ? (
-                    <DropdownMenuItem
-                      onSelect={() => void handleDuplicate(c)}
-                    >
+                    <DropdownMenuItem onSelect={() => void handleDuplicate(c)}>
                       <Copy className="size-4" aria-hidden /> Duplicate
                     </DropdownMenuItem>
                   ) : null}
@@ -773,11 +831,13 @@ export default function CampaignsPage() {
                       >
                         {c.send_paused ? (
                           <>
-                            <Play className="size-4" aria-hidden /> Resume sending
+                            <Play className="size-4" aria-hidden /> Resume
+                            sending
                           </>
                         ) : (
                           <>
-                            <Pause className="size-4" aria-hidden /> Pause sending
+                            <Pause className="size-4" aria-hidden /> Pause
+                            sending
                           </>
                         )}
                       </DropdownMenuItem>
@@ -1054,8 +1114,8 @@ export default function CampaignsPage() {
           {selectedIds.size > 0 ? (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 px-3 py-2 text-sm">
               <div>
-                <span className="font-medium">{selectedIds.size}</span>{" "}
-                campaign{selectedIds.size === 1 ? "" : "s"} selected
+                <span className="font-medium">{selectedIds.size}</span> campaign
+                {selectedIds.size === 1 ? "" : "s"} selected
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Button
@@ -1149,6 +1209,13 @@ export default function CampaignsPage() {
         isPending={statusApi.isLoading}
         onCancel={() => setTransitionTarget(null)}
         onConfirm={handleTransitionConfirm}
+        exclTiming={
+          transitionTarget?.transition !== "activate"
+            ? null
+            : exclTimingFor?.campaignId === transitionTarget.campaign.id
+              ? exclTimingFor.input
+              : undefined
+        }
       />
 
       {/* Archive / restore confirm */}

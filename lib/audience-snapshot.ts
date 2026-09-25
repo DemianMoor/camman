@@ -701,6 +701,12 @@ export async function computeStageAudienceCountForDraft(
   const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
   const excludeSegmentIds = campaign.excludeSegmentIds ?? [];
   const lifecycleRules = campaign.lifecycleRules === true;
+  // Only emitted for a lifecycle campaign; a legacy one passes null and the
+  // CTE list stays byte-identical to before PR 4b.
+  const lifecycleChips = lifecycleRules
+    ? ((filters.lifecycle_statuses as string[] | undefined) ?? [])
+    : null;
+  const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
   const excludeInUse = campaign.excludeInUse === true;
   // No audience source on the parent campaign → trivially zero.
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
@@ -752,7 +758,7 @@ export async function computeStageAudienceCountForDraft(
     with sources as (
       select distinct contact_id from (${source}) u
     ),
-    ${flagSetCtes(orgId, null, dripPostureOn)},
+    ${flagSetCtes(orgId, null, dripPostureOn, lifecycleChips)},
     flagged as (
       select
         s.contact_id,
@@ -760,8 +766,11 @@ export async function computeStageAudienceCountForDraft(
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere
+        ${useLifecycle
+          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+          : drizzleSql``}
       from sources s
-      ${flagJoins("s")}
+      ${flagJoins("s", false, useLifecycle)}
     ),
     qualified as (
       select
@@ -944,6 +953,12 @@ export async function computeStageAudienceCountsBatchForDraft(
   const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
   const excludeInUse = campaign.excludeInUse === true;
   const lifecycleRules = campaign.lifecycleRules === true;
+  // Only emitted for a lifecycle campaign; a legacy one passes null and the
+  // CTE list stays byte-identical to before PR 4b.
+  const lifecycleChips = lifecycleRules
+    ? ((filters.lifecycle_statuses as string[] | undefined) ?? [])
+    : null;
+  const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
   // No audience source on the parent campaign → every stage is trivially zero
   // (mirrors computeStageAudienceCountForDraft's short-circuit).
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
@@ -970,7 +985,7 @@ export async function computeStageAudienceCountsBatchForDraft(
     with sources as (
       select distinct contact_id from (${source}) u
     ),
-    ${flagSetCtes(orgId, null, dripPostureOn)},
+    ${flagSetCtes(orgId, null, dripPostureOn, lifecycleChips)},
     -- MATERIALIZED is load-bearing: the source set-ops (segment-rule SQL) are
     -- expensive. Computing the flagged set once and reusing it across the
     -- per-stage cross-join keeps the batch at one source evaluation. Without it
@@ -984,8 +999,11 @@ export async function computeStageAudienceCountsBatchForDraft(
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere
+        ${useLifecycle
+          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+          : drizzleSql``}
       from sources s
-      ${flagJoins("s")}
+      ${flagJoins("s", false, useLifecycle)}
     ),
     st as (${stagesCte}),
     qualified as (
@@ -1244,6 +1262,12 @@ export async function previewAudience(
     filters,
   } = input;
   const lifecycleRules = input.lifecycleRules === true;
+  // Only emitted for a lifecycle campaign; a legacy one passes null and the CTE
+  // list stays byte-identical to before PR 4b.
+  const lifecycleChips = lifecycleRules
+    ? ((filters.lifecycle_statuses as string[] | undefined) ?? [])
+    : null;
+  const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
   // set. When off, `offerExposureId` stays null so flagSetCtes/flagJoins emit
@@ -1363,7 +1387,7 @@ export async function previewAudience(
       from unionized
       group by contact_id
     ),
-    ${flagSetCtes(orgId, offerExposureId, dripPostureOn)},
+    ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips)},
     flagged as (
       select
         s.contact_id,
@@ -1377,8 +1401,11 @@ export async function previewAudience(
         ${useOfferExposure
           ? drizzleSql`(oe_set.contact_id is not null)`
           : drizzleSql`false`} as is_offer_exposed${carrierCol}
+        ${useLifecycle
+          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+          : drizzleSql``}
       from sources s
-      ${flagJoins("s", useOfferExposure)}
+      ${flagJoins("s", useOfferExposure, useLifecycle)}
       ${carrierJoin}
     ),
     qualified as (
@@ -1630,6 +1657,8 @@ export interface StageEligibilityPreviewInput {
     contactGroupIds: number[];
     filters: AudienceFilters;
     excludeInUse?: boolean;
+    // campaigns.lifecycle_rules — see AudiencePreviewInput.
+    lifecycleRules?: boolean;
   };
 }
 
@@ -1689,10 +1718,16 @@ export async function computeStageEligibilityPreview(
     });
     const dripPostureOn = await isDripPostureOn(orgId);
     const excludeInUse = draft.excludeInUse === true;
+    // Only emitted for a lifecycle campaign; a legacy one passes null and the
+    // CTE list stays byte-identical to before PR 4b.
+    const lifecycleChips = draft.lifecycleRules
+      ? ((draft.filters.lifecycle_statuses as string[] | undefined) ?? [])
+      : null;
+    const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
     // No split here — applied post-dedup in the final query (see above).
     qualifying = drizzleSql`
       with sources as (select distinct contact_id from (${source}) u),
-      ${flagSetCtes(orgId, null, dripPostureOn)},
+      ${flagSetCtes(orgId, null, dripPostureOn, lifecycleChips)},
       flagged as (
         select
           s.contact_id,
@@ -1700,13 +1735,18 @@ export async function computeStageEligibilityPreview(
           (oi_set.contact_id is not null) as has_opt_in,
           (cl_set.contact_id is not null) as has_clicker,
           (iu_set.contact_id is not null) as is_in_use_elsewhere
+          ${useLifecycle
+            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+            : drizzleSql``}
         from sources s
-        ${flagJoins("s")}
+        ${flagJoins("s", false, useLifecycle)}
       )
       select contact_id
       from flagged
       where has_opt_out = false
-        and ${lifecycleChipPredicate(draft.filters)}
+        and ${lifecycleChipPredicate(draft.filters, {
+          lifecycleRules: draft.lifecycleRules === true,
+        })}
         and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
         and (
           (${sf.include_no_status}::boolean and not has_opt_in and not has_clicker)

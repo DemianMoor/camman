@@ -8,7 +8,8 @@ import {
 import type { StageRecipientFilters } from "@/lib/sends/recipients";
 import { splitBucketMatch } from "@/lib/sends/split-bucket";
 
-export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbOrTx =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Stage send reconciliation (Workstream 3, Guarantee 1): prove no recipient
 // silently vanished. The frozen campaign pool partitions exactly into
@@ -55,7 +56,8 @@ export async function computeStageReconciliation(
   const elig = (await dbc.execute(sql`
     SELECT s.creative_id AS creative_id,
            c.offer_id AS offer_id,
-           c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts
+           c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
+           c.lifecycle_rules AS lifecycle_rules
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
     WHERE s.id = ${stageId} AND s.org_id = ${orgId}::uuid
@@ -64,6 +66,7 @@ export async function computeStageReconciliation(
     creative_id: number | null;
     offer_id: number | null;
     exclude_prior_offer_contacts: boolean;
+    lifecycle_rules: boolean;
   }[];
   const e = elig[0];
   const exclusions = e
@@ -73,6 +76,7 @@ export async function computeStageReconciliation(
         currentCreativeId: e.creative_id ?? null,
         currentOfferId: e.offer_id ?? null,
         excludePriorOffer: e.exclude_prior_offer_contacts,
+        lifecycleRules: e.lifecycle_rules === true,
       })
     : [];
   const exclUnion = eligibilityUnion(exclusions);

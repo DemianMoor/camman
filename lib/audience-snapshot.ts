@@ -230,7 +230,9 @@ function expandCarrierSelection(sel: string[]): string[] {
 function carrierArrayLiteral(values: string[]): string {
   if (values.length === 0) return "ARRAY['__none__']::text[]";
   return (
-    "ARRAY[" + values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") + "]::text[]"
+    "ARRAY[" +
+    values.map((v) => `'${v.replace(/'/g, "''")}'`).join(",") +
+    "]::text[]"
   );
 }
 
@@ -360,8 +362,12 @@ export interface AudienceSnapshotResult {
 async function buildAudienceSourceSql(
   input: AudiencePreviewInput,
 ): Promise<SQL> {
-  const { orgId, segmentIds, contactGroupIds = [], excludeSegmentIds = [] } =
-    input;
+  const {
+    orgId,
+    segmentIds,
+    contactGroupIds = [],
+    excludeSegmentIds = [],
+  } = input;
 
   // Contact-group clause: every contact tagged with any of the selected
   // groups. Built first so it can double as the universe restriction for the
@@ -378,7 +384,9 @@ async function buildAudienceSourceSql(
   // this keeps a near-universal `is_not` rule from scanning all contacts.
   const restrictUniverse = bothSides ? groupClause! : undefined;
   const perSegmentClauses = await Promise.all(
-    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
+    segmentIds.map((id) =>
+      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+    ),
   );
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
@@ -454,7 +462,9 @@ function lifecycleChipPredicate(
     // 'suppressed' is never a chip and is always excluded (spec §7.1); that is
     // an eligibility LAYER, not an audience choice, so it is absent here.
     const wanted = Array.isArray(filters.lifecycle_statuses)
-      ? filters.lifecycle_statuses.filter((v): v is string => typeof v === "string")
+      ? filters.lifecycle_statuses.filter(
+          (v): v is string => typeof v === "string",
+        )
       : [];
     // The one-chip minimum is enforced by the form and by the create/PATCH
     // validators. Reaching here with an empty set means BOTH failed, and of the
@@ -488,7 +498,9 @@ function lifecycleChipPredicate(
  * its SQL (never executed) so scripts/test-eligibility-layers-identical.ts can
  * prove the PR 4a extraction changed nothing. Not used by application code.
  */
-export function buildAudienceQualifierForTest(input: AudiencePreviewInput): SQL {
+export function buildAudienceQualifierForTest(
+  input: AudiencePreviewInput,
+): SQL {
   return buildQualifierFromRelation(input, drizzleSql`audience_candidates`);
 }
 
@@ -531,12 +543,16 @@ function buildQualifierFromRelation(
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere,
-        ${useOfferExposure
-          ? drizzleSql`(oe_set.contact_id is not null)`
-          : drizzleSql`false`} as is_offer_exposed
-        ${useLifecycle
-          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
-          : drizzleSql``}
+        ${
+          useOfferExposure
+            ? drizzleSql`(oe_set.contact_id is not null)`
+            : drizzleSql`false`
+        } as is_offer_exposed
+        ${
+          useLifecycle
+            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+            : drizzleSql``
+        }
       from ${candidateRelation} cand
       ${flagJoins("cand", useOfferExposure, useLifecycle)}
     )
@@ -716,7 +732,6 @@ export async function computeStageAudienceCountForDraft(
     };
   }
 
-
   const stageIncludeNoStatus = stageFilters.include_no_status;
   const stageIncludeClickers = stageFilters.include_clickers;
   const stageExcludeClickers = stageFilters.exclude_clickers;
@@ -732,7 +747,9 @@ export async function computeStageAudienceCountForDraft(
   const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
   const restrictUniverse = bothSides ? groupClause! : undefined;
   const perSegmentClauses = await Promise.all(
-    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
+    segmentIds.map((id) =>
+      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+    ),
   );
   const segmentBranches = perSegmentClauses.map(
     (clause) => drizzleSql`SELECT contact_id FROM (${clause}) seg_inner`,
@@ -766,9 +783,11 @@ export async function computeStageAudienceCountForDraft(
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere
-        ${useLifecycle
-          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
-          : drizzleSql``}
+        ${
+          useLifecycle
+            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+            : drizzleSql``
+        }
       from sources s
       ${flagJoins("s", false, useLifecycle)}
     ),
@@ -812,8 +831,7 @@ export async function computeStageAudienceCountForDraft(
   // Apply the campaign cap as an upper-bound clamp. At activation the
   // snapshot will random-sample, but a clamp here gives the right
   // ceiling for the preview.
-  const cappedCount =
-    cap !== null && cap < row.count ? cap : row.count;
+  const cappedCount = cap !== null && cap < row.count ? cap : row.count;
   return {
     count: cappedCount,
     breakdown: {
@@ -965,7 +983,6 @@ export async function computeStageAudienceCountsBatchForDraft(
     return new Map(stages.map((s) => [s.stageId, 0]));
   }
 
-
   // Identical source composition to computeStageAudienceCountForDraft (it uses
   // the same buildAudienceSourceSql logic inline).
   const source = await buildAudienceSourceSql({
@@ -999,9 +1016,11 @@ export async function computeStageAudienceCountsBatchForDraft(
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere
-        ${useLifecycle
-          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
-          : drizzleSql``}
+        ${
+          useLifecycle
+            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+            : drizzleSql``
+        }
       from sources s
       ${flagJoins("s", false, useLifecycle)}
     ),
@@ -1090,7 +1109,8 @@ export interface LaneCountBatchItem {
 // their (already-resolved) source set.
 function alivenessKey(l: LaneCountBatchItem): string | null {
   const src = l.sourceStageIds ?? null;
-  if (src !== null && src.length > 0) return `g:${[...src].sort((a, b) => a - b).join(",")}`;
+  if (src !== null && src.length > 0)
+    return `g:${[...src].sort((a, b) => a - b).join(",")}`;
   if (l.parentStageId != null) return `p:${l.parentStageId}`;
   return null; // aliveness off
 }
@@ -1288,7 +1308,9 @@ export async function previewAudience(
   const carrierJoin = hasCarrierFilter
     ? drizzleSql`inner join contacts pc on pc.id = s.contact_id`
     : drizzleSql``;
-  const carrierCol = hasCarrierFilter ? drizzleSql`, pc.carrier_norm` : drizzleSql``;
+  const carrierCol = hasCarrierFilter
+    ? drizzleSql`, pc.carrier_norm`
+    : drizzleSql``;
   // When BOTH dimensions are selected the audience is their INTERSECTION:
   // a contact must be in EVERY selected segment AND in a selected group. With
   // only one dimension populated, that side stands alone (no intersection).
@@ -1313,7 +1335,9 @@ export async function previewAudience(
   // exclude branches carry a NULL ordinal so they never inflate that count
   // (count(distinct …) ignores NULLs).
   const perSegmentClauses = await Promise.all(
-    segmentIds.map((id) => buildSegmentAudienceClause(id, orgId, restrictUniverse)),
+    segmentIds.map((id) =>
+      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+    ),
   );
   const segmentBranches = perSegmentClauses.map(
     (clause, i) => drizzleSql`
@@ -1346,10 +1370,13 @@ export async function previewAudience(
       FROM (${clause}) exc_inner
     `,
   );
-  const allBranches = [...segmentBranches, ...groupBranches, ...excludeBranches];
-  const unionedWithSources = allBranches.reduce(
-    (acc, branch, i) =>
-      i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
+  const allBranches = [
+    ...segmentBranches,
+    ...groupBranches,
+    ...excludeBranches,
+  ];
+  const unionedWithSources = allBranches.reduce((acc, branch, i) =>
+    i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
   );
 
   // Positive-base membership expression, resolved from which dimensions are
@@ -1398,12 +1425,16 @@ export async function previewAudience(
         (oi_set.contact_id is not null) as has_opt_in,
         (cl_set.contact_id is not null) as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere,
-        ${useOfferExposure
-          ? drizzleSql`(oe_set.contact_id is not null)`
-          : drizzleSql`false`} as is_offer_exposed${carrierCol}
-        ${useLifecycle
-          ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
-          : drizzleSql``}
+        ${
+          useOfferExposure
+            ? drizzleSql`(oe_set.contact_id is not null)`
+            : drizzleSql`false`
+        } as is_offer_exposed${carrierCol}
+        ${
+          useLifecycle
+            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+            : drizzleSql``
+        }
       from sources s
       ${flagJoins("s", useOfferExposure, useLifecycle)}
       ${carrierJoin}
@@ -1441,8 +1472,9 @@ export async function previewAudience(
       -- Per-bucket counts of contacts dropped BY the carrier filter (empty when no
       -- filter). Unidentified is its own line. Reported over the eligible ∩ membership
       -- audience so the UI can show "N removed as unidentified" + per-bucket removals.
-      ${hasCarrierFilter
-        ? drizzleSql`jsonb_build_object(
+      ${
+        hasCarrierFilter
+          ? drizzleSql`jsonb_build_object(
             'AT&T', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'AT&T'),
             'T-Mobile', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'T-Mobile'),
             'Verizon', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Verizon'),
@@ -1451,7 +1483,8 @@ export async function previewAudience(
             'Unknown', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm in ('Unknown','Unmapped')),
             'Unidentified', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Unidentified')
           )`
-        : drizzleSql`'{}'::jsonb`} as carrier_removed,
+          : drizzleSql`'{}'::jsonb`
+      } as carrier_removed,
       -- Per-source contributions stay PRE-intersection (eligible on each
       -- side) so the UI can show how the two dimensions narrow down; the
       -- intersection itself is the overlap column, which equals
@@ -1589,7 +1622,7 @@ export async function snapshotAudience(
   const totalRows = (await runner.execute(drizzleSql`
     select count(*)::int as count from audience_qualified
   `)) as unknown as { count: number }[];
-  const total = Array.isArray(totalRows) ? totalRows[0]?.count ?? 0 : 0;
+  const total = Array.isArray(totalRows) ? (totalRows[0]?.count ?? 0) : 0;
 
   const limitClause =
     cap !== null && cap < total
@@ -1648,7 +1681,12 @@ export interface StageEligibilityPreviewInput {
   // opt-in toggle. (org/campaign come from above.)
   eligibility: Pick<
     StageEligibilityParams,
-    "currentCreativeId" | "currentOfferId" | "excludePriorOffer"
+    | "currentCreativeId"
+    | "currentOfferId"
+    | "excludePriorOffer"
+    // campaigns.lifecycle_rules. Required, so a new call site cannot forget it
+    // and silently preview the legacy predicate for a lifecycle campaign.
+    | "lifecycleRules"
   >;
   // Draft mode needs the campaign's planned audience recipe (no frozen pool yet).
   draft?: {
@@ -1657,8 +1695,6 @@ export interface StageEligibilityPreviewInput {
     contactGroupIds: number[];
     filters: AudienceFilters;
     excludeInUse?: boolean;
-    // campaigns.lifecycle_rules — see AudiencePreviewInput.
-    lifecycleRules?: boolean;
   };
 }
 
@@ -1698,7 +1734,10 @@ export async function computeStageEligibilityPreview(
     });
   } else {
     const draft = input.draft;
-    if (!draft || (draft.segmentIds.length === 0 && draft.contactGroupIds.length === 0)) {
+    if (
+      !draft ||
+      (draft.segmentIds.length === 0 && draft.contactGroupIds.length === 0)
+    ) {
       return {
         segment_total: 0,
         saw_creative: 0,
@@ -1720,7 +1759,7 @@ export async function computeStageEligibilityPreview(
     const excludeInUse = draft.excludeInUse === true;
     // Only emitted for a lifecycle campaign; a legacy one passes null and the
     // CTE list stays byte-identical to before PR 4b.
-    const lifecycleChips = draft.lifecycleRules
+    const lifecycleChips = input.eligibility.lifecycleRules
       ? ((draft.filters.lifecycle_statuses as string[] | undefined) ?? [])
       : null;
     const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
@@ -1735,9 +1774,11 @@ export async function computeStageEligibilityPreview(
           (oi_set.contact_id is not null) as has_opt_in,
           (cl_set.contact_id is not null) as has_clicker,
           (iu_set.contact_id is not null) as is_in_use_elsewhere
-          ${useLifecycle
-            ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
-            : drizzleSql``}
+          ${
+            useLifecycle
+              ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
+              : drizzleSql``
+          }
         from sources s
         ${flagJoins("s", false, useLifecycle)}
       )
@@ -1745,7 +1786,7 @@ export async function computeStageEligibilityPreview(
       from flagged
       where has_opt_out = false
         and ${lifecycleChipPredicate(draft.filters, {
-          lifecycleRules: draft.lifecycleRules === true,
+          lifecycleRules: input.eligibility.lifecycleRules === true,
         })}
         and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
         and (
@@ -1762,6 +1803,7 @@ export async function computeStageEligibilityPreview(
     currentCreativeId: input.eligibility.currentCreativeId,
     currentOfferId: input.eligibility.currentOfferId,
     excludePriorOffer: input.eligibility.excludePriorOffer,
+    lifecycleRules: input.eligibility.lifecycleRules === true,
   });
   // Look up by key rather than by field: `ex` is an ordered layer list now, so
   // a layer that does not apply is simply absent. EMPTY_CONTACTS keeps the CTE

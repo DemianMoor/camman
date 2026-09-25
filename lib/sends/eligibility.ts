@@ -1,5 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
+import { purchasedOfferContacts } from "@/lib/sale-attribution";
+
 // ── Content-dedup eligibility (Phase 2, migration 0086/0087) ──────────────────
 // The SINGLE shared definition of "which contacts must be suppressed for this
 // stage" — consumed by the send/export recipient query (stageRecipientsSql), the
@@ -39,6 +41,17 @@ export interface StageEligibilityParams {
   currentOfferId: number | null;
   // campaigns.exclude_prior_offer_contacts — gates LAYER 3.
   excludePriorOffer: boolean;
+  // campaigns.lifecycle_rules (migration 0187). Gates the three lifecycle
+  // layers below.
+  //
+  // ⚠️ REQUIRED, not optional-defaulting-to-false, and deliberately so. Five
+  // call sites reach this builder and none of them knew the flag before PR 4b;
+  // an optional field would let any one of them keep compiling while silently
+  // skipping every lifecycle exclusion, forever. The symptom — "some sends
+  // exclude suppressed contacts and some don't" — is close to unfindable from
+  // the outside. Required turns that into a compile error that enumerates the
+  // callers for you.
+  lifecycleRules: boolean;
 }
 
 // Every exclusion layer, in the order they are applied and reported. Adding a
@@ -76,7 +89,9 @@ export interface EligibilityLayer {
 export type StageEligibilityExclusions = EligibilityLayer[];
 
 /** Sort an arbitrary set of layers into the canonical order. */
-export function orderLayers(layers: EligibilityLayer[]): StageEligibilityExclusions {
+export function orderLayers(
+  layers: EligibilityLayer[],
+): StageEligibilityExclusions {
   const rank = new Map<EligibilityLayerKey, number>(
     EXCLUSION_PRIORITY.map((k, i) => [k, i]),
   );
@@ -120,6 +135,44 @@ export function buildStageEligibilityExclusions(
       : null;
 
   const layers: EligibilityLayer[] = [];
+
+  // ── The lifecycle layers (PR 4b, spec §8.1) ────────────────────────────
+  // Only for a lifecycle campaign. None of them filters messaging_status:
+  // gateEligible() gates the whole audience, the same decision PR 3 made for
+  // the segment rules and for the same reason.
+  if (p.lifecycleRules) {
+    // Suppressed — the end of the lifecycle. Reads the migration-0188
+    // projection on contacts, like the audience chips do.
+    layers.push({
+      key: "suppressed",
+      sql: sql`
+        SELECT id AS contact_id FROM contacts
+        WHERE org_id = ${p.orgId}::uuid AND lifecycle_status = 'suppressed'
+      `,
+    });
+    // Bought this offer. Shares ONE definition with the
+    // made_purchase_for_offer segment rule (spec §8.1) so the two cannot
+    // drift about who has bought what.
+    if (p.currentOfferId != null) {
+      layers.push({
+        key: "bought_offer",
+        sql: purchasedOfferContacts(p.orgId, p.currentOfferId),
+      });
+    }
+    // In freeze AND messaged inside their own effective cadence. The cadence
+    // is stored per contact by the engagement job, so this needs no threshold
+    // lookup and no join to contact_groups.
+    layers.push({
+      key: "freeze_not_due",
+      sql: sql`
+        SELECT contact_id FROM contact_engagement
+        WHERE org_id = ${p.orgId}::uuid
+          AND status = 'freeze'
+          AND last_sent_at > now() - make_interval(days => freeze_cadence_days)
+      `,
+    });
+  }
+
   if (creative) layers.push({ key: "creative", sql: creative });
   if (inFlight) layers.push({ key: "in_flight", sql: inFlight });
   if (offer) layers.push({ key: "offer", sql: offer });

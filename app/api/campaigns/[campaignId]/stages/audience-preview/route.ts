@@ -86,6 +86,7 @@ export async function POST(
       exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
       offer_id: campaigns.offer_id,
       exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
+      lifecycle_rules: campaigns.lifecycle_rules,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
@@ -122,13 +123,12 @@ export async function POST(
           id: cid,
           orgId,
           segmentIds: campaignRow[0].audience_segment_ids ?? [],
-          excludeSegmentIds:
-            campaignRow[0].audience_exclude_segment_ids ?? [],
-          contactGroupIds:
-            campaignRow[0].audience_contact_group_ids ?? [],
+          excludeSegmentIds: campaignRow[0].audience_exclude_segment_ids ?? [],
+          contactGroupIds: campaignRow[0].audience_contact_group_ids ?? [],
           filters: campaignRow[0].audience_filters ?? {},
           cap: campaignRow[0].audience_cap ?? null,
           excludeInUse: campaignRow[0].exclude_in_use_contacts,
+          lifecycleRules: campaignRow[0].lifecycle_rules === true,
         },
         parsed.data,
       )
@@ -137,7 +137,7 @@ export async function POST(
   // For "projected" mode the pool count we display is the cap (the
   // ceiling at activation). For "frozen" mode it's the actual snapshot.
   const pool_size = isDraft
-    ? campaignRow[0].audience_cap ?? result.count
+    ? (campaignRow[0].audience_cap ?? result.count)
     : campaignRow[0].audience_snapshot_count;
 
   // Content-dedup eligibility breakdown (Phase 2 §5). Single timeout-guarded
@@ -153,12 +153,12 @@ export async function POST(
       currentCreativeId: parsed.data.creative_id ?? null,
       currentOfferId: campaignRow[0].offer_id,
       excludePriorOffer: campaignRow[0].exclude_prior_offer_contacts,
+      lifecycleRules: campaignRow[0].lifecycle_rules === true,
     },
     draft: isDraft
       ? {
           segmentIds: campaignRow[0].audience_segment_ids ?? [],
-          excludeSegmentIds:
-            campaignRow[0].audience_exclude_segment_ids ?? [],
+          excludeSegmentIds: campaignRow[0].audience_exclude_segment_ids ?? [],
           contactGroupIds: campaignRow[0].audience_contact_group_ids ?? [],
           filters: campaignRow[0].audience_filters ?? {},
           excludeInUse: campaignRow[0].exclude_in_use_contacts,

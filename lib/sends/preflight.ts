@@ -5,7 +5,8 @@ import { resolveSendsPerSecond } from "@/lib/sends/circuit-breakers";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
 
-export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbOrTx =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Read-only pre-flight validation for a stage send (WS2). Mirrors the structural
 // refusal reasons of kickoffStageSend WITHOUT materializing, so the operator sees
@@ -77,6 +78,7 @@ interface MainRow {
   creative_id: number | null;
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
+  lifecycle_rules: boolean;
   stage_tracking_id: string | null;
   sms_provider_id: number | null;
   provider_phone_id: number | null;
@@ -100,7 +102,11 @@ interface MainRow {
 
 export async function preflightStageSend(
   dbc: DbOrTx,
-  { orgId, campaignId, stageId }: { orgId: string; campaignId: number; stageId: number },
+  {
+    orgId,
+    campaignId,
+    stageId,
+  }: { orgId: string; campaignId: number; stageId: number },
 ): Promise<PreflightResult> {
   const rows = (await dbc.execute(sql`
     SELECT
@@ -111,6 +117,7 @@ export async function preflightStageSend(
       s.creative_id       AS creative_id,
       c.offer_id          AS offer_id,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
+      c.lifecycle_rules AS lifecycle_rules,
       s.tracking_id       AS stage_tracking_id,
       s.sms_provider_id   AS sms_provider_id,
       s.provider_phone_id AS provider_phone_id,
@@ -183,6 +190,7 @@ export async function preflightStageSend(
           creativeId: row.creative_id ?? null,
           offerId: row.offer_id ?? null,
           excludePriorOffer: row.exclude_prior_offer_contacts,
+          lifecycleRules: row.lifecycle_rules === true,
         },
         // Q4: the same carrier policy kickoff will apply, so the previewed
         // recipient count equals what materializes. Omitting it here would make
@@ -198,13 +206,23 @@ export async function preflightStageSend(
 
   const checks: PreflightCheck[] = [];
   const blockers: PreflightBlocker[] = [];
-  const add = (key: string, ok: boolean, label: string, blocker?: PreflightBlocker) => {
+  const add = (
+    key: string,
+    ok: boolean,
+    label: string,
+    blocker?: PreflightBlocker,
+  ) => {
     checks.push({ key, ok, label });
     if (!ok && blocker) blockers.push(blocker);
   };
 
   add("creative", !!row.creative_text, "Creative attached", "no_creative");
-  add("recipients", recipientCount > 0, `Recipients: ${recipientCount.toLocaleString()}`, "no_recipients");
+  add(
+    "recipients",
+    recipientCount > 0,
+    `Recipients: ${recipientCount.toLocaleString()}`,
+    "no_recipients",
+  );
 
   if (mode === "tracked") {
     add(
@@ -253,7 +271,12 @@ export async function preflightStageSend(
       WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
       LIMIT 1
     `)) as unknown as { ok: number }[];
-    add("short_domain", sd.length > 0, "Active short domain", "no_short_domain");
+    add(
+      "short_domain",
+      sd.length > 0,
+      "Active short domain",
+      "no_short_domain",
+    );
   }
 
   // Phase 4 throughput guardrail (tracked, sender assigned). Estimate the drain

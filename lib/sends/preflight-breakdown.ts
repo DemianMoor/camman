@@ -2,11 +2,18 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
-import { preflightStageSend, type PreflightBlocker } from "@/lib/sends/preflight";
+import {
+  preflightStageSend,
+  type PreflightBlocker,
+} from "@/lib/sends/preflight";
 import { computeStageReconciliation } from "@/lib/sends/reconcile";
-import { stageRecipientsSql, type StageRecipientFilters } from "@/lib/sends/recipients";
+import {
+  stageRecipientsSql,
+  type StageRecipientFilters,
+} from "@/lib/sends/recipients";
 
-export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type DbOrTx =
+  typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // ─── P5/P6: preflight breakdown ─────────────────────────────────────────────
 //
@@ -73,13 +80,18 @@ interface CfgRow {
   creative_id: number | null;
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
+  lifecycle_rules: boolean;
   provider_phone_id: number | null;
   allow_unknown_carrier: boolean | null;
 }
 
 export async function computePreflightBreakdown(
   dbc: DbOrTx,
-  { orgId, campaignId, stageId }: { orgId: string; campaignId: number; stageId: number },
+  {
+    orgId,
+    campaignId,
+    stageId,
+  }: { orgId: string; campaignId: number; stageId: number },
 ): Promise<PreflightBreakdown> {
   // 1. Live audience + blockers + drain estimate (the authoritative send picture).
   const pf = await preflightStageSend(dbc, { orgId, campaignId, stageId });
@@ -91,7 +103,7 @@ export async function computePreflightBreakdown(
            s.split_index, s.split_total, s.behavioral_tier, s.parent_stage_id,
            (SELECT g.source_stage_ids FROM campaign_stage_split_groups g
              WHERE g.id = s.split_group_id) AS source_stage_ids,
-           s.creative_id, c.offer_id, c.exclude_prior_offer_contacts,
+           s.creative_id, c.offer_id, c.exclude_prior_offer_contacts, c.lifecycle_rules,
            s.provider_phone_id, pp.allow_unknown_carrier
     FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
@@ -106,11 +118,23 @@ export async function computePreflightBreakdown(
     pool_total: 0,
     materialized_audience: materialized,
     predicted_sends: materialized,
-    excluded: { opt_out: 0, stage_filter: 0, split: 0, content_dedup: 0, lane: 0, dedup_1h_predicted: 0, carrier: {} },
+    excluded: {
+      opt_out: 0,
+      stage_filter: 0,
+      split: 0,
+      content_dedup: 0,
+      lane: 0,
+      dedup_1h_predicted: 0,
+      carrier: {},
+    },
     estimated_drain_seconds: pf.estimated_drain_seconds,
     sender_sends_per_second: pf.sender_sends_per_second,
     blockers: pf.blockers,
-    red: { no_audience: materialized === 0, all_dedup_predicted: false, has_blocker: pf.blockers.length > 0 },
+    red: {
+      no_audience: materialized === 0,
+      all_dedup_predicted: false,
+      has_blocker: pf.blockers.length > 0,
+    },
   };
   if (!cfg) return empty;
 
@@ -133,17 +157,25 @@ export async function computePreflightBreakdown(
     creativeId: cfg.creative_id ?? null,
     offerId: cfg.offer_id ?? null,
     excludePriorOffer: cfg.exclude_prior_offer_contacts,
+    lifecycleRules: cfg.lifecycle_rules === true,
   };
 
   // 3. Per-cause exclusion buckets off the frozen pool (opt-out/filter/split/dedup).
   //    reconcile does NOT apply the lane overlay, so its `qualified` is pre-lane.
-  const recon = await computeStageReconciliation(dbc, { campaignId, orgId, stageId, filters });
+  const recon = await computeStageReconciliation(dbc, {
+    campaignId,
+    orgId,
+    stageId,
+    filters,
+  });
 
   // 4. Lane exclusion = contacts that passed everything but failed the tier/aliveness
   //    overlay. Only meaningful for lane children; for non-lane stages, qualified
   //    and materialized should match, so we don't attribute any drift to "lane".
   const laneExcluded =
-    cfg.behavioral_tier != null ? Math.max(0, recon.qualified - materialized) : 0;
+    cfg.behavioral_tier != null
+      ? Math.max(0, recon.qualified - materialized)
+      : 0;
 
   // 5. Predicted 1-hour phone dedup: of the materialized recipient set, how many
   //    phones already have a 'sent' row org-wide within the dedup window. Uses the

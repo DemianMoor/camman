@@ -27,14 +27,19 @@ const bar = (name: string, ok: boolean, detail = "") => {
 
 async function main() {
   const { requirePreviewDb } = await import("./_require-preview-db");
-  const { fictionalPhones, refuseIfPhonesInUse } = await import("./_fictional-phones");
+  const { fictionalPhones, refuseIfPhonesInUse } =
+    await import("./_fictional-phones");
   const { db } = await import("@/db/client");
-  const { buildAudienceQualifierForTest } = await import("@/lib/audience-snapshot");
-  const { LIFECYCLE_CHIP_STATUSES } = await import("@/lib/validators/campaigns");
+  const { buildAudienceQualifierForTest } =
+    await import("@/lib/audience-snapshot");
+  const { LIFECYCLE_CHIP_STATUSES } =
+    await import("@/lib/validators/campaigns");
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
-  const one = async <T,>(q: SQL): Promise<T> => ((await db.execute(q)) as unknown as T[])[0];
-  const all = async <T,>(q: SQL): Promise<T[]> => (await db.execute(q)) as unknown as T[];
+  const one = async <T>(q: SQL): Promise<T> =>
+    ((await db.execute(q)) as unknown as T[])[0];
+  const all = async <T>(q: SQL): Promise<T[]> =>
+    (await db.execute(q)) as unknown as T[];
 
   const tag = `chips-${Date.now()}`;
   let orgId = "";
@@ -90,19 +95,34 @@ async function main() {
     console.log("PART C — the lifecycle chip predicate");
 
     const c1 = await qualify({ lifecycle_statuses: ["cold"] }, true);
-    bar("C1 one chip selects exactly that status", named(c1) === "cold", named(c1));
+    bar(
+      "C1 one chip selects exactly that status",
+      named(c1) === "cold",
+      named(c1),
+    );
 
     const c2 = await qualify({ lifecycle_statuses: ["hot", "warm"] }, true);
-    bar("C2 the Hot/Warm chip selects both", named(c2) === "hot,warm", named(c2));
+    bar(
+      "C2 the Hot/Warm chip selects both",
+      named(c2) === "hot,warm",
+      named(c2),
+    );
 
-    const c3 = await qualify({ lifecycle_statuses: ["new", "cold", "freeze"] }, true);
+    const c3 = await qualify(
+      { lifecycle_statuses: ["new", "cold", "freeze"] },
+      true,
+    );
     bar("C3 chips OR together", named(c3) === "new,cold,freeze", named(c3));
 
     // ⭐ The one that matters. An empty set reaching the predicate means the
     // form AND the validators both failed; of the two readings, "everybody" is
     // the one that silently messages the entire contact base.
     const c4 = await qualify({ lifecycle_statuses: [] }, true);
-    bar("C4 an EMPTY chip set matches NOBODY, not everybody", c4.size === 0, named(c4));
+    bar(
+      "C4 an EMPTY chip set matches NOBODY, not everybody",
+      c4.size === 0,
+      named(c4),
+    );
     const c5 = await qualify({}, true);
     bar("C5 a MISSING chip key matches nobody too", c5.size === 0, named(c5));
 
@@ -112,11 +132,16 @@ async function main() {
       { lifecycle_statuses: [...LIFECYCLE_CHIP_STATUSES] },
       true,
     );
-    bar("C6 every chip selected still EXCLUDES suppressed",
-      !everyChip.has(ids.suppressed) && everyChip.size === LIFECYCLE_CHIP_STATUSES.length,
-      named(everyChip));
-    bar("C7 'suppressed' is not an offerable chip value",
-      !(LIFECYCLE_CHIP_STATUSES as readonly string[]).includes("suppressed"));
+    bar(
+      "C6 every chip selected still EXCLUDES suppressed",
+      !everyChip.has(ids.suppressed) &&
+        everyChip.size === LIFECYCLE_CHIP_STATUSES.length,
+      named(everyChip),
+    );
+    bar(
+      "C7 'suppressed' is not an offerable chip value",
+      !(LIFECYCLE_CHIP_STATUSES as readonly string[]).includes("suppressed"),
+    );
 
     // An unrecognised value is dropped rather than interpolated — it builds a
     // raw fragment, so this is the injection guard as well as a narrowing one.
@@ -124,32 +149,54 @@ async function main() {
       { lifecycle_statuses: ["cold", "'; drop table contacts; --"] },
       true,
     );
-    bar("C8 an unrecognised chip value is dropped, not interpolated",
-      named(c8) === "cold", named(c8));
+    bar(
+      "C8 an unrecognised chip value is dropped, not interpolated",
+      named(c8) === "cold",
+      named(c8),
+    );
 
     // ── the legacy branch is untouched ─────────────────────────────────────
     // lifecycle_statuses present but lifecycle_rules false ⇒ the OLD predicate
     // decides, and the lifecycle key is ignored entirely.
-    const legacy = await qualify(
+    // The claim is not "some rows came back" — it is that the chip key makes NO
+    // difference when the campaign is legacy. So compare the SAME filters with
+    // and without it; identical sets is the only outcome that proves it.
+    const legacyWith = await qualify(
       { include_no_status: true, lifecycle_statuses: ["hot"] },
       false,
     );
-    bar("C9 with lifecycle_rules FALSE the legacy predicate decides",
-      legacy.size > 0 && !legacy.has(ids.hot) === false ? true : legacy.size > 0,
-      `${legacy.size} contact(s) — lifecycle_statuses ignored`);
+    const legacyWithout = await qualify({ include_no_status: true }, false);
+    const sameSet =
+      legacyWith.size === legacyWithout.size &&
+      [...legacyWith].every((id) => legacyWithout.has(id));
+    bar(
+      "C9 with lifecycle_rules FALSE the chip key changes nothing",
+      sameSet && legacyWithout.size > 0,
+      `${named(legacyWith)} vs ${named(legacyWithout)}`,
+    );
     const legacyNone = await qualify({ lifecycle_statuses: ["cold"] }, false);
-    bar("C10 legacy with NO old chips set matches nobody (old semantics)",
-      legacyNone.size === 0, named(legacyNone));
+    bar(
+      "C10 legacy with NO old chips set matches nobody (old semantics)",
+      legacyNone.size === 0,
+      named(legacyNone),
+    );
   } finally {
     if (orgId) {
       const name =
-        (await all<{ name: string }>(sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))[0]
-          ?.name ?? "";
+        (
+          await all<{ name: string }>(
+            sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`,
+          )
+        )[0]?.name ?? "";
       if (!name.includes(MARKER)) {
-        console.error(`REFUSING TEARDOWN: org ${orgId} lacks the marker (${JSON.stringify(name)})`);
+        console.error(
+          `REFUSING TEARDOWN: org ${orgId} lacks the marker (${JSON.stringify(name)})`,
+        );
         fail++;
       } else {
-        await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
+        await db.execute(
+          sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`,
+        );
       }
       const left = await one<{ n: string }>(sql`
         SELECT ((SELECT count(*) FROM organizations WHERE id = ${orgId}::uuid)
@@ -159,7 +206,9 @@ async function main() {
     }
   }
 
-  console.log(fail === 0 ? "\nAll checks passed." : `\n${fail} check(s) FAILED.`);
+  console.log(
+    fail === 0 ? "\nAll checks passed." : `\n${fail} check(s) FAILED.`,
+  );
   process.exit(fail === 0 ? 0 : 1);
 }
 

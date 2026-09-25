@@ -63,6 +63,29 @@ export function purchasedClause(alias = "ce"): SQL {
 }
 
 /**
+ * Contacts who have PURCHASED a given offer — the single definition, shared by
+ * the `made_purchase_for_offer` segment rule (lib/segment-rules-eval.ts) and
+ * the `bought_offer` eligibility layer (lib/sends/eligibility.ts). Spec §8.1
+ * requires they be the same SQL so the two cannot drift.
+ *
+ * ⚠️ The offer is scoped through the CAMPAIGN's offer, not
+ * conversion_events.offer_id: the ledger column is the offer at INGEST time,
+ * while both callers mean "the campaign's offer". Keeping the join keeps the
+ * meaning.
+ */
+export function purchasedOfferContacts(orgId: string, offerId: number): SQL {
+  return sql`
+        SELECT DISTINCT ce.contact_id
+        FROM conversion_events ce
+        JOIN campaigns ca ON ca.id = ce.campaign_id
+        WHERE ce.org_id = ${orgId}::uuid
+          AND ce.contact_id IS NOT NULL
+          AND ${purchasedClause()}
+          AND ca.offer_id = ${offerId}::int
+      `;
+}
+
+/**
  * A COUNTED conversion of ANY event type, on the aliased conversion_events row:
  * the status half of purchasedClause, with the is_purchase half removed.
  *
@@ -197,7 +220,10 @@ export function rescueSendIds(orgId: string | null, window: SQL = sql``): SQL {
  *
  * `orgId = null` is cross-org — see purchasedSendIds.
  */
-export function purchasesBySendSelect(orgId: string | null, restrict: SQL = sql``): SQL {
+export function purchasesBySendSelect(
+  orgId: string | null,
+  restrict: SQL = sql``,
+): SQL {
   const org = orgId === null ? sql`` : sql`AND ce.org_id = ${orgId}::uuid`;
   return sql`
     SELECT ce.stage_send_id,

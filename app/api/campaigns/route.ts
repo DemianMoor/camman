@@ -318,6 +318,14 @@ export async function POST(req: NextRequest) {
             // take the column default (false) and every campaign would be
             // legacy no matter what the engine is doing.
             lifecycle_rules: lifecycleRules,
+            // 869f53efz: new campaigns use the Y/N offer rules. Named
+            // explicitly for the reason the warning above gives — the column
+            // default is FALSE precisely so the 673 campaigns that predate
+            // 0191 keep "ever got this offer", and only a deliberate write
+            // here opts a new one into the new semantics.
+            offer_rules_enabled: true,
+            offer_cooldown_days: input.offer_cooldown_days ?? 7,
+            offer_limit_times: input.offer_limit_times ?? 5,
           })
           .returning();
 
@@ -373,6 +381,9 @@ export async function POST(req: NextRequest) {
               // about which predicate chose it, permanently, because a pool is
               // never recomputed.
               lifecycleRules,
+              offerRulesEnabled: true,
+              offerCooldownDays: input.offer_cooldown_days ?? 7,
+              offerLimitTimes: input.offer_limit_times ?? 5,
               segmentIds,
               excludeSegmentIds,
               contactGroupIds,

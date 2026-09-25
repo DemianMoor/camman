@@ -78,10 +78,15 @@ ALTER TABLE campaigns VALIDATE CONSTRAINT campaigns_offer_limit_times_check;
 ```ts
 // M1  got this offer 6 days ago, cooldown 7  ⇒ EXCLUDED (cooldown)
 // M2  got it 8 days ago, cooldown 7          ⇒ eligible
-// M3  ⭐ boundary: exactly 7 days            ⇒ eligible (strictly "within Y")
+// M3  ⭐ boundary: exactly 7.0 days ago      ⇒ EXCLUDED (owner, 2026-09-25:
+//     the rule is "more than Y days ago" to be eligible — same `>` as the
+//     freeze cadence, so the two cadence rules cannot disagree)
 // M4  got it 5 times, limit 5                ⇒ EXCLUDED (limit)
 // M5  got it 4 times, limit 5                ⇒ eligible
-// M6  ⭐ counts span CAMPAIGNS: 3 sends in one campaign + 2 in another = 5
+// M6  ⭐ counts span CAMPAIGNS: one row each in 5 other campaigns = 5
+// M6b ⭐ ONE campaign with messages = 5 counts as 1, NOT 5 — the bar that
+//     separates counting campaigns from counting messages; without it both
+//     implementations pass
 // M7  ⭐ THE CURRENT CAMPAIGN IS EXCLUDED FROM BOTH COUNTS — stage 2 must not
 //     be blocked by stage 1 (spec §11). Build a contact with rows ONLY under
 //     the current campaign and assert it is eligible on both layers.
@@ -97,7 +102,7 @@ ALTER TABLE campaigns VALIDATE CONSTRAINT campaigns_offer_limit_times_check;
 
 - [ ] **Step 3: Run it, confirm it fails.** `DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx --conditions=react-server scripts/test-offer-limit-cooldown.ts`
 - [ ] **Step 4: Implement**, reading `contact_offer_campaigns` with `campaign_id <> currentCampaignId` on both layers. Index `contact_offer_campaigns_org_offer_contact_idx (org_id, offer_id, contact_id)` serves both.
-- [ ] **Step 5: Re-run — expect 11/11.** **Step 6: Commit.**
+- [ ] **Step 5: Re-run — expect 12/12.** **Step 6: Commit.**
 
 ---
 
@@ -144,11 +149,14 @@ ALTER TABLE campaigns VALIDATE CONSTRAINT campaigns_offer_limit_times_check;
 
 ---
 
-## Open questions for you, before I build
+## Decisions (owner, 2026-09-25) — all four settled
 
-1. **Cooldown boundary.** "Within 7 days" — is exactly 7.0 days ago eligible or excluded? The plan assumes **eligible** (strictly less than Y). M3 pins whichever you choose.
-2. **Does the limit count MESSAGES or CAMPAIGNS?** `contact_offer_campaigns` has both: one row per (contact, offer, campaign) with a `messages` counter. "Got this offer 5 times" reads more naturally as five **campaigns** than five messages, and a three-stage drip would otherwise consume the allowance in one campaign. The plan assumes **campaigns** (`count(*)` over rows, current campaign excluded). This is the single biggest semantic choice in the PR.
-3. **One control or two** (Task 4 Step 3) — recommendation above is one.
+1. **The limit counts CAMPAIGNS, not messages.** One sequence = 1, however many stages it has. So the layer is `count(*)` over `contact_offer_campaigns` rows for that (contact, offer), excluding the current campaign — never `sum(messages)`. M6 asserts the cross-campaign count; **add M6b: a contact with one row carrying `messages = 5` counts as 1, not 5** — that is the bar that separates the two readings, and without it both implementations pass.
+2. **Exactly Y days ago is INSIDE the cooldown.** The rule is "more than Y days ago" to be eligible, i.e. excluded when `last_sent_at > now() - Y days` — the same `>` the freeze cadence already uses, which is worth keeping identical so two cadence rules in one codebase do not have opposite boundaries. **M3 flips: exactly 7.0 days ⇒ EXCLUDED.**
+3. **The existing "already got this offer" toggle becomes the enable switch.** Off ⇒ no limits at all (not "ever got" — off means off). On ⇒ the Y/N rule applies. There is ONE control, and `exclude_prior_offer_contacts` is what it writes; the Y and N inputs are its parameters, shown only when it is on.
+
+   ⚠️ **This changes what the existing toggle MEANS for campaigns created before 0191.** A legacy campaign with it on currently gets "ever got this offer". After this PR, whether it keeps that or becomes Y/N is decided by `offer_rules_enabled` — which is why that column defaults to FALSE and only the create route sets it true. Task 3 Step 2's byte-identical branch is what preserves the old meaning for them, and it is not optional.
+4. **Route-level default accepted** — `offer_rules_enabled = true` is written by the create route, named explicitly in `values({…})`, never as a column default.
 
 ## Merge gate
 

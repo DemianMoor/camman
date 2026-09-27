@@ -146,7 +146,7 @@ async function main() {
     }
     processed++;
     const t0 = performance.now();
-    let r: Omit<DayResult, "day" | "sends" | "unstamped" | "ms" | "skipped"> = {
+    const r: Omit<DayResult, "day" | "sends" | "unstamped" | "ms" | "skipped"> = {
       written: 0, byStatus: {}, suppressedCoerced: 0, unclassified: 0,
     };
 

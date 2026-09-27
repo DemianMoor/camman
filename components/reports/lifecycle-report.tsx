@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
+import { useApiCall } from "@/lib/hooks/use-api-call";
 import type {
   LifecycleMetrics,
   LifecycleReport as Report,
@@ -39,36 +40,32 @@ const money = (v: string) =>
 const num = (v: number) => v.toLocaleString();
 
 export function LifecycleReport() {
-  const todayEt = formatInCampaignTimezone(new Date(), "yyyy-MM-dd");
-  const weekAgoEt = formatInCampaignTimezone(
-    new Date(Date.now() - 6 * 86_400_000),
-    "yyyy-MM-dd",
+  // Lazy initialisers: reading the clock in the render body is impure, and the
+  // default period must not shift under a re-render.
+  const [from, setFrom] = useState(() =>
+    formatInCampaignTimezone(new Date(Date.now() - 6 * 86_400_000), "yyyy-MM-dd"),
   );
-  const [from, setFrom] = useState(weekAgoEt);
-  const [to, setTo] = useState(todayEt);
+  const [to, setTo] = useState(() =>
+    formatInCampaignTimezone(new Date(), "yyyy-MM-dd"),
+  );
   const [data, setData] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async (f: string, t: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/reports/lifecycle?from=${f}&to=${t}`);
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error ?? `HTTP ${res.status}`);
-      setData(j as Report);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const api = useApiCall<Report>();
 
   useEffect(() => {
-    void load(from, to);
-  }, [load, from, to]);
+    void (async () => {
+      const res = await api.execute(
+        `/api/reports/lifecycle?from=${from}&to=${to}`,
+      );
+      if (res.ok) {
+        setData(res.data);
+        setError(null);
+      } else {
+        setData(null);
+        setError(res.error);
+      }
+    })();
+  }, [api.execute, from, to]);
 
   const rows = data?.rows ?? [];
   const byRow = new Map(rows.map((r) => [r.row as string, r]));
@@ -99,7 +96,7 @@ export function LifecycleReport() {
           />
         </div>
         <span className="pb-2 text-xs text-muted-foreground">
-          ET dates, max 92 days
+          ET dates, max 14 days
         </span>
       </div>
 
@@ -179,7 +176,7 @@ export function LifecycleReport() {
         </CardContent>
       </Card>
 
-      {loading ? (
+      {api.isLoading ? (
         <p className="text-xs text-muted-foreground">Loading…</p>
       ) : null}
 
@@ -210,6 +207,12 @@ export function LifecycleReport() {
         <p>
           Per-recipient numbers here do not reconcile with Overview&apos;s
           totals, which come from Keitaro stage aggregates.
+        </p>
+        <p>
+          <span className="font-medium">The window is capped at 14 days.</span>{" "}
+          Cohort CTR is computed per recipient over the raw clicks, with no
+          rollup behind it, so a wider period takes longer than a page should —
+          14 days measured 34s on live data.
         </p>
         {data?.has_reconstructed ? (
           <p className="text-amber-700 dark:text-amber-400">

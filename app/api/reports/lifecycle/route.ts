@@ -8,12 +8,30 @@ import { getLifecycleReport } from "@/lib/reporting/lifecycle-report";
 // Read API for /reports/lifecycle — per-cohort performance by send date (PR 5).
 // Gated on campaigns.view, matching Overview and the other report routes.
 export const dynamic = "force-dynamic";
+// A 14-day window measured ~34s on production, and the cap above is set to keep
+// the worst case inside this.
+export const maxDuration = 60;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// Same cap as Overview. The query reads per-recipient rows rather than a
-// rollup, so the ceiling is a cost limit here, unlike /reports/delivery.
-const MAX_RANGE_DAYS = 92;
+// ⚠️ 14 DAYS, NOT OVERVIEW'S 92 — AND THE NUMBER IS MEASURED, NOT CHOSEN.
+// Cohort CTR needs "did this (stage, contact) click", which is per-recipient
+// over links + clicks; there is no rollup for it. Measured on production:
+//
+//   2d ~13-19s · 5d ~18s · 7d ~21-26s · 14d ~34s
+//
+// (Ranges, not points: repeats of identical code on a 7-day window spanned
+// 20.8-25.5s, so single runs cannot be compared to each other.) Linear, with a
+// large constant, so 92 days would be minutes. A cap the route cannot serve is
+// worse than a smaller one: the request would burn the whole maxDuration and
+// return a 504 with nothing to show for it. 14 fits inside the 60s limit below
+// even at the slow end of that spread.
+//
+// Widening this means changing where the clicks come from — counted_clickers
+// answers the same question in one indexed lookup, and that is the owner's
+// decision to make (they chose raw HUMAN_CLICK deliberately, for source
+// consistency with the engine), not one to take here.
+const MAX_RANGE_DAYS = 14;
 const DEFAULT_RANGE_DAYS = 7;
 
 export async function GET(req: NextRequest) {

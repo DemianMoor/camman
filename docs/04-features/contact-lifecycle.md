@@ -1,15 +1,16 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-09-25_
+_Last updated: 2026-09-27_
 
-**PR 1, 2a, 2b and 3 shipped.** The statuses are computed and stored, the
-thresholds that decide them are editable (§8), every send records the status it
-was prepared under, `contacts.lifecycle_status` carries a queryable projection
-(§3a), and the statuses are visible on the contacts list and the contact detail
-page (§3c), and eight segment rule types select on lifecycle facts (§3d).
-Campaign lifecycle chips and the eligibility layers (PR 4) and the cohort
-report (PR 5) follow. Segment rules (PR 3), the campaign lifecycle chips and
-the eligibility layers (PR 4) and the cohort report (PR 5) follow.
+**PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
+stored, the thresholds that decide them are editable (§8), every send records
+the status it was prepared under, `contacts.lifecycle_status` carries a
+queryable projection (§3a), the statuses are visible on the contacts list and
+the contact detail page (§3c), eight segment rule types select on lifecycle
+facts (§3d), and campaigns pick their audience with the status chips and drop
+the three lifecycle layers plus the offer cooldown/limit rules at send time
+(§3e–§3f2). PR 5 adds the cohort report and the reconstruction that gives it
+history (§3k).
 Design: [2026-09-22-contact-lifecycle-status-design.md](../superpowers/specs/2026-09-22-contact-lifecycle-status-design.md).
 
 ## 1. What it is
@@ -426,6 +427,142 @@ target whoever was hot that day rather than whoever is hot now.
   chosen under different semantics, and re-interpreting a stored
   `audience_filters` would change who they reach.
 
+### 3k. The cohort report (`/reports/lifecycle`, PR 5)
+
+One row per lifecycle cohort, by send date in ET: sends, clickers, CTR, sales,
+CR, revenue, opt-out rate and cost.
+[lib/reporting/lifecycle-report.ts](../../lib/reporting/lifecycle-report.ts),
+behind `GET /api/reports/lifecycle?from=&to=` (`campaigns.view`, **14-day
+cap**, `maxDuration = 60`), rendered by
+[components/reports/lifecycle-report.tsx](../../components/reports/lifecycle-report.tsx).
+
+**The cohort comes from the stamp, never from `contacts.lifecycle_status`.**
+`stage_send_lifecycle.status` is what the contact WAS when the message went
+out; the live column is what they are now. Reading the live one would move
+contacts between cohorts retroactively, so last week's number would change
+every time you looked at it. Measured on stage 4791 nineteen hours after its
+send: stamped hot 1,306 / warm 1,526, live hot 1,315 / warm 1,517 — nine
+contacts had already moved.
+
+Rows, in order: the six statuses, then `Clickers` (hot + warm) and
+`Non-clickers` (the rest), then `Total`, then `Unclassified`.
+
+- **`Unclassified` is a real row**, counting sends with no
+  `stage_send_lifecycle` row. Omit it and the cohorts silently fail to sum to
+  Total, and a reader concludes the tool is broken rather than that history is
+  missing.
+- **`Suppressed` shows a dash, not zeros**, with _"excluded by construction"_.
+  Suppressed contacts never enter an audience, so the row is structurally
+  empty; a 0 would read as a measurement somebody made.
+- **Every ratio with no denominator is `null`, not 0.** A 0% CTR on zero sends
+  is a statement nobody measured.
+
+Four things the page says in its footer because a number above it would
+otherwise be read as something else:
+
+| Footer line | Why it is there |
+| --- | --- |
+| Sales/CR/Revenue **attributed only** | ~1,038 attributed sales across 3.88M sends. Unlabelled, that reads as catastrophic performance rather than as an attribution gap. |
+| **CTR uses raw human clicks** | Overview uses `counted_clickers`, which lags the scoring cron. The same period gave 125 here and 112 there on stage 4791 at 19 h. An unexplained discrepancy between two tabs is worse than either number. |
+| **Cost includes opt-out cost** | An opt-out reply is billed like a send, so a cohort with more opt-outs costs more per send. That is the point of the column, but only if the reader knows it. |
+| **One status per contact per ET day** | For reconstructed periods the cohort is evaluated once per ET day, not per message (owner decision, 2026-09-27) — a contact messaged three times in a day carries one status for that day. |
+
+**Sources.** Sends from `stage_sends` (`status = 'sent'`); cohort from
+`stage_send_lifecycle`; clicks from raw `clicks` + `links` under the imported
+`HUMAN_CLICK`; opt-outs from `opt_out_attributions.stage_send_id`; sales
+ledger-primary with `stage_sends.sale_*` as the fallback only where no ledger
+event exists (4 such rows in 60 days), revenue for a send in both being the
+ledger's approved-only sum.
+
+⚠️ **The click join reads `(stage, contact)`, both columns.** That is the grain
+`counted_clickers` keys on. On `contact_id` alone it counts every link the
+contact ever clicked, org-wide, across every campaign — so a Hot contact
+imports their whole click history into whichever cohort they sit in, and cohort
+CTR measures the CONTACT instead of the send, inflated in exactly the cohorts
+that clicking defines.
+
+**The window is capped at 14 days, not Overview's 92, and the number is
+measured.** Cohort CTR asks "did this (stage, contact) click", which is
+per-recipient over `links` + `clicks` with no rollup behind it. On production:
+2d ~13–19s, 5d ~18s, 7d ~21–26s, 14d ~34s — linear with a large constant, so 92
+days is minutes. A cap the route cannot serve is worse than a smaller one: the
+request burns the whole `maxDuration` and returns a 504 with nothing to show.
+Widening it means changing where the clicks come from — `counted_clickers`
+answers the same question in one indexed lookup — and that is the owner's call,
+since raw `HUMAN_CLICK` was chosen deliberately for source consistency with the
+engine.
+
+Two shapes in the query are load-bearing, both measured on a five-day window:
+
+- **The click join is driven from the window's LINKS, by stage.** Driven from
+  the sends instead — as a join or as an `EXISTS` — the planner led with
+  `clicks_classification_scored_at_idx`, read EVERY human click in the org
+  (195,235 rows) and did a `links_pkey` heap fetch for each at 0.276 ms. That is
+  34.3s of a 42.4s window, and it does not depend on how much data is being
+  reported on. Scanning links by `stage_id` reads comparable rows with adjacent
+  heap pages, and the per-link probe into `clicks_link_id_idx` is index-only for
+  the ~97% of links nobody clicked.
+- **The stage rate is computed only for stages that need one.** It is a fallback
+  for sends whose own `cost_per_sms` is NULL, and the pipeline snapshots that per
+  row, so in practice almost none do. Counting every stage in the window cost
+  7.4s of the same 42.4s to produce rates nothing then read. (Written as a scalar
+  subquery inside the `LATERAL` it was also expanded TWICE per stage, because the
+  `CASE` references `denom` twice.)
+
+⚠️ **The temp-table fix from §10b was tried here and did NOT reproduce** — the
+same five-day window ran 51.5s as a CTE and 53.6s materialized and `ANALYZE`d.
+Nor could the variants be ranked afterwards: repeats of identical code on a
+7-day window spanned 20.8s, 21.8s and 25.5s, so the spread between REPEATS is as
+large as the gap between shapes. The simpler single statement is what ships.
+
+**Cost** is `coalesce(the send's own cost_per_sms, the stage's implied rate)`
+× `(1 + opted out)`. The implied rate divides `campaign_stages.total_cost` by
+the same denominator that produced it —
+`greatest(sms_count, the stage's sent rows) + opt_out_count`, from
+[lib/stages/total-cost.ts](../../lib/stages/total-cost.ts) — so apportioning it
+back across the stage's sends reproduces `total_cost` rather than a number near
+it. `greatest(…)` is not defensive: an API stage leaves `sms_count` at 0 and
+materializes one row per recipient, so dividing by `sms_count` alone would
+divide by zero for every stage this report can see. Manual/CSV stages have no
+per-recipient rows and so contribute nothing here at all — one of several
+reasons this tab does not foot with Overview.
+
+### 3k2. The reconstruction, and what it cannot know
+
+[scripts/backfill-lifecycle-reconstruction.ts](../../scripts/backfill-lifecycle-reconstruction.ts)
+fills `stage_send_lifecycle` for the sends that predate live stamping, marking
+every row `reconstructed = true` so the page can flag a period.
+
+It is a **replay, not a lookup**, because neither obvious source can answer
+"what was this contact on 13 August": `contact_engagement` holds only current
+rollups, and `contact_engagement_transitions` begins at the PR 1 backfill
+instant, which is after every row this targets. So the facts are rebuilt from
+raw `stage_sends` + `clicks`/`links` as of the day's end and fed to the one
+evaluator, `evaluationSelectSql`. No threshold comparison is re-spelled.
+
+What it cannot know, stated rather than hidden:
+
+- **`suppressed` is never written** (spec §10). Suppression could not have
+  happened before launch, so emitting it would be inventing history. A row the
+  facts imply is suppressed becomes `freeze` — the status it must have passed
+  through — and the coercions are counted and reported. (In practice the path
+  is unreachable: the replay passes `prev_status = NULL`, and both suppressed
+  rules require a previous status. The coercion is the belt to that braces.)
+- **It uses TODAY'S thresholds and is a ONE-SHOT artifact.** It is not re-run
+  after a threshold change (owner, 2026-09-27) — re-running would produce
+  different history for the same day. Nothing is recorded per row; the run
+  prints the thresholds in force and the page's note states them.
+- **One status per contact per ET day.** Evaluating per send would be ~71K
+  evaluations for a median day instead of one.
+- **A reconstructed row can never be `new`**, because `asOf` is the END of the
+  ET day and the day's own send is already counted.
+
+Dry run by default; `--apply` writes. Resume is derived from the data — a day
+is done when every `sent` row in it carries a stamp — never from a cursor file,
+which lies after a partial failure. One transaction per ET day, so a failure
+loses a day rather than the run. `--org` exists for the preview bar; production
+keeps the single-org assertion.
+
 ## 4. The job
 
 `refreshContactEngagement` ([lib/engagement/refresh.ts](../../lib/engagement/refresh.ts))
@@ -607,6 +744,31 @@ a read-only production measurement whose every run rolls back, and
 which produces the chip and per-layer counts against production **without
 creating or flipping a campaign** -- `lifecycleRules` is a parameter on every one
 of these paths, so the hypothetical is evaluated by passing `true`.
+
+The PR 5 bars:
+
+- [scripts/test-lifecycle-reconstruction.ts](../../scripts/test-lifecycle-reconstruction.ts)
+  -- 14 bars, run against the REAL script as a child process with `--org` on a
+  throwaway org, because calling an extracted helper would test a copy of the
+  replay rather than the command line that will be run against production.
+  R1/R2 are the whole feature in one pair: the same contact, from the SAME
+  single click, reconstructs as `hot` for a day 90 days ago and `warm` for
+  yesterday. A replay that degraded into a lookup of the current status would
+  return one value for both, so one of the two would go red. S1/S2 pin what it
+  must never write (`suppressed`, `new`); T1-T3 pin resume by re-running a
+  completed day; T4/T5 are SOURCE bars -- that resume reads the data rather
+  than a cursor file, and that the suppressed coercion is in the INSERT and not
+  only in the report.
+- [scripts/test-lifecycle-report.ts](../../scripts/test-lifecycle-report.ts) --
+  24 bars on the query. **B1 caught a real defect**: the click join first read
+  `links.contact_id` alone, with no stage, which counts every link the contact
+  ever clicked org-wide, so cohort CTR would have measured the contact instead
+  of the send -- inflated in exactly the cohorts clicking defines. C2/C3 seed
+  each sales source ALONE (a ledger-only buyer, a `sale_status`-only row, and
+  one carrying both) because a fixture writing both together cannot tell the
+  two readers apart. D4 pins the entire cost formula in one number: rate,
+  opt-out doubling and a per-send override together. E1 asserts a cohort with
+  no sends reports `null`, not 0%.
 
 [scripts/dryrun-lifecycle-recheck.ts](../../scripts/dryrun-lifecycle-recheck.ts)
 does the same for the send-time re-check: it mirrors the drain's claim

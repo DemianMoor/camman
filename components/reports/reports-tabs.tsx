@@ -14,10 +14,11 @@ import {
 // derived from the pathname so it stays correct on refresh and matches the
 // sidebar's Reports group.
 //
-// Delivery and Audience Stats are listed explicitly rather than through
-// REPORT_DIMENSIONS: like Overview each has its own route and its own column
-// set (delivery receipts; offer results per contact group from the offer group
-// report matviews), so neither is a PerformanceReport dimension.
+// Delivery, Audience Stats and Lifecycle are listed explicitly rather than
+// through REPORT_DIMENSIONS: like Overview each has its own route and its own
+// column set (delivery receipts; offer results per contact group from the offer
+// group report matviews; per-cohort metrics from the per-send lifecycle stamp),
+// so none of them is a PerformanceReport dimension.
 const TABS: { href: string; label: string; exact: boolean }[] = [
   { href: "/reports", label: "Overview", exact: true },
   ...REPORT_DIMENSIONS.map((d) => ({
@@ -27,6 +28,7 @@ const TABS: { href: string; label: string; exact: boolean }[] = [
   })),
   { href: "/reports/delivery", label: "Delivery", exact: false },
   { href: "/reports/audience", label: "Audience Stats", exact: false },
+  { href: "/reports/lifecycle", label: "Lifecycle", exact: false },
 ];
 
 export function ReportsTabs() {

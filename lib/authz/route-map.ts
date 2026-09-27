@@ -359,6 +359,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "reports/audience": { methods: ["GET"], token: ["GET"] },
   "reports/delivery": { methods: ["GET"], token: ["GET"] },
   "reports/epc-monitors": null, // maintenance job, not a report
+  // Lifecycle cohort report (PR 5). GET only, like its siblings.
+  "reports/lifecycle": { methods: ["GET"], token: ["GET"] },
   "reports/partners": null, // drip / partner intake -- hidden from the operator
   "reports/performance": { methods: ["GET"], token: ["GET"] },
   "reports/rebuild-counted-clickers": null, // maintenance job, not a report

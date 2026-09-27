@@ -209,7 +209,12 @@ function lifecycleExclusionCtes(layers?: EligibilityLayer[] | null): SQL {
 function lifecycleBreakdownCols(
   lifecycleRules: boolean,
   excludeInUse: boolean,
-  layers?: EligibilityLayer[] | null,
+  layers: EligibilityLayer[] | null | undefined,
+  // ⚠️ REQUIRED, not defaulted. It decides whether buyers are counted as
+  // EXCLUDED or as a send-time overlay — i.e. who the preview says is in the
+  // audience — and §11b makes that kind of parameter required so the compiler
+  // names every call site instead of one silently keeping the old behaviour.
+  buyersExcluded: boolean,
 ): SQL {
   if (!lifecycleRules) return drizzleSql``;
   const has = (key: string) =>
@@ -218,6 +223,10 @@ function lifecycleBreakdownCols(
       : drizzleSql`false`;
   const suppressed = has("suppressed");
   const bought = has("bought_offer");
+  // Participates in the exclusive chain ONLY when a cap makes it a real
+  // audience exclusion. Otherwise it must not consume a lead from a later
+  // bucket — it is an overlay, and those leads ARE in the audience.
+  const boughtExcl = buyersExcluded ? bought : drizzleSql`false`;
   const freezeNotDue = has("freeze_not_due");
   const offerLimit = has("offer_limit");
   const offerCooldown = has("offer_cooldown");
@@ -242,17 +251,21 @@ function lifecycleBreakdownCols(
       count(*) filter (where membership_ok and has_opt_out)::int as lc_excl_opted_out,
       count(*) filter (where membership_ok and not has_opt_out
         and ${suppressed})::int as lc_excl_suppressed,
-
       count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and ${offerLimit})::int as lc_excl_offer_limit,
+        and not ${suppressed} and ${boughtExcl})::int as lc_excl_bought_offer,
       count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and not ${offerLimit}
+        and not ${suppressed} and not ${boughtExcl}
+        and ${offerLimit})::int as lc_excl_offer_limit,
+      count(*) filter (where membership_ok and not has_opt_out
+        and not ${suppressed} and not ${boughtExcl} and not ${offerLimit}
         and ${offerCooldown})::int as lc_excl_offer_cooldown,
       count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and not ${offerLimit} and not ${offerCooldown}
+        and not ${suppressed} and not ${boughtExcl} and not ${offerLimit}
+        and not ${offerCooldown}
         and not ${hasChip})::int as lc_excl_status_not_selected,
       count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and not ${offerLimit} and not ${offerCooldown}
+        and not ${suppressed} and not ${boughtExcl} and not ${offerLimit}
+        and not ${offerCooldown}
         and ${hasChip}
         and ${excludeInUse}::boolean and is_in_use_elsewhere)::int as lc_excl_in_use_elsewhere`;
 }
@@ -503,9 +516,17 @@ export interface LifecycleAudienceBreakdown {
   // exclusions: all three keep a lead out of the pool at activation (the offer
   // rules replace the permanent "ever got this offer" DELETE — PR 4d Task 3).
   // Everything else is a send-time overlay, below.
+  //
+  // ⚠️ `bought_offer` is in BOTH groups, and exactly one of them is non-zero.
+  // For a CAPPED lifecycle campaign buyers are removed before the cap samples
+  // (they would otherwise occupy slots nobody else can use), so for that
+  // campaign it is a genuine audience exclusion and belongs in the partition.
+  // For an uncapped one it stays the send-time overlay PR 4b intended. The
+  // shape is static either way — an optional key would hide the case that was
+  // never handled, which is the mistake §11b exists to stop.
   excluded: Pick<
     LifecycleExclusionCounts,
-    "suppressed" | "offer_limit" | "offer_cooldown"
+    "suppressed" | "offer_limit" | "offer_cooldown" | "bought_offer"
   > & {
     opted_out: number;
     // Their status is not among the selected chips.
@@ -1505,6 +1526,17 @@ export async function previewAudience(
           : []),
       ]
     : null;
+  // ⚠️ MUST MATCH snapshotAudience's condition exactly. The preview and the
+  // activation have to answer "who is in the audience" the same way; if this
+  // drifts, the screen promises a pool the freeze does not deliver.
+  const buyersExcluded =
+    (input.cap ?? null) !== null && lifecycleRules && input.offerId != null;
+  // Emitted ONLY when buyers are excluded: `is_bought_offer` is a column only
+  // while the bought_offer layer is present, and an empty fragment keeps every
+  // other campaign's SQL byte-identical (the 4a gate).
+  const buyerTerm = buyersExcluded
+    ? drizzleSql`and not coalesce(q.is_bought_offer, false)`
+    : drizzleSql``;
   const excludeInUse = input.excludeInUse === true;
   // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
   // set. When off, `offerExposureId` stays null so flagSetCtes/flagJoins emit
@@ -1680,6 +1712,7 @@ export async function previewAudience(
           q.qualifies
           and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
           and (not ${excludePriorOffer}::boolean or not q.is_offer_exposed)
+          ${buyerTerm}
         ) as is_eligible,
         (${positiveExpr}) as membership_positive,
         ((${positiveExpr}) and not q.from_exclude_segment) as membership_ok
@@ -1721,7 +1754,7 @@ export async function previewAudience(
       -- In-audience leads who already got this offer (post-intersection, pre
       -- offer exclusion). Zero when the toggle is off (is_offer_exposed=false).
       count(*) filter (where qualifies and membership_ok and is_offer_exposed)::int as got_offer_in_prior_campaign
-      ${lifecycleBreakdownCols(lifecycleRules, excludeInUse, lifecycleExclusions)}
+      ${lifecycleBreakdownCols(lifecycleRules, excludeInUse, lifecycleExclusions, buyersExcluded)}
     from eligible
   `)) as unknown as {
     total_matching: number;
@@ -1739,6 +1772,7 @@ export async function previewAudience(
     lc_excl_opted_out?: number;
     lc_excl_suppressed?: number;
     lc_excl_status_not_selected?: number;
+    lc_excl_bought_offer?: number;
     lc_excl_offer_limit?: number;
     lc_excl_offer_cooldown?: number;
     lc_excl_in_use_elsewhere?: number;
@@ -1778,6 +1812,9 @@ export async function previewAudience(
               in_use_elsewhere: Number(row?.lc_excl_in_use_elsewhere ?? 0),
               offer_limit: Number(row?.lc_excl_offer_limit ?? 0),
               offer_cooldown: Number(row?.lc_excl_offer_cooldown ?? 0),
+              // Non-zero only for a capped campaign; for an uncapped one the
+              // count lives in send_time.bought_offer below.
+              bought_offer: Number(row?.lc_excl_bought_offer ?? 0),
             },
             send_time: {
               freeze_not_due: Number(row?.lc_freeze_not_due ?? 0),

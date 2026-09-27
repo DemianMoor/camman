@@ -20,6 +20,7 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+import { fromZonedTime } from "date-fns-tz";
 import { sql, type SQL } from "drizzle-orm";
 
 const DAY = 86_400_000;
@@ -73,7 +74,7 @@ async function main() {
       INSERT INTO campaign_stages (org_id, campaign_id, stage_number, stop_text)
       VALUES (${org}, ${camp.id}, 1, 'STOP') RETURNING id`);
 
-    const phones = fictionalPhones(3);
+    const phones = fictionalPhones(4);
     await refuseIfPhonesInUse(db, phones);
     const mkContact = async (i: number) =>
       (
@@ -85,6 +86,16 @@ async function main() {
     const cA = await mkContact(0); // one click, 100 days ago
     const cB = await mkContact(1); // 12 messages, never clicked ⇒ freeze
     const cC = await mkContact(2); // 1 message, never clicked ⇒ cold
+    const cD = await mkContact(3); // ONE send, at 23:59 ET — the boundary case
+
+    // `timestamptz AT TIME ZONE zone` is the SAFE direction — an instant TO a
+    // zone, yielding that zone's wall clock. It is the opposite direction
+    // (`date AT TIME ZONE zone`) that silently shifts the boundary.
+    const etDay = async (daysAgo: number) =>
+      (
+        await one<{ d: string }>(sql`
+          SELECT (${ago(daysAgo)}::timestamptz AT TIME ZONE 'America/New_York')::date::text AS d`)
+      ).d;
 
     const send = async (contactId: string, phone: string, daysAgo: number) =>
       (
@@ -116,11 +127,25 @@ async function main() {
     const sendB1 = await send(cB, phones[1], 1);
     const sendC1 = await send(cC, phones[2], 1);
 
-    const etDay = async (daysAgo: number) =>
-      (
-        await one<{ d: string }>(sql`
-          SELECT (${ago(daysAgo)}::timestamptz AT TIME ZONE 'America/New_York')::date::text AS d`)
-      ).d;
+    // ⭐ THE BOUNDARY FIXTURE. Every other fixture here is sent at an arbitrary
+    // time of day, and the day's end was computed 8 hours early — so they all
+    // still landed inside the truncated window and 13 green bars said nothing
+    // about it. This one is sent at 23:59 ET, which only a correct day-end
+    // includes. Under the old asOf it fell out of the facts entirely and
+    // reconstructed to nothing.
+    const lateD2 = fromZonedTime(
+      `${await etDay(1)}T23:59:00`,
+      "America/New_York",
+    ).toISOString();
+    const sendD = (
+      await one<{ id: string }>(sql`
+        INSERT INTO stage_sends
+          (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status, sent_at)
+        VALUES (${org}, ${camp.id}, ${stage.id}, ${cD}::uuid, ${phones[3]},
+                'hi', 'sent', ${lateD2}::timestamptz)
+        RETURNING id`)
+    ).id;
+
     const D1 = await etDay(90);
     const D2 = await etDay(1);
     console.log(`  fixture days: D1 = ${D1} (90d ago), D2 = ${D2} (yesterday)\n`);
@@ -194,6 +219,12 @@ async function main() {
       "R5 1 message, never clicked ⇒ cold",
       cStatus === "cold",
       `got ${cStatus ?? "no row"}`,
+    );
+    const dStatus = (await statusOf(sendD))?.status;
+    bar(
+      "R6 ⭐ a send at 23:59 ET is reconstructed, not dropped",
+      dStatus === "cold",
+      `got ${dStatus ?? "NO ROW — the day ended early and the send fell out"}`,
     );
 
     console.log("\nPART S — what it must never write");

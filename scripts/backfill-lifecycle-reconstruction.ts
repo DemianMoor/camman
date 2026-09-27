@@ -71,6 +71,7 @@ async function main() {
     "@/lib/engagement/thresholds-sql"
   );
   const { HUMAN_CLICK } = await import("@/lib/reporting/counted-clickers");
+  const { etDayBounds } = await import("@/lib/reporting/delivery-rollup");
   const { loadLifecycleSettings } = await import("@/lib/engagement/settings-io");
 
   const host = new URL(process.env.DATABASE_URL ?? "postgres://x@unknown/x")
@@ -153,7 +154,17 @@ async function main() {
     // ONE TRANSACTION PER ET DAY, so a failure loses one day, not the run.
     await db.transaction(async (tx) => {
       const org = sql`${orgId}::uuid`;
-      const asOf = sql`((${d.et_day}::date + 1) AT TIME ZONE 'America/New_York')`;
+      // ⚠️ THE DAY'S END, COMPUTED IN JS BY THE SHARED HELPER. Written as
+      // `(<date> + 1) AT TIME ZONE 'America/New_York'` in SQL it lands EIGHT
+      // HOURS EARLY — Postgres casts the date to timestamptz in the session
+      // zone, converts TO ET, and returns a naive timestamp compared as UTC, so
+      // asOf was 16:00 ET. Every day was then evaluated against truncated
+      // message counts and clicks, and every send after 16:00 ET fell out of
+      // the facts entirely and reconstructed to nothing.
+      const asOf = sql`${etDayBounds({
+        from: d.et_day,
+        to: d.et_day,
+      }).toExclusiveUtc.toISOString()}::timestamptz`;
 
       await tx.execute(sql`
         CREATE TEMP TABLE rc_target ON COMMIT DROP AS

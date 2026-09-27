@@ -29,6 +29,8 @@ import "./_env-preload";
 
 import { sql } from "drizzle-orm";
 
+import { etDayBounds } from "@/lib/reporting/delivery-rollup";
+
 const arg = (n: string) => {
   const i = process.argv.indexOf(`--${n}`);
   return i >= 0 ? (process.argv[i + 1] ?? null) : null;
@@ -88,7 +90,8 @@ async function main() {
       const org = sql`${orgId}::uuid`;
       // The instant we evaluate as of: the END of that ET day, so every send
       // in the day is covered by facts up to it.
-      const asOf = sql`((${day}::date + 1) AT TIME ZONE 'America/New_York')`;
+      // Same boundary fix as the backfill: the SQL form lands 8h early.
+  const asOf = sql`${etDayBounds({ from: day, to: day }).toExclusiveUtc.toISOString()}::timestamptz`;
       let m = performance.now();
 
       // The day's sent rows — the reconstruction's target set.

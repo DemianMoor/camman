@@ -17,6 +17,7 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 // Run: DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //        npx tsx --conditions=react-server scripts/test-lifecycle-report.ts
 
+import { fromZonedTime } from "date-fns-tz";
 import { sql, type SQL } from "drizzle-orm";
 
 const MARKER = "__LIFECYCLE_REPORT_TEST__";
@@ -373,6 +374,95 @@ async function main() {
       "G2 …and says the period holds no reconstructed rows",
       outside.has_reconstructed === false,
     );
+    // ── PART H — the ET day boundary ────────────────────────────────────────
+    //
+    // ⭐ THE BAR THAT WAS MISSING. Every fixture above sits in the MIDDLE of its
+    // window, and the window was wrong by 8 hours: `<date> AT TIME ZONE
+    // 'America/New_York'` casts the date to timestamptz in the session zone
+    // FIRST, then converts TO ET and returns a naive timestamp compared as UTC.
+    // A mid-window fixture is still inside a window displaced by 8 hours, so 24
+    // green bars said nothing about it. Only a fixture ON the boundary can.
+    //
+    // These two sends are 2 minutes apart across ET midnight, on their own stage
+    // and 40 days back so they cannot disturb the assertions above. Under the
+    // old boundary H1 saw 0 instead of 1 and H2 saw 2 instead of 1 — both red.
+    console.log("\nPART H — the ET day boundary");
+    const stageC = await mkStage(3, "0.0000", 0);
+    const bPhones = fictionalPhones(2);
+    await refuseIfPhonesInUse(db, bPhones);
+    const dayB = formatInCampaignTimezone(
+      new Date(Date.now() - 40 * 86_400_000),
+      "yyyy-MM-dd",
+    );
+    // +36h from ET MIDNIGHT lands at ~noon the NEXT ET day (a day is 23-25h),
+    // so this is DST-safe rather than a naive +1. Measuring from noon instead
+    // overshoots by a whole day, and the two sends stop being adjacent — which
+    // leaves H1/H2 green while testing nothing at all.
+    const dayBNext = formatInCampaignTimezone(
+      new Date(
+        fromZonedTime(`${dayB}T00:00:00`, "America/New_York").getTime() +
+          36 * 3_600_000,
+      ),
+      "yyyy-MM-dd",
+    );
+    // 23:59 on dayB and 00:01 on the next ET day — 2 minutes apart.
+    const lateIso = fromZonedTime(`${dayB}T23:59:00`, "America/New_York").toISOString();
+    const earlyIso = fromZonedTime(`${dayBNext}T00:01:00`, "America/New_York").toISOString();
+
+    const boundarySend = async (phone: string, iso: string) => {
+      const cid = (
+        await one<{ id: string }>(sql`
+          INSERT INTO contacts (org_id, phone_number, line_type)
+          VALUES (${org}, ${phone}, 'mobile') RETURNING id`)
+      ).id;
+      const sid = (
+        await one<{ id: string }>(sql`
+          INSERT INTO stage_sends
+            (org_id, campaign_id, stage_id, contact_id, phone, rendered_text,
+             status, sent_at)
+          VALUES (${org}, ${camp.id}, ${stageC}, ${cid}::uuid, ${phone}, 'hi',
+                  'sent', ${iso}::timestamptz)
+          RETURNING id`)
+      ).id;
+      await db.execute(sql`
+        INSERT INTO stage_send_lifecycle (stage_send_id, org_id, status, reconstructed)
+        VALUES (${sid}::uuid, ${org}, 'cold', false)`);
+      return sid;
+    };
+    await boundarySend(bPhones[0], lateIso);
+    await boundarySend(bPhones[1], earlyIso);
+
+    const repB = await getLifecycleReport({ orgId, from: dayB, to: dayB });
+    const repBNext = await getLifecycleReport({
+      orgId,
+      from: dayBNext,
+      to: dayBNext,
+    });
+    const totalOf = (r: typeof repB) =>
+      r.rows.find((x) => x.row === "total")!.sends;
+
+    // ⚠️ The fixture's own precondition. If these two stop being 2 minutes
+    // apart, H1/H2 pass without testing a boundary at all.
+    bar(
+      "H0 the two fixtures really are minutes apart across ET midnight",
+      Date.parse(earlyIso) - Date.parse(lateIso) === 2 * 60_000,
+      `${lateIso} → ${earlyIso}`,
+    );
+    bar(
+      "H1 ⭐ a send at 23:59 ET belongs to THAT ET day",
+      totalOf(repB) === 1,
+      `${dayB} → ${totalOf(repB)} send(s), expected 1`,
+    );
+    bar(
+      "H2 ⭐ …and one 2 minutes later belongs to the NEXT day, alone",
+      totalOf(repBNext) === 1,
+      `${dayBNext} → ${totalOf(repBNext)} send(s), expected 1`,
+    );
+    bar(
+      "H3 a two-day window holds both, so neither was simply dropped",
+      totalOf(await getLifecycleReport({ orgId, from: dayB, to: dayBNext })) === 2,
+    );
+
   } finally {
     if (orgId) {
       const name =

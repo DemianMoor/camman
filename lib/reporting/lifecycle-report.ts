@@ -4,6 +4,7 @@ import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { HUMAN_CLICK } from "@/lib/reporting/counted-clickers";
+import { etDayBounds } from "@/lib/reporting/delivery-rollup";
 import { purchasedClause } from "@/lib/sale-attribution";
 
 // ── THE LIFECYCLE COHORT REPORT (PR 5) ──────────────────────────────────────
@@ -134,6 +135,16 @@ export function lifecycleReportSql(opts: {
 }): SQL {
   const { orgId, from, to } = opts;
   const org = sql`${orgId}::uuid`;
+  // ⚠️ THE ET DAY IS CONVERTED TO INSTANTS IN JS, VIA THE SHARED HELPER —
+  // never in SQL. `<date> AT TIME ZONE 'America/New_York'` reads like the right
+  // thing and is not: Postgres casts the date to timestamptz in the SESSION zone
+  // first, then converts TO ET and hands back a naive timestamp that compares as
+  // UTC, landing the boundary 8 hours early. Shipped that way it silently
+  // reported the wrong days. etDayBounds is also DST-correct, which an interval
+  // arithmetic fix would not be.
+  const { fromUtc, toExclusiveUtc } = etDayBounds({ from, to });
+  const windowStart = sql`${fromUtc.toISOString()}::timestamptz`;
+  const windowEnd = sql`${toExclusiveUtc.toISOString()}::timestamptz`;
   return sql`
     WITH lc_sent AS (
       SELECT ss.id, ss.contact_id, ss.stage_id, ss.cost_per_sms,
@@ -146,10 +157,9 @@ export function lifecycleReportSql(opts: {
         -- (sent_at AT TIME ZONE 'America/New_York')::date BETWEEN … . The
         -- expression form wraps the indexed column, so it cannot use
         -- stage_sends_org_sent_at_idx and seq-scans the whole table: measured at
-        -- 15.2s for a ONE-DAY window that returned zero rows. The bounds below
-        -- are the same ET days, expressed so the index can answer them.
-        AND ss.sent_at >= (${from}::date AT TIME ZONE 'America/New_York')
-        AND ss.sent_at < ((${to}::date + 1) AT TIME ZONE 'America/New_York')
+        -- 15.2s for a ONE-DAY window that returned zero rows.
+        AND ss.sent_at >= ${windowStart}
+        AND ss.sent_at < ${windowEnd}
     ),
     -- ⚠️ ONLY THE STAGES THAT NEED A RATE. The stage rate is a FALLBACK, read
     -- solely for sends whose own cost_per_sms is NULL — the send pipeline

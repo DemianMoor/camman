@@ -467,6 +467,12 @@ otherwise be read as something else:
 | **Cost includes opt-out cost** | An opt-out reply is billed like a send, so a cohort with more opt-outs costs more per send. That is the point of the column, but only if the reader knows it. |
 | **One status per contact per ET day** | For reconstructed periods the cohort is evaluated once per ET day, not per message (owner decision, 2026-09-27) — a contact messaged three times in a day carries one status for that day. |
 
+⚠️ **The ET day becomes an instant in JS, via `etDayBounds`** — never
+`<date> AT TIME ZONE 'America/New_York'` in SQL, which lands the boundary 8
+hours early (see [07-conventions.md](../07-conventions.md)). The same mistake
+sat in the reconstruction's `asOf` and in this window at once; both are now the
+shared helper, and both carry a boundary bar that red-proves.
+
 **Sources.** Sends from `stage_sends` (`status = 'sent'`); cohort from
 `stage_send_lifecycle`; clicks from raw `clicks` + `links` under the imported
 `HUMAN_CLICK`; opt-outs from `opt_out_attributions.stage_send_id`; sales
@@ -555,7 +561,10 @@ What it cannot know, stated rather than hidden:
 - **One status per contact per ET day.** Evaluating per send would be ~71K
   evaluations for a median day instead of one.
 - **A reconstructed row can never be `new`**, because `asOf` is the END of the
-  ET day and the day's own send is already counted.
+  ET day and the day's own send is already counted. That day-end comes from
+  `etDayBounds`; written as `(<date> + 1) AT TIME ZONE 'America/New_York'` it is
+  16:00 ET, which truncates every day's facts and drops every send made after
+  it.
 
 Dry run by default; `--apply` writes. Resume is derived from the data — a day
 is done when every `sent` row in it carries a stamp — never from a cursor file,

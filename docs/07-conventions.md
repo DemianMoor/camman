@@ -168,6 +168,24 @@ The Lifecycle report ([lib/reporting/lifecycle-report.ts](../lib/reporting/lifec
 - ⭐ **A per-recipient join must carry every column of its grain.** The click join reads `links` on `(stage_id, contact_id)` — the grain `counted_clickers` keys on. On `contact_id` alone it counts every link that contact ever clicked, org-wide, across every campaign, so a Hot contact imports their whole click history into whichever cohort they sit in and cohort CTR measures the CONTACT instead of the send — inflated in exactly the cohorts that clicking defines. Caught by bar B1 in [scripts/test-lifecycle-report.ts](../scripts/test-lifecycle-report.ts), whose fixture clicks a DIFFERENT stage's link.
 - **Apportioning a stage total needs the denominator that produced it.** Per-send cost is `coalesce(the send's cost_per_sms, the stage rate) × (1 + opted out)`, where the stage rate divides `total_cost` by `greatest(sms_count, the stage's sent rows) + opt_out_count` — the same expression [lib/stages/total-cost.ts](../lib/stages/total-cost.ts) used to compute it, so the parts sum back to the whole. `greatest(…)` is load-bearing: an API stage leaves `sms_count` at 0, so dividing by it alone divides by zero for every stage this report can see.
 
+## `<date> AT TIME ZONE` converts the WRONG WAY, and a mid-window fixture cannot catch it (2026-09-27)
+
+An ET calendar day becomes an instant in JavaScript, through `etDayBounds` ([lib/reporting/delivery-rollup.ts](../lib/reporting/delivery-rollup.ts)) — **never** by writing `<date> AT TIME ZONE 'America/New_York'` in SQL. That expression reads like "ET midnight of this day" and is not:
+
+| expression | yields | intended |
+| --- | --- | --- |
+| `'2026-08-22'::date AT TIME ZONE 'America/New_York'` | `2026-08-21 20:00` — a **naive** timestamp, compared as UTC | `2026-08-22 04:00+00` |
+| `('2026-08-22'::date + 1) AT TIME ZONE 'America/New_York'` | `2026-08-22 20:00` | `2026-08-23 04:00+00` |
+
+Postgres casts the `date` to `timestamptz` in the SESSION zone first, then `AT TIME ZONE` converts **to** ET and returns a `timestamp without time zone`, which the comparison then reads back as UTC. Net: the boundary lands **8 hours early**. Both directions of the operator exist and only one is a mistake — `timestamptz AT TIME ZONE zone` (an instant → that zone's wall clock, used for GROUP BY on an ET date) is correct and is what the other 150 uses in this repo do.
+
+It shipped in two places at once: the Lifecycle report's window (every figure covered 8 hours of the previous ET day and stopped 8 hours short) and the reconstruction's `asOf` (every ET day evaluated as of **16:00 ET**, so message counts and clicks were truncated for all 3.08M rows, and every send after 16:00 ET fell out of the facts and reconstructed to nothing — 10,364 of them).
+
+- ⭐ **A fixture in the MIDDLE of a window cannot detect a shifted window.** 38 bars were green across both files. Every fixture sat at an arbitrary time of day, and a window displaced by 8 hours still contained all of them. The defect was found by reading a dry run's arithmetic, not by a test.
+- **A boundary needs a fixture ON the boundary, and a precondition bar under it.** `scripts/test-lifecycle-report.ts` H1/H2 place two sends **two minutes apart** across ET midnight and assert each lands in its own day; `scripts/test-lifecycle-reconstruction.ts` R6 sends at 23:59 ET and asserts it reconstructs at all. Red-proved against the old code: H1 returned 0 instead of 1, H2 returned 2 instead of 1, R6 returned no row. H0 asserts the two fixtures really are minutes apart — the first version measured `+36h` from ET **noon** instead of midnight, which put them two DAYS apart and left H1/H2 green while testing nothing.
+- ⭐ **The neighbouring bar that stays green tells you what a weaker test would have missed.** H3 asks a two-day window for both sends and passes under BOTH the broken and the fixed boundary. A bar written at that width would have proved the feature worked while the days were wrong.
+- **DST is the reason the fix is not `+ interval '4 hours'`.** `etDayBounds` uses `fromZonedTime`, which is offset-correct across the March and November transitions; an arithmetic correction is right for eight months of the year.
+
 ## A window predicate must not wrap the indexed column, and a cap must be servable (2026-09-27)
 
 Three findings from making the Lifecycle report usable, all measured on production.

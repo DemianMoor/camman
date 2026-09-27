@@ -2,6 +2,16 @@
 
 _Last updated: 2026-09-27_
 
+## Decide per entity once, then fan out — and say which count you are showing (2026-09-27)
+
+Two lessons from the group × lifecycle breakdown, both measured on production.
+
+- ⭐ **When a fact belongs to an entity, compute it on the ENTITY and join outwards.** "Can this contact be messaged today" is a property of the contact, but the table needed it per (group, contact). Evaluating it per membership row costs median 2,659 ms; evaluating it once per contact and fanning out to memberships costs 1,812 ms — there are 1,129,787 memberships over 973,731 contacts, so the anti-joins run on a relation 16% larger for no reason. The rule generalises: find the grain the fact actually has, not the grain the output has.
+- ⭐ **A deduplicated total and a per-row total are different numbers, and BOTH belong on screen.** A contact in several groups is counted in each group's row, because "how big is this group" is a real question. But summing those rows to size a send overstates it by the overlap — on production, 765,566 summed against 667,141 distinct, a **98,425** error. So group rows count per group, cluster rows are the DISTINCT union of their groups, and a footer states the distinct total. Showing only one of the two invites the wrong arithmetic silently.
+- **A test needs a bar for each of the two.** G6/H1 assert the cluster counts an overlapping contact once; H2 asserts the group rows count it twice. Either bar alone passes against a wrong implementation — the first against one that deduplicates everywhere, the second against one that deduplicates nowhere.
+- **Config that the SQL joins against beats config the SQL is generated from.** The cluster mapping is a `VALUES` list built from a TS const, keyed on the operator-facing group CODE — not the serial id (which differs per database, so a preview fixture and production would cluster differently) and not the display name (editable, so a rename would empty a cluster with nothing failing).
+- **When one half of a screen is 3x slower than the other, split the request.** The grid is 1,812 ms and the rollups 6,311 ms; together the operator waits for the slower one to see either. Split, the numbers they read most arrive inside the bar.
+
 ## A frozen first column is OPT-IN PER TABLE, and it must stay that way (2026-09-23)
 
 `/reports` is ~25–30 columns wide, so the name that identifies the row — the

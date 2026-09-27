@@ -20,6 +20,7 @@ import { SearchableSelect } from "@/components/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import { GroupLifecycleTable } from "@/components/reports/group-lifecycle-table";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import type {
   AudienceGroupOption,
@@ -220,6 +221,19 @@ export function AudienceReport({ initialGroupId }: { initialGroupId: number | nu
 
   return (
     <div className="space-y-4">
+
+      {/* Contact group x lifecycle, for sizing a daily campaign. Its own two
+          requests; nothing below depends on it. */}
+      <section className="grid gap-2">
+        <div>
+          <h2 className="text-base font-semibold">Group x lifecycle</h2>
+          <p className="text-sm text-muted-foreground">
+            How many contacts each group can still be messaged today, by
+            lifecycle status.
+          </p>
+        </div>
+        <GroupLifecycleTable />
+      </section>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1">
           <SearchableSelect

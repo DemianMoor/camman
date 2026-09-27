@@ -145,6 +145,11 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production repair; writes only behind --apply",
   },
   {
+    file: "backfill-lifecycle-rollup.ts",
+    viaLibrary: true,
+    why: "fills lifecycle_day_rollup (migration 0192) for days the nightly 14-day window does not reach; writes through lib/reporting/lifecycle-rollup, so it carries no write token of its own",
+  },
+  {
     file: "backfill-lifecycle-reconstruction.ts",
     why: "one-shot production backfill of stage_send_lifecycle for sends that predate live stamping (contact lifecycle PR 5); dry-run default, writes only behind --apply, one transaction per ET day",
   },

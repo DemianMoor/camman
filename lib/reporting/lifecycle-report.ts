@@ -100,7 +100,7 @@ export async function getLifecycleReport(opts: {
   return foldLifecycleRows(rows, opts.from, opts.to);
 }
 
-interface LifecycleReportRow {
+export interface LifecycleReportRow {
   row: string;
   sends: number;
   clickers: number;
@@ -133,6 +133,35 @@ export function lifecycleReportSql(opts: {
   from: string;
   to: string;
 }): SQL {
+  return lifecycleSql(opts, "cohort");
+}
+
+/**
+ * The SAME computation at (ET day, cohort) grain — what the nightly rollup
+ * stores. One extra GROUP BY column and nothing else, so the rollup cannot
+ * drift from the direct query by construction.
+ *
+ * ⚠️ `(sent_at AT TIME ZONE 'America/New_York')::date` is the SAFE direction of
+ * the operator: an instant TO a zone, giving that zone's wall clock. It is the
+ * opposite direction, `<date> AT TIME ZONE zone`, that silently shifts a
+ * boundary by 8 hours — see 07-conventions.md.
+ */
+export function lifecycleDayRowsSql(opts: {
+  orgId: string;
+  from: string;
+  to: string;
+}): SQL {
+  return lifecycleSql(opts, "day");
+}
+
+function lifecycleSql(
+  opts: {
+    orgId: string;
+    from: string;
+    to: string;
+  },
+  grain: "cohort" | "day",
+): SQL {
   const { orgId, from, to } = opts;
   const org = sql`${orgId}::uuid`;
   // ⚠️ THE ET DAY IS CONVERTED TO INSTANTS IN JS, VIA THE SHARED HELPER —
@@ -147,7 +176,7 @@ export function lifecycleReportSql(opts: {
   const windowEnd = sql`${toExclusiveUtc.toISOString()}::timestamptz`;
   return sql`
     WITH lc_sent AS (
-      SELECT ss.id, ss.contact_id, ss.stage_id, ss.cost_per_sms,
+      SELECT ss.id, ss.contact_id, ss.stage_id, ss.cost_per_sms, ss.sent_at,
              ss.sale_status, l.status AS cohort, l.reconstructed
       FROM stage_sends ss
       LEFT JOIN stage_send_lifecycle l
@@ -301,6 +330,7 @@ export function lifecycleReportSql(opts: {
              coalesce(lg.revenue, 0) AS ledger_revenue,
              (op.id IS NOT NULL) AS opted_out,
              -- The stage cost model at send grain: rate × (1 + opted out).
+             s.sent_at,
              coalesce(s.cost_per_sms, r.rate, 0)
                * (1 + CASE WHEN op.id IS NOT NULL THEN 1 ELSE 0 END) AS cost
       FROM lc_sent s
@@ -310,7 +340,12 @@ export function lifecycleReportSql(opts: {
       LEFT JOIN opted op ON op.id = s.id
       LEFT JOIN stage_rate r ON r.stage_id = s.stage_id
     )
-    SELECT coalesce(cohort, '__unclassified__') AS row,
+    SELECT ${
+      grain === "day"
+        ? sql`(sent_at AT TIME ZONE 'America/New_York')::date AS et_day,`
+        : sql``
+    }
+           coalesce(cohort, '__unclassified__') AS row,
            count(*)::int AS sends,
            count(*) FILTER (WHERE clicked)::int AS clickers,
            sum(is_sale)::int AS sales,
@@ -319,11 +354,11 @@ export function lifecycleReportSql(opts: {
            coalesce(sum(cost), 0)::text AS cost,
            bool_or(coalesce(reconstructed, false)) AS reconstructed
     FROM per_send
-    GROUP BY 1
+    GROUP BY ${grain === "day" ? sql`1, 2` : sql`1`}
   `;
 }
 
-function foldLifecycleRows(
+export function foldLifecycleRows(
   rows: LifecycleReportRow[],
   from: string,
   to: string,

@@ -5,12 +5,20 @@ import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
+import {
+  formatCampaignDateTime,
+  formatInCampaignTimezone,
+} from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import type {
   LifecycleMetrics,
-  LifecycleReport as Report,
+  LifecycleReport,
 } from "@/lib/reporting/lifecycle-report";
+
+type Report = LifecycleReport & {
+  rollup_computed_at: string | null;
+  live_days: number;
+};
 import { cn } from "@/lib/utils";
 
 // Row order and copy. `suppressed` is shown with a DASH and a note rather than
@@ -96,7 +104,7 @@ export function LifecycleReport() {
           />
         </div>
         <span className="pb-2 text-xs text-muted-foreground">
-          ET dates, max 14 days
+          ET dates, max 92 days
         </span>
       </div>
 
@@ -209,11 +217,21 @@ export function LifecycleReport() {
           totals, which come from Keitaro stage aggregates.
         </p>
         <p>
-          <span className="font-medium">The window is capped at 14 days.</span>{" "}
-          Cohort CTR is computed per recipient over the raw clicks, with no
-          rollup behind it, so a wider period takes longer than a page should —
-          14 days measured 34s on live data.
+          <span className="font-medium">Closed days are read from a nightly
+          rollup; today is counted live.</span>{" "}
+          So today&apos;s row is current to the second, while a closed day
+          reflects the last nightly recompute — which re-runs a 14-day trailing
+          window, so late clicks, conversions and opt-outs still land.
         </p>
+        {data?.rollup_computed_at ? (
+          <p>
+            Closed days last recomputed{" "}
+            <span className="font-medium">
+              {formatCampaignDateTime(data.rollup_computed_at)}
+            </span>
+            .
+          </p>
+        ) : null}
         {data?.has_reconstructed ? (
           <p className="text-amber-700 dark:text-amber-400">
             <span className="font-medium">This period includes reconstructed rows.</span>{" "}

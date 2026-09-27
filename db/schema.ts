@@ -4462,6 +4462,57 @@ export const stage_send_lifecycle = pgTable(
 
 export type StageSendLifecycle = typeof stage_send_lifecycle.$inferSelect;
 
+// One row per (org, ET day, cohort) for the Lifecycle report (migration 0192).
+//
+// The report's per-recipient query is linear with a large constant — 14 ET days
+// measured ~34s on production — which forced its route cap to 14 days against
+// Overview's 92. This table is what lifts that: a day is computed once by the
+// nightly job and summed thereafter.
+//
+// ⚠️ COUNTS, NEVER RATIOS. CTR / CR / opt-out rate are derived at read time from
+// summed numerators and denominators. A stored per-day ratio, averaged across a
+// window, would weight a 200-send day the same as a 90,000-send one.
+export const lifecycle_day_rollup = pgTable(
+  "lifecycle_day_rollup",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    et_day: date("et_day").notNull(),
+    // The six statuses plus '__unclassified__' for sends with no stamp — a real
+    // value rather than NULL, so missing history stays visible instead of
+    // becoming a zero, and the read needs no coalesce.
+    cohort: text("cohort").notNull(),
+    sends: integer("sends").notNull().default(0),
+    clickers: integer("clickers").notNull().default(0),
+    sales: integer("sales").notNull().default(0),
+    revenue: numeric("revenue", { precision: 14, scale: 4 })
+      .notNull()
+      .default("0"),
+    opt_outs: integer("opt_outs").notNull().default(0),
+    cost: numeric("cost", { precision: 14, scale: 4 }).notNull().default("0"),
+    // True when ANY send in the cell was rebuilt by the 60-day backfill rather
+    // than stamped live, so the page can still mark the period.
+    reconstructed: boolean("reconstructed").notNull().default(false),
+    computed_at: timestamp("computed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "lifecycle_day_rollup_pkey",
+      columns: [table.org_id, table.et_day, table.cohort],
+    }),
+    index("lifecycle_day_rollup_computed_at_idx").on(table.computed_at),
+    check(
+      "lifecycle_day_rollup_cohort_check",
+      sql`${table.cohort} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed', '__unclassified__')`,
+    ),
+  ],
+);
+
+export type LifecycleDayRollup = typeof lifecycle_day_rollup.$inferSelect;
+
 // Q4/Q5 — per-NUMBER carrier policy (migration 0142). One row per
 // (number, carrier); an ABSENT row means allowed and uncapped, which is what
 // makes the empty table a no-op against today's behaviour.

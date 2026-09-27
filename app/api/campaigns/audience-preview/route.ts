@@ -112,6 +112,12 @@ export async function POST(req: NextRequest) {
     // the query, so no separate ownership check is needed — a foreign id
     // simply matches no exposures (and we avoid the extra round-trip).
     excludePriorOffer: parsed.data.exclude_prior_offer_contacts ?? false,
+    // A campaign being created gets the new semantics, so the preview must
+    // use them too — otherwise the numbers on screen describe a rule the
+    // campaign will not actually run.
+    offerRulesEnabled: lifecycleRules,
+    offerCooldownDays: parsed.data.offer_cooldown_days ?? 7,
+    offerLimitTimes: parsed.data.offer_limit_times ?? 5,
     offerId: parsed.data.offer_id ?? null,
   });
   return NextResponse.json(result);

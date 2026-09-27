@@ -88,6 +88,9 @@ interface CfgRow {
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
   lifecycle_rules: boolean;
+  offer_rules_enabled: boolean;
+  offer_cooldown_days: number;
+  offer_limit_times: number;
   provider_phone_id: number | null;
   allow_unknown_carrier: boolean | null;
 }
@@ -166,6 +169,9 @@ export async function computePreflightBreakdown(
     offerId: cfg.offer_id ?? null,
     excludePriorOffer: cfg.exclude_prior_offer_contacts,
     lifecycleRules: cfg.lifecycle_rules === true,
+    offerRulesEnabled: cfg.offer_rules_enabled === true,
+    offerCooldownDays: Number(cfg.offer_cooldown_days ?? 7),
+    offerLimitTimes: Number(cfg.offer_limit_times ?? 5),
   };
 
   // 3. Per-cause exclusion buckets off the frozen pool (opt-out/filter/split/dedup).

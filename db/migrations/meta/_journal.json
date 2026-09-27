@@ -1338,6 +1338,13 @@
       "when": 1792972800000,
       "tag": "0190_stage_sends_skipped_ineligible",
       "breakpoints": true
+    },
+    {
+      "idx": 191,
+      "version": "7",
+      "when": 1793059200000,
+      "tag": "0191_campaign_offer_limit_cooldown",
+      "breakpoints": true
     }
   ]
 }

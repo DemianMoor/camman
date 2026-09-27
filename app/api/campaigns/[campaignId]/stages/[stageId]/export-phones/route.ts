@@ -83,6 +83,9 @@ export async function GET(
       offer_id: campaigns.offer_id,
       exclude_prior_offer_contacts: campaigns.exclude_prior_offer_contacts,
       lifecycle_rules: campaigns.lifecycle_rules,
+      offer_rules_enabled: campaigns.offer_rules_enabled,
+      offer_cooldown_days: campaigns.offer_cooldown_days,
+      offer_limit_times: campaigns.offer_limit_times,
       provider_phone_id: campaign_stages.provider_phone_id,
     })
     .from(campaign_stages)
@@ -169,6 +172,9 @@ export async function GET(
             offerId: stage.offer_id ?? null,
             excludePriorOffer: stage.exclude_prior_offer_contacts,
             lifecycleRules: stage.lifecycle_rules === true,
+            offerRulesEnabled: stage.offer_rules_enabled === true,
+            offerCooldownDays: Number(stage.offer_cooldown_days ?? 7),
+            offerLimitTimes: Number(stage.offer_limit_times ?? 5),
           },
           limit: effectiveLimit,
           offset,

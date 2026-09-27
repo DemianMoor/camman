@@ -77,6 +77,8 @@ type CampaignDetail = {
   audience_cap: number | null;
   exclude_in_use_contacts: boolean;
   exclude_prior_offer_contacts: boolean;
+  offer_cooldown_days?: number;
+  offer_limit_times?: number;
   start_date: string | null;
   end_date: string | null;
   status: Status;
@@ -284,6 +286,8 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
     audience_cap: data.audience_cap ?? null,
     exclude_in_use_contacts: data.exclude_in_use_contacts ?? true,
     exclude_prior_offer_contacts: data.exclude_prior_offer_contacts ?? false,
+    offer_cooldown_days: data.offer_cooldown_days ?? 7,
+    offer_limit_times: data.offer_limit_times ?? 5,
     link_mode: data.link_mode ?? "manual",
     start_date: data.start_date ?? "",
     end_date: data.end_date ?? "",
@@ -1162,6 +1166,8 @@ function AudienceCard({
   // the create route does not set it until PR 4c — so this whole branch is
   // dead code until then, by design.
   const lifecycleRules = state.lifecycleRules === true;
+  const watchedOfferCooldown = state.form.watch("offer_cooldown_days");
+  const watchedOfferLimit = state.form.watch("offer_limit_times");
   const legacyMappedChips = mapLegacyFiltersToChips(watchedFilters);
   // The Freeze note: the effective cadence of the SELECTED contact groups,
   // shown as a range when they differ. Informational only — see the note text.
@@ -1436,6 +1442,68 @@ function AudienceCard({
                   disabled={audienceLocked || anySubmitting}
                 />
               </div>
+              {/* 869f53efz. These are PARAMETERS of the toggle above, not
+                  independent switches — shown only when it is on, because
+                  "not within Y days / not more than N times" is meaningless
+                  when nothing is being excluded. Two controls both claiming to
+                  govern "already got this offer" is how an operator ends up
+                  unable to explain their own audience. */}
+              {watchedExcludePriorOffer ? (
+                <div className="grid grid-cols-2 gap-3 rounded-md border border-dashed p-3">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="offer-cooldown">Not within</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="offer-cooldown"
+                        type="number"
+                        min={0}
+                        max={365}
+                        className="w-20"
+                        value={watchedOfferCooldown ?? 7}
+                        onChange={(e) =>
+                          form.setValue(
+                            "offer_cooldown_days",
+                            Number(e.target.value),
+                            { shouldDirty: true },
+                          )
+                        }
+                        disabled={audienceLocked || anySubmitting}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        days
+                      </span>
+                    </div>
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="offer-limit">Not more than</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="offer-limit"
+                        type="number"
+                        min={1}
+                        max={100}
+                        className="w-20"
+                        value={watchedOfferLimit ?? 5}
+                        onChange={(e) =>
+                          form.setValue(
+                            "offer_limit_times",
+                            Number(e.target.value),
+                            { shouldDirty: true },
+                          )
+                        }
+                        disabled={audienceLocked || anySubmitting}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        times
+                      </span>
+                    </div>
+                  </div>
+                  <p className="col-span-2 text-xs text-muted-foreground">
+                    One campaign counts as one, however many stages it sends. A
+                    click does not reset either number.
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             {/* Legacy filter chips. Hidden entirely for a lifecycle campaign
@@ -1931,6 +1999,8 @@ function buildCreateBody(
     audience_cap: values.audience_cap,
     exclude_in_use_contacts: values.exclude_in_use_contacts,
     exclude_prior_offer_contacts: values.exclude_prior_offer_contacts,
+    offer_cooldown_days: values.offer_cooldown_days,
+    offer_limit_times: values.offer_limit_times,
     link_mode: values.link_mode,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,

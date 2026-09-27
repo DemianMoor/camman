@@ -39,8 +39,18 @@ export interface StageEligibilityParams {
   currentCreativeId: number | null;
   // The campaign's offer. Only used when excludePriorOffer is true.
   currentOfferId: number | null;
-  // campaigns.exclude_prior_offer_contacts — gates LAYER 3.
+  // campaigns.exclude_prior_offer_contacts — the ENABLE switch. Off ⇒ neither
+  // LAYER 3 nor the offer rules apply at all.
   excludePriorOffer: boolean;
+  // campaigns.offer_rules_enabled — WHICH rule runs when excludePriorOffer is
+  // on: true ⇒ the Y/N offer rules below, false ⇒ the legacy "ever got this
+  // offer" (LAYER 3). Required, per CLAUDE.md §11b: it decides who is
+  // excluded, so an optional default would hide the call sites that forget it.
+  offerRulesEnabled: boolean;
+  // campaigns.offer_cooldown_days / offer_limit_times. Only read when
+  // offerRulesEnabled is true.
+  offerCooldownDays: number;
+  offerLimitTimes: number;
   // campaigns.lifecycle_rules (migration 0187). Gates the three lifecycle
   // layers below.
   //
@@ -71,6 +81,11 @@ export const EXCLUSION_PRIORITY = [
   "suppressed",
   "bought_offer",
   "freeze_not_due",
+  // 869f53efz (PR 4d). Ahead of the content-dedup layers per spec §8.3: an
+  // offer rule is a stronger statement about the person than "saw this
+  // creative", so it should be the reason reported when both apply.
+  "offer_limit",
+  "offer_cooldown",
   "creative",
   "in_flight",
   "offer",
@@ -185,6 +200,62 @@ export function lifecycleExclusionLayers(p: {
   return orderLayers(layers);
 }
 
+/**
+ * The OFFER RULE layers (869f53efz, PR 4d): not more than N campaigns, and not
+ * within Y days.
+ *
+ * Both read `contact_offer_campaigns` — the per-(contact, offer, campaign)
+ * rollup the engagement job maintains — and both EXCLUDE THE CURRENT CAMPAIGN.
+ * That carve-out is the whole reason the table is keyed by campaign: without
+ * it, stage 2 of a three-stage sequence would be blocked by stage 1, and a
+ * drip would cannibalise itself on its second message.
+ *
+ * ⚠️ THE LIMIT COUNTS CAMPAIGNS, NOT MESSAGES (owner, 2026-09-25). One
+ * sequence = 1 however many stages it sent. So this is `count(*)` over rows,
+ * never `sum(messages)` — the column exists for reporting, not for this.
+ *
+ * ⚠️ EXACTLY Y DAYS AGO IS INSIDE THE COOLDOWN. The predicate is
+ * `last_sent_at > now() - Y days`, the same `>` the freeze cadence uses. Two
+ * cadence rules in one codebase with opposite boundaries is a bug waiting for
+ * someone to compare them.
+ *
+ * A click does NOT reset either count. Engagement and offer fatigue are
+ * different things: someone who clicks every message still should not receive
+ * the same offer six times.
+ */
+export function offerRuleLayers(p: {
+  orgId: string;
+  offerId: number | null;
+  currentCampaignId: number;
+  cooldownDays: number;
+  limitTimes: number;
+}): EligibilityLayer[] {
+  if (p.offerId == null) return [];
+  const scope = sql`
+        WHERE coc.org_id = ${p.orgId}::uuid
+          AND coc.offer_id = ${p.offerId}::int
+          AND coc.campaign_id <> ${p.currentCampaignId}::int`;
+  return orderLayers([
+    {
+      key: "offer_limit",
+      sql: sql`
+        SELECT coc.contact_id FROM contact_offer_campaigns coc
+        ${scope}
+        GROUP BY coc.contact_id
+        HAVING count(*) >= ${p.limitTimes}::int
+      `,
+    },
+    {
+      key: "offer_cooldown",
+      sql: sql`
+        SELECT DISTINCT coc.contact_id FROM contact_offer_campaigns coc
+        ${scope}
+          AND coc.last_sent_at > now() - make_interval(days => ${p.cooldownDays}::int)
+      `,
+    },
+  ]);
+}
+
 export function buildStageEligibilityExclusions(
   p: StageEligibilityParams,
 ): StageEligibilityExclusions {
@@ -211,8 +282,11 @@ export function buildStageEligibilityExclusions(
       `
     : null;
 
+  // LAYER 3 is the LEGACY "ever got this offer". With offer rules on it is
+  // replaced by the Y/N pair below — not stacked with them, or a contact past
+  // their cooldown would still be blocked forever by the old rule.
   const offer =
-    p.excludePriorOffer && p.currentOfferId != null
+    p.excludePriorOffer && !p.offerRulesEnabled && p.currentOfferId != null
       ? sql`
         SELECT contact_id FROM offer_exposures
         WHERE org_id = ${p.orgId}::uuid
@@ -232,6 +306,18 @@ export function buildStageEligibilityExclusions(
       ...lifecycleExclusionLayers({
         orgId: p.orgId,
         offerId: p.currentOfferId,
+      }),
+    );
+  }
+
+  if (p.excludePriorOffer && p.offerRulesEnabled) {
+    layers.push(
+      ...offerRuleLayers({
+        orgId: p.orgId,
+        offerId: p.currentOfferId,
+        currentCampaignId: p.currentCampaignId,
+        cooldownDays: p.offerCooldownDays,
+        limitTimes: p.offerLimitTimes,
       }),
     );
   }

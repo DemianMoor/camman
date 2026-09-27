@@ -223,6 +223,9 @@ async function main() {
         currentOfferId: p.offerId,
         excludePriorOffer: false,
         lifecycleRules: p.lifecycleRules,
+        offerRulesEnabled: false,
+        offerCooldownDays: 7,
+        offerLimitTimes: 5,
       });
       const union = eligibilityUnion(layers);
       if (!union) return new Set();
@@ -241,6 +244,9 @@ async function main() {
         currentOfferId: offerId,
         excludePriorOffer: false,
         lifecycleRules: true,
+        offerRulesEnabled: false,
+        offerCooldownDays: 7,
+        offerLimitTimes: 5,
       });
       const l = layers.find((x) => x.key === key);
       if (!l) return new Set();
@@ -314,6 +320,9 @@ async function main() {
       currentOfferId: null,
       excludePriorOffer: false,
       lifecycleRules: true,
+      offerRulesEnabled: false,
+      offerCooldownDays: 7,
+      offerLimitTimes: 5,
     });
     bar(
       "E10 a campaign with NO offer emits no bought_offer layer",
@@ -342,6 +351,9 @@ async function main() {
       currentOfferId: offerA.id,
       excludePriorOffer: false,
       lifecycleRules: true,
+      offerRulesEnabled: false,
+      offerCooldownDays: 7,
+      offerLimitTimes: 5,
     });
     const keys = layersAll.map((l) => l.key);
     const ranks = keys.map((k) =>

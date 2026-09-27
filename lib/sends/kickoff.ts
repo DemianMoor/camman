@@ -190,6 +190,9 @@ interface MainRow {
   creative_allow_multi_segment: boolean;
   exclude_prior_offer_contacts: boolean;
   lifecycle_rules: boolean;
+  offer_rules_enabled: boolean;
+  offer_cooldown_days: number;
+  offer_limit_times: number;
   campaign_name: string | null;
   stage_number: number | null;
   label: string | null;
@@ -249,6 +252,9 @@ export async function kickoffStageSend(
       cr.allow_multi_segment     AS creative_allow_multi_segment,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
       c.lifecycle_rules AS lifecycle_rules,
+           c.offer_rules_enabled AS offer_rules_enabled,
+           c.offer_cooldown_days AS offer_cooldown_days,
+           c.offer_limit_times AS offer_limit_times,
       c.name                         AS campaign_name,
       s.stage_number                 AS stage_number,
       s.label                        AS label
@@ -671,6 +677,9 @@ export async function kickoffStageSend(
       offerId: row.offer_id ?? null,
       excludePriorOffer: row.exclude_prior_offer_contacts,
       lifecycleRules: row.lifecycle_rules === true,
+      offerRulesEnabled: row.offer_rules_enabled === true,
+      offerCooldownDays: Number(row.offer_cooldown_days ?? 7),
+      offerLimitTimes: Number(row.offer_limit_times ?? 5),
     },
     // Q4: the sending NUMBER's carrier allow-list, applied HERE so an excluded
     // contact never becomes a stage_sends row. ANDs with the campaign-level

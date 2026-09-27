@@ -191,6 +191,9 @@ async function main() {
     excludePriorOffer: c.exclude_prior_offer_contacts,
     // ⭐ The hypothetical, as an argument. The campaign row is untouched.
     lifecycleRules: true,
+    offerRulesEnabled: false,
+    offerCooldownDays: 7,
+    offerLimitTimes: 5,
   });
   for (const l of layers) {
     t = performance.now();

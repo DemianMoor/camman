@@ -99,6 +99,9 @@ export async function POST(
       // Which predicate chose this campaign's audience. Read here so the
       // activation snapshot freezes the pool the campaign's own chips describe.
       lifecycle_rules: campaigns.lifecycle_rules,
+      offer_rules_enabled: campaigns.offer_rules_enabled,
+      offer_cooldown_days: campaigns.offer_cooldown_days,
+      offer_limit_times: campaigns.offer_limit_times,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
@@ -194,6 +197,9 @@ export async function POST(
               // engine has since been switched off. Its chips were chosen
               // under those semantics.
               lifecycleRules: c.lifecycle_rules === true,
+              offerRulesEnabled: c.offer_rules_enabled === true,
+              offerCooldownDays: c.offer_cooldown_days,
+              offerLimitTimes: c.offer_limit_times,
               cap: c.audience_cap ?? null,
               excludeInUse: c.exclude_in_use_contacts,
               // Bake the prior-offer exclusion into the frozen pool so the pool

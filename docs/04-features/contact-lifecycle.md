@@ -16,14 +16,14 @@ Design: [2026-09-22-contact-lifecycle-status-design.md](../superpowers/specs/202
 
 Every contact carries one status, recomputed from its own send and click history:
 
-| Status | Meaning |
-|---|---|
-| `new` | never received a campaign message |
-| `cold` | messaged, never clicked (or its last click has aged out) |
-| `hot` | a human click within `hot_days` (30) |
-| `warm` | a human click within `warm_days` (120) |
-| `freeze` | `freeze_after_messages` (10) messages since the last click, with no click |
-| `suppressed` | 60 days in freeze with ≥ 2 messages sent in freeze, still no click |
+| Status       | Meaning                                                                   |
+| ------------ | ------------------------------------------------------------------------- |
+| `new`        | never received a campaign message                                         |
+| `cold`       | messaged, never clicked (or its last click has aged out)                  |
+| `hot`        | a human click within `hot_days` (30)                                      |
+| `warm`       | a human click within `warm_days` (120)                                    |
+| `freeze`     | `freeze_after_messages` (10) messages since the last click, with no click |
+| `suppressed` | 60 days in freeze with ≥ 2 messages sent in freeze, still no click        |
 
 Order matters: the rules are evaluated top to bottom and the first match wins, so
 a click always beats a message count. The whole definition lives in ONE SQL
@@ -43,7 +43,7 @@ means Global Suppression. The user-facing label is still "Suppressed".
   `classification = 'human' AND scored_at IS NOT NULL` — joined to the contact
   through `links.contact_id`. Bot, prefetch, suspect and unscored clicks never count.
 - **The freeze clock.** `freeze_entered_at` is stamped when a contact enters
-  freeze; `freeze_started_at` / `freeze_msgs` count only messages sent *after*
+  freeze; `freeze_started_at` / `freeze_msgs` count only messages sent _after_
   that. This is why a backfilled freeze contact cannot be suppressed at launch:
   its clock starts at the backfill instant.
 - **Thresholds** come from the org's `lifecycle_settings` row (or the defaults in
@@ -57,16 +57,16 @@ means Global Suppression. The user-facing label is still "Suppressed".
 
 ## 3. Where it lives
 
-| Object | Role |
-|---|---|
-| `contact_engagement` | one row per contact: facts, status, freeze clock, effective cadence, `thresholds` jsonb, `time_due_at` |
-| `contact_engagement_transitions` | every status change, with the thresholds in effect and a reason |
-| `lifecycle_settings` | org thresholds + `engine_mode` (the job's on/off switch) |
-| `contact_groups.{freeze_after_messages, freeze_cadence_days, suppress_after_days, suppress_min_freeze_messages}` | per-group overrides, NULL = inherit |
-| `contact_offer_campaigns` | per (contact, offer, campaign) exposure — the grain ClickUp 869f53efz needs |
-| `stage_send_lifecycle` | status-at-send, written at Prepare (§3b); read by the PR 5 cohort report |
-| `contacts.lifecycle_status` | denormalised PROJECTION of `contact_engagement.status` (§3a) |
-| `campaigns.lifecycle_rules` | false on every pre-existing campaign; gates the PR 4 eligibility layers |
+| Object                                                                                                           | Role                                                                                                   |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `contact_engagement`                                                                                             | one row per contact: facts, status, freeze clock, effective cadence, `thresholds` jsonb, `time_due_at` |
+| `contact_engagement_transitions`                                                                                 | every status change, with the thresholds in effect and a reason                                        |
+| `lifecycle_settings`                                                                                             | org thresholds + `engine_mode` (the job's on/off switch)                                               |
+| `contact_groups.{freeze_after_messages, freeze_cadence_days, suppress_after_days, suppress_min_freeze_messages}` | per-group overrides, NULL = inherit                                                                    |
+| `contact_offer_campaigns`                                                                                        | per (contact, offer, campaign) exposure — the grain ClickUp 869f53efz needs                            |
+| `stage_send_lifecycle`                                                                                           | status-at-send, written at Prepare (§3b); read by the PR 5 cohort report                               |
+| `contacts.lifecycle_status`                                                                                      | denormalised PROJECTION of `contact_engagement.status` (§3a)                                           |
+| `campaigns.lifecycle_rules`                                                                                      | false on every pre-existing campaign; gates the PR 4 eligibility layers                                |
 
 Code: [lib/engagement/](../../lib/engagement/) — `constants.ts`, `status-sql.ts`
 (the rules), `refresh.ts` (the orchestrator), `settings.ts`, `monitor.ts` — plus
@@ -90,13 +90,13 @@ newest 21 contacts whose status is X". Status also correlates strongly with age
 ones), so the planner had to walk `contacts` by `created_at` a very long way
 before finding a page. Measured on production, page query:
 
-| filter | before 0188 | bar |
-|---|---|---|
-| cold | 18 ms | 300 ms |
-| new | 4 ms | 300 ms |
-| warm | 572 ms | 300 ms |
-| freeze | 3,931 ms | 300 ms |
-| suppressed | 13,413 ms | 300 ms |
+| filter     | before 0188 | bar    |
+| ---------- | ----------- | ------ |
+| cold       | 18 ms       | 300 ms |
+| new        | 4 ms        | 300 ms |
+| warm       | 572 ms      | 300 ms |
+| freeze     | 3,931 ms    | 300 ms |
+| suppressed | 13,413 ms   | 300 ms |
 
 Three predicate shapes were measured (correlated `EXISTS`, correlated scalar
 `coalesce`, and both ANDed). Each has a different pathological case, because the
@@ -171,21 +171,21 @@ transitions newest-first.
 Eight rule types read lifecycle facts. Seven read `contact_engagement`;
 `lifecycle_status` reads the `contacts.lifecycle_status` projection (§3a).
 
-| rule_type | value | meaning |
-|---|---|---|
-| `messages_sent_at_least` | any N | `msgs_total >= N` |
-| `messages_sent_at_most` | any N | `msgs_total <= N`, **a missing row counts as 0** |
-| `messages_sent_in_period_at_least` | `{count, days: 7\|14\|30\|90}` | `msgs_<days>d >= count` |
-| `last_message_more_than_n_days_ago` | any N | `last_sent_at < now - N days` |
-| `last_message_in_last_n_days` | any N | `last_sent_at >= now - N days` |
-| `last_click_more_than_n_days_ago` | any N | `last_click_at < now - N days` |
-| `last_click_in_last_n_days` | any N | `last_click_at >= now - N days` |
-| `lifecycle_status` | a set of the six statuses, `is` / `is_not` | `lifecycle_status = ANY(set)` |
+| rule_type                           | value                                      | meaning                                          |
+| ----------------------------------- | ------------------------------------------ | ------------------------------------------------ |
+| `messages_sent_at_least`            | any N                                      | `msgs_total >= N`                                |
+| `messages_sent_at_most`             | any N                                      | `msgs_total <= N`, **a missing row counts as 0** |
+| `messages_sent_in_period_at_least`  | `{count, days: 7\|14\|30\|90}`             | `msgs_<days>d >= count`                          |
+| `last_message_more_than_n_days_ago` | any N                                      | `last_sent_at < now - N days`                    |
+| `last_message_in_last_n_days`       | any N                                      | `last_sent_at >= now - N days`                   |
+| `last_click_more_than_n_days_ago`   | any N                                      | `last_click_at < now - N days`                   |
+| `last_click_in_last_n_days`         | any N                                      | `last_click_at >= now - N days`                  |
+| `lifecycle_status`                  | a set of the six statuses, `is` / `is_not` | `lifecycle_status = ANY(set)`                    |
 
 Three contracts worth knowing before using them:
 
 - **Never messaged / never clicked matches NEITHER direction.** `last_sent_at IS
-  NULL` fails `< now - N` and `>= now - N` alike, so an "Excl" segment built on
+NULL` fails `< now - N` and `>= now - N` alike, so an "Excl" segment built on
   "last message in the last 3 days" never removes a brand-new contact. Reach
   those contacts with `lifecycle_status is new` instead.
 - **"At most N messages" includes contacts the job has not reached.** They have
@@ -204,7 +204,7 @@ it is the first decision about who the campaign reaches, and the others narrow
 what it selects.
 
 ⚠️ **The create form has THREE states, not two.** While the engine read is in
-flight the answer is *not yet known*, and rendering that as "legacy" is a bug —
+flight the answer is _not yet known_, and rendering that as "legacy" is a bug —
 it showed a read-only chip row and the old Filters row with no explanation, for
 as long as the request took. The row now says "checking the lifecycle engine…",
 shows nothing as selected, and withholds the legacy Filters row until the
@@ -225,7 +225,7 @@ Three contracts:
   it again, and `scripts/test-lifecycle-chips.ts` C4/C5 assert the SQL does too
   -- an empty set and a missing key both match nobody.
 - **`suppressed` is not an offerable chip.** It is the end of the lifecycle, not
-  an audience you pick. It is excluded as a *layer* (below) so the reason is
+  an audience you pick. It is excluded as a _layer_ (below) so the reason is
   reported rather than silently absent from a chip list.
 - **A legacy campaign is completely unaffected.** With `lifecycle_rules = false`
   the old predicate decides and the `lifecycle_statuses` key is ignored
@@ -242,12 +242,12 @@ create+activate snapshot must ask
 the same `engine_mode = 'write'` question the create route answers when it
 writes the row.
 
-| path | source of the flag |
-|---|---|
-| create-mode audience preview | the gate (no row exists yet) |
-| create + activate snapshot | the gate — the same value written to the row |
-| draft → active snapshot | `campaigns.lifecycle_rules` off the row |
-| stage previews, preflight, drain | `campaigns.lifecycle_rules` off the row |
+| path                             | source of the flag                           |
+| -------------------------------- | -------------------------------------------- |
+| create-mode audience preview     | the gate (no row exists yet)                 |
+| create + activate snapshot       | the gate — the same value written to the row |
+| draft → active snapshot          | `campaigns.lifecycle_rules` off the row      |
+| stage previews, preflight, drain | `campaigns.lifecycle_rules` off the row      |
 
 ⚠️ **`lifecycleRules` is REQUIRED on `AudiencePreviewInput`, and it was optional
 until that caused a production bug.** Three call sites never passed it and an
@@ -267,11 +267,11 @@ For a lifecycle campaign, `buildStageEligibilityExclusions` adds three
 exclusion layers ahead of the content-dedup ones, ordered by
 `EXCLUSION_PRIORITY` in [lib/sends/eligibility.ts](../../lib/sends/eligibility.ts):
 
-| layer | excludes | source |
-|---|---|---|
-| `suppressed` | `lifecycle_status = 'suppressed'` | the 3a projection |
-| `bought_offer` | bought this campaign's offer | `purchasedOfferContacts()`, shared with the `made_purchase_for_offer` segment rule |
-| `freeze_not_due` | in Freeze AND `last_sent_at > now() - freeze_cadence_days` | `contact_engagement`, per contact |
+| layer            | excludes                                                   | source                                                                             |
+| ---------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `suppressed`     | `lifecycle_status = 'suppressed'`                          | the 3a projection                                                                  |
+| `bought_offer`   | bought this campaign's offer                               | `purchasedOfferContacts()`, shared with the `made_purchase_for_offer` segment rule |
+| `freeze_not_due` | in Freeze AND `last_sent_at > now() - freeze_cadence_days` | `contact_engagement`, per contact                                                  |
 
 - **The order is the contract.** A lead caught by two layers is reported under
   the first. Change the order and you change which bucket the number lands in.
@@ -291,12 +291,52 @@ arriving after activation, so freezing either would freeze a decision that has
 to be made at send time. `suppressed` never enters the audience in the first
 place, because it is not a chip.
 
+### 3f2. The offer rules — cooldown and limit (869f53efz, PR 4d)
+
+Two more layers, for a campaign whose "Exclude leads who already got this
+offer" toggle is on AND that was created with `offer_rules_enabled`:
+
+| layer            | excludes                                                    |
+| ---------------- | ----------------------------------------------------------- |
+| `offer_limit`    | got this offer in **N or more other CAMPAIGNS** (default 5) |
+| `offer_cooldown` | last got it **within Y days** (default 7)                   |
+
+Both read `contact_offer_campaigns`, the per-(contact, offer, campaign) rollup
+the engagement job maintains.
+
+- ⚠️ **The limit counts CAMPAIGNS, not messages.** One sequence = 1 however
+  many stages it sends. `count(*)` over rows, never `sum(messages)` — the
+  `messages` column exists for reporting. The two readings agree on every
+  fixture except one campaign with several messages, which is why
+  `test-offer-limit-cooldown.ts` M6b exists.
+- ⚠️ **The current campaign is carved out of both counts**, so stage 2 is never
+  blocked by stage 1 and a drip does not cannibalise itself on its second
+  message. That carve-out is why the table is keyed by campaign at all.
+- **Exactly Y days ago is INSIDE the cooldown** — the rule is "more than Y days
+  ago" to be eligible, the same `>` the freeze cadence uses.
+- **A click does not reset either count.** Engagement and offer fatigue are
+  different things.
+- ⚠️ **The Y/N rule REPLACES "ever got this offer"; the two never stack.**
+  Stacked, a contact past their cooldown would stay excluded forever and the
+  feature would be inert. At activation, `snapshotAudience` runs one DELETE or
+  the other — still a separate statement after `ANALYZE`, per the planner note
+  in CLAUDE.md §10b.
+
+**Which rule a campaign gets** is `campaigns.offer_rules_enabled`. It defaults
+to FALSE in the column and is set true only by the create route, so the 673
+campaigns that predate migration 0191 keep "ever got this offer" and nobody's
+frozen pool changes meaning underneath them.
+
+In the preview breakdown both land in `excluded`, not `send_time`: they keep a
+lead out of the **pool**, where the send-time group is for layers that skip
+someone already snapshotted.
+
 ### 3g. Why a lead was not sent to
 
 The reasons are reported in four places -- the preflight breakdown, the Prepare
 dialog, the eligibility preview and the autopilot view. They are the same
 buckets because every shape **spreads** `LifecycleExclusionCounts` rather than
-listing keys, and `LIFECYCLE_EXCLUSION_KEYS` is *derived* from
+listing keys, and `LIFECYCLE_EXCLUSION_KEYS` is _derived_ from
 `EXCLUSION_PRIORITY` by difference. A missing bucket is a compile error, not a
 number that quietly reads zero -- which is what it would look like, and is
 indistinguishable from "nobody was excluded for that reason".
@@ -324,7 +364,7 @@ The decision is one pure function
 ([lib/campaigns/excl-timing-warning.ts](../../lib/campaigns/excl-timing-warning.ts))
 that both mount sites call, because the failure mode is not "the warning is
 wrong" but "the warning is right on the detail page and absent on the list
-page" -- which reads to an operator as *nothing to worry about*. The list page
+page" -- which reads to an operator as _nothing to worry about_. The list page
 prefetches `GET /api/campaigns/[campaignId]` when the dialog opens rather than
 widening the list route, and holds the confirm button until it lands.
 

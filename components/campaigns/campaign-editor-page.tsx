@@ -1449,16 +1449,27 @@ function AudienceCard({
                   govern "already got this offer" is how an operator ends up
                   unable to explain their own audience. */}
               {watchedExcludePriorOffer ? (
-                <div className="grid grid-cols-2 gap-3 rounded-md border border-dashed p-3">
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="offer-cooldown">Not within</Label>
-                    <div className="flex items-center gap-2">
+                <div className="grid gap-2 rounded-md border border-dashed p-3">
+                  {/* ⚠️ STACKED, not a 2-column grid. This block sits inside
+                      the Audience section's md:grid-cols-3, so it is already
+                      in a one-third-width column — a nested 2-column grid
+                      collided the inputs with their unit labels on production
+                      ("5days"). One field per row, label and input inline,
+                      reads correctly at any column width. */}
+                  <div className="flex items-center justify-between gap-2">
+                    <Label
+                      htmlFor="offer-cooldown"
+                      className="text-xs font-normal text-muted-foreground"
+                    >
+                      Not within
+                    </Label>
+                    <div className="flex shrink-0 items-center gap-1.5">
                       <Input
                         id="offer-cooldown"
                         type="number"
                         min={0}
                         max={365}
-                        className="w-20"
+                        className="h-8 w-16 text-right"
                         value={watchedOfferCooldown ?? 7}
                         onChange={(e) =>
                           form.setValue(
@@ -1469,20 +1480,25 @@ function AudienceCard({
                         }
                         disabled={audienceLocked || anySubmitting}
                       />
-                      <span className="text-xs text-muted-foreground">
+                      <span className="w-10 text-xs text-muted-foreground">
                         days
                       </span>
                     </div>
                   </div>
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="offer-limit">Not more than</Label>
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label
+                      htmlFor="offer-limit"
+                      className="text-xs font-normal text-muted-foreground"
+                    >
+                      Not more than
+                    </Label>
+                    <div className="flex shrink-0 items-center gap-1.5">
                       <Input
                         id="offer-limit"
                         type="number"
                         min={1}
                         max={100}
-                        className="w-20"
+                        className="h-8 w-16 text-right"
                         value={watchedOfferLimit ?? 5}
                         onChange={(e) =>
                           form.setValue(
@@ -1493,12 +1509,12 @@ function AudienceCard({
                         }
                         disabled={audienceLocked || anySubmitting}
                       />
-                      <span className="text-xs text-muted-foreground">
+                      <span className="w-10 text-xs text-muted-foreground">
                         times
                       </span>
                     </div>
                   </div>
-                  <p className="col-span-2 text-xs text-muted-foreground">
+                  <p className="text-xs text-muted-foreground">
                     One campaign counts as one, however many stages it sends. A
                     click does not reset either number.
                   </p>

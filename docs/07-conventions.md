@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-25_
+_Last updated: 2026-09-27_
 
 ## A frozen first column is OPT-IN PER TABLE, and it must stay that way (2026-09-23)
 
@@ -156,6 +156,55 @@ The drain dispatches real messages. Any gate added to it inherits a failure mode
 - **The module throws; the CALLER decides.** A helper that swallows its own errors has taken a decision it lacks the context to take. `recheckLifecycleEligibility` throws and [lib/sends/drain.ts](../lib/sends/drain.ts) catches.
 - ⭐ **Count the failure, and treat the resulting numbers as MISSING rather than zero.** `DrainResult.recheckFailedBatches` exists so a batch that skipped the check is visible. Without it, a check that silently never ran is indistinguishable from a check that found nothing — and the second reading is the comforting one, which is why it is the one people reach for.
 - ⭐ **A fail-open path that cannot be made to fail on purpose is an untested claim.** The drain takes an injectable `recheckEligibility` seam beside `sendSms`/`isEnabled` for exactly this: `scripts/test-lifecycle-send-recheck.ts` J13 injects a throwing re-check and asserts the batch STILL dispatched and the failure was counted. Asserting "it didn't throw" would also pass for a check that quietly did nothing.
+
+## A cohort report groups by the STAMP, never by the live status (2026-09-27)
+
+The Lifecycle report ([lib/reporting/lifecycle-report.ts](../lib/reporting/lifecycle-report.ts)) groups every send by `stage_send_lifecycle.status` — what the contact WAS when the message went out — not by `contacts.lifecycle_status`, which is what they are now.
+
+- **A live-status read makes history move.** Contacts change cohort continuously, so grouping last week's sends by today's status means last week's numbers change every time somebody opens the page, and no two screenshots of the same period agree. Measured on stage 4791 nineteen hours after its send: stamped hot 1,306 / warm 1,526, live hot 1,315 / warm 1,517 — nine contacts had already moved, after less than a day.
+- ⭐ **`Unclassified` is a real row, not an omission.** Sends with no stamp predate live stamping. Dropping them makes the cohorts silently fail to sum to `Total`, and a reader concludes the tool is broken rather than that history is missing. The same logic makes `Suppressed` render as a **dash** with "excluded by construction" rather than zeros: it is structurally empty, and a 0 reads as a measurement somebody made.
+- **Two tabs that disagree must say why, in the smaller one.** This report's CTR comes from raw `HUMAN_CLICK`, the source the engagement job evaluates against, so a cohort's CTR and the status DEFINING that cohort are computed from the same clicks. Overview uses `counted_clickers`, which lags the scoring cron — 125 vs 112 on stage 4791 at 19 h. Neither number is wrong; an unexplained discrepancy between two tabs is worse than either, so the page names both sources.
+- **Label an attribution gap where the number is, not in a doc.** ~1,038 attributed sales across 3.88M sends reads as catastrophic performance unless the Sales/CR/Revenue columns say **attributed only** on the page itself.
+- ⭐ **A per-recipient join must carry every column of its grain.** The click join reads `links` on `(stage_id, contact_id)` — the grain `counted_clickers` keys on. On `contact_id` alone it counts every link that contact ever clicked, org-wide, across every campaign, so a Hot contact imports their whole click history into whichever cohort they sit in and cohort CTR measures the CONTACT instead of the send — inflated in exactly the cohorts that clicking defines. Caught by bar B1 in [scripts/test-lifecycle-report.ts](../scripts/test-lifecycle-report.ts), whose fixture clicks a DIFFERENT stage's link.
+- **Apportioning a stage total needs the denominator that produced it.** Per-send cost is `coalesce(the send's cost_per_sms, the stage rate) × (1 + opted out)`, where the stage rate divides `total_cost` by `greatest(sms_count, the stage's sent rows) + opt_out_count` — the same expression [lib/stages/total-cost.ts](../lib/stages/total-cost.ts) used to compute it, so the parts sum back to the whole. `greatest(…)` is load-bearing: an API stage leaves `sms_count` at 0, so dividing by it alone divides by zero for every stage this report can see.
+
+## `<date> AT TIME ZONE` converts the WRONG WAY, and a mid-window fixture cannot catch it (2026-09-27)
+
+An ET calendar day becomes an instant in JavaScript, through `etDayBounds` ([lib/reporting/delivery-rollup.ts](../lib/reporting/delivery-rollup.ts)) — **never** by writing `<date> AT TIME ZONE 'America/New_York'` in SQL. That expression reads like "ET midnight of this day" and is not:
+
+| expression | yields | intended |
+| --- | --- | --- |
+| `'2026-08-22'::date AT TIME ZONE 'America/New_York'` | `2026-08-21 20:00` — a **naive** timestamp, compared as UTC | `2026-08-22 04:00+00` |
+| `('2026-08-22'::date + 1) AT TIME ZONE 'America/New_York'` | `2026-08-22 20:00` | `2026-08-23 04:00+00` |
+
+Postgres casts the `date` to `timestamptz` in the SESSION zone first, then `AT TIME ZONE` converts **to** ET and returns a `timestamp without time zone`, which the comparison then reads back as UTC. Net: the boundary lands **8 hours early**. Both directions of the operator exist and only one is a mistake — `timestamptz AT TIME ZONE zone` (an instant → that zone's wall clock, used for GROUP BY on an ET date) is correct and is what the other 150 uses in this repo do.
+
+It shipped in two places at once: the Lifecycle report's window (every figure covered 8 hours of the previous ET day and stopped 8 hours short) and the reconstruction's `asOf` (every ET day evaluated as of **16:00 ET**, so message counts and clicks were truncated for all 3.08M rows, and every send after 16:00 ET fell out of the facts and reconstructed to nothing — 10,364 of them).
+
+- ⭐ **A fixture in the MIDDLE of a window cannot detect a shifted window.** 38 bars were green across both files. Every fixture sat at an arbitrary time of day, and a window displaced by 8 hours still contained all of them. The defect was found by reading a dry run's arithmetic, not by a test.
+- **A boundary needs a fixture ON the boundary, and a precondition bar under it.** `scripts/test-lifecycle-report.ts` H1/H2 place two sends **two minutes apart** across ET midnight and assert each lands in its own day; `scripts/test-lifecycle-reconstruction.ts` R6 sends at 23:59 ET and asserts it reconstructs at all. Red-proved against the old code: H1 returned 0 instead of 1, H2 returned 2 instead of 1, R6 returned no row. H0 asserts the two fixtures really are minutes apart — the first version measured `+36h` from ET **noon** instead of midnight, which put them two DAYS apart and left H1/H2 green while testing nothing.
+- ⭐ **The neighbouring bar that stays green tells you what a weaker test would have missed.** H3 asks a two-day window for both sends and passes under BOTH the broken and the fixed boundary. A bar written at that width would have proved the feature worked while the days were wrong.
+- **DST is the reason the fix is not `+ interval '4 hours'`.** `etDayBounds` uses `fromZonedTime`, which is offset-correct across the March and November transitions; an arithmetic correction is right for eight months of the year.
+
+## A window predicate must not wrap the indexed column, and a cap must be servable (2026-09-27)
+
+Three findings from making the Lifecycle report usable, all measured on production.
+
+- ⭐ **An ET-day window written as `(sent_at AT TIME ZONE 'America/New_York')::date BETWEEN a AND b` cannot use the index on `sent_at`.** The expression wraps the column, so the planner seq-scans: **15.2s for a ONE-DAY window that returned zero rows**, against 0.07s for the identical window expressed as a half-open range on raw `sent_at`. Both bounds are the same ET days; only one of them is answerable. Anywhere an ET calendar day meets a `TIMESTAMPTZ` column, convert the DAY to instants, never the column to a day.
+- ⭐ **A predicate that does not constrain the driving table will be ignored by the planner, whichever way you write the join.** The report's click join, written as `sent JOIN links JOIN clicks` and then again as an `EXISTS` semi-join, both times led with `clicks_classification_scored_at_idx` and read **every human click in the org** (195,235 rows), doing a `links_pkey` heap fetch for each — 34.3s of a 42.4s window, a cost independent of how much data was being reported on. Driving from the window's LINKS by `stage_id` fixed it: comparable row count, but a stage's links are physically adjacent, and the probe into `clicks_link_id_idx` is index-only for the ~97% of links nobody clicked. Rewriting a join as `EXISTS` is not a plan change; changing which table drives it is.
+- **A fallback should not be computed where it cannot be read.** The per-stage cost rate exists for sends whose own `cost_per_sms` is NULL; the pipeline snapshots that per row, so almost none are. Computing it for every stage in the window cost 7.4s of the same 42.4s producing rates nothing consumed. Narrowing the stage list to `WHERE cost_per_sms IS NULL` removed the node entirely.
+- ⭐ **A cap the route cannot serve is worse than a smaller one.** The plan called for Overview's 92 days; measured, that is minutes, and the request would burn the whole `maxDuration` and return a 504 with nothing to show. The cap is 14 days because 14 days measured ~34s and fits inside a 60s limit. Widening it means changing the CLICK SOURCE (`counted_clickers` answers the same question in one indexed lookup), which is a decision about what the number MEANS, so it goes to the owner rather than being taken in the query.
+- ⭐ **On a live database, measure the repeat before believing the difference.** Identical code on a 7-day window measured 20.8s, 21.8s and 25.5s. Every variant in this thread was within that spread of its neighbour, so the ranking read off single runs was noise — and twice a "fix" adopted on one run was contradicted by the next. Only the changes worth FACTORS (15.2s → 0.07s; 34.3s → gone) survived. See [feedback_reverify_a_stated_cause].
+
+## A reconstruction states what it cannot know (2026-09-27)
+
+[scripts/backfill-lifecycle-reconstruction.ts](../scripts/backfill-lifecycle-reconstruction.ts) rebuilds cohorts for sends that predate live stamping. It is a REPLAY, not a lookup: `contact_engagement` holds only current rollups, and `contact_engagement_transitions` begins at the PR 1 backfill instant, which is after every row it targets. Facts are rebuilt from raw `stage_sends` + `clicks`/`links` and fed to the ONE evaluator, `evaluationSelectSql` — no threshold comparison is re-spelled.
+
+- ⭐ **Never invent a state that could not have existed.** `suppressed` is never written: suppression could not have happened before launch, so emitting it would fabricate history. A row the facts imply is suppressed becomes `freeze`, and the coercions are counted and reported rather than absorbed.
+- **A one-shot artifact must record what it meant.** It uses TODAY'S thresholds and is not re-run after a threshold change (owner, 2026-09-27) — re-running would produce different history for the same day. Nothing is stored per row, so the run prints the thresholds in force and the page's note states them. The alternative, a per-row threshold column, buys a re-runnability nobody wants.
+- ⭐ **Resume must be derived from the data.** A day is done when every `sent` row in it carries a stamp. A cursor file lies after a partial failure — it records where the process stopped, not where the data got to. One transaction per ET day, so a failure loses a day rather than the run.
+- **Name the grain in the output, not only in the code.** One status per contact per ET day (evaluating per send would be ~71K evaluations for a median day), and the page says so, because a reader comparing this to a per-message number otherwise finds a discrepancy they cannot explain.
+- ⭐ **Test the artifact, not an extraction of it.** [scripts/test-lifecycle-reconstruction.ts](../scripts/test-lifecycle-reconstruction.ts) runs the real script as a child process with `--org` on a throwaway org. An extracted helper would test a copy of the replay; the command line is what runs against production. Its R1/R2 pair is the whole feature: the SAME contact, from the SAME single click, must reconstruct as `hot` for a day 90 days ago and `warm` for yesterday — a replay that degraded into a lookup returns one value for both.
 
 ## A dry run must mirror the predicate it is rehearsing, and name its world-state (2026-09-25)
 

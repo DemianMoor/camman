@@ -145,6 +145,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production repair; writes only behind --apply",
   },
   {
+    file: "backfill-lifecycle-reconstruction.ts",
+    why: "one-shot production backfill of stage_send_lifecycle for sends that predate live stamping (contact lifecycle PR 5); dry-run default, writes only behind --apply, one transaction per ET day",
+  },
+  {
     file: "backfill-optout-attributions.ts",
     why: "one-shot production backfill of opt_out_attributions",
   },

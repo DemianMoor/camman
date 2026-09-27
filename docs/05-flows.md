@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-09-25_
+_Last updated: 2026-09-27_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -461,6 +461,57 @@ sequenceDiagram
 ```
 
 > Runs just after the opt-out / conversions / offer-reach pollers each quarter-hour so it folds in freshly-attributed engagement. All bucketing is by the SEND hour in ET; sales/revenue use the per-recipient `stage_sends` attribution (not the Keitaro daily aggregate) so they're hour- and group-splittable. Grand totals come from `report_stage_hour`; `report_group_hour` fans out over contact groups and is non-additive. See [04-features/reports-rollup.md](04-features/reports-rollup.md).
+
+## K. Lifecycle cohort report — read path (PR 5)
+
+```mermaid
+sequenceDiagram
+  participant UI as /reports/lifecycle
+  participant API as GET /api/reports/lifecycle
+  participant Fn as getLifecycleReport
+  participant DB
+  UI->>API: ?from=&to= (ET dates, default last 7d, 14d cap, maxDuration 60)
+  API->>API: requireApiMembership + can("campaigns.view")
+  API->>Fn: { orgId, from, to }
+  Fn->>DB: sent = stage_sends status='sent', ET send date in range<br/>LEFT JOIN stage_send_lifecycle (the STAMP, not contacts.lifecycle_status)
+  Fn->>DB: clicked = links for the window's STAGES, EXISTS a HUMAN_CLICK<br/>(driven from links, not from the sends — see conventions)
+  Fn->>DB: sales = conversion_events (ledger) else stage_sends.sale_status<br/>revenue = ledger approved-only sum
+  Fn->>DB: opted = opt_out_attributions.stage_send_id
+  Fn->>DB: stage_rate = total_cost / (greatest(sms_count, sent rows) + opt_out_count)<br/>ONLY for stages holding a send with a NULL cost_per_sms
+  DB-->>Fn: one row per cohort
+  Fn-->>API: six cohorts + Clickers/Non-clickers + Total + Unclassified<br/>has_reconstructed
+  API-->>UI: JSON — ratios null where the denominator is 0
+  Note over UI: Suppressed renders as a dash ("excluded by construction");<br/>a reconstructed period is flagged with the thresholds note
+```
+
+> No rollup and no cache: the read is per-recipient over `stage_sends`, bounded by the 14-day cap (measured: ~34s at 14 days, minutes at 92). `Unclassified` counts sends with no stamp, so the cohorts always foot with `Total` and missing history shows as missing rather than as a broken tool. See [04-features/contact-lifecycle.md](04-features/contact-lifecycle.md) §3k.
+
+## K2. Lifecycle reconstruction — one-off backfill (PR 5)
+
+```mermaid
+sequenceDiagram
+  participant Op as operator (CLI, off-peak)
+  participant S as backfill-lifecycle-reconstruction
+  participant DB
+  Op->>S: npx tsx … (dry run) / --apply
+  S->>DB: loadLifecycleSettings — print the thresholds THIS run used
+  S->>DB: candidate ET days + per-day unstamped count
+  loop one transaction per ET day, oldest first
+    S->>S: skip when unstamped = 0 (resume derived from data, not a cursor)
+    S->>DB: rc_target — the day's unstamped sent rows
+    S->>DB: rc_clicks / rc_facts as of the day's END (asOf = day+1 ET)
+    S->>DB: createThresholdTempTables + evaluationSelectSql → rc_final
+    S->>DB: count rows the facts imply suppressed (coerced to freeze)
+    alt --apply
+      S->>DB: INSERT stage_send_lifecycle (status, reconstructed = true)
+    else dry run
+      S->>DB: ROLLBACK — nothing written
+    end
+  end
+  S-->>Op: per-day distribution, coerced count, unclassified count
+```
+
+> A REPLAY, not a lookup: `contact_engagement` holds only current rollups and `contact_engagement_transitions` begins after every row this targets, so the facts are rebuilt and fed to the one evaluator. `suppressed` is never written — suppression could not have happened before launch. One-shot: it uses today's thresholds and is NOT re-run after a threshold change, so re-running would produce different history for the same day.
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)
 

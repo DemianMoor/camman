@@ -5,7 +5,10 @@ import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { findFrequencyCollisions } from "@/lib/guardrails/frequency";
 import { notifyGuardrailOncePerDay } from "@/lib/guardrails/notify";
-import { CAMPAIGN_TIMEZONE, CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
+import {
+  CAMPAIGN_TIMEZONE,
+  CAMPAIGN_TIMEZONE_LABEL,
+} from "@/lib/campaign-timezone";
 import {
   computePreflightBreakdown,
   type PreflightBreakdown,
@@ -78,7 +81,9 @@ function redReason(b: PreflightBreakdown): string {
 
 function autopilotUrl(): string {
   const base = process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ?? "";
-  return base ? `${base}/sends/autopilot` : "the Autopilot view (/sends/autopilot)";
+  return base
+    ? `${base}/sends/autopilot`
+    : "the Autopilot view (/sends/autopilot)";
 }
 
 function formatRedAlert(r: DueRow, b: PreflightBreakdown): string {
@@ -89,14 +94,21 @@ function formatRedAlert(r: DueRow, b: PreflightBreakdown): string {
   );
 }
 
-function formatDigest(items: { r: DueRow; b: PreflightBreakdown }[], redCount: number): string {
+function formatDigest(
+  items: { r: DueRow; b: PreflightBreakdown }[],
+  redCount: number,
+): string {
   const head =
     `🔭 Preflight — ${items.length} stage${items.length === 1 ? "" : "s"} fire in the next 15 min` +
-    (redCount > 0 ? ` · ⚠️ ${redCount} need${redCount === 1 ? "s" : ""} attention` : " · all clear");
+    (redCount > 0
+      ? ` · ⚠️ ${redCount} need${redCount === 1 ? "s" : ""} attention`
+      : " · all clear");
   const lines = items.map(({ r, b }) => {
     const icon = isRed(b) ? "🔴" : "✅";
     const dedup =
-      b.excluded.dedup_1h_predicted > 0 ? ` · ${b.excluded.dedup_1h_predicted.toLocaleString()} dedup-skip` : "";
+      b.excluded.dedup_1h_predicted > 0
+        ? ` · ${b.excluded.dedup_1h_predicted.toLocaleString()} dedup-skip`
+        : "";
     return `${icon} ${stageLabel(r)} — ${b.predicted_sends.toLocaleString()} send${dedup} (${etTime(r.scheduled_at)})`;
   });
   return `${head}\n\n${lines.join("\n")}\n\nAbort/re-date: ${autopilotUrl()}`;
@@ -161,7 +173,19 @@ export async function runSendPreflight(
       AND s.scheduled_at IS NOT NULL
       AND s.scheduled_at > ${nowIso}
       AND s.scheduled_at <= ${leadIso}
-      AND s.materialized_at IS NULL
+      -- ⚠️ NOT materialized_at IS NULL. That guard assumed materialization
+      -- happens near send time, which is false for a campaign created AND
+      -- activated in one go: its stages materialize immediately, possibly days
+      -- before their scheduled_at. Stage 4791 (campaign 1460) materialized
+      -- 2026-09-25 17:27 for a 2026-09-26 13:45 send, so every preflight tick
+      -- in its lead window skipped it and preflight_result stayed NULL —
+      -- there was no Prepare-time prediction to compare the live send against.
+      --
+      -- sent_at IS NULL above already excludes a stage that has fired, and
+      -- scheduled_at > now() excludes one that is firing, so dropping the
+      -- materialized guard cannot preflight a stage whose send is done or in
+      -- progress. What it adds is exactly the case that was missing: built
+      -- early, not yet sent.
       AND s.sent_at IS NULL
       AND s.schedule_missed_at IS NULL
       AND s.slip_hold_at IS NULL
@@ -217,24 +241,27 @@ export async function runSendPreflight(
   // would need a loop here, which is not the shape today.
   try {
     if (orgId) {
-    const collision = await findFrequencyCollisions(orgId);
-    if (collision.contacts > 0) {
-      await notifyGuardrailOncePerDay(
-        {
-          orgId,
-          event: "guardrail.frequency_collision",
-          headline: `${collision.contacts.toLocaleString()} contact${collision.contacts === 1 ? "" : "s"} reached by a second campaign within 3 days`,
-          detail: [
-            `Campaigns involved: ${collision.campaigns.slice(0, 20).join(", ")}`,
-            "Allowed within one campaign; across campaigns it is worth a look.",
-          ],
-          entityType: "org",
-          entityId: orgId,
-          metadata: { contacts: collision.contacts, campaigns: collision.campaigns },
-        },
-        "frequency-collision",
-      );
-    }
+      const collision = await findFrequencyCollisions(orgId);
+      if (collision.contacts > 0) {
+        await notifyGuardrailOncePerDay(
+          {
+            orgId,
+            event: "guardrail.frequency_collision",
+            headline: `${collision.contacts.toLocaleString()} contact${collision.contacts === 1 ? "" : "s"} reached by a second campaign within 3 days`,
+            detail: [
+              `Campaigns involved: ${collision.campaigns.slice(0, 20).join(", ")}`,
+              "Allowed within one campaign; across campaigns it is worth a look.",
+            ],
+            entityType: "org",
+            entityId: orgId,
+            metadata: {
+              contacts: collision.contacts,
+              campaigns: collision.campaigns,
+            },
+          },
+          "frequency-collision",
+        );
+      }
     }
   } catch (err) {
     console.error("[preflight] frequency collision check failed", err);

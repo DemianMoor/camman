@@ -1,6 +1,6 @@
 {
-  "id": "0190a000-0190-4190-8190-000000000190",
-  "prevId": "0189a000-0189-4189-8189-000000000189",
+  "id": "0191a000-0191-4191-8191-000000000191",
+  "prevId": "0190a000-0190-4190-8190-000000000190",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1383,6 +1383,27 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'regular'"
+        },
+        "offer_rules_enabled": {
+          "name": "offer_rules_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "offer_cooldown_days": {
+          "name": "offer_cooldown_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 7
+        },
+        "offer_limit_times": {
+          "name": "offer_limit_times",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 5
         }
       },
       "indexes": {

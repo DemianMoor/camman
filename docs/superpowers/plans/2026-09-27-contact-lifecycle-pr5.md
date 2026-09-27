@@ -37,6 +37,13 @@ The whole plan hangs off these, so they are at the top rather than buried in a t
 2. **Sales/CR/Revenue: LEDGER PRIMARY.** `stage_sends.sale_*` is a fallback **only** for rows with no ledger event (4 rows in 60 days). Revenue where both exist = the **ledger's approved-only sum**. Label the column **"attributed only"** on the page.
 3. **Rows**: New, Cold, Hot, Warm, Freeze, Suppressed, then **Clickers** (hot+warm), **Non-clickers** (the rest), Total, plus **Unclassified** for sends older than the backfill.
 4. **Cohort from the STAMP**, never from today's `contact_engagement.status`.
+4b. **CTR uses RAW `HUMAN_CLICK` over `clicks`+`links`** (owner, 2026-09-27) — the same source the engagement job evaluates against, not `counted_clickers`.
+
+   ⚠️ **The two disagree, and the plan must not hide it.** Measured on stage 4791 at 19 h: raw `HUMAN_CLICK` gives **125** clickers, `counted_clickers` gives **112**. The scored table lags, so a fresh period reads low through it.
+
+   Using the job's source means **a cohort's CTR and the status that defines the cohort are computed from the same clicks** — otherwise a contact can be "hot" by one definition while their click is missing from the other, in the same row of the same table.
+
+   **A footer note states that Overview uses `counted_clickers`,** so the two tabs showing different CTRs for the same period is documented rather than discovered. This joins the existing footnote about per-recipient numbers not reconciling with Overview's Keitaro aggregates — the Lifecycle tab now differs from Overview on two axes, and both are named.
 5. The backfill is a large data write: **dry-run default, `--apply` asks first**, off-peak, **resumable by ET day**.
 
 ---
@@ -68,7 +75,9 @@ The whole plan hangs off these, so they are at the top rather than buried in a t
 **Files:** Create `lib/reporting/lifecycle-report.ts`
 
 - [ ] **Step 1:** Per cohort, by send date in ET: sends, CTR, CR, sales, revenue, opt-out rate, cost.
-- [ ] **Step 2: Sources** — sends from `stage_sends`; cohort from `stage_send_lifecycle.status`; clicks from `counted_clickers` joined on `(stage_id, contact_id)`; opt-outs from `opt_out_attributions.stage_send_id`; sales/revenue ledger-primary per decision 2.
+- [ ] **Step 2: Sources** — sends from `stage_sends`; cohort from `stage_send_lifecycle.status`; **clicks from raw `clicks`+`links` under `HUMAN_CLICK`** (decision 4b), joined to the send's contact; opt-outs from `opt_out_attributions.stage_send_id`; sales/revenue ledger-primary per decision 2.
+
+  ⚠️ `HUMAN_CLICK` is imported from `lib/reporting/counted-clickers.ts`, never retyped — it is the one definition of a human click, and re-spelling it would let the report and the job disagree about the same click.
 - [ ] **Step 3: ⚠️ `Unclassified` must be a real row**, counting sends with no `stage_send_lifecycle` row. Omitting it makes the cohorts silently fail to sum to Total, and a reader will assume the tool is broken rather than that history is missing.
 - [ ] **Step 4:** Reuse `getStageMetricsInRange`'s conventions where they apply, so this tab does not invent a second definition of cost or CTR.
 - [ ] **Step 5: Bar** on preview: cohorts sum to Total; a send with no stamp lands in Unclassified.
@@ -82,7 +91,8 @@ The whole plan hangs off these, so they are at the top rather than buried in a t
 - [ ] **Step 2:** Route-map entry like the other report routes.
 - [ ] **Step 3: The two labels that stop numbers being misread:**
   - the Sales/CR/Revenue columns marked **"attributed only"** — ~1,038 attributed sales across 3.88M sends will otherwise read as catastrophic performance rather than as an attribution gap;
-  - a note on any period containing `reconstructed` rows, and a line stating **one status per contact per ET day**.
+  - a note on any period containing `reconstructed` rows, and a line stating **one status per contact per ET day**;
+  - **a footer note that CTR here uses raw human clicks, while Overview uses `counted_clickers`** — the numbers differ for the same period (125 vs 112 on stage 4791 at 19 h) and an unexplained discrepancy between two tabs is worse than either number.
 - [ ] **Step 4:** The existing footnote that per-recipient numbers do not reconcile with Overview's Keitaro aggregates.
 - [ ] **Step 5: Commit.**
 

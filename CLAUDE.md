@@ -254,6 +254,17 @@ Any new parameter that decides **who is selected into an audience, or excluded f
 
 Learned the expensive way (2026-09-25). `lifecycleRules` was made **required** on `StageEligibilityParams` and the compiler immediately named two read paths that would have shown legacy numbers. The same flag was left **optional** on `AudiencePreviewInput` in the same series, with a comment defending it. Three call sites never passed it: the create-mode audience preview ignored the chips entirely, and **both activation snapshots would have frozen the legacy audience into a campaign whose own row said `lifecycle_rules = true`** — permanently, because a pool is never recomputed.
 
+### 11c. "Read-only" means no UI action that can persist
+
+When a task says read-only, it constrains **what may change**, not which tool is used. Driving the app's UI is not a read: this codebase auto-saves, so a click can commit before anything asks for confirmation.
+
+- **Read from the source or the database instead.** A list of rule types, a set of enum values, a threshold, a column's contents — all of them are available from a file or a `SELECT`. Reaching them through the UI is the slowest route and the only one that can write.
+- **Navigating and screenshotting are reads. Clicking is not — assume any click persists.** The Rules panel commits a rule the moment it is added, with no save button; the same is true anywhere auto-save is the pattern. "I only clicked to reveal the dropdown" is not a defence, because the reveal and the write were the same action.
+- **If a control must be exercised to see what is being verified, do it on the preview stack**, or open the control that already exists rather than creating one. Opening an existing `<Select>` and pressing Escape reads its options; adding a row to open the same `<Select>` writes one.
+- **If something is written anyway: revert it, then prove the revert.** Not "I deleted it" — re-read the rows, and check the table for residue the delete would not cover. Report it before reporting the work it interrupted.
+
+Learned the expensive way (2026-09-27). A production verification pass clicked **Add rule** on segment 237 purely to reach the rule-type picker, which created a real rule and changed that segment's audience until it was removed. The revert was verified three ways — the segment back to its 2 original rules, `max(segment_rules.id)` unchanged, and zero rules created in the window — and the same list was then obtained by opening an existing rule's dropdown and pressing Escape, which is what should have happened first.
+
 ## 12. What This Project Is NOT (yet)
 
 To keep scope tight, the following are explicitly OUT of scope for v1. Do not build them, do not stub them, do not "prepare for" them in ways that complicate v1 code:

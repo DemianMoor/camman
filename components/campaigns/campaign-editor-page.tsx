@@ -1396,6 +1396,20 @@ function AudienceCard({
                     </FormControl>
                     <FormDescription className="text-xs">
                       Blank = full audience. Random sample frozen at activation.
+                      {/* ⚠️ Only when BOTH are true, because that is exactly
+                          when the behaviour differs: a capped lifecycle
+                          campaign drops buyers before sampling, an uncapped one
+                          leaves them in for the send path to skip. Two
+                          identical recipes freeze different pools, and the
+                          operator finds that out here rather than from a
+                          number that does not add up. */}
+                      {lifecycleRules && field.value != null ? (
+                        <>
+                          {" "}
+                          Buyers of this offer are excluded before the cap
+                          samples.
+                        </>
+                      ) : null}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

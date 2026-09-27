@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-09-25_
+_Last updated: 2026-09-27_
 
 **PR 1, 2a, 2b and 3 shipped.** The statuses are computed and stored, the
 thresholds that decide them are editable (§8), every send records the status it
@@ -330,6 +330,57 @@ frozen pool changes meaning underneath them.
 In the preview breakdown both land in `excluded`, not `send_time`: they keep a
 lead out of the **pool**, where the send-time group is for layers that skip
 someone already snapshotted.
+
+### 3f3. Buyers are removed before the cap samples (869f53efz follow-up)
+
+When a lifecycle campaign has an `audience_cap`, contacts who already bought
+the offer are deleted from `audience_qualified` **before** the
+`ORDER BY RANDOM() LIMIT cap` sample, in `snapshotAudience`
+([lib/audience-snapshot.ts](../../lib/audience-snapshot.ts)). Only when a cap is
+set, only for lifecycle campaigns, only when the campaign has an offer.
+
+**Why a cap changes the answer.** §3f decided deliberately that `bought_offer`
+is a SEND-TIME overlay: buyers stay in the pool and the drain skips them,
+because purchases keep arriving after activation and freezing that decision
+would freeze a stale one. A cap changes the economics, not that reasoning:
+
+- **Without a cap** a buyer in the pool costs nothing. The send skips them and
+  everybody else still gets their message.
+- **With a cap** the pool is *sampled*, so every buyer that survives the sample
+  occupies a slot a sendable contact would have had. The message is not merely
+  skipped — it is never sent to anyone.
+
+⚠️ **Two campaigns with identical recipes now freeze different pools** depending
+only on whether a cap is set. That is intended and it is surprising, so it is
+said in the cap field's helper text as well as here: _"Buyers of this offer are
+excluded before the cap samples."_
+
+⚠️ **The staleness objection does not apply, because being a buyer is
+MONOTONIC** — nobody un-buys. Excluding them at activation can only ever be
+correct-and-early, never wrong-later. Someone who buys *after* activation is
+untouched by this and is still caught by the send-time layer. That asymmetry is
+what makes this safe where baking in `freeze_not_due` — which moves with the
+clock in both directions — would not be.
+
+**The preview says the same thing.** For a capped lifecycle campaign
+`bought_offer` moves from `lifecycle.send_time` to `lifecycle.excluded` and is
+subtracted from `total_matching`; for an uncapped one it stays in `send_time`.
+The key exists in BOTH groups and exactly one is non-zero — a static shape, not
+an optional key, so the compiler names any caller that has not handled the case.
+The preview's condition and `snapshotAudience`'s are written to match exactly:
+if they drift, the screen promises a pool the freeze does not deliver.
+
+**Measured on production, 2026-09-27 — and it is ~0.** Across the 10 capped
+lifecycle campaigns that have a frozen pool: **2 slots reclaimed in total**, all
+on campaign 1461, out of **29,929 pooled contacts (0.007%)**. Nine of the ten
+reclaimed nothing.
+
+⚠️ **That number is bounded by attribution coverage, not by how many people
+actually bought.** Only ~1,038 sales across 3.88M sends are attributed to a
+recipient at all (see the Lifecycle report's "attributed only" note), so the
+buyer set any pool can see is tiny. The change is cheap and correct, and it
+becomes worth something only if per-recipient attribution improves. It is
+recorded here at its measured value rather than at its intuitive one.
 
 ### 3g. Why a lead was not sent to
 

@@ -1,6 +1,16 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-25_
+_Last updated: 2026-09-27_
+
+## A cap turns a skip into a lost send (2026-09-27)
+
+`bought_offer` is a send-time overlay for an uncapped campaign and an audience exclusion for a capped one, and the asymmetry is the point rather than an inconsistency.
+
+- **Without a cap, skipping and excluding are the same outcome.** The buyer does not get the message either way, and everybody else still does. With a cap the pool is SAMPLED, so a buyer who survives the sample consumes a slot nobody else can use — the message is not skipped, it is never sent. Same layer, different cost, so a different place to apply it.
+- ⭐ **Only a MONOTONIC fact may be baked into a frozen pool.** Nobody un-buys, so excluding buyers at activation is correct-and-early at worst. `freeze_not_due` moves with the clock in both directions, which is exactly why PR 4b refused to freeze it. "Can this fact reverse?" is the question that decides whether a layer belongs at activation or at send time.
+- **When behaviour depends on a field, the field's helper text is where the operator finds out.** Two identical recipes now freeze different pools depending only on whether a cap is set. That belongs under the cap input, not only in a doc — and on the LIVE field: `CampaignForm`/`CampaignFormFields` is referenced by no page, so copy added there would never render.
+- ⭐ **Report the justification at its measured value, not its intuitive one.** The change is correct and tested, and on production it reclaims **2 slots across 10 capped lifecycle campaigns and 29,929 pooled contacts (0.007%)**. The plan asked for that number precisely so it could be weighed, and the honest reading is that the feature is cheap insurance rather than a win — its ceiling is set by per-recipient attribution coverage (~1,038 attributed sales across 3.88M sends), not by how many people bought.
+- **A scope bar is worth more than a behaviour bar here.** `scripts/test-bought-offer-cap.ts` N2 asserts the UNCAPPED case still keeps buyers in the pool; without it, an exclusion that leaked into every campaign would pass every other bar while silently reversing a PR 4b decision. N7 pins WHICH buyers — excluding buyers of any offer would also satisfy N1.
 
 ## A frozen first column is OPT-IN PER TABLE, and it must stay that way (2026-09-23)
 

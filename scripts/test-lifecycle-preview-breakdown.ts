@@ -171,7 +171,11 @@ async function main() {
     };
     void names;
 
-    const preview = (chips: string[], excludeInUse: boolean) =>
+    const preview = (
+      chips: string[],
+      excludeInUse: boolean,
+      cap?: number,
+    ) =>
       previewAudience({
         orgId,
         lifecycleRules: true,
@@ -179,6 +183,7 @@ async function main() {
         filters: { lifecycle_statuses: chips },
         offerId: offer.id,
         excludeInUse,
+        ...(cap === undefined ? {} : { cap }),
       });
 
     console.log("PART F — the lifecycle preview breakdown");
@@ -251,11 +256,36 @@ async function main() {
       `bucket=${rOn.lifecycle!.excluded.in_use_elsewhere}, ${r.total_matching} → ${rOn.total_matching}`,
     );
     // The send-time overlay is a SUBSET of the audience, never a bucket.
+    // ⚠️ UPDATED for the buyers-at-cap change. `bought_offer` now appears in
+    // BOTH groups and exactly one is non-zero: an UNCAPPED campaign keeps PR
+    // 4b's send-time overlay, a CAPPED one removes buyers before the sample so
+    // it becomes a real audience exclusion. The old wording asserted the key
+    // was ABSENT from `excluded`, which a static shape can no longer promise.
     bar(
-      "F9c bought_offer is a send-time OVERLAY: in the audience, skipped later",
-      lc.send_time.bought_offer === 1 &&
-        !(Object.keys(ex) as string[]).includes("bought_offer"),
-      `send_time.bought_offer=${lc.send_time.bought_offer}, still inside total_matching`,
+      "F9c UNCAPPED: bought_offer is a send-time OVERLAY, in the audience",
+      lc.send_time.bought_offer === 1 && ex.bought_offer === 0,
+      `send_time=${lc.send_time.bought_offer}, excluded=${ex.bought_offer}, still inside total_matching`,
+    );
+    // ⭐ The same fixture with a cap. One input differs, and the lead moves
+    // from the overlay to the partition — which is the whole change.
+    const rCap = await preview(["new", "warm", "cold", "freeze"], false, 100);
+    const exCap = rCap.lifecycle!.excluded;
+    bar(
+      "F9d ⭐ CAPPED: the same buyer becomes an audience EXCLUSION",
+      exCap.bought_offer === 1 && rCap.lifecycle!.send_time.bought_offer === 0,
+      `excluded=${exCap.bought_offer}, send_time=${rCap.lifecycle!.send_time.bought_offer}`,
+    );
+    bar(
+      "F9e …and the audience shrinks by exactly that lead",
+      rCap.total_matching === r.total_matching - 1,
+      `${r.total_matching} uncapped → ${rCap.total_matching} capped`,
+    );
+    bar(
+      "F9f the partition identity still holds for the capped preview",
+      rCap.total_matching +
+        Object.values(exCap).reduce((a, b) => a + b, 0) ===
+        r.total_matching + Object.values(ex).reduce((a, b) => a + b, 0),
+      `capped ${rCap.total_matching}+${Object.values(exCap).reduce((a, b) => a + b, 0)} vs uncapped ${r.total_matching}+${Object.values(ex).reduce((a, b) => a + b, 0)}`,
     );
 
     // ⭐ The accounting bar: every lead in the base is either sending or in

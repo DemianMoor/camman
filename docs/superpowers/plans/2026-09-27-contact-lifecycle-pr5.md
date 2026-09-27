@@ -110,8 +110,10 @@ The whole plan hangs off these, so they are at the top rather than buried in a t
 
 ---
 
-## Open questions
+## Open questions — all three ANSWERED (owner, 2026-09-27)
 
-1. **Cost per send** — the Overview formula is `coalesce(cost_per_sms, stage rate) × (1 + opted out)`. Confirm that is wanted verbatim at cohort grain, since a cohort with a higher opt-out rate then shows a higher cost per send, which is either the point or a confusion.
-2. **`Suppressed` as a report row** will always be **0 sends** — suppressed contacts are excluded from audiences by construction. Show it as a structurally-empty row, or omit it? Recommend showing it with a dash rather than a zero.
-3. **Thresholds drift**: "using current thresholds" means re-running the backfill after a threshold change produces different history for the same day. Accept and document, or have reconstructed rows record the thresholds used (transition rows already carry theirs)?
+1. **Cost per send: the Overview formula VERBATIM at cohort grain** — `coalesce(cost_per_sms, stage rate) × (1 + opted out)`. A cohort with more opt-outs costing more per send **is the point**, not a confusion. Add one footer line: **cost includes opt-out cost**.
+2. **`Suppressed` shows, with a dash**, and the note **"excluded by construction"**. Not omitted (a missing row reads as an oversight) and not a zero (a zero reads as a measurement).
+3. **Threshold drift: accept and document.** The backfill runs ONCE and is **not re-run after a threshold change**. The page's reconstruction note states the thresholds in force on the day it ran. **No new column** — reconstructed rows do not record their own thresholds.
+
+   ⚠️ This makes the reconstruction a **one-shot artifact**, so the note is not decoration: without it, a reader comparing reconstructed history against post-change live stamps has no way to know the two were produced under different rules.

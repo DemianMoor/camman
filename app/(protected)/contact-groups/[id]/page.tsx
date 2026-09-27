@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/dialog";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { Input } from "@/components/ui/input";
+import { GroupLifecycleTable } from "@/components/reports/group-lifecycle-table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
@@ -544,6 +545,15 @@ export default function ContactGroupDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* The same numbers as Reports -> Audience Stats, scoped to this group.
+          It calls the same endpoint and picks this row rather than running a
+          narrower query: one definition of "sendable" and "available today",
+          so the group page and the report can never disagree. */}
+      <div className="grid gap-2">
+        <h2 className="text-sm font-medium">Lifecycle breakdown</h2>
+        <GroupLifecycleTable onlyGroupId={groupIdNum} />
+      </div>
 
       <Tabs
         value={activeTab}

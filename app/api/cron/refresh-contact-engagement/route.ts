@@ -20,12 +20,16 @@ import {
 } from "@/lib/engagement/refresh";
 import { orgsWithEngineOn } from "@/lib/engagement/settings";
 import { recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
+import { refreshLifecycleDayRollup } from "@/lib/reporting/lifecycle-rollup";
 
 // Maintains contact_engagement (migration 0187) — see lib/engagement/refresh.ts.
 //
 //   every 15 min at :10/:25/:40/:55   incremental (after propagate-clickers at :08/:23/…,
 //                                     so a click scored this tick is already human)
 //   ?mode=full at 06:35 UTC           full recount (02:35 ET, outside the send windows)
+//                                     + the Lifecycle day rollup (migration 0192),
+//                                     a 14-day rolling recompute so late clicks,
+//                                     conversions and opt-outs still land
 //
 // INERT BY DEFAULT. Only orgs with lifecycle_settings.engine_mode = 'write' are
 // processed, so every tick is a no-op until the one-off backfill
@@ -102,6 +106,22 @@ async function handle(req: NextRequest): Promise<NextResponse> {
             return refreshContactEngagement(tx, org_id, { mode, dryRun: false, since, evaluateAll });
           });
           results.push({ org_id, ...r });
+          // ⚠️ NIGHTLY ONLY, and OUTSIDE the refresh transaction. The rollup is
+          // a read-side convenience: if it fails, contact_engagement — which
+          // the send path reads — must still have been written. Folding it into
+          // the same transaction would let a reporting query roll back the
+          // statuses. A rollup failure is logged and withholds nothing.
+          if (mode === "full") {
+            try {
+              const roll = await refreshLifecycleDayRollup(db, { orgId: org_id });
+              console.info("[contact-engagement] lifecycle rollup", roll);
+            } catch (err) {
+              console.error("[contact-engagement] lifecycle rollup failed", {
+                org_id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
           console.error("[contact-engagement] refresh failed", { org_id, mode, error });

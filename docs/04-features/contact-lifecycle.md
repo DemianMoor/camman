@@ -487,16 +487,17 @@ imports their whole click history into whichever cohort they sit in, and cohort
 CTR measures the CONTACT instead of the send, inflated in exactly the cohorts
 that clicking defines.
 
-**The window is capped at 14 days, not Overview's 92, and the number is
-measured.** Cohort CTR asks "did this (stage, contact) click", which is
+**The window is 92 days, the same as Overview — restored by the day rollup
+(§3k3).** It was 14 for one PR, and the reason is worth keeping because it is
+what the rollup exists to fix: Cohort CTR asks "did this (stage, contact) click", which is
 per-recipient over `links` + `clicks` with no rollup behind it. On production:
 2d ~13–19s, 5d ~18s, 7d ~21–26s, 14d ~34s — linear with a large constant, so 92
 days is minutes. A cap the route cannot serve is worse than a smaller one: the
 request burns the whole `maxDuration` and returns a 504 with nothing to show.
-Widening it means changing where the clicks come from — `counted_clickers`
-answers the same question in one indexed lookup — and that is the owner's call,
-since raw `HUMAN_CLICK` was chosen deliberately for source consistency with the
-engine.
+
+The rollup lifts it **without** changing where the clicks come from — raw
+`HUMAN_CLICK` stays, so the cohort definition and the CTR still share a source.
+A day is computed once and summed thereafter.
 
 Two shapes in the query are load-bearing, both measured on a five-day window:
 
@@ -532,6 +533,52 @@ materializes one row per recipient, so dividing by `sms_count` alone would
 divide by zero for every stage this report can see. Manual/CSV stages have no
 per-recipient rows and so contribute nothing here at all — one of several
 reasons this tab does not foot with Overview.
+
+### 3k3. The day rollup (migration 0192)
+
+`lifecycle_day_rollup` holds one row per **(org, ET day, cohort)**:
+`sends`, `clickers`, `sales`, `revenue`, `opt_outs`, `cost`, `reconstructed`.
+[lib/reporting/lifecycle-rollup.ts](../../lib/reporting/lifecycle-rollup.ts).
+
+**One definition, two grains.** `lifecycleDayRowsSql` is `lifecycleReportSql`
+with a single extra `GROUP BY` column — not a re-typed copy. Two spellings of
+"what is a clicker" would agree on the day they were written and diverge
+quietly after, and the rollup's whole claim is that its numbers ARE the
+per-recipient numbers.
+
+⚠️ **Counts are stored; ratios are derived.** CTR, CR and opt-out rate are
+computed at read time from summed numerators and denominators. A stored per-day
+ratio averaged across a window would weight a 200-send day like a 90,000-send
+one — bar Q1 pins this with a fixture whose pooled CTR (57.14%) differs from
+the average of its days (62.50%).
+
+**The read is a hybrid: closed days from the rollup, today live.** A nightly
+rollup cannot know about today, and mid-send-day "today" is exactly the number
+an operator watches — the same reasoning, and the same split at ET midnight,
+as Overview's Total Sent. So a 92-day window is a summation over 91 stored days
+plus one day computed on the spot.
+
+**Written by the engagement job's nightly full run** (06:35 UTC / 02:35 ET),
+recomputing a **14-day trailing window** so late-scored clicks, conversions on
+the 15-minute poll and opt-outs that arrive days later still land. It runs
+**outside** the refresh transaction: the rollup is a read-side convenience, and
+a reporting query must never be able to roll back `contact_engagement`, which
+the send path reads. A rollup failure is logged and withholds nothing.
+
+⚠️ **The refresh DELETEs the range then INSERTs it**, rather than upserting. An
+upsert cannot remove a `(day, cohort)` cell that should no longer exist — after
+the reconstruction stamps a send that was `__unclassified__`, that cell would
+sit there forever and the cohorts would stop summing to Total. Bar R2 pins it.
+
+**Staleness is reported as a timestamp, not a count of missing days.** The
+obvious signal — "days in the window with no rollup row" — cannot be computed:
+a day with zero sends legitimately has no row and is indistinguishable from a
+day nobody has touched, so it cried wolf on every quiet Sunday. The page shows
+when the closed half was last recomputed instead.
+
+Days older than the nightly window are filled once by
+[scripts/backfill-lifecycle-rollup.ts](../../scripts/backfill-lifecycle-rollup.ts),
+chunked so each statement stays short and the run is resumable.
 
 ### 3k2. The reconstruction, and what it cannot know
 

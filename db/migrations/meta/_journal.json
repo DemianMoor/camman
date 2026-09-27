@@ -1345,6 +1345,13 @@
       "when": 1793059200000,
       "tag": "0191_campaign_offer_limit_cooldown",
       "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1793145600000,
+      "tag": "0192_lifecycle_day_rollup",
+      "breakpoints": true
     }
   ]
 }

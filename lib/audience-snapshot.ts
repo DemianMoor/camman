@@ -6,6 +6,7 @@ import type { SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import { inUseSetBody, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
+import { purchasedOfferContacts } from "@/lib/sale-attribution";
 
 import { EXIT_TIER, campaignTierExpr, tierLiteral } from "./campaign-tier";
 import {
@@ -1861,8 +1862,17 @@ export async function snapshotAudience(
   // back). Splitting it out lets ANALYZE give the planner the real cardinality
   // of the qualified set, so it hash-anti-joins instead: 67.5s → 4.2s on the
   // same recipe, byte-identical rows out.
-  if (input.excludePriorOffer === true && input.offerId != null) {
+  // ANALYZE once, for whichever of the DELETEs below actually runs. Both need
+  // it for the same planner reason; running it twice would just cost time.
+  let analyzed = false;
+  const analyzeOnce = async () => {
+    if (analyzed) return;
     await runner.execute(drizzleSql`analyze audience_qualified`);
+    analyzed = true;
+  };
+
+  if (input.excludePriorOffer === true && input.offerId != null) {
+    await analyzeOnce();
     if (input.offerRulesEnabled === true) {
       // ── 869f53efz: the Y/N rule REPLACES "ever got this offer" ───────────
       // Not stacked with it. Stacking would leave the old permanent DELETE in
@@ -1903,6 +1913,49 @@ export async function snapshotAudience(
         )
       `);
     }
+  }
+
+  // ── BUYERS ARE REMOVED BEFORE THE CAP SAMPLES (869f53efz follow-up) ───────
+  //
+  // ⭐ ONLY WHEN A CAP IS SET, and the asymmetry is deliberate. PR 4b decided
+  // that `bought_offer` is a SEND-TIME overlay: buyers stay in the pool and the
+  // drain skips them, because purchases keep arriving after activation and
+  // freezing that decision would freeze a stale one.
+  //
+  // A cap changes the economics, not that reasoning. WITHOUT a cap a buyer in
+  // the pool costs nothing — the send skips them and everybody else still gets
+  // their message. WITH a cap the pool is SAMPLED, so every buyer that survives
+  // the sample occupies a slot a sendable contact would have had: the message
+  // is not merely skipped, it is never sent to anyone.
+  //
+  // ⚠️ So two campaigns with identical recipes freeze DIFFERENT pools depending
+  // only on whether a cap is set. That is intended and it is surprising, which
+  // is why it is in the docs and in the cap field's helper text as well as here.
+  //
+  // ⚠️ The staleness objection does not bite: being a buyer is MONOTONIC —
+  // nobody un-buys — so excluding them at activation can only ever be
+  // correct-and-early, never wrong-later. Someone who buys AFTER activation is
+  // untouched by this and is still caught by the send-time layer. That
+  // asymmetry is what makes this safe where baking in `freeze_not_due` (which
+  // moves with the clock in both directions) would not be.
+  //
+  // purchasedOfferContacts() is the ONE definition, shared with the
+  // made_purchase_for_offer segment rule and the send-time layer.
+  //
+  // ⚠️ A SEPARATE statement after ANALYZE, like its neighbour above, for the
+  // planner reason in CLAUDE.md §10b: folded into the qualifier this is another
+  // anti-join whose outer side estimates rows=1, and the nested loop it picks
+  // is what timed activation out at 84s before.
+  if (
+    cap !== null &&
+    input.lifecycleRules === true &&
+    input.offerId != null
+  ) {
+    await analyzeOnce();
+    await runner.execute(drizzleSql`
+      delete from audience_qualified q
+      where q.contact_id in (${purchasedOfferContacts(input.orgId, input.offerId)})
+    `);
   }
 
   const totalRows = (await runner.execute(drizzleSql`

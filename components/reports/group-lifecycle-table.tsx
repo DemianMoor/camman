@@ -10,21 +10,12 @@ import { Label } from "@/components/ui/label";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
-  GROUP_LIFECYCLE_STATUSES,
+  GROUP_LIFECYCLE_COLUMNS,
+  columnPair,
   type GroupLifecycleRow,
-  type GroupLifecycleStatus,
 } from "@/lib/reporting/group-lifecycle-types";
 import type { StoredGroupLifecycle } from "@/lib/reporting/group-lifecycle-store";
 import { cn } from "@/lib/utils";
-
-const LABEL: Record<GroupLifecycleStatus, string> = {
-  new: "New",
-  cold: "Cold",
-  hot: "Hot",
-  warm: "Warm",
-  freeze: "Freeze",
-  suppressed: "Suppressed",
-};
 
 const n = (v: number) => v.toLocaleString();
 
@@ -45,15 +36,18 @@ function Row({ r, indent }: { r: GroupLifecycleRow; indent?: boolean }) {
           <span className="ml-2 text-xs text-muted-foreground">in a cluster</span>
         ) : null}
       </td>
-      {GROUP_LIFECYCLE_STATUSES.map((s) => (
-        <td key={s} className="px-3 py-2 text-right">
-          <span className="font-medium">{n(r.by_status[s].available)}</span>
-          <span className="text-muted-foreground">
-            {" / "}
-            {n(r.by_status[s].sendable)}
-          </span>
-        </td>
-      ))}
+      {GROUP_LIFECYCLE_COLUMNS.map((col) => {
+        const p = columnPair(r.by_status, col);
+        return (
+          <td key={col.key} className="px-3 py-2 text-right">
+            <span className="font-medium">{n(p.available)}</span>
+            <span className="text-muted-foreground">
+              {" / "}
+              {n(p.sendable)}
+            </span>
+          </td>
+        );
+      })}
       <td className="px-3 py-2 text-right">
         <span className="font-medium">{n(r.total.available)}</span>
         <span className="text-muted-foreground">
@@ -137,9 +131,9 @@ export function GroupLifecycleTable({
       "row",
       "kind",
       "code",
-      ...GROUP_LIFECYCLE_STATUSES.flatMap((s) => [
-        `${LABEL[s]} available`,
-        `${LABEL[s]} sendable`,
+      ...GROUP_LIFECYCLE_COLUMNS.flatMap((col) => [
+        `${col.label} available`,
+        `${col.label} sendable`,
       ]),
       "Total available",
       "Total sendable",
@@ -148,10 +142,10 @@ export function GroupLifecycleTable({
       r.label,
       r.kind,
       r.code ?? "",
-      ...GROUP_LIFECYCLE_STATUSES.flatMap((s) => [
-        String(r.by_status[s].available),
-        String(r.by_status[s].sendable),
-      ]),
+      ...GROUP_LIFECYCLE_COLUMNS.flatMap((col) => {
+        const p = columnPair(r.by_status, col);
+        return [String(p.available), String(p.sendable)];
+      }),
       String(r.total.available),
       String(r.total.sendable),
     ];
@@ -238,9 +232,9 @@ export function GroupLifecycleTable({
                 <th className="px-3 py-2 text-left font-medium">
                   {onlyGroupId == null ? "Group" : "This group"}
                 </th>
-                {GROUP_LIFECYCLE_STATUSES.map((s) => (
-                  <th key={s} className="px-3 py-2 text-right font-medium">
-                    {LABEL[s]}
+                {GROUP_LIFECYCLE_COLUMNS.map((col) => (
+                  <th key={col.key} className="px-3 py-2 text-right font-medium">
+                    {col.label}
                   </th>
                 ))}
                 <th className="px-3 py-2 text-right font-medium">Total</th>

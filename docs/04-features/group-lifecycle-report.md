@@ -50,39 +50,69 @@ alone is satisfied by a wrong implementation.
 A group in no cluster is not hidden — it renders unclustered, so a new group
 appears the day it is created.
 
-### Why it is two requests
+### It is read from a stored table (migration 0193)
 
-⚠️ **The split is measured, not preferred.** Both halves were timed on
-production, five runs each:
+⚠️ **The page does not compute any of this.** It used to, and waited **8.4–25.9 s
+(median 10,957 ms)** across two requests. The engagement job already runs every
+15 minutes over the same tables, so it computes the whole thing there and writes
+~126 rows to `group_lifecycle_rollup`; the page reads those in **~50 ms**.
 
-| | median | worst |
+| | median |
+| --- | ---: |
+| before — computing on read, both requests | **10,957 ms** |
+| after — reading the stored table | **50 ms** |
+| one refresh (what the job does every 15 min) | 7,077 ms |
+
+**Clusters and the distinct total are stored too**, not derived on read. Both
+are DISTINCT unions across groups and cannot be recovered by summing the group
+rows — which is the entire reason they are shown.
+
+⚠️ **The refresh DELETEs the org's rows then INSERTs them**, rather than
+upserting. An upsert cannot remove a row that should no longer exist — an
+archived contact group, or a (group, status) pair that has emptied — and those
+would sit in the table reported as real. Bar K5 pins it by archiving a group
+and asserting its rows are gone.
+
+⚠️ **Only N = 3 is stored, and each row carries the `recent_days` it answers
+for.** Any other N is computed on demand and never written: storing an N = 7
+result would leave the next page load showing a number for a question nobody
+asked, under a timestamp that looked fresh. The page therefore recomputes when
+the operator changes N, and says so while it does.
+
+The header shows **"as of HH:MM"** for a stored figure, **"computed just now"**
+after a refresh, and **"not computed yet"** before the job has ever run — a
+stored number and a live one are otherwise indistinguishable, and the
+difference is up to 15 minutes of sends.
+
+### Why it is stored rather than tuned
+
+The cost is the availability computation over `contact_engagement` plus the
+rollups' DISTINCT across ~1.1M membership rows. Attribution between those two
+**moved by 5x between measurement runs on the live database**:
+
+| | run 1 | run 2 |
 | --- | ---: | ---: |
-| per-group grid, `available_today` included | **1,812 ms** | 1,863 ms |
-| cluster rollups + distinct footer | 6,311 ms | 9,369 ms |
+| base counts alone | 2,309 ms | 1,950 ms |
+| cost of the engagement join | 13,720 ms | 2,532 ms |
+| cost of the in-use join | ~0 (−374 ms) | 518 ms |
+| full table | 16,078 ms | 4,573 ms |
 
-The rollups need DISTINCT contacts across ~1.1M membership rows, and that
-dedup is inherent — `count(DISTINCT)` cost ~8.2s, a per-contact `array_agg`
-collapse 6.2–14.1s. Serving them together would put the whole screen behind the
-slower half, so the grid loads first (inside the 2s bar) and the rollups fill in
-beneath it.
+Rewriting the engagement predicate's `OR` as an indexable `UNION` (the §10e
+pattern) measured **worse** on median — 8,974 ms against 4,573 ms — with ranges
+that overlapped everything. A query whose cost cannot be attributed reliably
+between two runs is one to move off the read path, not one to keep tuning.
 
-⚠️ **The grid is fast because availability is decided ONCE PER CONTACT, then
-fanned out to memberships.** Deciding it per membership row — the obvious shape
-— costs median 2,659 ms / worst 2,690 ms, because there are 1,129,787
-memberships over 973,731 contacts and the anti-joins then run on the larger
-relation. Single runs of these shapes ranged 2.1s to 15.9s to a statement
-timeout with no code change, so only repeated, interleaved spreads were used.
-
-No migration: every index this needs already exists.
-
-CSV export covers clusters, groups and the footer in one file.
+The one stable finding across both runs: **the in-use join is not the problem**.
+It is within noise of free.
 
 ## Where it lives
 
 | | |
 | --- | --- |
 | Page | `app/(protected)/reports/group-lifecycle/page.tsx` → **Reports → Group × Lifecycle** |
-| API | `GET /api/reports/group-lifecycle?part=table\|rollups&days=N` (`contacts.view`) |
+| API | `GET /api/reports/group-lifecycle?days=N&refresh=1` (`contacts.view`) — stored by default; `refresh=1` or any N ≠ 3 recomputes |
+| Stored table | `group_lifecycle_rollup` (migration 0193), written by the engagement job every 15 min |
+| Store layer | [lib/reporting/group-lifecycle-store.ts](../../lib/reporting/group-lifecycle-store.ts) |
 | Route map | `reports/group-lifecycle`, `GET` (also token-readable) |
 | Query | [lib/reporting/group-lifecycle.ts](../../lib/reporting/group-lifecycle.ts) |
 | Cluster config | [lib/reporting/group-clusters.ts](../../lib/reporting/group-clusters.ts) |
@@ -91,6 +121,7 @@ CSV export covers clusters, groups and the footer in one file.
 | Bars | [scripts/test-group-lifecycle.ts](../../scripts/test-group-lifecycle.ts) (13) |
 | Measurement | [scripts/measure-group-lifecycle.ts](../../scripts/measure-group-lifecycle.ts), read-only |
 
-It began as a section inside Audience Stats and was moved to its own tab on
-2026-09-28 (owner). Nothing about the numbers changed — the same component, the
-same two requests — so the move is a relocation, not a rewrite.
+It began as a section inside Audience Stats, moved to its own tab on
+2026-09-28, and was switched to a stored table later the same day when the page
+proved too slow to compute on read. The numbers have not changed at any point —
+bar K1 asserts the stored table reproduces the computed one cell for cell.

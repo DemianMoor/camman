@@ -20,12 +20,15 @@ import {
 } from "@/lib/engagement/refresh";
 import { orgsWithEngineOn } from "@/lib/engagement/settings";
 import { recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
+import { refreshGroupLifecycleRollup } from "@/lib/reporting/group-lifecycle-store";
 import { refreshLifecycleDayRollup } from "@/lib/reporting/lifecycle-rollup";
 
 // Maintains contact_engagement (migration 0187) — see lib/engagement/refresh.ts.
 //
 //   every 15 min at :10/:25/:40/:55   incremental (after propagate-clickers at :08/:23/…,
 //                                     so a click scored this tick is already human)
+//                                     + the Group x Lifecycle table (0193), which
+//                                     the report reads instead of computing it
 //   ?mode=full at 06:35 UTC           full recount (02:35 ET, outside the send windows)
 //                                     + the Lifecycle day rollup (migration 0192),
 //                                     a 14-day rolling recompute so late clicks,
@@ -106,6 +109,21 @@ async function handle(req: NextRequest): Promise<NextResponse> {
             return refreshContactEngagement(tx, org_id, { mode, dryRun: false, since, evaluateAll });
           });
           results.push({ org_id, ...r });
+          // The Group x Lifecycle table (migration 0193), EVERY tick. It is
+          // what the report reads instead of computing 15-36s of joins on
+          // page load, so it has to keep pace with the 15-minute job rather
+          // than the nightly one. Outside the refresh transaction for the same
+          // reason as the rollup below: a reporting query must never be able to
+          // roll back contact_engagement, which the send path reads.
+          try {
+            const gl = await refreshGroupLifecycleRollup(db, { orgId: org_id });
+            console.info("[contact-engagement] group lifecycle rollup", gl);
+          } catch (err) {
+            console.error("[contact-engagement] group lifecycle rollup failed", {
+              org_id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
           // ⚠️ NIGHTLY ONLY, and OUTSIDE the refresh transaction. The rollup is
           // a read-side convenience: if it fails, contact_engagement — which
           // the send path reads — must still have been written. Folding it into

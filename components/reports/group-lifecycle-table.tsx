@@ -1,20 +1,20 @@
 "use client";
 
-import { Download } from "lucide-react";
+import { Download, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
   GROUP_LIFECYCLE_STATUSES,
-  type GroupLifecycleReport,
-  type GroupLifecycleRollups,
   type GroupLifecycleRow,
   type GroupLifecycleStatus,
 } from "@/lib/reporting/group-lifecycle-types";
+import type { StoredGroupLifecycle } from "@/lib/reporting/group-lifecycle-store";
 import { cn } from "@/lib/utils";
 
 const LABEL: Record<GroupLifecycleStatus, string> = {
@@ -81,48 +81,56 @@ export function GroupLifecycleTable({
   onlyGroupId?: number | null;
 }) {
   const [days, setDays] = useState(3);
-  const [table, setTable] = useState<GroupLifecycleReport | null>(null);
-  const [rollups, setRollups] = useState<GroupLifecycleRollups | null>(null);
+  const [data, setData] = useState<StoredGroupLifecycle | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const tableApi = useApiCall<GroupLifecycleReport>();
-  const rollupApi = useApiCall<GroupLifecycleRollups>();
+  const [refreshing, setRefreshing] = useState(false);
+  const api = useApiCall<StoredGroupLifecycle>();
 
+  // ⚠️ ONE REQUEST NOW, and it reads a STORED table. The page used to issue two
+  // that computed everything, and waited 15-36s for them. The engagement job
+  // writes the table every 15 minutes; this reads ~126 rows.
+  //
+  // Changing N is NOT the stored question (the store answers for N = 3), so it
+  // recomputes — which is slow on purpose and visible as such.
   useEffect(() => {
     void (async () => {
-      const res = await tableApi.execute(
-        `/api/reports/group-lifecycle?part=table&days=${days}`,
+      const res = await api.execute(
+        `/api/reports/group-lifecycle?days=${days}`,
       );
       if (res.ok) {
-        setTable(res.data);
+        setData(res.data);
         setError(null);
       } else {
-        setTable(null);
+        setData(null);
         setError(res.error);
       }
     })();
-  }, [tableApi.execute, days]);
+  }, [api.execute, days]);
 
-  useEffect(() => {
-    if (onlyGroupId != null) return;
-    void (async () => {
-      const res = await rollupApi.execute(
-        `/api/reports/group-lifecycle?part=rollups&days=${days}`,
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const res = await api.execute(
+        `/api/reports/group-lifecycle?days=${days}&refresh=1`,
       );
-      if (res.ok) setRollups(res.data);
-    })();
-  }, [rollupApi.execute, days, onlyGroupId]);
+      if (res.ok) {
+        setData(res.data);
+        setError(null);
+      } else {
+        setError(res.error);
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
-  // ⚠️ Rendered only when the rollups were computed for the CURRENT N. They are
-  // a separate, slower request, so after N changes the old ones are still in
-  // state for a few seconds — showing them beside a grid computed with the new
-  // N would put two different questions' answers in one table. Comparing
-  // recent_days is how that is avoided WITHOUT clearing state inside an effect.
-  const liveRollups =
-    rollups && rollups.recent_days === days ? rollups : null;
-
-  const groups = (table?.groups ?? []).filter((g) =>
+  const groups = (data?.groups ?? []).filter((g) =>
     onlyGroupId == null ? true : g.group_id === onlyGroupId,
   );
+  // Clusters and the distinct total arrive in the SAME payload now, so there is
+  // no second request that can fall out of step with the grid — which is what
+  // the previous version had to guard against by comparing recent_days.
+  const showRollups = onlyGroupId == null && data != null;
 
   const csv = () => {
     const head = [
@@ -149,9 +157,9 @@ export function GroupLifecycleTable({
     ];
     const rows: string[][] = [
       head,
-      ...(liveRollups?.clusters ?? []).map(line),
+      ...(showRollups && data ? data.clusters : []).map(line),
       ...groups.map(line),
-      ...(liveRollups ? [line(liveRollups.distinct_total)] : []),
+      ...(showRollups && data ? [line(data.distinct_total)] : []),
     ];
     const body = rows
       .map((r) =>
@@ -189,8 +197,31 @@ export function GroupLifecycleTable({
         <span className="pb-2 text-xs text-muted-foreground">
           Available today excludes anyone messaged inside this window.
         </span>
-        <div className="ml-auto pb-1">
-          <Button variant="outline" size="sm" onClick={csv} disabled={!table}>
+        <div className="ml-auto flex items-center gap-2 pb-1">
+          {/* ⚠️ Says WHICH number is on screen. A stored figure and a
+              just-computed one look identical otherwise, and the difference is
+              up to 15 minutes of sends. */}
+          {data ? (
+            <span className="text-xs text-muted-foreground">
+              {data.live
+                ? "computed just now"
+                : data.computed_at
+                  ? `as of ${formatCampaignDateTime(data.computed_at)}`
+                  : "not computed yet — press Refresh now"}
+            </span>
+          ) : null}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void refresh()}
+            disabled={refreshing || api.isLoading}
+          >
+            <RefreshCw
+              className={cn("mr-2 h-4 w-4", refreshing && "animate-spin")}
+            />
+            Refresh now
+          </Button>
+          <Button variant="outline" size="sm" onClick={csv} disabled={!data}>
             <Download className="mr-2 h-4 w-4" />
             Export CSV
           </Button>
@@ -216,26 +247,30 @@ export function GroupLifecycleTable({
               </tr>
             </thead>
             <tbody className="tabular-nums">
-              {onlyGroupId == null && liveRollups
-                ? liveRollups.clusters.map((c) => <Row key={c.key} r={c} />)
+              {showRollups && data
+                ? data.clusters.map((c) => <Row key={c.key} r={c} />)
                 : null}
               {groups.map((g) => (
                 <Row
                   key={g.key}
                   r={g}
-                  indent={onlyGroupId == null && liveRollups != null}
+                  indent={showRollups}
                 />
               ))}
-              {onlyGroupId == null && liveRollups ? (
-                <Row r={liveRollups.distinct_total} />
+              {showRollups && data ? (
+                <Row r={data.distinct_total} />
               ) : null}
             </tbody>
           </table>
         </CardContent>
       </Card>
 
-      {tableApi.isLoading ? (
-        <p className="text-xs text-muted-foreground">Loading…</p>
+      {api.isLoading ? (
+        <p className="text-xs text-muted-foreground">
+          {days === 3 && !refreshing
+            ? "Loading…"
+            : "Recomputing — this is the slow path, a few seconds…"}
+        </p>
       ) : null}
 
       <div className="grid gap-1 text-xs text-muted-foreground">
@@ -266,14 +301,21 @@ export function GroupLifecycleTable({
           </>
         ) : null}
         <p>
+          <span className="font-medium">
+            These numbers are computed every 15 minutes
+          </span>{" "}
+          by the engagement job and read from a stored table, which is why the
+          page loads immediately. <em>Refresh now</em> recomputes them; changing
+          the rest window also recomputes, because only the {3}-day figure is
+          stored.
+        </p>
+        <p>
           <span className="font-medium">This is a sizing estimate.</span> The
           freeze and last-message facts come from a rollup the engagement job
           refreshes every 15 minutes, while the send re-checks freeze against
           live sends — so a send can drop contacts counted here.
         </p>
-        {onlyGroupId == null && !liveRollups && !error ? (
-          <p>Cluster rollups and the distinct total are still loading…</p>
-        ) : null}
+
       </div>
     </div>
   );

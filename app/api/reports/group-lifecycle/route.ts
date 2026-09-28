@@ -3,23 +3,28 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
 import {
+  computeGroupLifecycleNow,
+  readStoredGroupLifecycle,
+} from "@/lib/reporting/group-lifecycle-store";
+import {
   DEFAULT_RECENT_DAYS,
   MAX_RECENT_DAYS,
-  getGroupLifecycleBreakdown,
-  getGroupLifecycleRollups,
-} from "@/lib/reporting/group-lifecycle";
+} from "@/lib/reporting/group-lifecycle-types";
 
-// Contact group × lifecycle, for sizing a daily campaign. Read-only.
+// Contact group x lifecycle, for sizing a daily campaign. Read-only.
 //
-// ⚠️ TWO PARTS, TWO REQUESTS, AND THE SPLIT IS MEASURED. `part=table` is the
-// per-group grid and lands inside the 2s bar (median 1,812ms, worst 1,863ms on
-// production over five runs). `part=rollups` is the cluster unions and the
-// distinct footer, which need DISTINCT contacts across ~1.1M membership rows
-// and cost median 6,311ms / worst 9,369ms. Serving them together would put the
-// whole screen behind the slower half; split, the operator reads per-group
-// numbers in under two seconds and the rollups arrive after.
+// ⚠️ THE DEFAULT PATH READS A STORED TABLE (migration 0193), written by the
+// engagement job every 15 minutes. Computing it on read cost 15-36s across two
+// requests; reading ~126 rows is a few milliseconds.
+//
+// Two ways to get a live number, and both are explicit:
+//   ?refresh=1   the "Refresh now" button — recomputes and STORES (N = 3)
+//   ?days=N      any N other than 3 — recomputes and does NOT store, because
+//                the store answers for N = 3 and writing another N into it
+//                would leave the next page load showing a number for a
+//                question nobody asked, under a fresh-looking timestamp
 export const dynamic = "force-dynamic";
-// Above the rollups' worst measured run with room to spare.
+// The stored read needs milliseconds; a refresh recomputes the whole thing.
 export const maxDuration = 60;
 
 export async function GET(req: NextRequest) {
@@ -28,8 +33,6 @@ export async function GET(req: NextRequest) {
     method: "GET",
   });
   if ("error" in auth) return auth.error;
-  // Same gate as the other audience reports: reading group sizes is reading
-  // the audience, not the campaigns.
   if (!can(auth.role, "contacts.view")) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -40,12 +43,12 @@ export async function GET(req: NextRequest) {
     Number.isFinite(rawDays) && rawDays >= 1
       ? Math.min(Math.floor(rawDays), MAX_RECENT_DAYS)
       : DEFAULT_RECENT_DAYS;
+  const refresh = sp.get("refresh") === "1";
 
-  const part = sp.get("part") === "rollups" ? "rollups" : "table";
   const data =
-    part === "rollups"
-      ? await getGroupLifecycleRollups({ orgId: auth.orgId, recentDays })
-      : await getGroupLifecycleBreakdown({ orgId: auth.orgId, recentDays });
+    refresh || recentDays !== DEFAULT_RECENT_DAYS
+      ? await computeGroupLifecycleNow({ orgId: auth.orgId, recentDays })
+      : await readStoredGroupLifecycle({ orgId: auth.orgId });
 
-  return NextResponse.json({ part, ...data });
+  return NextResponse.json(data);
 }

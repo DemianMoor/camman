@@ -1,6 +1,23 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-27_
+_Last updated: 2026-09-28_
+
+## A cost you cannot attribute is one to move, not tune (2026-09-28)
+
+The Group x Lifecycle report was too slow, so its parts were timed separately — base counts, the engagement join, the in-use join — to find what to fix. The attribution would not hold still.
+
+| | run 1 | run 2 |
+| --- | ---: | ---: |
+| base counts alone | 2,309 ms | 1,950 ms |
+| cost of the engagement join | 13,720 ms | 2,532 ms |
+| cost of the in-use join | ~0 (−374 ms) | 518 ms |
+| full table | 16,078 ms | 4,573 ms |
+
+- ⭐ **Two runs disagreeing by 5x is itself the finding.** Rewriting the engagement predicate's `OR` as an indexable `UNION` — the §10e pattern, which was the obvious fix — measured WORSE on median (8,974 ms against 4,573 ms) with overlapping ranges. Any tuning decision taken from these numbers would have been a coin toss. Moving the work off the read path removes the need to decide at all.
+- **Report the range, not a point, and say when a difference is unmeasurable.** "The engagement join costs 13,720 ms" was true of one run and wrong about the next. The defensible statements were the stable ones: the page waits 8.4-25.9 s, and the in-use join is within noise of free.
+- ⭐ **When a job already runs over the same tables, the work is nearly free there.** The engagement job runs every 15 minutes and already reads `contacts`, `contact_engagement` and the membership junction. Computing the report inside it costs 7,077 ms of a job that has its own budget, and turns a 10,957 ms page into a 50 ms one.
+- **A stored number must say when it was computed and what question it answers.** `recent_days` is a column, not an assumption, so an N = 7 result can never be mistaken for the stored N = 3 one; the header reads "as of HH:MM" for stored and "computed just now" after a refresh. Without both, a stored figure and a live one are indistinguishable, and the gap is up to 15 minutes of sends.
+- ⭐ **A rollup refresh DELETEs then INSERTs; an upsert cannot delete.** A row whose subject has gone — an archived contact group, a (group, status) pair that emptied — survives every upsert and is reported as real forever. Bar K5 archives a group and asserts its stored rows disappear.
 
 ## Decide per entity once, then fan out — and say which count you are showing (2026-09-27)
 

@@ -1352,6 +1352,13 @@
       "when": 1793145600000,
       "tag": "0192_lifecycle_day_rollup",
       "breakpoints": true
+    },
+    {
+      "idx": 193,
+      "version": "7",
+      "when": 1793232000000,
+      "tag": "0193_group_lifecycle_rollup",
+      "breakpoints": true
     }
   ]
 }

@@ -85,9 +85,16 @@ async function main() {
     const current = await mkCampaign("cur", "draft");
     const prior = await mkCampaign("pri", "completed");
 
-    const phones = fictionalPhones(4);
+    const phones = fictionalPhones(6);
     await refuseIfPhonesInUse(db, phones);
-    const mk = async (i: number, status: string) => {
+    const mk = async (
+      i: number,
+      status: string,
+      // The freeze rest period lives in contact_engagement, NOT on contacts —
+      // a fixture that sets only contacts.lifecycle_status = 'freeze' leaves
+      // the layer with nothing to catch and the bar passes on an empty set.
+      eng?: { last_sent_days_ago: number; freeze_cadence_days: number },
+    ) => {
       const id = (
         await one<{ id: string }>(sql`
           INSERT INTO contacts (org_id, phone_number, line_type, lifecycle_status)
@@ -96,6 +103,16 @@ async function main() {
       await db.execute(sql`
         INSERT INTO contact_contact_groups (org_id, contact_id, contact_group_id)
         VALUES (${org}, ${id}::uuid, ${group.id})`);
+      if (eng) {
+        await db.execute(sql`
+          INSERT INTO contact_engagement
+            (contact_id, org_id, status, status_changed_at, msgs_total, msgs_since_click,
+             msgs_7d, msgs_14d, msgs_30d, msgs_90d, last_sent_at, last_click_at,
+             freeze_cadence_days, thresholds)
+          VALUES (${id}::uuid, ${org}, ${status}, now(), 12, 12, 0, 0, 0, 0,
+                  now() - make_interval(days => ${eng.last_sent_days_ago}::int), null,
+                  ${eng.freeze_cadence_days}, '{}'::jsonb)`);
+      }
       return id;
     };
     // ⚠️ THE TWO RULES READ DIFFERENT TABLES, and the fixture must feed both or
@@ -131,6 +148,11 @@ async function main() {
     await exposure(cRested, 60, 1);
     await exposure(cRecent, 2, 1);
     await exposure(cOver, 60, 6);
+
+    // The freeze pair for PART F. Identical except for when they were last
+    // messaged against their own 14-day cadence.
+    await mk(4, "freeze", { last_sent_days_ago: 60, freeze_cadence_days: 14 });
+    await mk(5, "freeze", { last_sent_days_ago: 2, freeze_cadence_days: 14 });
 
     const base = {
       orgId,
@@ -204,6 +226,62 @@ async function main() {
       "M7 …and the one over the limit is not",
       withRules.lifecycle?.excluded.offer_limit === 1,
       `limit bucket ${withRules.lifecycle?.excluded.offer_limit}`,
+    );
+
+    // ── PART F — the freeze rest period is an AUDIENCE exclusion ───────────
+    // ⭐ WHY THIS BELONGS IN THE CROSS-PATH FILE. freeze_not_due used to be a
+    // send-time OVERLAY: counted inside total_matching, subtracted only on the
+    // day. Campaign 1501 sized itself at 1,500 against the freeze cohort and
+    // its stage could send to 28, because the CAP sampled the pool before the
+    // rest period was ever consulted — 1,500 drawn at random from 69,185
+    // resting contacts of whom ~2% were due.
+    //
+    // The two contacts below differ ONLY in when they were last messaged
+    // against their own 14-day cadence. Both are freeze, both are in the group,
+    // both match the chip. The resting one must be absent from the PREVIEW and
+    // from the FREEZE alike — a bar on either alone passes while the two
+    // disagree, which is the failure this file exists to catch.
+    console.log("\nPART F — the freeze rest period");
+    const freezeBase = {
+      ...base,
+      filters: { lifecycle_statuses: ["freeze"] },
+      excludePriorOffer: false,
+      offerRulesEnabled: false,
+    };
+    const fPrev = await previewAudience(freezeBase as never);
+    const fSnap = await snapshotTotal({
+      filters: { lifecycle_statuses: ["freeze"] },
+      excludePriorOffer: false,
+      offerRulesEnabled: false,
+    });
+    bar(
+      "F1 ⭐ the preview equals the freeze for the freeze cohort",
+      fPrev.total_matching === fSnap,
+      `preview ${fPrev.total_matching}, snapshot ${fSnap}`,
+    );
+    bar(
+      "F2 ⭐ only the DUE contact is in the audience, not both",
+      fPrev.total_matching === 1,
+      `${fPrev.total_matching} — the one messaged 60 days ago, not the one messaged 2 days ago`,
+    );
+    bar(
+      "F3 …and the resting one is REPORTED, not silently dropped",
+      fPrev.lifecycle?.excluded.freeze_not_due === 1,
+      `freeze_not_due bucket ${fPrev.lifecycle?.excluded.freeze_not_due}`,
+    );
+    // ⭐ The bar that would have caught the original defect. Before the change
+    // the preview said 2 and the snapshot froze 2, so the two AGREED — and the
+    // send still dropped one. Agreement alone is not enough; the number has to
+    // be the sendable one.
+    bar(
+      "F4 ⭐ a capped freeze campaign fills with SENDABLE contacts",
+      (await snapshotTotal({
+        filters: { lifecycle_statuses: ["freeze"] },
+        excludePriorOffer: false,
+        offerRulesEnabled: false,
+        cap: 2,
+      })) === 1,
+      "cap 2 over a 2-contact freeze cohort yields the 1 who can actually be messaged",
     );
   } finally {
     if (orgId) {

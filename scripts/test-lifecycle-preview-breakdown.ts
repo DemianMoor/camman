@@ -191,9 +191,12 @@ async function main() {
     const bs = lc.by_status;
     bar(
       "F2 by_status counts the SENDING audience per status",
-      // cold is 3, not 2: cInUse is cold and exclude_in_use is OFF here, so it
-      // sends. cOptedOut is cold too but opted out, so it does not.
-      bs.new === 1 && bs.warm === 1 && bs.cold === 4 && bs.freeze === 2,
+      // cInUse is cold and exclude_in_use is OFF here, so it sends. cOptedOut
+      // is cold too but opted out, so it does not.
+      // ⚠️ cold is 3 and freeze is 1 since 2026-09-28: cBuyer (bought_offer)
+      // and cFreezeNotDue are AUDIENCE exclusions now, not a send-time overlay,
+      // so they leave by_status instead of sitting inside it.
+      bs.new === 1 && bs.warm === 1 && bs.cold === 3 && bs.freeze === 1,
       JSON.stringify(bs),
     );
     bar(
@@ -208,11 +211,18 @@ async function main() {
     );
 
     // The freeze pair differs ONLY in last_sent_at vs its cadence.
-    // send_time numbers OVERLAY the audience — these leads are in it.
+    //
+    // ⭐ INVERTED 2026-09-28. This used to assert the OPPOSITE — that the
+    // not-due lead stayed inside the audience (`bs.freeze === 2`) and was only
+    // reported as a send-time overlay. That is precisely the behaviour the
+    // owner rejected: a freeze-cohort campaign capped at 1,500 sized itself
+    // from 69,185 resting contacts and could send to 28. The rest period is an
+    // audience exclusion now, so the not-due lead must be OUT of the audience
+    // and IN a bucket.
     bar(
-      "F5 freeze_not_due counts the frozen-but-not-due half of Freeze",
-      lc.send_time.freeze_not_due === 1 && bs.freeze === 2,
-      `${lc.send_time.freeze_not_due} of ${bs.freeze} freeze`,
+      "F5 ⭐ a freeze lead inside its rest period is EXCLUDED, not overlaid",
+      lc.excluded.freeze_not_due === 1 && bs.freeze === 1,
+      `bucket=${lc.excluded.freeze_not_due}, freeze in audience=${bs.freeze} (the due one only)`,
     );
 
     // ── the exclusive buckets ──────────────────────────────────────────────
@@ -250,12 +260,13 @@ async function main() {
         rOn.total_matching === r.total_matching - 1,
       `bucket=${rOn.lifecycle!.excluded.in_use_elsewhere}, ${r.total_matching} → ${rOn.total_matching}`,
     );
-    // The send-time overlay is a SUBSET of the audience, never a bucket.
+    // ⭐ INVERTED 2026-09-28, for the same reason as F5: this asserted that a
+    // buyer stayed INSIDE total_matching and was merely reported. Every
+    // lifecycle layer is an audience exclusion now.
     bar(
-      "F9c bought_offer is a send-time OVERLAY: in the audience, skipped later",
-      lc.send_time.bought_offer === 1 &&
-        !(Object.keys(ex) as string[]).includes("bought_offer"),
-      `send_time.bought_offer=${lc.send_time.bought_offer}, still inside total_matching`,
+      "F9c ⭐ a lead who already bought the offer is EXCLUDED, not overlaid",
+      ex.bought_offer === 1 && bs.cold === 3,
+      `bucket=${ex.bought_offer}, cold in audience=${bs.cold} (cBuyer is gone)`,
     );
 
     // ⭐ The accounting bar: every lead in the base is either sending or in

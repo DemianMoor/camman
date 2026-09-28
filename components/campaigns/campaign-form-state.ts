@@ -289,17 +289,28 @@ export function useCampaignFormState(props: CampaignFormProps) {
         // ⚠️ Bounded. Without a timeout a hung request parks the form in
         // "checking…" forever, which is a different silent failure from the
         // one this whole change is fixing. 8s then fall back, with the note.
-        const res = await fetch("/api/settings/lifecycle", {
+        // ⚠️ NOT /api/settings/lifecycle. That route is manager+ and `null` in
+        // the route map, so for an OPERATOR it 403'd every time — the catch
+        // below then reported the engine as off to the one role that creates
+        // campaigns all day. This asks for the single fact the form needs, on
+        // a route the operator may reach.
+        const res = await fetch("/api/campaigns/lifecycle-mode", {
           signal: AbortSignal.timeout(8000),
         });
         if (!res.ok) throw new Error(String(res.status));
-        const j = (await res.json()) as { engine_mode?: string };
-        if (!cancelled)
-          setEngineMode(j.engine_mode === "write" ? "write" : "off");
+        const j = (await res.json()) as { lifecycle_rules?: boolean };
+        if (!cancelled) setEngineMode(j.lifecycle_rules ? "write" : "off");
       } catch {
-        // Fail toward the legacy chips: showing the old filters when the
-        // engine is actually on is a cosmetic wrong; showing the lifecycle
-        // chips when it is off invites picking a status nothing maintains.
+        // Fail toward the legacy chips: showing the lifecycle chips when the
+        // engine is off invites picking a status nothing maintains.
+        //
+        // ⚠️ This is NOT a cosmetic fallback, and an earlier comment here said
+        // it was. The CREATE route decides lifecycle_rules server-side from the
+        // same posture, so a campaign built through the legacy editor while the
+        // engine is ON still becomes a lifecycle campaign — with no
+        // lifecycle_statuses, which the chip predicate reads as "match nobody".
+        // The fallback is tolerable only because it is now rare; before the
+        // route change it fired for every operator, every time.
         if (!cancelled) setEngineMode("off");
       }
     })();

@@ -453,6 +453,17 @@ statuses the chips select on are maintained by the job; with the engine off
 they are frozen at whenever it stopped, so a campaign picking "Hot" would
 target whoever was hot that day rather than whoever is hot now.
 
+⚠️ **The form asks `/api/campaigns/lifecycle-mode`, not `/api/settings/lifecycle`**
+(2026-09-28). The settings route is `null` in the operator route map —
+`lifecycle.configure` is manager+ — so for an OPERATOR it 403'd every time, the
+catch reported the engine as off, and every operator saw the legacy chips and
+the "engine is off" note. That was not cosmetic, which the fallback's own
+comment had assumed: the create route decides `lifecycle_rules` server-side from
+the same posture, so the campaign became a lifecycle campaign anyway, carrying
+legacy `audience_filters` with **no `lifecycle_statuses`** — which the chip
+predicate reads as *match nobody* (§3e). The new route returns one boolean and
+is gated on `campaigns.view`; the settings route stays denied.
+
 - The create route reads the engine **inside its insert transaction**. A read
   before it could disagree with the insert if the switch flipped in between,
   and nothing downstream could tell which engine was live.

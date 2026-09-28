@@ -424,6 +424,11 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
 
   // ── settings ─────────────────────────────────────────────────────────────
   "settings/lifecycle": null, // settings -- lifecycle.configure (manager+); no operator path
+  // ⚠️ The OPERATOR path to the one fact the campaign form needs from the line
+  // above: which editor to draw. settings/lifecycle stays denied (thresholds
+  // are manager+); this says only whether a new campaign will be a lifecycle
+  // campaign, which is the decision the create route already makes for them.
+  "campaigns/lifecycle-mode": { methods: ["GET"], token: ["GET"] },
   "settings/lifecycle/preview": null, // settings -- lifecycle.configure (manager+); no operator path
   "settings/notifications": null, // settings / provider registry -- Owner only
   "settings/providers": null, // settings / provider registry -- Owner only

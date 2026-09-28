@@ -66,7 +66,7 @@ async function main() {
     const gB = await mkGroup(wlCodes[1], `B ${tag}`);
     const gOut = await mkGroup(`zz-${tag}`, `Outside ${tag}`);
 
-    const N = 9;
+    const N = 10;
     const phones = fictionalPhones(N);
     await refuseIfPhonesInUse(db, phones);
 
@@ -129,6 +129,11 @@ async function main() {
     await join(c7, gA);
     const c8 = await mk(8, "cold");
     await join(c8, gOut);
+    // ⚠️ Group B ends up with one hot (c2) AND one warm (c9), so the Hot/Warm
+    // column's sum is exercised on real numbers. A bar that adds 0 + 0 proves
+    // only that the code did not crash.
+    const c9 = await mk(9, "warm");
+    await join(c9, gB);
 
     // c6 is in an ACTIVE campaign's pool.
     const brand = await one<{ id: number }>(sql`
@@ -284,6 +289,59 @@ async function main() {
       "K6 the stored read is fast — it reads rows, not joins",
       after.computed_ms < 500,
       `${after.computed_ms} ms`,
+    );
+
+    // ── PART L — the displayed columns ──────────────────────────────────────
+    console.log("\nPART L - the displayed columns");
+    const { GROUP_LIFECYCLE_COLUMNS, columnPair, GROUP_LIFECYCLE_STATUSES: STS } =
+      await import("@/lib/reporting/group-lifecycle-types");
+    const covered = GROUP_LIFECYCLE_COLUMNS.flatMap((c) => [...c.statuses]);
+    bar(
+      "L1 the columns PARTITION the statuses - each exactly once",
+      covered.length === new Set(covered).size &&
+        STS.every((st) => covered.includes(st)) &&
+        covered.every((st) => (STS as readonly string[]).includes(st)),
+      `columns cover [${covered.join(", ")}] against [${STS.join(", ")}]`,
+    );
+    bar(
+      "L2 ...so the visible columns still sum to the Total column",
+      GROUP_LIFECYCLE_COLUMNS.reduce(
+        (a, c) => a + columnPair(A.by_status, c).sendable,
+        0,
+      ) === A.total.sendable,
+      `${GROUP_LIFECYCLE_COLUMNS.reduce((a, c) => a + columnPair(A.by_status, c).sendable, 0)} vs total ${A.total.sendable}`,
+    );
+    const hw = GROUP_LIFECYCLE_COLUMNS.find((c) => c.key === "hot_warm")!;
+    const hwB = columnPair(B.by_status, hw);
+    bar(
+      "L3 Hot/Warm is hot + warm, on both halves of the cell",
+      hwB.sendable === 2 &&
+        hwB.sendable === B.by_status.hot.sendable + B.by_status.warm.sendable &&
+        hwB.available === B.by_status.hot.available + B.by_status.warm.available,
+      `group B: hot ${B.by_status.hot.sendable} + warm ${B.by_status.warm.sendable} = ${hwB.sendable} sendable (${hwB.available} available)`,
+    );
+    // Summing statuses is only safe because they are disjoint - a contact has
+    // exactly ONE lifecycle_status. If that ever stopped holding, Hot/Warm
+    // would double-count and this bar is where it would show.
+    bar(
+      "L4 the status sets are DISJOINT, which is what makes summing safe",
+      (
+        await one<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM (
+            SELECT contact_id FROM contact_contact_groups ccg
+            JOIN contacts c ON c.id = ccg.contact_id
+            WHERE ccg.org_id = ${org}
+            GROUP BY contact_id
+            HAVING count(DISTINCT c.lifecycle_status) > 1
+          ) x`)
+      ).n === 0,
+      "no contact carries two lifecycle statuses",
+    );
+    bar(
+      "L5 the order is the one the owner asked for",
+      GROUP_LIFECYCLE_COLUMNS.map((c) => c.key).join(",") ===
+        "hot_warm,cold,freeze,new,suppressed",
+      GROUP_LIFECYCLE_COLUMNS.map((c) => c.label).join(" | "),
     );
 
   } finally {

@@ -20,6 +20,53 @@ export const GROUP_LIFECYCLE_STATUSES = [
 
 export type GroupLifecycleStatus = (typeof GROUP_LIFECYCLE_STATUSES)[number];
 
+/**
+ * The columns the REPORT shows, in the order it shows them (owner, 2026-09-28).
+ *
+ * ⚠️ DELIBERATELY NOT THE STORAGE ORDER, and deliberately not one column per
+ * status. Hot and Warm are one column because the operator treats them as one
+ * audience — people who have clicked — and sizes a send from the pair. The
+ * stored rows stay per status (the DB check constraint pins that set), so this
+ * is presentation only and nothing about the numbers changes.
+ *
+ * ⚠️ SUMMING ACROSS STATUSES IS SAFE HERE, including on the cluster and
+ * distinct-total rows. A contact has exactly ONE `lifecycle_status`, so the
+ * per-status sets are disjoint and hot + warm double-counts nobody. That would
+ * NOT hold for a grouping whose members could overlap.
+ *
+ * ⚠️ THESE COLUMNS MUST PARTITION `GROUP_LIFECYCLE_STATUSES` — every status in
+ * exactly one column, none twice. Otherwise the Total column silently stops
+ * equalling the sum of the visible ones, which is the kind of arithmetic error
+ * a reader would trust. `scripts/test-group-lifecycle.ts` L1 asserts it.
+ */
+export interface GroupLifecycleColumn {
+  key: string;
+  label: string;
+  statuses: readonly GroupLifecycleStatus[];
+}
+
+export const GROUP_LIFECYCLE_COLUMNS: readonly GroupLifecycleColumn[] = [
+  { key: "hot_warm", label: "Hot/Warm", statuses: ["hot", "warm"] },
+  { key: "cold", label: "Cold", statuses: ["cold"] },
+  { key: "freeze", label: "Freeze", statuses: ["freeze"] },
+  { key: "new", label: "New", statuses: ["new"] },
+  { key: "suppressed", label: "Suppressed", statuses: ["suppressed"] },
+] as const;
+
+/** Sum a row's pairs across the statuses a display column covers. */
+export function columnPair(
+  by: Record<GroupLifecycleStatus, StatusPair>,
+  col: GroupLifecycleColumn,
+): StatusPair {
+  return col.statuses.reduce(
+    (a, st) => ({
+      sendable: a.sendable + by[st].sendable,
+      available: a.available + by[st].available,
+    }),
+    { sendable: 0, available: 0 },
+  );
+}
+
 export interface StatusPair {
   sendable: number;
   available: number;

@@ -9,6 +9,26 @@ contact group can still be messaged today, split by lifecycle status. It is its 
 [lib/reporting/group-lifecycle.ts](../../lib/reporting/group-lifecycle.ts),
 behind `GET /api/reports/group-lifecycle` (`contacts.view`).
 
+**Columns, in order: Hot/Warm · Cold · Freeze · New · Suppressed · Total**
+(owner, 2026-09-28).
+
+⚠️ **Hot and Warm share one column** because the operator treats them as one
+audience — people who have clicked — and sizes a send from the pair. The stored
+rows stay **per status**; this is presentation only, and no number changed.
+
+⚠️ **Summing statuses is safe because they are disjoint.** A contact has exactly
+one `lifecycle_status`, so Hot + Warm double-counts nobody — including on the
+cluster and distinct-total rows, which are themselves DISTINCT unions. That
+would not hold for any grouping whose members could overlap, which is why bar L4
+asserts the disjointness rather than assuming it.
+
+⚠️ **The visible columns must PARTITION the status set** — every status in
+exactly one column, none twice — or the Total column silently stops equalling
+the sum of what is on screen. `GROUP_LIFECYCLE_COLUMNS` in
+[lib/reporting/group-lifecycle-types.ts](../../lib/reporting/group-lifecycle-types.ts)
+is the single definition, used by the table and the CSV alike, and bars L1/L2
+pin the partition and the total.
+
 Every cell is **available today / sendable**:
 
 - **Sendable** — active, eligible (`messaging_status = 'eligible'`), not opted

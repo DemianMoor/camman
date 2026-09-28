@@ -4513,6 +4513,58 @@ export const lifecycle_day_rollup = pgTable(
 
 export type LifecycleDayRollup = typeof lifecycle_day_rollup.$inferSelect;
 
+// The stored Group x Lifecycle table (migration 0193): one row per
+// (org, row, status), written by the engagement job every 15 minutes.
+//
+// The report used to compute everything on read and the page waited 15-36s
+// across two requests. Now it reads ~126 rows.
+//
+// ⚠️ CLUSTERS AND THE DISTINCT TOTAL ARE STORED, not derived on read. Both are
+// DISTINCT unions across groups, so they cannot be recovered by summing the
+// group rows — which is exactly why they are shown.
+export const group_lifecycle_rollup = pgTable(
+  "group_lifecycle_rollup",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // 'group' -> row_key is contact_groups.id as text
+    // 'cluster' -> row_key is a key from lib/reporting/group-clusters.ts
+    // 'all' -> row_key is '__all__', the DISTINCT total across all groups
+    row_kind: text("row_kind").notNull(),
+    row_key: text("row_key").notNull(),
+    status: text("status").notNull(),
+    sendable: integer("sendable").notNull().default(0),
+    available: integer("available").notNull().default(0),
+    // ⚠️ The N this row answers for, stored rather than assumed. The job writes
+    // 3; any other N is computed on demand and never written here.
+    recent_days: integer("recent_days").notNull(),
+    computed_at: timestamp("computed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "group_lifecycle_rollup_pkey",
+      columns: [table.org_id, table.row_kind, table.row_key, table.status],
+    }),
+    check(
+      "group_lifecycle_rollup_kind_check",
+      sql`${table.row_kind} IN ('group', 'cluster', 'all')`,
+    ),
+    check(
+      "group_lifecycle_rollup_status_check",
+      sql`${table.status} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')`,
+    ),
+    check(
+      "group_lifecycle_rollup_recent_days_check",
+      sql`${table.recent_days} >= 1 AND ${table.recent_days} <= 90`,
+    ),
+  ],
+);
+
+export type GroupLifecycleRollup = typeof group_lifecycle_rollup.$inferSelect;
+
 // Q4/Q5 — per-NUMBER carrier policy (migration 0142). One row per
 // (number, carrier); an ABSENT row means allowed and uncapped, which is what
 // makes the empty table a no-op against today's behaviour.

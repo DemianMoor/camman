@@ -235,6 +235,57 @@ async function main() {
       A.total.sendable ===
         Object.values(A.by_status).reduce((a, p) => a + p.sendable, 0),
     );
+    // ── PART K — the stored table (migration 0193) ─────────────────────────
+    console.log("\nPART K — the stored table");
+    const { refreshGroupLifecycleRollup, readStoredGroupLifecycle } =
+      await import("@/lib/reporting/group-lifecycle-store");
+    const written = await refreshGroupLifecycleRollup(db, { orgId, recentDays: 3 });
+    const stored = await readStoredGroupLifecycle({ orgId });
+    const sA = stored.groups.find((g) => g.group_id === gA)!;
+    bar(
+      "K1 ⭐ the stored table reproduces the computed one, cell for cell",
+      JSON.stringify(sA.by_status) === JSON.stringify(A.by_status) &&
+        JSON.stringify(stored.distinct_total.by_status) ===
+          JSON.stringify(r.distinct_total.by_status),
+      `${written.rows} rows written in ${written.durationMs} ms`,
+    );
+    bar(
+      "K2 …including the cluster rows, which cannot be recovered by summing",
+      JSON.stringify(
+        stored.clusters.find((c) => c.key === "weight_loss")!.by_status,
+      ) === JSON.stringify(wl.by_status),
+    );
+    bar(
+      "K3 the read reports WHEN it was computed and that it is not live",
+      stored.computed_at !== null && stored.live === false,
+      `computed_at=${stored.computed_at}, live=${stored.live}`,
+    );
+    bar(
+      "K4 …and which N the stored numbers answer for",
+      stored.recent_days === 3,
+      `recent_days=${stored.recent_days}`,
+    );
+    // ⭐ A refresh must REMOVE rows that should no longer exist. An upsert
+    // leaves an archived group's row in the table, reported as real forever.
+    await db.execute(sql`
+      UPDATE contact_groups SET archived_at = now() WHERE id = ${gOut}`);
+    await refreshGroupLifecycleRollup(db, { orgId, recentDays: 3 });
+    const after = await readStoredGroupLifecycle({ orgId });
+    const leftover = (await all<{ n: string }>(sql`
+      SELECT count(*)::text AS n FROM group_lifecycle_rollup
+      WHERE org_id = ${org} AND row_kind = 'group' AND row_key = ${String(gOut)}`))[0];
+    bar(
+      "K5 ⭐ a refresh DELETES rows for a group that is now archived",
+      Number(leftover.n) === 0 &&
+        !after.groups.some((g) => g.group_id === gOut),
+      `${leftover.n} stale row(s) left for the archived group`,
+    );
+    bar(
+      "K6 the stored read is fast — it reads rows, not joins",
+      after.computed_ms < 500,
+      `${after.computed_ms} ms`,
+    );
+
   } finally {
     if (orgId) {
       const name =
@@ -254,7 +305,8 @@ async function main() {
               + (SELECT count(*) FROM contacts WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM contact_groups WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM opt_outs WHERE org_id = ${orgId}::uuid)
-              + (SELECT count(*) FROM campaigns WHERE org_id = ${orgId}::uuid)) AS n`);
+              + (SELECT count(*) FROM campaigns WHERE org_id = ${orgId}::uuid)
+              + (SELECT count(*) FROM group_lifecycle_rollup WHERE org_id = ${orgId}::uuid)) AS n`);
       console.log(`\nTeardown: ${left.n} row(s) left`);
       if (Number(left.n) !== 0) fail++;
     }

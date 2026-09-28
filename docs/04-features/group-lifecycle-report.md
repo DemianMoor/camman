@@ -7,7 +7,7 @@ contact group can still be messaged today, split by lifecycle status. It is its 
 (`/reports/group-lifecycle`) — and the same component renders one row on each
 **contact group's detail page**.
 [lib/reporting/group-lifecycle.ts](../../lib/reporting/group-lifecycle.ts),
-behind `GET /api/reports/group-lifecycle` (`contacts.view`).
+behind `GET /api/reports/group-lifecycle` (**`contacts.stats`**, not `contacts.view`: the report shows audience SIZE and never a contact row, and those are separate grants — gated on `contacts.view` it returned 403 to the OPERATOR role, which is the role that sizes the daily sends).
 
 **Columns, in order: Hot/Warm · Cold · Freeze · New · Suppressed · Total**
 (owner, 2026-09-28).
@@ -130,7 +130,7 @@ It is within noise of free.
 | | |
 | --- | --- |
 | Page | `app/(protected)/reports/group-lifecycle/page.tsx` → **Reports → Group × Lifecycle** |
-| API | `GET /api/reports/group-lifecycle?days=N&refresh=1` (`contacts.view`) — stored by default; `refresh=1` or any N ≠ 3 recomputes |
+| API | `GET /api/reports/group-lifecycle?days=N&refresh=1` (`contacts.stats`) — stored by default; `refresh=1` or any N ≠ 3 recomputes |
 | Stored table | `group_lifecycle_rollup` (migration 0193), written by the engagement job every 15 min |
 | Store layer | [lib/reporting/group-lifecycle-store.ts](../../lib/reporting/group-lifecycle-store.ts) |
 | Route map | `reports/group-lifecycle`, `GET` (also token-readable) |

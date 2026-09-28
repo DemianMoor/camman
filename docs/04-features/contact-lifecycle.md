@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-09-27_
+_Last updated: 2026-09-28_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -331,6 +331,48 @@ frozen pool changes meaning underneath them.
 In the preview breakdown both land in `excluded`, not `send_time`: they keep a
 lead out of the **pool**, where the send-time group is for layers that skip
 someone already snapshotted.
+
+### 3f4. The preview must apply the SAME offer rule as the freeze (2026-09-28)
+
+PR 4d made the cooldown/limit pair **replace** the permanent "ever got this
+offer" rule rather than stack with it, and changed `snapshotAudience`
+accordingly — it builds its qualifier with `excludePriorOffer: false` and then
+runs one DELETE or the other. `previewAudience` did not get that change. It
+kept applying the permanent rule **and** merely reported the new ones, so the
+screen and the activation answered differently.
+
+Measured on production, Hot/Warm × three Weight Loss groups × one offer,
+cooldown 30 / limit 5:
+
+| | |
+| --- | ---: |
+| preview — what the operator sized the campaign from | **77** |
+| snapshot — what activating it would have frozen | **1,907** |
+
+The 77 was exactly "never received this offer, ever". The **1,830** contacts in
+between had received it once or twice and had since rested past their cooldown:
+shown as excluded, and would have been messaged anyway.
+
+Two things were wrong and both had to be fixed:
+
+- the permanent rule ran even when the Y/N rules did — now
+  `excludePriorOffer && !offerRulesOn`, mirroring the snapshot;
+- the Y/N layers were **reported but not subtracted**. They are AUDIENCE
+  exclusions, so `total_matching` has to drop. The tell was that setting the
+  cooldown to 0 did not move the audience while the cooldown bucket read
+  117,975 — a bucket larger than the group it was drawn from.
+
+⭐ **The regression bar is a CROSS-PATH one**
+([scripts/test-preview-matches-snapshot.ts](../../scripts/test-preview-matches-snapshot.ts)).
+Every other suite tests one function or the other, and each passed throughout;
+only asserting that the two give the same answer catches a disagreement between
+them. Red-proved against the old code: preview 1 against snapshot 2.
+
+⚠️ **The two rules read different tables** — the Y/N pair counts campaigns in
+`contact_offer_campaigns`, the permanent rule asks only whether an
+`offer_exposures` row exists. A fixture that feeds one and not the other makes
+the unfed rule look like it excludes nobody, which is exactly how the first
+version of that bar mis-stated its expectation.
 
 ### 3g. Why a lead was not sent to
 

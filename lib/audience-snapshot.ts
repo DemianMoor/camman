@@ -1508,7 +1508,20 @@ export async function previewAudience(
   // Content-dedup LAYER 3: only computed when the toggle is on AND an offer is
   // set. When off, `offerExposureId` stays null so flagSetCtes/flagJoins emit
   // the exact same SQL as before — no oe_set CTE, no extra join.
-  const excludePriorOffer = input.excludePriorOffer === true;
+  //
+  // ⚠️ AND NOT WHEN THE Y/N RULES ARE ON. PR 4d made the cooldown/limit pair
+  // REPLACE the permanent "ever got this offer" rule, and snapshotAudience does
+  // exactly that — it builds its qualifier with excludePriorOffer: false and
+  // then runs one DELETE or the other. This function did not get that change,
+  // so the preview applied the permanent rule as well and the two disagreed.
+  //
+  // Measured on production before the fix, Hot/Warm × three Weight Loss groups
+  // × one offer, cooldown 30 / limit 5: the preview showed **77** while
+  // activation would freeze **1,907**. The 77 was exactly "never received this
+  // offer, ever" — the 1,830 contacts who had it once or twice and have since
+  // rested past their cooldown were on screen as excluded, and would have been
+  // sent to anyway. The operator sizes a campaign from this number.
+  const excludePriorOffer = input.excludePriorOffer === true && !offerRulesOn;
   const offerExposureId =
     excludePriorOffer && input.offerId != null ? input.offerId : null;
   const useOfferExposure = offerExposureId != null;
@@ -1516,6 +1529,17 @@ export async function previewAudience(
   // carrier logic when a filter is set, so the common no-filter preview is byte-for-
   // byte unchanged (no perf regression). Unidentified is never selectable, so it is
   // always in the "removed" set once any filter is active.
+  // ⚠️ THE OFFER RULES ARE SUBTRACTED HERE, not merely counted. They are
+  // AUDIENCE exclusions (PR 4d): a lead they catch never reaches the pool, and
+  // snapshotAudience DELETEs them. Reporting them in `excluded` while leaving
+  // them inside total_matching said "excluded" about people the screen was
+  // still counting as sendable — the buckets read 117,975 while the audience
+  // did not move when the cooldown was set to 0, which is how the omission was
+  // found.
+  const offerRuleTerm = offerRulesOn
+    ? drizzleSql`and not coalesce(q.is_offer_limit, false)
+          and not coalesce(q.is_offer_cooldown, false)`
+    : drizzleSql``;
   const carrierFilter = input.filters.carrier_filter ?? [];
   const hasCarrierFilter = carrierFilter.length > 0;
   const carrierMatchSql = hasCarrierFilter
@@ -1679,6 +1703,7 @@ export async function previewAudience(
           q.qualifies
           and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
           and (not ${excludePriorOffer}::boolean or not q.is_offer_exposed)
+          ${offerRuleTerm}
         ) as is_eligible,
         (${positiveExpr}) as membership_positive,
         ((${positiveExpr}) and not q.from_exclude_segment) as membership_ok

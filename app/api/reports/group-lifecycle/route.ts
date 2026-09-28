@@ -33,7 +33,12 @@ export async function GET(req: NextRequest) {
     method: "GET",
   });
   if ("error" in auth) return auth.error;
-  if (!can(auth.role, "contacts.view")) {
+  // ⚠️ contacts.stats, NOT contacts.view. This report shows audience SIZE and
+  // never a contact row, and those are deliberately separate grants
+  // (869et3vm1 Phase 2: "how many" and "who" stopped being the same
+  // permission). Gated on contacts.view it returned 403 to the OPERATOR role,
+  // which is the role that sizes the daily sends.
+  if (!can(auth.role, "contacts.stats")) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

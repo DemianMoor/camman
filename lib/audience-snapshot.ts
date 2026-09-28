@@ -1904,13 +1904,38 @@ export async function snapshotAudience(
       // blocked by stage 1. At activation the campaign has sent nothing, so
       // the carve-out removes nothing — it is here so the predicate is the
       // SAME one the send path applies later.
+      // ⚠️ UNCORRELATED ON PURPOSE — `contact_id in (select …)`, NOT
+      // `exists (… and coc.contact_id = q.contact_id)`.
+      //
+      // Splitting this statement out after ANALYZE (the comment above) is what
+      // makes the PERMANENT rule below hash-anti-join. It does nothing for this
+      // one, because a subquery carrying GROUP BY/HAVING cannot be pulled up
+      // into a semi-join at all: Postgres keeps it as a SubPlan and re-executes
+      // it once per surviving candidate. Measured on production, campaign 1485
+      // against offer 123 (95,166 candidates), correlated:
+      //
+      //   ->  GroupAggregate (actual time=0.055..0.055 rows=0 loops=95166)
+      //         ->  Index Scan using contact_offer_campaigns_pkey …
+      //
+      // 95,166 random index probes = 5,317 ms server-side warm, and far worse
+      // cold — it was 27.5 s of a 39 s activation, the single dominant cost.
+      // Written uncorrelated, the offer's rows are grouped ONCE and hash
+      // semi-joined: 1,173 ms, and bounded by the OFFER's exposure rows instead
+      // of growing linearly with the audience.
+      //
+      // Semantics are unchanged: correlating on contact_id made each group
+      // exactly one contact's rows, so grouping globally and applying the same
+      // HAVING yields the same contact set. Verified on production — both forms
+      // excluded the identical 1,012 contacts of 95,166.
+      //
+      // This is also the shape lib/sends/eligibility.ts already uses for the
+      // same two rules, so the freeze and the send now read alike.
       await runner.execute(drizzleSql`
         delete from audience_qualified q
-        where exists (
-          select 1 from contact_offer_campaigns coc
+        where q.contact_id in (
+          select coc.contact_id from contact_offer_campaigns coc
           where coc.org_id = ${input.orgId}::uuid
             and coc.offer_id = ${input.offerId}::int
-            and coc.contact_id = q.contact_id
             and coc.campaign_id <> ${input.campaignId}::int
           group by coc.contact_id
           having count(*) >= ${input.offerLimitTimes ?? 5}::int

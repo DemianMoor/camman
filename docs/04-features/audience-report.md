@@ -48,7 +48,7 @@ It also appears as the last row of the sidebar's Reports group.
 | Sends, Revenue, Sales, Cost, Sent 7d/30d/90d | `SUM` of the group's offer cells. Additive: each `stage_sends` row belongs to exactly one stage → campaign → offer, and the cell join places it at most once per group |
 | Clicks (EPC denominator) | `COUNT(DISTINCT counted_clickers.contact_id)` at **group** grain, with the cells' scope (tracked campaigns that targeted the group, recipient in the group) |
 | Opt-outs | `COUNT(DISTINCT opt_out_id)` at **group** grain, same scope; recipient read from `opt_outs.contact_id` (see Data layer) |
-| RPM / Net RPM / EPC / Net profit / Opt-out % | Derived from the row's own totals, never averaged across offers |
+| RPM / Net RPM / EPC / CTR % / Net profit / Opt-out % | Derived from the row's own totals, never averaged across offers. CTR % = `clicks / sends * 100` (unique clickers per message sent — the same per-send basis as Opt-out %); because clicks are deduplicated at group grain, the group CTR can read below every offer row's |
 | Fresh pool | "—". Fresh pool is a per-offer quantity (sendable group members never sent *that* offer) |
 
 **The totals row's clicks and opt-outs are lower than the rows added up, by
@@ -135,7 +135,7 @@ when the offer row is missing.
 
 ## UI
 
-- **Columns:** Offer (+ Archived badge) · Sends · RPM · Net RPM · EPC · Sales ·
+- **Columns:** Offer (+ Archived badge) · Sends · RPM · Net RPM · EPC · CTR % · Sales ·
   Opt-out % · Net profit (economics labelled "(all time)") · Sent 7d / 30d /
   90d · Fresh pool.
 - **Sorting:** every column, client-side. Default: Net RPM descending.

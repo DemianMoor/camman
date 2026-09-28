@@ -20,6 +20,7 @@ export type Derived = {
   rpm: number | null;
   net_rpm: number | null;
   epc: number | null;
+  ctr: number | null;
   net_profit: number;
   oo_pct: number | null;
 };
@@ -27,8 +28,12 @@ export function derive(m: RawMetrics): Derived {
   const rpm = m.sends > 0 ? (m.revenue / m.sends) * 1000 : null;
   const net_rpm = m.sends > 0 ? ((m.revenue - m.cost) / m.sends) * 1000 : null;
   const epc = m.clicks > 0 ? m.revenue / m.clicks : null;
+  // Unique clickers per message sent — the same per-send basis as Opt-out %,
+  // so the two rates compare directly. Not clickers per recipient: the
+  // matviews carry no unique-recipient count.
+  const ctr = m.sends > 0 ? (m.clicks / m.sends) * 100 : null;
   const oo_pct = m.sends > 0 ? (m.optouts / m.sends) * 100 : null;
-  return { rpm, net_rpm, epc, net_profit: m.revenue - m.cost, oo_pct };
+  return { rpm, net_rpm, epc, ctr, net_profit: m.revenue - m.cost, oo_pct };
 }
 
 // ---- color helpers ----

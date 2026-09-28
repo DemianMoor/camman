@@ -167,10 +167,10 @@ async function main() {
       `     opted out ${n(ex.opted_out)} · suppressed ${n(ex.suppressed)} · ` +
         `status not selected ${n(ex.status_not_selected)} · in use elsewhere ${n(ex.in_use_elsewhere)}`,
     );
+    // Since 2026-09-28 these two are exclusion buckets like the rest, not an
+    // overlay sitting inside the audience.
     console.log(
-      `   send-time overlays (inside the audience, skipped on the day):` +
-        `\n     freeze not due ${n(all.lifecycle.send_time.freeze_not_due)} · ` +
-        `bought this offer ${n(all.lifecycle.send_time.bought_offer)}\n`,
+      `     bought this offer ${n(ex.bought_offer)} · freeze not due ${n(ex.freeze_not_due)}\n`,
     );
   }
 

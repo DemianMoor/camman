@@ -286,11 +286,42 @@ exclusion layers ahead of the content-dedup ones, ordered by
   whole audience -- the same decision PR 3 made for the segment rules, for the
   same reason.
 
-Neither `freeze_not_due` nor `bought_offer` is baked into the frozen pool, and
-neither should be: freeze due-ness moves with the clock and purchases keep
-arriving after activation, so freezing either would freeze a decision that has
-to be made at send time. `suppressed` never enters the audience in the first
-place, because it is not a chip.
+**⚠️ CHANGED 2026-09-28 — all three are now AUDIENCE exclusions, applied when
+the audience is chosen.** This section previously said the opposite: that
+neither `freeze_not_due` nor `bought_offer` should be baked into the frozen
+pool, because freeze due-ness moves with the clock and purchases keep arriving,
+so the decision belonged at send time.
+
+That reasoning missed that **the cap samples the pool first**. Campaign 1501
+("Freeze - Atlass Coffee", offer 126) targeted the freeze cohort across four
+Weight Loss groups. Of the 69,185 freeze contacts there, only ~2% were past
+their 14-day rest period. Capped at 1,500 it drew 1,500 at *random* from all
+69,185 — and the stage could send to **28**. `1,500 × (1,371 ÷ 69,185) = 30`;
+the 28 was the arithmetic, not a fault. The other 1,472 were then *locked*: they
+sat in an active campaign's pool, so `exclude_in_use_contacts` kept them out of
+every other campaign while the campaign holding them could not message them.
+
+The owner's ruling: "the audience on the campaign configuration level should
+only show allowed sendable contacts... that should be the rule for every
+lifecycle cohort."
+
+Measured on production for the same recipe after the change: **1,340 sendable**
+(1,371 due − 31 already in use), every one of them deliverable, against 1,500
+of which 28 were.
+
+**This cannot send to anyone the old code blocked.** `lib/sends/eligibility.ts`
+still EXCEPTs the same layers on the day, so a lead who buys the offer or
+re-enters freeze between activation and send is still caught. Selection-time
+filtering only stops the pool being padded with people who cannot receive the
+message — the same belt-and-braces as `exclude_prior_offer_contacts` (§10b).
+
+The accepted cost: the pool is frozen to who is sendable on **activation day**,
+so a contact who becomes due tomorrow is not in *that* campaign. These are
+daily campaigns — tomorrow's picks them up — and a genuine multi-week trickle is
+what drip campaigns are for.
+
+`suppressed` never enters the audience in the first place, because it is not a
+chip; it is applied anyway so the layer list is uniform.
 
 ### 3f2. The offer rules — cooldown and limit (869f53efz, PR 4d)
 
@@ -328,9 +359,9 @@ to FALSE in the column and is set true only by the create route, so the 673
 campaigns that predate migration 0191 keep "ever got this offer" and nobody's
 frozen pool changes meaning underneath them.
 
-In the preview breakdown both land in `excluded`, not `send_time`: they keep a
-lead out of the **pool**, where the send-time group is for layers that skip
-someone already snapshotted.
+In the preview breakdown both land in `excluded`: they keep a lead out of the
+**pool**. Since 2026-09-28 every lifecycle layer does, and the `send_time` group
+is gone entirely (§3f, §3g).
 
 ### 3f4. The preview must apply the SAME offer rule as the freeze (2026-09-28)
 
@@ -388,13 +419,17 @@ The audience preview additionally reports (`AudiencePreviewResult.lifecycle`):
 
 - `by_status` -- the audience split by status; sums to `total_matching`.
 - `excluded` -- leads NOT in the audience, **partitioned**: opted out ->
-  suppressed -> status not selected -> in use elsewhere. Audience + buckets =
-  the whole base, each lead counted once. `in_use_elsewhere` is only counted
-  when `exclude_in_use_contacts` is ON, because with it off those leads send.
-- `send_time` -- `freeze_not_due` and `bought_offer`, which **overlay** the
-  audience: those leads ARE in it and WILL be snapshotted, and the send skips
-  them on the day. They are subsets of `total_matching`, not buckets, so they
-  do not participate in the partition identity.
+  suppressed -> status not selected -> bought offer -> freeze not due ->
+  offer limit -> offer cooldown -> in use elsewhere. Audience + buckets = the
+  whole base, each lead counted once. `in_use_elsewhere` is only counted when
+  `exclude_in_use_contacts` is ON, because with it off those leads send.
+- **There is no `send_time` group any more** (2026-09-28). `freeze_not_due` and
+  `bought_offer` joined the partition when they became audience exclusions
+  (§3f). `status_not_selected` also moved AHEAD of the cohort-specific layers,
+  so a campaign targeting Hot no longer reports thousands of "freeze not due"
+  against people who were never candidates for it — the old ordering did
+  exactly that with the offer buckets, showing a cooldown bucket of 117,975
+  beside an audience of 1,907.
 
 ### 3h. The Excl-timing warning
 

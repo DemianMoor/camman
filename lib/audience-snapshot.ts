@@ -174,7 +174,16 @@ function flagSetCtes(
       select distinct contact_id from offer_exposures
       where org_id = ${orgId}::uuid and offer_id = ${offerExposureOfferId}::int
     )`;
-  if (lifecycleChips == null || lifecycleChips.length === 0) return withOffer;
+  // ⚠️ THE EXCLUSION CTEs DO NOT DEPEND ON THE CHIPS. They used to be emitted
+  // only inside the `lc_set` branch below, so a lifecycle campaign with ZERO
+  // chips selected produced `is_suppressed` columns and `left join lx_*` against
+  // CTEs that were never declared — a hard 42P01 ("relation lx_suppressed does
+  // not exist"). It stayed hidden because the snapshot never asked for these
+  // layers until 2026-09-28 and the preview is rarely run with no chip at all.
+  // Emitting them beside lc_set rather than within it makes the two independent,
+  // which is what the callers already assume.
+  if (lifecycleChips == null || lifecycleChips.length === 0)
+    return drizzleSql`${withOffer}${lifecycleExclusionCtes(lifecycleExclusions)}`;
   return drizzleSql`${withOffer},
     lc_set as (
       select id as contact_id, lifecycle_status from contacts
@@ -234,25 +243,35 @@ function lifecycleBreakdownCols(
     drizzleSql``,
   );
 
+  // ⚠️ ORDER CHANGED 2026-09-28, along with the two new buckets. bought_offer
+  // and freeze_not_due joined the chain when they stopped being a send-time
+  // overlay and became audience exclusions, and `status_not_selected` moved
+  // AHEAD of the cohort-specific layers.
+  //
+  // That move matters: a campaign targeting Hot would otherwise report
+  // thousands of "freeze not due" against people who were never candidates for
+  // it. The old ordering did exactly that with the offer buckets — a cooldown
+  // bucket reading 117,975 beside an audience of 1,907. A bucket must only ever
+  // describe the cohort the operator actually asked for, or it is noise that
+  // looks like a finding.
+  const inCohort = drizzleSql`membership_ok and not has_opt_out
+        and not ${suppressed} and ${hasChip}`;
   return drizzleSql`,
       jsonb_build_object(${byStatus}) as lc_by_status,
-      count(*) filter (where ${sending} and ${freezeNotDue})::int as lc_freeze_not_due,
-      count(*) filter (where ${sending} and ${bought})::int as lc_bought_offer,
       count(*) filter (where membership_ok and has_opt_out)::int as lc_excl_opted_out,
       count(*) filter (where membership_ok and not has_opt_out
         and ${suppressed})::int as lc_excl_suppressed,
-
       count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and ${offerLimit})::int as lc_excl_offer_limit,
-      count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and not ${offerLimit}
-        and ${offerCooldown})::int as lc_excl_offer_cooldown,
-      count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and not ${offerLimit} and not ${offerCooldown}
-        and not ${hasChip})::int as lc_excl_status_not_selected,
-      count(*) filter (where membership_ok and not has_opt_out
-        and not ${suppressed} and not ${offerLimit} and not ${offerCooldown}
-        and ${hasChip}
+        and not ${suppressed} and not ${hasChip})::int as lc_excl_status_not_selected,
+      count(*) filter (where ${inCohort} and ${bought})::int as lc_excl_bought_offer,
+      count(*) filter (where ${inCohort} and not ${bought}
+        and ${freezeNotDue})::int as lc_excl_freeze_not_due,
+      count(*) filter (where ${inCohort} and not ${bought} and not ${freezeNotDue}
+        and ${offerLimit})::int as lc_excl_offer_limit,
+      count(*) filter (where ${inCohort} and not ${bought} and not ${freezeNotDue}
+        and not ${offerLimit} and ${offerCooldown})::int as lc_excl_offer_cooldown,
+      count(*) filter (where ${inCohort} and not ${bought} and not ${freezeNotDue}
+        and not ${offerLimit} and not ${offerCooldown}
         and ${excludeInUse}::boolean and is_in_use_elsewhere)::int as lc_excl_in_use_elsewhere`;
 }
 
@@ -493,19 +512,23 @@ export interface LifecycleAudienceBreakdown {
   // order). That identity is what makes them worth showing, and
   // scripts/test-lifecycle-preview-breakdown.ts asserts it.
   //
-  // The lifecycle reason names come from LifecycleExclusionCounts via Pick/Omit
-  // rather than being retyped. `suppressed` is the ONE layer that keeps a lead
-  // out of the audience entirely, so it is the one named here; every other
-  // layer — including any added later — lands in send_time below, which is the
-  // safe default: reported, never silently dropped.
-  // ⚠️ `suppressed`, `offer_limit` and `offer_cooldown` are AUDIENCE
-  // exclusions: all three keep a lead out of the pool at activation (the offer
-  // rules replace the permanent "ever got this offer" DELETE — PR 4d Task 3).
-  // Everything else is a send-time overlay, below.
-  excluded: Pick<
-    LifecycleExclusionCounts,
-    "suppressed" | "offer_limit" | "offer_cooldown"
-  > & {
+  // The lifecycle reason names come from LifecycleExclusionCounts rather than
+  // being retyped, so a layer added to that list has to be accounted for here.
+  //
+  // ⚠️ THERE IS NO `send_time` GROUP ANY MORE (owner, 2026-09-28): "the
+  // audience on the campaign configuration level should only show allowed
+  // sendable contacts... that should be the rule for every lifecycle cohort."
+  //
+  // It used to hold freeze_not_due and bought_offer as an OVERLAY — leads
+  // counted inside total_matching that the send would then skip. The reasoning
+  // was that freeze due-ness moves with the clock and purchases keep arriving,
+  // so the call belonged at send time. What that missed is that the CAP samples
+  // the pool first: a freeze-cohort campaign capped at 1,500 drew 1,500 at
+  // random from 69,185 freeze contacts of whom only ~2% were past their rest
+  // period, and the stage could send to 28. Every lifecycle layer is now an
+  // audience exclusion, and the send-time layers stay on as a safety net, so
+  // nothing that was blocked before can slip through now.
+  excluded: LifecycleExclusionCounts & {
     opted_out: number;
     // Their status is not among the selected chips.
     status_not_selected: number;
@@ -513,22 +536,6 @@ export interface LifecycleAudienceBreakdown {
     // DO send, so calling them excluded would be a lie.
     in_use_elsewhere: number;
   };
-  // `send_time` OVERLAYS the audience: these leads ARE in it and WILL be
-  // snapshotted, but the send-time eligibility layers will skip them on the
-  // day. They are subsets of total_matching, NOT buckets, so they do not
-  // participate in the identity above — exactly like got_offer_in_prior_campaign
-  // already behaves when its toggle is off.
-  //
-  // Neither is baked into the frozen pool, and neither should be: freeze
-  // due-ness moves with the clock, and purchases keep arriving after
-  // activation. Freezing either would freeze a decision that has to be made
-  // at send time.
-  // freeze_not_due: in Freeze AND inside their own cadence right now.
-  // bought_offer: already bought this campaign's offer.
-  send_time: Omit<
-    LifecycleExclusionCounts,
-    "suppressed" | "offer_limit" | "offer_cooldown"
-  >;
 }
 
 export interface AudienceSnapshotResult {
@@ -724,8 +731,48 @@ function buildQualifierFromRelation(
     : null;
   const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
 
+  // ⚠️ THE LIFECYCLE EXCLUSIONS ARE APPLIED HERE, NOT ONLY AT SEND (owner,
+  // 2026-09-28): "the audience on the campaign configuration level should only
+  // show allowed sendable contacts... that should be the rule for every
+  // lifecycle cohort."
+  //
+  // They used to be a send-time overlay, on the reasoning that freeze due-ness
+  // moves with the clock and purchases keep arriving, so the decision belonged
+  // at send time. True — but the CAP samples the pool BEFORE any of that runs,
+  // and that is what broke: campaign 1501 targeted the freeze cohort, where
+  // only ~2% of the 69,185 freeze contacts in its groups were past their
+  // 14-day rest. Capped at 1,500 it drew 1,500 at random from all 69,185 and
+  // 1,472 of them were resting — the stage could send to 28 people.
+  // 1,500 × (1,371 ÷ 69,185) = 30. The 28 was the arithmetic, exactly.
+  //
+  // Worse, those 1,472 were then LOCKED: they sat in an active campaign's pool,
+  // so exclude_in_use_contacts kept them out of every other campaign while the
+  // campaign that held them could not message them.
+  //
+  // Filtering at selection time cannot send to anyone the old code would have
+  // blocked: lib/sends/eligibility.ts still EXCEPTs the same layers on the day,
+  // so someone who buys the offer or re-enters freeze after activation is still
+  // caught. The pool simply stops being padded with people who cannot receive
+  // the message. Same belt-and-braces as excludePriorOffer (§10b).
+  //
+  // The cost is real and accepted: the pool is frozen to who is sendable on
+  // activation day, so a contact who becomes due tomorrow is not in THIS
+  // campaign. These are daily campaigns — tomorrow's campaign picks them up,
+  // and a genuine multi-week trickle is what drip campaigns are for.
+  const lifecycleExclusions = lifecycleRules
+    ? lifecycleExclusionLayers({ orgId, offerId: input.offerId ?? null })
+    : null;
+  // The offer rules are deliberately NOT here: snapshotAudience applies them as
+  // its own DELETE after ANALYZE, for the planner reasons in that function.
+  const exclusionTerm = (lifecycleExclusions ?? []).reduce(
+    (acc, l) =>
+      drizzleSql`${acc}
+      and not coalesce(${drizzleSql.raw(`is_${l.key}`)}, false)`,
+    drizzleSql``,
+  );
+
   return drizzleSql`
-    with ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips)},
+    with ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips, lifecycleExclusions)},
     flagged as (
       select
         cand.contact_id,
@@ -743,8 +790,9 @@ function buildQualifierFromRelation(
             ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
             : drizzleSql``
         }
+        ${lifecycleFlagCols(lifecycleExclusions)}
       from ${candidateRelation} cand
-      ${flagJoins("cand", useOfferExposure, useLifecycle)}
+      ${flagJoins("cand", useOfferExposure, useLifecycle, lifecycleExclusions)}
     )
     select
       contact_id,
@@ -756,6 +804,7 @@ function buildQualifierFromRelation(
       and ${lifecycleChipPredicate(filters, { lifecycleRules })}
       and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
       and (not ${excludePriorOffer}::boolean or not is_offer_exposed)
+      ${exclusionTerm}
   `;
 }
 
@@ -901,6 +950,12 @@ export async function computeStageAudienceCountForDraft(
     excludeInUse?: boolean;
     // campaigns.lifecycle_rules — see AudiencePreviewInput.
     lifecycleRules?: boolean;
+    // ⚠️ REQUIRED, per CLAUDE.md §11b: it changes WHO is counted (the
+    // bought_offer layer is built from it), so it must not be optional with a
+    // default. Optional, a call site that forgot it would quietly count buyers
+    // of the campaign's own offer as sendable and nothing would say so. Pass
+    // null explicitly for a campaign with no offer yet.
+    offerId: number | null;
   },
   stageFilters: StageAudienceFilters,
 ): Promise<StageAudienceCountResult> {
@@ -914,6 +969,20 @@ export async function computeStageAudienceCountForDraft(
     : null;
   const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
   const excludeInUse = campaign.excludeInUse === true;
+  // The lifecycle exclusions, for the same reason the campaign-level preview
+  // and the snapshot apply them (owner, 2026-09-28): a draft's per-stage count
+  // is a configuration-level number, and it must not promise an audience the
+  // send cannot deliver. The OFFER rules stay campaign-level — this estimate
+  // never modelled them and the ruling was about the lifecycle cohorts.
+  const draftExclusions = lifecycleRules
+    ? lifecycleExclusionLayers({ orgId, offerId: campaign.offerId })
+    : null;
+  const draftExclusionTerm = (draftExclusions ?? []).reduce(
+    (acc, l) =>
+      drizzleSql`${acc}
+        and not coalesce(${drizzleSql.raw(`is_${l.key}`)}, false)`,
+    drizzleSql``,
+  );
   // No audience source on the parent campaign → trivially zero.
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
     return {
@@ -965,7 +1034,7 @@ export async function computeStageAudienceCountForDraft(
     with sources as (
       select distinct contact_id from (${source}) u
     ),
-    ${flagSetCtes(orgId, null, dripPostureOn, lifecycleChips)},
+    ${flagSetCtes(orgId, null, dripPostureOn, lifecycleChips, draftExclusions)},
     flagged as (
       select
         s.contact_id,
@@ -978,8 +1047,9 @@ export async function computeStageAudienceCountForDraft(
             ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
             : drizzleSql``
         }
+        ${lifecycleFlagCols(draftExclusions)}
       from sources s
-      ${flagJoins("s", false, useLifecycle)}
+      ${flagJoins("s", false, useLifecycle, draftExclusions)}
     ),
     qualified as (
       select
@@ -988,6 +1058,7 @@ export async function computeStageAudienceCountForDraft(
       where has_opt_out = false
         and ${lifecycleChipPredicate(filters, { lifecycleRules })}
         and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
+        ${draftExclusionTerm}
         and (
           (${stageIncludeNoStatus}::boolean and not has_opt_in and not has_clicker)
           or (${stageIncludeClickers}::boolean and has_clicker)
@@ -1536,10 +1607,22 @@ export async function previewAudience(
   // still counting as sendable — the buckets read 117,975 while the audience
   // did not move when the cooldown was set to 0, which is how the omission was
   // found.
-  const offerRuleTerm = offerRulesOn
-    ? drizzleSql`and not coalesce(q.is_offer_limit, false)
-          and not coalesce(q.is_offer_cooldown, false)`
-    : drizzleSql``;
+  //
+  // ⚠️ AND SO IS EVERY OTHER LIFECYCLE LAYER, since 2026-09-28 (owner): "the
+  // audience on the campaign configuration level should only show allowed
+  // sendable contacts... that should be the rule for every lifecycle cohort."
+  // freeze_not_due and bought_offer used to be reported as a `send_time`
+  // overlay — leads counted INSIDE total_matching that the send would skip.
+  // That is what let a freeze-cohort campaign size itself at 1,500 and then
+  // send to 28. The term below is now built from the whole layer list, so a
+  // layer added later is subtracted by construction rather than by someone
+  // remembering to extend this expression.
+  const exclusionTerm = (lifecycleExclusions ?? []).reduce(
+    (acc, l) =>
+      drizzleSql`${acc}
+          and not coalesce(q.${drizzleSql.raw(`is_${l.key}`)}, false)`,
+    drizzleSql``,
+  );
   const carrierFilter = input.filters.carrier_filter ?? [];
   const hasCarrierFilter = carrierFilter.length > 0;
   const carrierMatchSql = hasCarrierFilter
@@ -1703,7 +1786,7 @@ export async function previewAudience(
           q.qualifies
           and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
           and (not ${excludePriorOffer}::boolean or not q.is_offer_exposed)
-          ${offerRuleTerm}
+          ${exclusionTerm}
         ) as is_eligible,
         (${positiveExpr}) as membership_positive,
         ((${positiveExpr}) and not q.from_exclude_segment) as membership_ok
@@ -1758,11 +1841,11 @@ export async function previewAudience(
     got_offer_in_prior_campaign: number;
     carrier_removed: Record<string, number>;
     lc_by_status?: Record<string, number>;
-    lc_freeze_not_due?: number;
-    lc_bought_offer?: number;
     lc_excl_opted_out?: number;
     lc_excl_suppressed?: number;
     lc_excl_status_not_selected?: number;
+    lc_excl_bought_offer?: number;
+    lc_excl_freeze_not_due?: number;
     lc_excl_offer_limit?: number;
     lc_excl_offer_cooldown?: number;
     lc_excl_in_use_elsewhere?: number;
@@ -1799,13 +1882,11 @@ export async function previewAudience(
               status_not_selected: Number(
                 row?.lc_excl_status_not_selected ?? 0,
               ),
+              bought_offer: Number(row?.lc_excl_bought_offer ?? 0),
+              freeze_not_due: Number(row?.lc_excl_freeze_not_due ?? 0),
               in_use_elsewhere: Number(row?.lc_excl_in_use_elsewhere ?? 0),
               offer_limit: Number(row?.lc_excl_offer_limit ?? 0),
               offer_cooldown: Number(row?.lc_excl_offer_cooldown ?? 0),
-            },
-            send_time: {
-              freeze_not_due: Number(row?.lc_freeze_not_due ?? 0),
-              bought_offer: Number(row?.lc_bought_offer ?? 0),
             },
           } satisfies LifecycleAudienceBreakdown,
         }

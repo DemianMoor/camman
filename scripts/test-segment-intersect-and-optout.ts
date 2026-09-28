@@ -277,6 +277,7 @@ async function main() {
       contactGroupIds: groupIds,
       filters: allFilters,
       cap: null,
+      offerId: null,
     },
     draftFilters,
   );
@@ -288,6 +289,7 @@ async function main() {
       contactGroupIds: groupIds,
       filters: allFilters,
       cap: null,
+      offerId: null,
     },
     draftFilters,
   );

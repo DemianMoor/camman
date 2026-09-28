@@ -136,6 +136,8 @@ export async function POST(
           cap: campaignRow[0].audience_cap ?? null,
           excludeInUse: campaignRow[0].exclude_in_use_contacts,
           lifecycleRules: campaignRow[0].lifecycle_rules === true,
+          // Required: it builds the bought_offer exclusion (CLAUDE.md §11b).
+          offerId: campaignRow[0].offer_id ?? null,
         },
         parsed.data,
       )

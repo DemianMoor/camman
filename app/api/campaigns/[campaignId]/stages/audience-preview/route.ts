@@ -13,6 +13,10 @@ import {
 } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 
+// Same gap as the campaign-level preview: a seconds-long read with no ceiling
+// of its own. 60s matches the other heavy read routes.
+export const maxDuration = 60;
+
 function parseId(idParam: string) {
   const n = Number(idParam);
   if (!Number.isInteger(n) || n <= 0) return null;

@@ -10,6 +10,21 @@ import { previewAudience } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 import { audiencePreviewSchema } from "@/lib/validators/campaigns";
 
+// ⚠️ THIS ROUTE HAD NO maxDuration, on a query that takes SECONDS.
+//
+// Measured on production for one real recipe — Hot/Warm x three contact groups
+// x one offer with the cooldown/limit rules on — the preview runs 6.5-18s and
+// was seen at 47s. It had been running on the platform default the whole time,
+// so a slow recipe returned a 504 and the form showed "Could not preview
+// audience - fix any issues above", which reads as a VALIDATION problem the
+// operator could correct. There was nothing to correct.
+//
+// 60s matches the other heavy read routes (reports/lifecycle,
+// reports/group-lifecycle). It is a floor under the failure, NOT a fix for the
+// latency: a preview that fires as the operator edits the form has no business
+// taking eight seconds, and that is tracked separately.
+export const maxDuration = 60;
+
 // Live count of contacts that would be in the audience pool given a set
 // of segments, contact groups, and a filter snapshot. Writes nothing.
 // The campaign creation dialog calls this whenever filters change so the

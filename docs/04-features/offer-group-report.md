@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-09-21_
+_Last updated: 2026-09-28_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -44,6 +44,7 @@ an average of per-group ratios.
 | **RPM** | `revenue / sends * 1000`. 0 sends ⇒ shown as "—". |
 | **Net RPM** | `(revenue - cost) / sends * 1000`. |
 | **EPC** | `revenue / clicks`. 0 clicks ⇒ "—". |
+| **CTR %** | `clicks / sends * 100` — unique clickers per message sent, the same per-send basis as Opt-out % (not per unique recipient: the matviews carry no recipient count). 0 sends ⇒ "—". Footer/benchmark inherit the `+manual` click mix. |
 | **Net profit** | `revenue - cost`. |
 | **Opt-out %** | `optouts / sends * 100`. |
 | **Sent last 7 / 30 / 90 days** | `COUNT(*)` of attributed `stage_sends` rows within the window — send rows, **not** distinct contacts, scoped to **this offer**, and (since migration 0132) tracked campaigns only. |
@@ -440,7 +441,7 @@ Telegram report's Warsaw-time cron — see [crons.md](crons.md)).
 — a lightweight custom sortable table (not the `DataTable` wrapper, which can't
 pin rows or foot a table; justified by the small per-offer row count).
 
-- **Columns:** Group · Sends · RPM · Net RPM · EPC · Sales · Opt-out % · Net
+- **Columns:** Group · Sends · RPM · Net RPM · EPC · CTR % · Sales · Opt-out % · Net
   profit · Sent 7d · Sent 30d · Sent 90d · Fresh pool. Default sort: Net RPM
   descending. All columns sortable client-side (the full row set is already
   loaded).

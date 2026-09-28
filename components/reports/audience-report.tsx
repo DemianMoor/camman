@@ -44,7 +44,7 @@ type ReportBody = {
 type AudienceResponse = { groups: AudienceGroupOption[]; report: ReportBody | null };
 
 type SortKey =
-  | "offer_name" | "sends" | "rpm" | "net_rpm" | "epc" | "sales"
+  | "offer_name" | "sends" | "rpm" | "net_rpm" | "epc" | "ctr" | "sales"
   | "oo_pct" | "net_profit" | "sent_7d" | "sent_30d" | "sent_90d" | "fresh_pool";
 
 // TIME BASIS — like the offer report, economics are ALL TIME: the matview has no
@@ -55,6 +55,7 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "rpm", label: "RPM (all time)", numeric: true },
   { key: "net_rpm", label: "Net RPM (all time)", numeric: true },
   { key: "epc", label: "EPC (all time)", numeric: true },
+  { key: "ctr", label: "CTR % (all time)", numeric: true },
   { key: "sales", label: "Sales (all time)", numeric: true },
   { key: "oo_pct", label: "Opt-out % (all time)", numeric: true },
   { key: "net_profit", label: "Net profit (all time)", numeric: true },
@@ -88,6 +89,7 @@ function MetricCells({
       <td className={NUM}>{fmtUsd(m.rpm)}</td>
       <td className={`${NUM} ${netRpmClass(m.net_rpm, breakEven)}`}>{fmtUsd(m.net_rpm)}</td>
       <td className={NUM}>{fmtUsd(m.epc)}</td>
+      <td className={NUM}>{fmtPct(m.ctr)}</td>
       <td className={NUM}>{fmtInt(m.sales)}</td>
       <td className={`${NUM} ${ooClass(m.oo_pct)}`}>{fmtPct(m.oo_pct)}</td>
       <td className={NUM}>{fmtUsd(m.net_profit)}</td>
@@ -204,7 +206,7 @@ export function AudienceReport({ initialGroupId }: { initialGroupId: number | nu
       w: SentWindows | null,
       fresh: number | null,
     ) => [
-      label, m.sends, fmtNum(m.rpm), fmtNum(m.net_rpm), fmtNum(m.epc), m.sales,
+      label, m.sends, fmtNum(m.rpm), fmtNum(m.net_rpm), fmtNum(m.epc), fmtNum(m.ctr), m.sales,
       fmtNum(m.oo_pct), m.net_profit.toFixed(2),
       w?.sent_7d ?? "", w?.sent_30d ?? "", w?.sent_90d ?? "", fresh ?? "",
     ];
@@ -333,8 +335,8 @@ export function AudienceReport({ initialGroupId }: { initialGroupId: number | nu
             </p>
             <p>
               <strong>This group · all offers</strong> counts each clicker and each
-              opt-out once across every offer, so its clicks (the EPC denominator)
-              and opt-outs are lower than the rows added up. Sends, revenue, sales
+              opt-out once across every offer, so its clicks (the EPC denominator and
+              CTR numerator) and opt-outs are lower than the rows added up. Sends, revenue, sales
               and cost do add up.
             </p>
             <p>

@@ -39,7 +39,7 @@ type ReportResponse = {
 };
 
 type SortKey =
-  | "group_name" | "sends" | "rpm" | "net_rpm" | "epc" | "sales" | "pending_revenue"
+  | "group_name" | "sends" | "rpm" | "net_rpm" | "epc" | "ctr" | "sales" | "pending_revenue"
   | "oo_pct" | "net_profit" | "sent_7d" | "sent_30d" | "sent_90d" | "fresh_pool";
 
 const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
@@ -61,6 +61,7 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "rpm", label: "RPM (all time)", numeric: true },
   { key: "net_rpm", label: "Net RPM (all time)", numeric: true },
   { key: "epc", label: "EPC (all time)", numeric: true },
+  { key: "ctr", label: "CTR % (all time)", numeric: true },
   { key: "sales", label: "Sales (all time)", numeric: true },
   { key: "pending_revenue", label: "Pending $ (all time)", numeric: true },
   { key: "oo_pct", label: "Opt-out % (all time)", numeric: true },
@@ -91,6 +92,7 @@ function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived & { pe
       <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.rpm)}</td>
       <td className={`px-3 py-2 text-right tabular-nums ${netRpmClass(m.net_rpm, breakEven)}`}>{fmtUsd(m.net_rpm)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(m.epc)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">{fmtPct(m.ctr)}</td>
       <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sales)}</td>
       {/* Pending is approved revenue's sibling: a held payout, shown so it is
           visible without ever being added into Revenue / RPM / EPC / net profit.
@@ -201,7 +203,7 @@ export default function OfferGroupReportPage() {
     if (!data) return;
     const header = COLUMNS.map((c) => c.label);
     const line = (label: string, m: RawMetrics & Derived) => [
-      label, m.sends, fmtNum(m.rpm), fmtNum(m.net_rpm), fmtNum(m.epc), m.sales,
+      label, m.sends, fmtNum(m.rpm), fmtNum(m.net_rpm), fmtNum(m.epc), fmtNum(m.ctr), m.sales,
       "pending_revenue" in m ? fmtNum((m as { pending_revenue: number }).pending_revenue) : "",
       fmtNum(m.oo_pct), m.net_profit.toFixed(2),
       "sent_7d" in m ? (m as ViewRow).sent_7d : "",

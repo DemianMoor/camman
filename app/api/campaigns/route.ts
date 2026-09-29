@@ -21,6 +21,7 @@ import {
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { loadLifecycleSettings } from "@/lib/engagement/settings-io";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
+import { isOfferAssignedToBrand } from "@/lib/api/offer-brands";
 import { snapshotAudience } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
 import { generateCampaignSlug } from "@/lib/campaign-helpers";
@@ -120,6 +121,20 @@ export async function POST(req: NextRequest) {
         { field: "offer_id" },
       );
     }
+  }
+  // Offer ↔ brand assignment (offer_brands, 0194). A new campaign always
+  // counts as a change, so the pair must be assigned.
+  if (
+    input.brand_id != null &&
+    input.offer_id != null &&
+    !(await isOfferAssignedToBrand(orgId, input.offer_id, input.brand_id))
+  ) {
+    return apiError(
+      400,
+      "This offer isn't assigned to the selected brand",
+      API_ERROR_CODES.VALIDATION,
+      { field: "offer_id", reason: "offer_not_assigned_to_brand" },
+    );
   }
   if (input.routing_type_id != null) {
     const r = await db

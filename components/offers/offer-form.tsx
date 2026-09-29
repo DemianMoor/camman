@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, Trash2 } from "lucide-react";
 import { useFieldArray, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 
@@ -34,8 +34,14 @@ import {
 
 export type { OfferFormValues };
 
+export type OfferFormBrand = { id: number; name: string };
+
 export interface OfferFormProps {
   mode: "create" | "edit";
+  /** Edit mode: the offer's id, used to load per-brand active campaign counts. */
+  offerId?: number;
+  /** The org's brands — the "Brands" checkbox list. */
+  brands: OfferFormBrand[];
   initialValues?: Partial<OfferFormValues>;
   onSubmit: (values: OfferFormValues) => Promise<void>;
   onCancel: () => void;
@@ -54,8 +60,14 @@ type NetworksListResponse = {
   totalCount: number;
 };
 
+type OfferDetailResponse = {
+  active_campaigns_by_brand: { brand_id: number; count: number }[];
+};
+
 export function OfferForm({
   mode,
+  offerId,
+  brands,
   initialValues,
   onSubmit,
   onCancel,
@@ -79,8 +91,54 @@ export function OfferForm({
       payout_revshare: initialValues?.payout_revshare,
       sales_pages: initialValues?.sales_pages ?? [],
       color: initialValues?.color ?? "",
+      // New offer: every brand checked by default (card 869f94t0t).
+      brand_ids: initialValues?.brand_ids ?? brands.map((b) => b.id),
     },
   });
+
+  // Brands may arrive after the form mounts; fill the create-mode default then,
+  // unless the user has already touched the checkboxes.
+  useEffect(() => {
+    if (isEdit || brands.length === 0) return;
+    if (form.getFieldState("brand_ids").isDirty) return;
+    if ((form.getValues("brand_ids") ?? []).length > 0) return;
+    form.setValue(
+      "brand_ids",
+      brands.map((b) => b.id),
+    );
+  }, [isEdit, brands, form]);
+
+  // Edit mode: active campaigns per brand on this offer, for the non-blocking
+  // "they will keep running" warning when a brand is unchecked.
+  const detailApi = useApiCall<OfferDetailResponse>();
+  const [activeByBrand, setActiveByBrand] = useState<Map<number, number>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    if (!isEdit || offerId == null) return;
+    let cancelled = false;
+    (async () => {
+      const result = await detailApi.execute(`/api/offers/${offerId}`);
+      if (cancelled || !result.ok) return;
+      setActiveByBrand(
+        new Map(
+          result.data.active_campaigns_by_brand.map((r) => [
+            r.brand_id,
+            r.count,
+          ]),
+        ),
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isEdit, offerId, detailApi.execute]);
+
+  const checkedBrandIds = form.watch("brand_ids") ?? [];
+  const uncheckedInUse = brands.filter(
+    (b) =>
+      !checkedBrandIds.includes(b.id) && (activeByBrand.get(b.id) ?? 0) > 0,
+  );
 
   const payoutModel = form.watch("payout_model");
 
@@ -232,6 +290,79 @@ export function OfferForm({
                 <FormMessage />
               </FormItem>
             )}
+          />
+        </section>
+
+        <Separator />
+
+        {/* Brands — which brands' campaigns may pick this offer (0194). */}
+        <section className="grid gap-4">
+          <div className="grid gap-1">
+            <h3 className="text-sm font-medium">Brands</h3>
+            <p className="text-xs text-muted-foreground">
+              Campaigns under these brands can pick this offer.
+            </p>
+          </div>
+
+          <FormField
+            control={form.control}
+            name="brand_ids"
+            render={({ field }) => {
+              const selected = field.value ?? [];
+              const toggle = (id: number) =>
+                field.onChange(
+                  selected.includes(id)
+                    ? selected.filter((x) => x !== id)
+                    : [...selected, id],
+                );
+              return (
+                <FormItem>
+                  <FormLabel required>Assigned brands</FormLabel>
+                  {brands.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      No brands yet.
+                    </p>
+                  ) : (
+                    <div className="grid gap-2">
+                      {[...brands]
+                        .sort((x, y) => x.name.localeCompare(y.name))
+                        .map((b) => (
+                          <label
+                            key={b.id}
+                            className="flex items-center gap-2 text-sm"
+                          >
+                            <input
+                              type="checkbox"
+                              className="size-4"
+                              checked={selected.includes(b.id)}
+                              onChange={() => toggle(b.id)}
+                              disabled={isSubmitting}
+                            />
+                            {b.name}
+                          </label>
+                        ))}
+                    </div>
+                  )}
+                  {uncheckedInUse.map((b) => {
+                    const n = activeByBrand.get(b.id) ?? 0;
+                    return (
+                      <p
+                        key={b.id}
+                        className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400"
+                      >
+                        <AlertTriangle
+                          className="mt-0.5 size-3.5 shrink-0"
+                          aria-hidden
+                        />
+                        Used by {n} active campaign{n === 1 ? "" : "s"} under{" "}
+                        {b.name} — {n === 1 ? "it" : "they"} will keep running.
+                      </p>
+                    );
+                  })}
+                  <FormMessage />
+                </FormItem>
+              );
+            }}
           />
         </section>
 

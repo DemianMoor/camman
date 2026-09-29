@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-09-28_
+_Last updated: 2026-09-29_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -107,6 +107,8 @@ erDiagram
 
   creatives ||--o{ creative_offers : "M:N offers"
   offers ||--o{ creative_offers : ""
+  offers ||--o{ offer_brands : "M:N brands"
+  brands ||--o{ offer_brands : ""
   creatives ||--o{ spam_scores : "cached via columns"
 
   campaigns ||--o{ campaign_stages : "ordered stages"
@@ -261,6 +263,7 @@ erDiagram
 | `brands` | `brand_id` (text uniq), `website`, `short_link_base` (legacy) | brand↔short-domain mapping is in `short_domains` |
 | `affiliate_networks` | `network_id` (text uniq) | |
 | `offers` | `offer_id` (text uniq), `network_id` (NOT NULL, **restrict**), `payout_model` cpa/revshare, `payout_cpa`, `payout_revshare`, `sales_pages` jsonb | `payout_cpa` is the **current-rate cache only** — never used to compute historical revenue (that's `keitaro_stage_results.revenue`); rate history lives in `offer_payouts` · `keitaro_offer_id` (0181, nullable, unique per org) — Keitaro's offer id, for conversions with no resolvable click |
+| `offer_brands` | PK(offer_id, brand_id), `org_id`, `created_at`; INDEX(org_id, brand_id); both FKs **cascade** (migration `0194`) | M:N — which brands an offer may be picked under. Read ONLY by the campaign-editor / clickers-upload offer pickers and the campaign save-time check; never by the send path, materialization, preflight, drip intake or reports. RLS: org-scoped SELECT only. Backfilled all offers × all brands per org; a brand created later starts with no offers |
 | `offer_payouts` | `offer_id` (→offers, cascade), `payout_cpa` (NOT NULL), `effective_from`, `effective_to` (NULL=current), partial UNIQUE(offer_id) WHERE effective_to IS NULL | effective-dated CPA history (migration 0083). The offers write path closes the current row (`effective_to=now()`) and opens a new one on every CPA change instead of overwriting. For display/audit of "the rate that applied when" — NOT for recomputing earnings |
 | `sms_providers` | `sms_provider_id` (text uniq — the row IDENTITY), `adapter_code` (the CONNECTION TYPE, 0134; NULL = no API adapter), `supports_api_send`, `sends_enabled` + `opt_out_footer` (0138), send-window cols, circuit-breaker cols (`send_paused*`, `max_sends_per_run` / `_minute` / `_24h` volume caps) | per-second rate lives on `provider_phones` (0073), not here. `adapter_code` answers "what kind of provider"; `sms_provider_id` answers "which row" — breakers, windows and reporting stay per-ROW. Capability (`supports_api_send`) / posture (`sends_enabled`) / latch (`send_paused`) are three separate questions — see 0138 below |
 | `provider_credentials` | `provider_id`, `brand_id` (NULL=default), `label`, `api_key` (legacy plaintext, nullable), `api_key_encrypted`, `api_key_last4`, `inbound_webhook_token` | **N accounts per provider** as of migration `0110` — a row IS an account (`label` distinguishes them). Both single-account unique indexes dropped (`provider_credentials_provider_brand_uniq`, `provider_credentials_provider_default_uniq`); `api_key` DROP NOT NULL (encrypted-only writes now allowed). See [security-notes.md](security-notes.md) and [07-conventions.md](07-conventions.md) |

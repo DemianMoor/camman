@@ -24,6 +24,7 @@ import {
   pairIsChanging,
 } from "@/lib/api/brand-number-guard";
 import { computeBrandChangeImpact } from "@/lib/api/campaign-brand-change";
+import { isOfferAssignedToBrand } from "@/lib/api/offer-brands";
 import { can } from "@/lib/permissions";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
@@ -383,6 +384,71 @@ export async function PATCH(
         "default_provider_phone_id doesn't belong to your organization",
         API_ERROR_CODES.VALIDATION,
         { field: "default_provider_phone_id" },
+      );
+    }
+  }
+
+  // Org ownership of brand_id / offer_id when present (RLS is
+  // defense-in-depth; Drizzle bypasses it). Mirrors the POST checks.
+  if (input.brand_id != null) {
+    const found = await db
+      .select({ id: brands.id })
+      .from(brands)
+      .where(and(eq(brands.id, input.brand_id), eq(brands.org_id, orgId)))
+      .limit(1);
+    if (!found[0]) {
+      return apiError(
+        400,
+        "brand_id doesn't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "brand_id" },
+      );
+    }
+  }
+  if (input.offer_id != null) {
+    const found = await db
+      .select({ id: offers.id })
+      .from(offers)
+      .where(and(eq(offers.id, input.offer_id), eq(offers.org_id, orgId)))
+      .limit(1);
+    if (!found[0]) {
+      return apiError(
+        400,
+        "offer_id doesn't belong to your organization",
+        API_ERROR_CODES.VALIDATION,
+        { field: "offer_id" },
+      );
+    }
+  }
+
+  // Offer ↔ brand assignment (offer_brands, 0194). GRANDFATHERED: checked only
+  // when brand or offer DIFFERS from the stored row — the editor always sends
+  // both, so "present in the payload" is not "changed". An existing
+  // out-of-brand pair saves untouched.
+  {
+    const brandChanged =
+      input.brand_id !== undefined &&
+      (input.brand_id ?? null) !== current[0].brand_id;
+    const offerChanged =
+      input.offer_id !== undefined &&
+      (input.offer_id ?? null) !== current[0].offer_id;
+    const nextBrandId = brandChanged
+      ? (input.brand_id ?? null)
+      : current[0].brand_id;
+    const nextOfferId = offerChanged
+      ? (input.offer_id ?? null)
+      : current[0].offer_id;
+    if (
+      (brandChanged || offerChanged) &&
+      nextBrandId != null &&
+      nextOfferId != null &&
+      !(await isOfferAssignedToBrand(orgId, nextOfferId, nextBrandId))
+    ) {
+      return apiError(
+        400,
+        "This offer isn't assigned to the selected brand",
+        API_ERROR_CODES.VALIDATION,
+        { field: "offer_id", reason: "offer_not_assigned_to_brand" },
       );
     }
   }

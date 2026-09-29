@@ -50,6 +50,12 @@ const baseOfferShape = {
       z.literal(""),
     ])
     .optional(),
+  // Brands this offer may be picked under (offer_brands, migration 0194).
+  // Required on create; on update, present ⇒ replace-all, absent ⇒ untouched.
+  brand_ids: z
+    .array(z.number().int().positive())
+    .min(1, "Select at least one brand")
+    .max(200),
 };
 
 function applyPayoutRefinement(

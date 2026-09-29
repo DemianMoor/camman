@@ -681,7 +681,10 @@ function SetupCard({
     form,
     isEdit,
     brands,
-    offers,
+    offerPickerOptions,
+    offerOutOfBrand,
+    offerOutOfBrandGrandfathered,
+    brandHasNoOffers,
     routingTypes,
     trafficTypes,
     activePhones,
@@ -825,12 +828,27 @@ function SetupCard({
                 <FormLabel required>Offer</FormLabel>
                 <FormControl>
                   <OfferPicker
-                    offers={offers}
+                    offers={offerPickerOptions}
                     value={field.value}
                     onChange={field.onChange}
                     disabled={anySubmitting}
                   />
                 </FormControl>
+                {brandHasNoOffers && field.value === null ? (
+                  <p className="text-xs text-muted-foreground">
+                    No offers assigned to this brand yet.{" "}
+                    <Link href="/offers" className="underline">
+                      Assign offers
+                    </Link>
+                  </p>
+                ) : null}
+                {offerOutOfBrand ? (
+                  <p className="text-xs text-amber-700 dark:text-amber-400">
+                    {offerOutOfBrandGrandfathered
+                      ? "This offer isn't assigned to this brand. It's kept as-is — saving without changing brand or offer is fine."
+                      : "This offer isn't assigned to the selected brand. Pick an assigned offer, or assign it on the Offers page, before saving."}
+                  </p>
+                ) : null}
                 <FormMessage />
               </FormItem>
             )}

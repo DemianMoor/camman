@@ -29,7 +29,12 @@ export type ActivePhone = {
   provider_color: string | null;
   supports_api_send: boolean;
 };
-export type Offer = Info & { payout_model: string; payout_cpa: string | null };
+export type Offer = Info & {
+  payout_model: string;
+  payout_cpa: string | null;
+  // Brands the offer is assigned to (offer_brands, 0194).
+  brand_ids: number[];
+};
 export type SegmentInfo = {
   id: number;
   name: string;
@@ -321,6 +326,42 @@ export function useCampaignFormState(props: CampaignFormProps) {
 
   const watchedLinkMode = form.watch("link_mode");
   const watchedOfferId = form.watch("offer_id");
+
+  // Offer ↔ brand (0194): with a brand selected, the picker lists only offers
+  // assigned to it; with none, every offer. A selected offer outside the brand
+  // is never cleared silently — it stays in the list, labelled. It's
+  // GRANDFATHERED when the pair equals the stored row (edit mode): the server
+  // only validates a pair that changed, so that save succeeds.
+  const offersForBrand = useMemo(
+    () =>
+      watchedBrandId == null
+        ? offers
+        : offers.filter((o) => o.brand_ids.includes(watchedBrandId)),
+    [offers, watchedBrandId],
+  );
+  const selectedOffer = offers.find((o) => o.id === watchedOfferId) ?? null;
+  const offerOutOfBrand =
+    watchedBrandId != null &&
+    selectedOffer != null &&
+    !selectedOffer.brand_ids.includes(watchedBrandId);
+  const offerOutOfBrandGrandfathered =
+    offerOutOfBrand &&
+    isEdit &&
+    watchedBrandId === (initialValues?.brand_id ?? null) &&
+    watchedOfferId === (initialValues?.offer_id ?? null);
+  const offerPickerOptions =
+    offerOutOfBrand && selectedOffer
+      ? [
+          {
+            ...selectedOffer,
+            name: `${selectedOffer.name} (not assigned to this brand)`,
+          },
+          ...offersForBrand,
+        ]
+      : offersForBrand;
+  const brandHasNoOffers =
+    watchedBrandId != null && offersForBrand.length === 0;
+
   const watchedSegments = form.watch("audience_segment_ids");
   const watchedExcludeSegments = form.watch("audience_exclude_segment_ids");
   const watchedContactGroups = form.watch("audience_contact_group_ids");
@@ -376,10 +417,10 @@ export function useCampaignFormState(props: CampaignFormProps) {
   }, [isEdit, brands, form]);
   useEffect(() => {
     if (isEdit) return;
-    if (offers.length === 1 && form.getValues("offer_id") === null) {
-      form.setValue("offer_id", offers[0].id, { shouldDirty: false });
+    if (offersForBrand.length === 1 && form.getValues("offer_id") === null) {
+      form.setValue("offer_id", offersForBrand[0].id, { shouldDirty: false });
     }
-  }, [isEdit, offers, form]);
+  }, [isEdit, offersForBrand, form]);
   useEffect(() => {
     if (isEdit) return;
     if (
@@ -794,6 +835,10 @@ export function useCampaignFormState(props: CampaignFormProps) {
     form,
     brands,
     offers,
+    offerPickerOptions,
+    offerOutOfBrand,
+    offerOutOfBrandGrandfathered,
+    brandHasNoOffers,
     routingTypes,
     trafficTypes,
     segments,

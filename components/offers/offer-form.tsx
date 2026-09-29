@@ -316,7 +316,7 @@ export function OfferForm({
                 );
               return (
                 <FormItem>
-                  <FormLabel required>Brands</FormLabel>
+                  <FormLabel required>Assigned brands</FormLabel>
                   {brands.length === 0 ? (
                     <p className="text-xs text-muted-foreground">
                       No brands yet.
@@ -352,7 +352,7 @@ export function OfferForm({
                           aria-hidden
                         />
                         Used by {n} active campaign{n === 1 ? "" : "s"} under{" "}
-                        {b.name} — they will keep running.
+                        {b.name} — {n === 1 ? "it" : "they"} will keep running.
                       </p>
                     );
                   })}

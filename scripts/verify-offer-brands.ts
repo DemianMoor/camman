@@ -48,7 +48,13 @@ async function dbMode() {
 
     // The backfill rows share one created_at: the migration transaction's now().
     const backfill = await sql<
-      { org_id: string; t: Date; actual: number; offers: number; brands: number }[]
+      {
+        org_id: string;
+        t: Date;
+        actual: number;
+        offers: number;
+        brands: number;
+      }[]
     >`
       WITH t AS (
         SELECT org_id, min(created_at) AS t FROM offer_brands GROUP BY org_id
@@ -82,7 +88,13 @@ async function dbMode() {
     }
 
     const scope = await sql<
-      { id: number; status: string; brand_id: number | null; offer_id: number | null; assigned: boolean }[]
+      {
+        id: number;
+        status: string;
+        brand_id: number | null;
+        offer_id: number | null;
+        assigned: boolean;
+      }[]
     >`
       SELECT c.id, c.status, c.brand_id, c.offer_id,
         EXISTS (
@@ -97,13 +109,16 @@ async function dbMode() {
               WHERE s.campaign_id = c.id AND s.status IN ('scheduled', 'pending')))
       ORDER BY c.id`;
     const byStatus = new Map<string, number>();
-    for (const r of scope) byStatus.set(r.status, (byStatus.get(r.status) ?? 0) + 1);
+    for (const r of scope)
+      byStatus.set(r.status, (byStatus.get(r.status) ?? 0) + 1);
     check(
       "campaign scope non-empty",
       scope.length > 0,
       `${scope.length} campaigns: ${[...byStatus].map(([s, n]) => `${s} ${n}`).join(", ")}`,
     );
-    const withPair = scope.filter((r) => r.brand_id != null && r.offer_id != null);
+    const withPair = scope.filter(
+      (r) => r.brand_id != null && r.offer_id != null,
+    );
     const outOfBrand = withPair.filter((r) => !r.assigned);
     check(
       "zero in-scope campaigns outside their brand",
@@ -197,22 +212,35 @@ async function httpMode() {
     const must = async (method: string, path: string, body?: unknown) => {
       const r = await api(method, path, body);
       if (r.status >= 300) {
-        throw new Error(`${method} ${path} → ${r.status} ${JSON.stringify(r.json)}`);
+        throw new Error(
+          `${method} ${path} → ${r.status} ${JSON.stringify(r.json)}`,
+        );
       }
       return r.json;
     };
     const idsFor = async (q: string) => {
       const r = await must("GET", `/api/offers/list?pageSize=500${q}`);
-      return (r.data as { id: number }[]).map((o) => o.id).sort((a, b) => a - b);
+      return (r.data as { id: number }[])
+        .map((o) => o.id)
+        .sort((a, b) => a - b);
     };
     const same = (a: number[], b: number[]) =>
       JSON.stringify([...a].sort((x, y) => x - y)) ===
       JSON.stringify([...b].sort((x, y) => x - y));
 
     const sfx = Date.now().toString(36);
-    const net = await must("POST", "/api/networks", { name: "ob net", network_id: `obn-${sfx}` });
-    const brandA = await must("POST", "/api/brands", { name: "ob A", brand_id: `oba-${sfx}` });
-    const brandB = await must("POST", "/api/brands", { name: "ob B", brand_id: `obb-${sfx}` });
+    const net = await must("POST", "/api/networks", {
+      name: "ob net",
+      network_id: `obn-${sfx}`,
+    });
+    const brandA = await must("POST", "/api/brands", {
+      name: "ob A",
+      brand_id: `oba-${sfx}`,
+    });
+    const brandB = await must("POST", "/api/brands", {
+      name: "ob B",
+      brand_id: `obb-${sfx}`,
+    });
     const A = brandA.id as number;
     const B = brandB.id as number;
     const offer = (tag: string, brand_ids: number[]) =>
@@ -229,7 +257,10 @@ async function httpMode() {
 
     // Picker subset per brand, and the unfiltered list.
     check("list brand_id=A → {X}", same(await idsFor(`&brand_id=${A}`), [X]));
-    check("list brand_id=B → {X, Y}", same(await idsFor(`&brand_id=${B}`), [X, Y]));
+    check(
+      "list brand_id=B → {X, Y}",
+      same(await idsFor(`&brand_id=${B}`), [X, Y]),
+    );
     check("list without brand → {X, Y}", same(await idsFor(""), [X, Y]));
     const rows = (await must("GET", "/api/offers/list?pageSize=500")).data as {
       id: number;
@@ -241,63 +272,129 @@ async function httpMode() {
         same(rows.find((r) => r.id === Y)!.brand_ids, [B]),
     );
     const big = await api("GET", "/api/offers/list?pageSize=300");
-    check("pageSize cap raised (300 honoured)", big.json.pageSize === 300, `pageSize=${big.json.pageSize}`);
+    check(
+      "pageSize cap raised (300 honoured)",
+      big.json.pageSize === 300,
+      `pageSize=${big.json.pageSize}`,
+    );
 
     // A brand created now starts empty.
-    const brandC = await must("POST", "/api/brands", { name: "ob C", brand_id: `obc-${sfx}` });
-    check("new brand has no offers", (await idsFor(`&brand_id=${brandC.id}`)).length === 0);
+    const brandC = await must("POST", "/api/brands", {
+      name: "ob C",
+      brand_id: `obc-${sfx}`,
+    });
+    check(
+      "new brand has no offers",
+      (await idsFor(`&brand_id=${brandC.id}`)).length === 0,
+    );
 
     // Offer validation.
     const noBrand = await api("POST", "/api/offers", {
-      name: "ob z", offer_id: `obz-${sfx}`, network_id: net.id,
-      payout_model: "cpa", payout_cpa: 10, brand_ids: [],
+      name: "ob z",
+      offer_id: `obz-${sfx}`,
+      network_id: net.id,
+      payout_model: "cpa",
+      payout_cpa: 10,
+      brand_ids: [],
     });
-    check("offer create with zero brands → 400", noBrand.status === 400, String(noBrand.status));
+    check(
+      "offer create with zero brands → 400",
+      noBrand.status === 400,
+      String(noBrand.status),
+    );
     const foreign = await api("POST", "/api/offers", {
-      name: "ob z", offer_id: `obz-${sfx}`, network_id: net.id,
-      payout_model: "cpa", payout_cpa: 10, brand_ids: [2147483000],
+      name: "ob z",
+      offer_id: `obz-${sfx}`,
+      network_id: net.id,
+      payout_model: "cpa",
+      payout_cpa: 10,
+      brand_ids: [2147483000],
     });
-    check("offer create with a foreign brand → 400", foreign.status === 400, String(foreign.status));
+    check(
+      "offer create with a foreign brand → 400",
+      foreign.status === 400,
+      String(foreign.status),
+    );
 
     // Campaign create: an unassigned pair is rejected, an assigned one saves.
     const badCreate = await api("POST", "/api/campaigns", {
-      name: "ob bad", brand_id: A, offer_id: Y, save_as_draft: true,
+      name: "ob bad",
+      brand_id: A,
+      offer_id: Y,
+      save_as_draft: true,
     });
     check(
       "campaign POST with unassigned pair → 400 offer_not_assigned_to_brand",
-      badCreate.status === 400 && JSON.stringify(badCreate.json).includes("offer_not_assigned_to_brand"),
+      badCreate.status === 400 &&
+        JSON.stringify(badCreate.json).includes("offer_not_assigned_to_brand"),
       String(badCreate.status),
     );
     const camp = await must("POST", "/api/campaigns", {
-      name: "ob camp", brand_id: A, offer_id: X, save_as_draft: true,
+      name: "ob camp",
+      brand_id: A,
+      offer_id: X,
+      save_as_draft: true,
     });
     const cid = camp.id as number;
 
     // Unassign X from A (brands-only PATCH) → campaign (A, X) is grandfathered.
-    const brandsOnly = await api("PATCH", `/api/offers/${X}`, { brand_ids: [B] });
-    check("brands-only offer PATCH → 200", brandsOnly.status === 200, String(brandsOnly.status));
+    const brandsOnly = await api("PATCH", `/api/offers/${X}`, {
+      brand_ids: [B],
+    });
+    check(
+      "brands-only offer PATCH → 200",
+      brandsOnly.status === 200,
+      String(brandsOnly.status),
+    );
     check("X no longer listed for A", same(await idsFor(`&brand_id=${A}`), []));
 
     // Grandfathered: the editor sends brand + offer on every save.
     const gf = await api("PATCH", `/api/campaigns/${cid}`, {
-      name: "ob camp (edited)", brand_id: A, offer_id: X,
+      name: "ob camp (edited)",
+      brand_id: A,
+      offer_id: X,
     });
-    check("grandfathered campaign saves with the pair unchanged → 200", gf.status === 200, `${gf.status} ${gf.status !== 200 ? JSON.stringify(gf.json) : ""}`);
-    const changedBad = await api("PATCH", `/api/campaigns/${cid}`, { brand_id: A, offer_id: Y });
+    check(
+      "grandfathered campaign saves with the pair unchanged → 200",
+      gf.status === 200,
+      `${gf.status} ${gf.status !== 200 ? JSON.stringify(gf.json) : ""}`,
+    );
+    const changedBad = await api("PATCH", `/api/campaigns/${cid}`, {
+      brand_id: A,
+      offer_id: Y,
+    });
     check(
       "CHANGED offer to an unassigned one → 400 offer_not_assigned_to_brand",
-      changedBad.status === 400 && JSON.stringify(changedBad.json).includes("offer_not_assigned_to_brand"),
+      changedBad.status === 400 &&
+        JSON.stringify(changedBad.json).includes("offer_not_assigned_to_brand"),
       String(changedBad.status),
     );
-    const changedGood = await api("PATCH", `/api/campaigns/${cid}`, { brand_id: B, offer_id: X });
-    check("CHANGED brand to an assigned one → 200", changedGood.status === 200, String(changedGood.status));
-    const foreignOffer = await api("PATCH", `/api/campaigns/${cid}`, { offer_id: 2147483000 });
-    check("PATCH with a foreign offer_id → 400 (new org check)", foreignOffer.status === 400, String(foreignOffer.status));
+    const changedGood = await api("PATCH", `/api/campaigns/${cid}`, {
+      brand_id: B,
+      offer_id: X,
+    });
+    check(
+      "CHANGED brand to an assigned one → 200",
+      changedGood.status === 200,
+      String(changedGood.status),
+    );
+    const foreignOffer = await api("PATCH", `/api/campaigns/${cid}`, {
+      offer_id: 2147483000,
+    });
+    check(
+      "PATCH with a foreign offer_id → 400 (new org check)",
+      foreignOffer.status === 400,
+      String(foreignOffer.status),
+    );
 
     // Duplicate copies an out-of-brand pair as-is: make (B, X) grandfathered.
     await must("PATCH", `/api/offers/${X}`, { brand_ids: [A] });
     const dup = await api("POST", `/api/campaigns/${cid}/duplicate`, {});
-    check("duplicate of an out-of-brand campaign → 2xx", dup.status >= 200 && dup.status < 300, String(dup.status));
+    check(
+      "duplicate of an out-of-brand campaign → 2xx",
+      dup.status >= 200 && dup.status < 300,
+      String(dup.status),
+    );
   } finally {
     // Cleanup by explicit id only: the throwaway org's campaigns (brand/offer
     // FKs are RESTRICT), then the org (cascades the rest), then the user.
@@ -339,10 +436,18 @@ function diffMode() {
   })
     .split("\n")
     .filter(Boolean);
-  check("branch diff non-empty", changed.length > 0, `${changed.length} files vs origin/main`);
+  check(
+    "branch diff non-empty",
+    changed.length > 0,
+    `${changed.length} files vs origin/main`,
+  );
   console.log(`send-path prefixes checked: ${SEND_PATH.join(", ")}`);
   const hits = changed.filter((f) => SEND_PATH.some((p) => f.startsWith(p)));
-  check("zero send-path files changed", hits.length === 0, hits.join(", ") || "none");
+  check(
+    "zero send-path files changed",
+    hits.length === 0,
+    hits.join(", ") || "none",
+  );
 }
 
 async function main() {
@@ -354,7 +459,9 @@ async function main() {
     console.error("usage: verify-offer-brands.ts --db | --http | --diff");
     process.exit(1);
   }
-  console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
+  console.log(
+    failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`,
+  );
   process.exit(failures === 0 ? 0 : 1);
 }
 

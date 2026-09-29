@@ -33,15 +33,13 @@ export async function replaceOfferBrands(
     .where(
       and(eq(offer_brands.org_id, orgId), eq(offer_brands.offer_id, offerId)),
     );
-  await tx
-    .insert(offer_brands)
-    .values(
-      [...new Set(brandIds)].map((brand_id) => ({
-        org_id: orgId,
-        offer_id: offerId,
-        brand_id,
-      })),
-    );
+  await tx.insert(offer_brands).values(
+    [...new Set(brandIds)].map((brand_id) => ({
+      org_id: orgId,
+      offer_id: offerId,
+      brand_id,
+    })),
+  );
 }
 
 export async function isOfferAssignedToBrand(

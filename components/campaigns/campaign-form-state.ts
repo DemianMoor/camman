@@ -359,7 +359,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
           ...offersForBrand,
         ]
       : offersForBrand;
-  const brandHasNoOffers = watchedBrandId != null && offersForBrand.length === 0;
+  const brandHasNoOffers =
+    watchedBrandId != null && offersForBrand.length === 0;
 
   const watchedSegments = form.watch("audience_segment_ids");
   const watchedExcludeSegments = form.watch("audience_exclude_segment_ids");

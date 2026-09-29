@@ -136,7 +136,8 @@ export function OfferForm({
 
   const checkedBrandIds = form.watch("brand_ids") ?? [];
   const uncheckedInUse = brands.filter(
-    (b) => !checkedBrandIds.includes(b.id) && (activeByBrand.get(b.id) ?? 0) > 0,
+    (b) =>
+      !checkedBrandIds.includes(b.id) && (activeByBrand.get(b.id) ?? 0) > 0,
   );
 
   const payoutModel = form.watch("payout_model");
@@ -323,21 +324,23 @@ export function OfferForm({
                     </p>
                   ) : (
                     <div className="grid gap-2">
-                      {brands.map((b) => (
-                        <label
-                          key={b.id}
-                          className="flex items-center gap-2 text-sm"
-                        >
-                          <input
-                            type="checkbox"
-                            className="size-4"
-                            checked={selected.includes(b.id)}
-                            onChange={() => toggle(b.id)}
-                            disabled={isSubmitting}
-                          />
-                          {b.name}
-                        </label>
-                      ))}
+                      {[...brands]
+                        .sort((x, y) => x.name.localeCompare(y.name))
+                        .map((b) => (
+                          <label
+                            key={b.id}
+                            className="flex items-center gap-2 text-sm"
+                          >
+                            <input
+                              type="checkbox"
+                              className="size-4"
+                              checked={selected.includes(b.id)}
+                              onChange={() => toggle(b.id)}
+                              disabled={isSubmitting}
+                            />
+                            {b.name}
+                          </label>
+                        ))}
                     </div>
                   )}
                   {uncheckedInUse.map((b) => {

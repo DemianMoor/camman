@@ -10,6 +10,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { brandsBelongToOrg, replaceOfferBrands } from "@/lib/api/offer-brands";
 import { can } from "@/lib/permissions";
 import { nullIfEmpty, offerCreateSchema } from "@/lib/validators/offers";
 
@@ -62,6 +63,12 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  if (!(await brandsBelongToOrg(orgId, data.brand_ids))) {
+    return apiError(400, "Brand not found", API_ERROR_CODES.VALIDATION, {
+      field: "brand_ids",
+    });
+  }
+
   try {
     const created = await db.transaction(async (tx) => {
       const [row] = await tx
@@ -99,6 +106,7 @@ export async function POST(req: NextRequest) {
           effective_to: null,
         });
       }
+      await replaceOfferBrands(tx, orgId, row.id, data.brand_ids);
       return row;
     });
     return NextResponse.json(created, { status: 201 });

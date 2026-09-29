@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-28_
+_Last updated: 2026-09-29_
 
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
@@ -1311,6 +1311,14 @@ Precedence, most specific first — one function, `resolveOptOutFooter` ([lib/se
 `""` and whitespace mean **no preference**, never an empty footer — an empty box submits `null` so the column clears and the chain falls through. Storing `""` would read as set and behave as unset.
 
 **The preview names the winning level.** The stage form composes from the resolved footer and, when the stage level loses, says which level won and what text will ship. An operator editing a box whose value will never appear on the wire is the failure this surfaces.
+
+## Offer ↔ brand (migration 0194) — a picker filter plus a save-time check, grandfathered (2026-09-29)
+
+`offer_brands` decides which offers a campaign's editor offers for its brand. It is read by exactly three things: the campaign-editor offer picker, the clickers-upload offer chips, and the campaign `POST`/`PATCH` check in [`lib/api/offer-brands.ts`](../lib/api/offer-brands.ts). **Nothing on the send path reads it** — unassigning an offer from a brand never stops, pauses or re-validates a running campaign.
+
+- **"Changed" means differs from the stored row, not present in the payload.** `buildPatchBody` sends `brand_id` and `offer_id` on every save; keying the check off presence would lock every grandfathered campaign out of its own edit form. Compare against `current[0]`, like the brand → number guard below.
+- **Never clear an offer silently.** When the brand changes to one the offer isn't assigned to, the editor keeps the offer, labels it and warns; the server decides at save.
+- **A new brand starts empty** (owner ruling): auto-assigning every offer would reproduce the unfiltered state the feature exists to remove.
 
 ## Brand → sending number (Drip Phase 1 item 1a) — WRITE-TIME ONLY, and grandfathered
 

@@ -75,6 +75,9 @@ type Clicker = {
 
 type ListResponse = { data: Clicker[]; totalCount: number };
 type InfoListResponse = { data: Info[] };
+// Offers carry their brand assignment (offer_brands, 0194) so the upload
+// dialog can list only offers assigned to the chosen brand.
+type OfferInfo = Info & { brand_ids: number[] };
 
 type Filters = {
   search: string;
@@ -167,7 +170,7 @@ export default function ClickersPage() {
   const listApi = useApiCall<ListResponse>();
   const brandsApi = useApiCall<InfoListResponse>();
   const providersApi = useApiCall<InfoListResponse>();
-  const offersApi = useApiCall<InfoListResponse>();
+  const offersApi = useApiCall<{ data: OfferInfo[] }>();
   const bulkDeleteApi = useApiCall<{ deleted_clickers: number }>();
 
   const [data, setData] = useState<Clicker[]>([]);
@@ -178,7 +181,7 @@ export default function ClickersPage() {
 
   const [brands, setBrands] = useState<Info[]>([]);
   const [providers, setProviders] = useState<Info[]>([]);
-  const [offers, setOffers] = useState<Info[]>([]);
+  const [offers, setOffers] = useState<OfferInfo[]>([]);
   useEffect(() => {
     (async () => {
       const r = await brandsApi.execute("/api/brands/list?pageSize=100");
@@ -247,6 +250,10 @@ export default function ClickersPage() {
   const [uploadBrandId, setUploadBrandId] = useState<number | null>(null);
   const [uploadProviderId, setUploadProviderId] = useState<number | null>(null);
   const [uploadOfferId, setUploadOfferId] = useState<number | null>(null);
+  const uploadOffers =
+    uploadBrandId === null
+      ? offers
+      : offers.filter((o) => o.brand_ids.includes(uploadBrandId));
   const [uploadSource, setUploadSource] = useState("");
 
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
@@ -632,9 +639,19 @@ export default function ClickersPage() {
                     <button
                       key={b.id}
                       type="button"
-                      onClick={() =>
-                        setUploadBrandId(active ? null : b.id)
-                      }
+                      onClick={() => {
+                        const next = active ? null : b.id;
+                        setUploadBrandId(next);
+                        // Drop an offer that isn't assigned to the new brand.
+                        const offer = offers.find((o) => o.id === uploadOfferId);
+                        if (
+                          next !== null &&
+                          offer &&
+                          !offer.brand_ids.includes(next)
+                        ) {
+                          setUploadOfferId(null);
+                        }
+                      }}
                       className={cn(
                         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs",
                         active
@@ -656,7 +673,12 @@ export default function ClickersPage() {
             <div className="grid gap-2">
               <Label>Offer</Label>
               <div className="flex flex-wrap gap-1.5">
-                {offers.map((o) => {
+                {uploadBrandId !== null && uploadOffers.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    No offers assigned to this brand yet.
+                  </p>
+                ) : null}
+                {uploadOffers.map((o) => {
                   const active = uploadOfferId === o.id;
                   return (
                     <button

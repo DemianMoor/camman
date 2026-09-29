@@ -85,7 +85,11 @@ type Offer = {
   network: Network | null;
   // Distinct leads already used for this offer (content-dedup counter).
   distinct_contacts_used: number;
+  // Brands this offer is assigned to (offer_brands, 0194).
+  brand_ids: number[];
 };
+
+type BrandOption = { id: number; name: string };
 
 type ListResponse = {
   data: Offer[];
@@ -95,6 +99,7 @@ type ListResponse = {
 };
 
 type NetworksListResponse = { data: Network[]; totalCount: number };
+type BrandsListResponse = { data: BrandOption[]; totalCount: number };
 
 type Filters = {
   search: string;
@@ -104,6 +109,7 @@ type Filters = {
   sortBy: string;
   sortDir: "asc" | "desc";
   networkFilter: number | null;
+  brandFilter: number | null;
 };
 
 const DEFAULT_FILTERS: Filters = {
@@ -114,11 +120,13 @@ const DEFAULT_FILTERS: Filters = {
   sortBy: "created_at",
   sortDir: "desc",
   networkFilter: null,
+  brandFilter: null,
 };
 
 const SEARCH_DEBOUNCE_MS = 300;
 const NETWORK_FILTER_ALL = "__all__";
 const NETWORK_FILTER_NONE = "__none__";
+const BRAND_FILTER_ALL = "__all__";
 
 function OfferCell({ offer }: { offer: Offer }) {
   const initial = offer.name.charAt(0).toUpperCase() || "?";
@@ -201,7 +209,8 @@ export default function OffersPage() {
   const filtersAreDefault =
     filters.search === DEFAULT_FILTERS.search &&
     filters.showArchived === DEFAULT_FILTERS.showArchived &&
-    filters.networkFilter === DEFAULT_FILTERS.networkFilter;
+    filters.networkFilter === DEFAULT_FILTERS.networkFilter &&
+    filters.brandFilter === DEFAULT_FILTERS.brandFilter;
 
   // Search debounce
   const [searchInput, setSearchInput] = useState(filters.search);
@@ -222,6 +231,7 @@ export default function OffersPage() {
   const archiveApi = useApiCall<Offer>();
   const restoreApi = useApiCall<Offer>();
   const networksApi = useApiCall<NetworksListResponse>();
+  const brandsApi = useApiCall<BrandsListResponse>();
 
   const [data, setData] = useState<Offer[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -247,6 +257,23 @@ export default function OffersPage() {
     };
   }, [networksAvailable, networksApi.execute]);
 
+  const [brands, setBrands] = useState<BrandOption[]>([]);
+  const brandNameById = useMemo(
+    () => new Map(brands.map((b) => [b.id, b.name])),
+    [brands],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await brandsApi.execute("/api/brands/list?pageSize=100");
+      if (cancelled) return;
+      if (result.ok) setBrands(result.data.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [brandsApi.execute]);
+
   useEffect(() => {
     let cancelled = false;
     setFetchError(null);
@@ -261,6 +288,9 @@ export default function OffersPage() {
     if (filters.showArchived) params.set("showArchived", "true");
     if (filters.networkFilter !== null) {
       params.set("network_id", String(filters.networkFilter));
+    }
+    if (filters.brandFilter !== null) {
+      params.set("brand_id", String(filters.brandFilter));
     }
 
     (async () => {
@@ -287,6 +317,7 @@ export default function OffersPage() {
     filters.search,
     filters.showArchived,
     filters.networkFilter,
+    filters.brandFilter,
     refreshTick,
     listApi.execute,
   ]);
@@ -368,6 +399,28 @@ export default function OffersPage() {
         id: "network",
         header: "Network",
         cell: ({ row }) => <NetworkCell network={row.original.network} />,
+        enableSorting: false,
+      },
+      {
+        id: "brands",
+        header: "Brands",
+        cell: ({ row }) => {
+          const names = (row.original.brand_ids ?? [])
+            .map((id) => brandNameById.get(id))
+            .filter((n): n is string => n !== undefined);
+          if (names.length === 0) {
+            return <span className="text-muted-foreground">—</span>;
+          }
+          return (
+            <div className="flex flex-wrap gap-1">
+              {names.map((n) => (
+                <Badge key={n} variant="secondary">
+                  {n}
+                </Badge>
+              ))}
+            </div>
+          );
+        },
         enableSorting: false,
       },
       {
@@ -487,7 +540,7 @@ export default function OffersPage() {
         },
       },
     ],
-    [canUpdate, canArchive, canRestore],
+    [canUpdate, canArchive, canRestore, brandNameById],
   );
 
   const isAuthLoading = !auth;
@@ -562,6 +615,31 @@ export default function OffersPage() {
             {networks.map((n) => (
               <SelectItem key={n.id} value={String(n.id)}>
                 {n.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={
+            filters.brandFilter === null
+              ? BRAND_FILTER_ALL
+              : String(filters.brandFilter)
+          }
+          onValueChange={(v) =>
+            updateFilters({
+              brandFilter: v === BRAND_FILTER_ALL ? null : Number(v),
+              page: 0,
+            })
+          }
+        >
+          <SelectTrigger className="h-9 w-[180px]">
+            <SelectValue placeholder="All brands" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={BRAND_FILTER_ALL}>All brands</SelectItem>
+            {brands.map((b) => (
+              <SelectItem key={b.id} value={String(b.id)}>
+                {b.name}
               </SelectItem>
             ))}
           </SelectContent>
@@ -672,6 +750,7 @@ export default function OffersPage() {
         <OfferForm
           key="create"
           mode="create"
+          brands={brands}
           onSubmit={handleCreate}
           onCancel={() => setCreateOpen(false)}
           isSubmitting={createApi.isLoading}
@@ -694,6 +773,8 @@ export default function OffersPage() {
           <OfferForm
             key={`edit-${editing.id}`}
             mode="edit"
+            offerId={editing.id}
+            brands={brands}
             initialValues={{
               name: editing.name,
               offer_id: editing.offer_id,
@@ -715,6 +796,9 @@ export default function OffersPage() {
               sales_pages: editing.sales_pages ?? [],
               avatar_url: editing.avatar_url ?? "",
               color: editing.color ?? "",
+              // Ids not in `brands` (e.g. an archived brand) aren't rendered
+              // as checkboxes, so they ride along untouched on save.
+              brand_ids: editing.brand_ids ?? [],
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}

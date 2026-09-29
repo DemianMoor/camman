@@ -4,6 +4,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import {
   affiliate_networks,
+  campaigns,
+  offer_brands,
   offer_exposure_counts,
   offer_payouts,
   offers,
@@ -14,6 +16,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { brandsBelongToOrg, replaceOfferBrands } from "@/lib/api/offer-brands";
 import { can } from "@/lib/permissions";
 import { nullIfEmpty, offerUpdateSchema } from "@/lib/validators/offers";
 
@@ -92,9 +95,38 @@ export async function GET(
       entity: "offer",
     });
   }
+  // Brand assignment (0194) + per-brand ACTIVE campaign counts on this offer,
+  // which drive the offer form's non-blocking "used by N active campaigns
+  // under Brand X — they will keep running" warning when a brand is unchecked.
+  const [brandRows, activeByBrand] = await Promise.all([
+    db
+      .select({ brand_id: offer_brands.brand_id })
+      .from(offer_brands)
+      .where(
+        and(eq(offer_brands.org_id, orgId), eq(offer_brands.offer_id, offerId)),
+      ),
+    db
+      .select({
+        brand_id: campaigns.brand_id,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(campaigns)
+      .where(
+        and(
+          eq(campaigns.org_id, orgId),
+          eq(campaigns.offer_id, offerId),
+          eq(campaigns.status, "active"),
+        ),
+      )
+      .groupBy(campaigns.brand_id),
+  ]);
   const out = {
     ...row,
     network: row.network && row.network.id !== null ? row.network : null,
+    brand_ids: brandRows.map((r) => r.brand_id),
+    active_campaigns_by_brand: activeByBrand.filter(
+      (r): r is { brand_id: number; count: number } => r.brand_id !== null,
+    ),
   };
   return NextResponse.json(out);
 }
@@ -145,8 +177,15 @@ export async function PATCH(
     );
   }
 
+  const { brand_ids: brandIds, ...columnInput } = parsed.data;
+  if (brandIds !== undefined && !(await brandsBelongToOrg(orgId, brandIds))) {
+    return apiError(400, "Brand not found", API_ERROR_CODES.VALIDATION, {
+      field: "brand_ids",
+    });
+  }
+
   const updates: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(parsed.data)) {
+  for (const [k, v] of Object.entries(columnInput)) {
     if (v === undefined) continue;
     if (NULLABLE_OPTIONAL_STRING.has(k)) {
       updates[k] = nullIfEmpty(v as string);
@@ -217,12 +256,17 @@ export async function PATCH(
 
   try {
     const updated = await db.transaction(async (tx) => {
-      const [row] = await tx
-        .update(offers)
-        .set(updates)
-        .where(and(eq(offers.id, offerId), eq(offers.org_id, orgId)))
-        .returning();
+      const offerWhere = and(eq(offers.id, offerId), eq(offers.org_id, orgId));
+      // A brands-only PATCH has no column updates (Drizzle rejects an empty set).
+      const [row] =
+        Object.keys(updates).length > 0
+          ? await tx.update(offers).set(updates).where(offerWhere).returning()
+          : await tx.select().from(offers).where(offerWhere);
       if (!row) return null;
+
+      if (brandIds !== undefined) {
+        await replaceOfferBrands(tx, orgId, offerId, brandIds);
+      }
 
       if (cpaChanged) {
         // Close the current open history row...

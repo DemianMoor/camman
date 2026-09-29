@@ -1793,6 +1793,34 @@ export const creative_offers = pgTable(
 export type CreativeOffer = typeof creative_offers.$inferSelect;
 export type NewCreativeOffer = typeof creative_offers.$inferInsert;
 
+// Junction: offers ↔ brands (migration 0194). Which brands an offer may be
+// picked under. Read ONLY by the campaign-editor / clickers-upload offer
+// pickers and the campaign save-time check (which fires only when brand or
+// offer changes vs the stored row — existing pairs are grandfathered). Never
+// read by the send path, materialization, preflight, drip intake or reports.
+// A brand created after 0194 starts with no offers.
+export const offer_brands = pgTable(
+  "offer_brands",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    offer_id: integer("offer_id")
+      .notNull()
+      .references(() => offers.id, { onDelete: "cascade" }),
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "cascade" }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.offer_id, table.brand_id] }),
+    index("offer_brands_org_brand_idx").on(table.org_id, table.brand_id),
+  ],
+);
+
 // Campaigns: long-running containers for SMS-send sequences. The audience
 // is frozen at activation — see campaign_audience_pool below. Drafts can
 // be saved empty; name + brand + offer are enforced at the API layer when

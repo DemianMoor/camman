@@ -93,3 +93,14 @@ Five optimizations keep this fast even at ~750K contacts:
 ## 7. Extension points / limitations
 - No re-snapshot / refresh-audience action by design.
 - Random sampling is `ORDER BY RANDOM()` — fine at current scale; revisit for very large pools.
+
+## 8. Task 2 parity harness (temporary)
+
+While Task 2 rebuilds the campaign preview (plan: `docs/superpowers/plans/2026-09-30-audience-preview-task2-plan.md`), the preview as it stood on 2026-09-30 is frozen verbatim in [`lib/audience-preview-reference/`](../../lib/audience-preview-reference/index.ts). [`scripts/verify-preview-parity.ts`](../../scripts/verify-preview-parity.ts) runs the reference and the live `previewAudience` on real campaign recipes, one READ ONLY `REPEATABLE READ` transaction per recipe, and fails on any field that differs. `previewAudience` takes an optional `runner` for this purpose only; the route never passes it.
+
+- **Scope is printed and enforced.** The recipes cover the plan's list (lifecycle chips, segments, small and large groups, offer rules, an offer with and without history, cap, carrier, in-use on and off), with named variants where no real campaign carries an item. The run fails with fewer than 10 recipes, fewer than 5 segment recipes, or fewer than half with a non-empty audience. Two zeros agreeing prove nothing.
+- **Red-proved every run.** Each numeric field of each result is bumped by one, and the differ must name exactly that field. It was also proven once end to end with a one-row change to the live SQL.
+- **`--timing`** is the segment gate ([change 3]). It times segment evaluation alone against the whole preview (EXPLAIN ANALYZE, BUFFERS, two interleaved rounds), counting only recipes whose preview takes at least 100 ms. If the median share is above 50%, T2 stops.
+- **Production only between 05:00 and 06:00 UTC.** Any database other than the one in `.env.demo` counts as production. The script refuses to start outside 05:00–05:45 and takes no new recipe after 06:00.
+
+The reference and the harness helpers are deleted together with the kill switch once Task 2 is accepted.

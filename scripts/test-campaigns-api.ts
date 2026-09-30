@@ -130,6 +130,14 @@ async function main() {
         network_id: network.id,
         payout_model: "cpa",
         payout_cpa: 10,
+        // ⚠️ REQUIRED since migration 0194 (#247): offerCreateSchema has
+        // `brand_ids: …min(1, "Select at least one brand")`. Without it this
+        // seed 400s, and because every later step needs the offer, the whole
+        // suite cascades — campaign create 400, tracking ids NaN, teardown
+        // deleting `undefined`. The suite looked broken in six places for one
+        // missing field. Not a product defect: the create form has required a
+        // brand since 0194 too.
+        brand_ids: [brand.id],
       }),
     });
     check("seed: offer creation returns 201", offerR.status === 201);
@@ -171,6 +179,34 @@ async function main() {
     });
     check("seed: 100 contacts uploaded to segment", upR.status === 201);
 
+    // ⚠️ PUT THE SAME CONTACTS IN THE CONTACT GROUP. The campaign below
+    // selects a segment AND a group, and since 2026-06-10 those dimensions
+    // INTERSECT rather than UNION (CLAUDE.md §10b). Contacts in the segment
+    // alone intersect to NOBODY: the create route refuses with
+    // `empty_audience`, and every later assertion fails on a campaign that
+    // was never made. The test predates the intersect change.
+    //
+    // Through bulk-apply-groups, NOT an `assign_to_group_ids` on the segment
+    // upload above: that field exists on the contacts / opt-outs / opt-ins /
+    // clickers uploads only, and the segment upload’s schema strips it without
+    // an error -- which is how the first attempt at this fix did nothing.
+    const seededIds = await db
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(inArray(contacts.phone_number, phones));
+    const grpApplyR = await apiFetch("/api/contacts/bulk-apply-groups", {
+      method: "POST",
+      body: JSON.stringify({
+        contact_ids: seededIds.map((r) => r.id),
+        group_ids: [grp.id],
+      }),
+    });
+    check(
+      "seed: the same 100 contacts added to the contact group",
+      grpApplyR.status === 200 && seededIds.length === 100,
+      `status ${grpApplyR.status}, ${seededIds.length} ids`,
+    );
+
     // Mark 5 of those contacts as opt-outs so we can verify the snapshot
     // excludes them.
     const optOutPhones = phones.slice(0, 5);
@@ -206,8 +242,17 @@ async function main() {
         save_as_draft: false,
       }),
     });
-    check("returns 201", c1R.status === 201, `got ${c1R.status}`);
-    const c1 = (await c1R.json()) as {
+    // Read the body ONCE and show it when the status is wrong. Without this a
+    // failure reads "got 400" and says nothing about which field the server
+    // rejected -- which is how a single missing seed field looked like six
+    // unrelated broken assertions.
+    const c1Text = await c1R.text();
+    check(
+      "returns 201",
+      c1R.status === 201,
+      c1R.status === 201 ? "" : `got ${c1R.status} — ${c1Text.slice(0, 220)}`,
+    );
+    const c1 = JSON.parse(c1Text || "{}") as {
       id: number;
       status: string;
       audience_snapshot_count: number;
@@ -241,6 +286,13 @@ async function main() {
       method: "POST",
       body: JSON.stringify({
         name: `Test Campaign ${unique} B`,
+        // ⚠️ exclude_in_use_contacts defaults to TRUE (§10b). The first campaign
+        // is ACTIVE and holds these same 95 contacts, so with the default this
+        // second campaign would correctly select nobody (`empty_audience`,
+        // in_use_in_other_campaigns = 95). What is under test here is not the
+        // in-use exclusion, so it is switched off EXPLICITLY rather than by
+        // relying on an old default.
+        exclude_in_use_contacts: false,
         brand_id: brand.id,
         offer_id: offer.id,
         audience_segment_ids: [seg.id],
@@ -249,7 +301,9 @@ async function main() {
         save_as_draft: false,
       }),
     });
-    const c1b = (await c1bR.json()) as {
+    const c1bText = await c1bR.text();
+    if (c1bR.status !== 201) console.log(`    ↳ second create: ${c1bR.status} ${c1bText.slice(0, 220)}`);
+    const c1b = JSON.parse(c1bText || "{}") as {
       id: number;
       tracking_id: string | null;
     };
@@ -389,6 +443,13 @@ async function main() {
         offer_id: offer.id,
         audience_segment_ids: [seg.id],
         audience_contact_group_ids: [grp.id],
+        // ⚠️ exclude_in_use_contacts defaults to TRUE (§10b). The first campaign
+        // is ACTIVE and holds these same 95 contacts, so with the default this
+        // draft would correctly select nobody (`empty_audience`,
+        // in_use_in_other_campaigns = 95). What is under test here is not the
+        // in-use exclusion, so it is switched off EXPLICITLY rather than by
+        // relying on an old default.
+        exclude_in_use_contacts: false,
         audience_filters: {
           include_no_status: true,
           include_not_clicked: true,
@@ -410,7 +471,11 @@ async function main() {
       method: "POST",
       body: JSON.stringify({ status: "active" }),
     });
-    check("draft → active returns 200", c2cActR.status === 200);
+    check(
+      "draft → active returns 200",
+      c2cActR.status === 200,
+      c2cActR.status === 200 ? "" : `got ${c2cActR.status} — ${(await c2cActR.clone().text()).slice(0, 220)}`,
+    );
     const c2cActivated = (await c2cActR.json()) as {
       status: string;
       audience_snapshot_count: number;
@@ -667,7 +732,37 @@ async function main() {
       method: "POST",
       body: JSON.stringify({ status: "active" }),
     });
-    check("completed → active: 409 invalid", s4R.status === 409);
+    // ⚠️ RETIRED EXPECTATION: this used to assert 409. Reactivating a completed
+    // campaign became a deliberate feature in 7f06b78d (2026-08-19, card
+    // 869ekxp0b: "activate campaign after it was marked as completed");
+    // TRANSITIONS now reads `completed: new Set(["active"]) // can be
+    // reactivated`. The assertion follows the product.
+    check(
+      "completed → active: 200 (reactivation, 869ekxp0b)",
+      s4R.status === 200,
+      s4R.status === 200 ? "" : `got ${s4R.status} — ${(await s4R.clone().text()).slice(0, 220)}`,
+    );
+    // …and the coverage the old line gave — an INVALID transition is refused —
+    // is kept with one TRANSITIONS still forbids: active → draft.
+    const s5R = await apiFetch(`/api/campaigns/${c1.id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status: "draft" }),
+    });
+    const s5Body = (await s5R.json().catch(() => ({}))) as {
+      details?: { reason?: string };
+    };
+    check(
+      "active → draft: 409 invalid_transition",
+      s5R.status === 409 && s5Body.details?.reason === "invalid_transition",
+      `got ${s5R.status} ${JSON.stringify(s5Body).slice(0, 160)}`,
+    );
+    // Return the campaign to completed so it stops holding the 95 contacts as
+    // "in use" for the preview check in [8].
+    const s6R = await apiFetch(`/api/campaigns/${c1.id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status: "completed" }),
+    });
+    check("active → completed again: 200", s6R.status === 200);
 
     console.log("\n[8] POST audience-preview (no DB write)");
     const previewR = await apiFetch("/api/campaigns/audience-preview", {
@@ -678,6 +773,11 @@ async function main() {
           include_no_status: true,
           include_not_clicked: true,
         },
+        // Same flag the snapshots above were taken with. The route defaults it
+        // to TRUE, and the [2c] campaign is ACTIVE holding these 95 contacts, so
+        // the default would report 0 (in_use_in_other_campaigns = 95) -- correct
+        // behaviour, but not what "matches snapshot logic" is checking.
+        exclude_in_use_contacts: false,
       }),
     });
     check("returns 200", previewR.status === 200);
@@ -685,7 +785,7 @@ async function main() {
     check(
       "preview count = 95 (matches snapshot logic)",
       preview.count === 95,
-      `got ${preview.count}`,
+      `got ${preview.count} — ${JSON.stringify(preview).slice(0, 260)}`,
     );
     // Ensure no extra pool rows landed for a non-existent campaign.
     const allPoolRows = await db
@@ -699,7 +799,16 @@ async function main() {
   } finally {
     console.log("\nCleanup");
     try {
-      for (const cid of createdCampaignIds) {
+      // ⚠️ ONLY IDS THAT WERE ACTUALLY ASSIGNED. When a create fails the suite
+      // still pushes `created.id`, which is `undefined`, and a delete bound to
+      // an undefined parameter killed the connection (ECONNRESET) in one run
+      // and HUNG past a 5-minute cap in the next -- the "suite hang" was this,
+      // not a slow query: deleting all 100 seeded contacts takes 236 ms on
+      // preview. A failed seed must surface as its failed assertion, not as
+      // a hang in teardown that hides it.
+      const real = <T,>(xs: (T | undefined | null)[]): T[] =>
+        xs.filter((x): x is T => x != null);
+      for (const cid of real(createdCampaignIds)) {
         await db.delete(campaigns).where(eq(campaigns.id, cid));
       }
       if (insertedPhones.length > 0) {
@@ -721,19 +830,19 @@ async function main() {
           .delete(contacts)
           .where(inArray(contacts.phone_number, insertedPhones));
       }
-      for (const sid of createdSegmentIds) {
+      for (const sid of real(createdSegmentIds)) {
         await db.delete(segments).where(eq(segments.id, sid));
       }
-      for (const gid of createdGroupIds) {
+      for (const gid of real(createdGroupIds)) {
         await db.delete(contact_groups).where(eq(contact_groups.id, gid));
       }
-      for (const oid of createdOfferIds) {
+      for (const oid of real(createdOfferIds)) {
         await db.delete(offers).where(eq(offers.id, oid));
       }
-      for (const nid of createdNetworkIds) {
+      for (const nid of real(createdNetworkIds)) {
         await db.delete(affiliate_networks).where(eq(affiliate_networks.id, nid));
       }
-      for (const bid of createdBrandIds) {
+      for (const bid of real(createdBrandIds)) {
         await db.delete(brands).where(eq(brands.id, bid));
       }
       console.log("  cleanup complete");

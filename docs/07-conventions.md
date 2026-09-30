@@ -3861,6 +3861,20 @@ The rest of that bucket (no mapping at all, or no status) really is counted nowh
 
 `EventCountRow.unmapped` was `unmapped?: number`, and the residual column is emitted only while some row HAS one. So a caller mapping its rows to `{ events }` rendered the per-event counts with **no residual column at all**, compiled clean, and left every scan bar green — the structural pairing (`eventCountColumns` returns both in one array) was intact and irrelevant, because the ROW SHAPE suppressed the column. The fields are required now; the bar (**Y9**) is on the DECLARATION, because "this field is optional" is not something `tsc` can fail. The same reasoning as `EMPTY_TALLY`'s freeze: the type is the weaker of the two guards, so the guard goes where the hole is.
 
+## ⭐ A test teardown must never delete by an id that was never assigned (2026-09-30)
+
+When a create inside a test fails, `created.id` is `undefined` — and most suites
+push it into their cleanup list anyway. A Drizzle/postgres-js delete bound to an
+undefined parameter does not fail cleanly: in `test-campaigns-api` it reset the
+connection (`ECONNRESET`) on one run and **hung past a five-minute cap** on the
+next. It was diagnosed for a day as "the suite is slow"; the delete it was
+supposedly slow on takes 236 ms. One failed seed then hides behind a hang, and
+the real failure is never read.
+
+**How to apply:** filter cleanup lists to assigned ids (`xs.filter((x) => x != null)`)
+before deleting. And make a failing create **print the response body** — "got
+400" alone is how one missing seed field looked like six unrelated failures.
+
 ## ⭐ A script that both reads prod and writes preview must be TWO scripts (2026-09-30)
 
 The preview-DB guard asks one question of every script: *if you can write, do

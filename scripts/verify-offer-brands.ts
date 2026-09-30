@@ -3,8 +3,8 @@
 // Three modes, each prints its scope and FAILS on an empty one:
 //
 //   --db    READ-ONLY. Safe on prod and preview.
-//           (1) backfill: per org, rows written by the migration's transaction
-//               == offers × brands that existed at that moment;
+//           (1) assignments vs the owner-confirmed baseline (BASELINE below);
+//               the one-time backfill check passed 2026-09-29 and is retired;
 //           (2) scope: every active / paused / completed-with-pending-stages
 //               campaign has its (brand, offer) pair assigned — zero
 //               out-of-brand on day one.
@@ -37,6 +37,88 @@ function check(label: string, ok: boolean, detail = "") {
   if (!ok) failures++;
 }
 
+// ── The expected assignments: an OWNER-CONFIRMED BASELINE, not the backfill ──
+//
+// Until 2026-09-30 this checked that the migration's backfill rows still
+// equalled offers × brands (147 = 49 × 3). That was true on day one (verified
+// 2026-09-29) and could only ever go red afterwards: the offer form REPLACES an
+// offer's whole brand set on save, so every curation deletes backfill rows. On
+// 2026-09-30 the owner curated 24 offers (15:23–15:27 UTC, plus offer 60) —
+// "that was me, deliberate" — and the old check reported 72 missing rows.
+//
+// The expectation is now the owner-confirmed state at BASELINE_AT (52 offers,
+// 103 pairs). Against it, per offer:
+//   same set                                  → ok
+//   different set, and EVERY current row was  → reported: a save through the
+//     written after BASELINE_AT                  app (replace-all), i.e. curation
+//   different set WITHOUT that full rewrite    → FAIL: rows removed some other
+//                                                way (cascade, manual SQL, a bug)
+//   offer gone                                 → reported (an offer delete
+//                                                cascades by design)
+// Re-baseline deliberately (owner-confirmed), never to make a red run green.
+const BASELINE_AT = new Date("2026-09-30T20:14:32Z");
+const BASELINE_ORG = "b0ce3435-5ea2-4510-ab11-8cdd0d0c125b";
+const BASELINE: Record<number, number[]> = {
+  1: [8, 142, 143],
+  2: [8, 142, 143],
+  3: [8, 142, 143],
+  4: [8, 142, 143],
+  5: [8, 142, 143],
+  6: [8, 142, 143],
+  58: [8],
+  59: [8],
+  60: [8],
+  61: [142],
+  62: [8],
+  75: [142],
+  76: [8, 142, 143],
+  77: [8],
+  78: [8, 142, 143],
+  79: [8],
+  80: [8],
+  81: [8, 142, 143],
+  82: [8, 142, 143],
+  83: [8, 142, 143],
+  96: [8],
+  97: [8, 142, 143],
+  98: [8, 142, 143],
+  99: [8, 142, 143],
+  100: [8, 143],
+  101: [8, 142, 143],
+  112: [8, 142, 143],
+  113: [8, 142, 143],
+  114: [8, 142, 143],
+  115: [142],
+  116: [8, 142, 143],
+  117: [8, 142, 143],
+  118: [8],
+  121: [8, 142, 143],
+  122: [143],
+  123: [143],
+  124: [143],
+  126: [8],
+  127: [8, 142, 143],
+  130: [8, 142, 143],
+  131: [8],
+  132: [8, 142, 143],
+  133: [143],
+  134: [142],
+  135: [8, 142, 143],
+  136: [143],
+  137: [8],
+  138: [142],
+  139: [143],
+  140: [143],
+  141: [143],
+  142: [8],
+};
+// Campaigns whose (brand, offer) pair is outside the brand BECAUSE of that
+// curation: grandfathered by design (the save check fires only when the pair
+// changes; nothing on the send path reads offer_brands). Reviewed 2026-09-30:
+// 1044/1045 paused with no open stages, 1154/1355 completed with a stranded
+// past "pending" stage. A campaign NOT listed here going out of brand fails.
+const ACKNOWLEDGED_OUT_OF_BRAND = new Set([1044, 1045, 1154, 1355]);
+
 // ── --db ─────────────────────────────────────────────────────────────────────
 async function dbMode() {
   const sql = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
@@ -44,46 +126,60 @@ async function dbMode() {
     const host = new URL(process.env.DATABASE_URL!).hostname;
     console.log(`DB host: ${host}`);
 
-    // The backfill rows share one created_at: the migration transaction's now().
-    const backfill = await sql<
-      {
-        org_id: string;
-        t: Date;
-        actual: number;
-        offers: number;
-        brands: number;
-      }[]
+    const rows = await sql<
+      { offer_id: number; brand_id: number; created_at: Date }[]
     >`
-      WITH t AS (
-        SELECT org_id, min(created_at) AS t FROM offer_brands GROUP BY org_id
-      )
-      SELECT t.org_id, t.t,
-        (SELECT count(*)::int FROM offer_brands ob
-          WHERE ob.org_id = t.org_id AND ob.created_at = t.t) AS actual,
-        (SELECT count(*)::int FROM offers o
-          WHERE o.org_id = t.org_id AND o.created_at <= t.t) AS offers,
-        (SELECT count(*)::int FROM brands b
-          WHERE b.org_id = t.org_id AND b.created_at <= t.t) AS brands
-      FROM t ORDER BY t.org_id`;
-    const orgsWithBoth = await sql<{ n: number }[]>`
-      SELECT count(DISTINCT o.org_id)::int AS n
-      FROM offers o JOIN brands b ON b.org_id = o.org_id`;
-    check(
-      "backfill scope non-empty",
-      backfill.length > 0,
-      `${backfill.length} org(s) with offer_brands rows; ${orgsWithBoth[0].n} org(s) have offers and brands`,
-    );
-    check(
-      "every org with offers and brands was backfilled",
-      backfill.length === orgsWithBoth[0].n,
-    );
-    for (const r of backfill) {
-      check(
-        `backfill org ${r.org_id} at ${r.t.toISOString()}`,
-        r.actual === r.offers * r.brands,
-        `${r.actual} rows = ${r.offers} offers × ${r.brands} brands (${r.offers * r.brands})`,
-      );
+      SELECT offer_id, brand_id, created_at FROM offer_brands
+      WHERE org_id = ${BASELINE_ORG}::uuid`;
+    const current = new Map<number, { brands: number[]; oldest: Date }>();
+    for (const r of rows) {
+      const c = current.get(r.offer_id) ?? { brands: [], oldest: r.created_at };
+      c.brands.push(r.brand_id);
+      if (r.created_at < c.oldest) c.oldest = r.created_at;
+      current.set(r.offer_id, c);
     }
+    const offersNow = new Set(
+      (
+        await sql<{ id: number }[]>`
+          SELECT id FROM offers WHERE org_id = ${BASELINE_ORG}::uuid`
+      ).map((r) => r.id),
+    );
+    const key = (xs: number[]) => [...xs].sort((a, b) => a - b).join(",");
+    const baselineIds = Object.keys(BASELINE).map(Number);
+    check(
+      "baseline scope non-empty",
+      baselineIds.length > 0 && rows.length > 0,
+      `${baselineIds.length} offers in the baseline of ${BASELINE_AT.toISOString()}; ${rows.length} rows now`,
+    );
+    const resaved: string[] = [];
+    const gone: number[] = [];
+    const unexplained: string[] = [];
+    for (const id of baselineIds) {
+      const now = current.get(id);
+      if (!offersNow.has(id)) {
+        gone.push(id);
+        continue;
+      }
+      const was = key(BASELINE[id]);
+      const is = now ? key(now.brands) : "";
+      if (was === is) continue;
+      if (now && now.oldest > BASELINE_AT)
+        resaved.push(`${id} [${was}]→[${is}] at ${now.oldest.toISOString()}`);
+      else unexplained.push(`${id} [${was}]→[${is || "none"}]`);
+    }
+    const added = [...current.keys()].filter((id) => !(id in BASELINE));
+    console.log(
+      `  re-saved since the baseline: ${resaved.join("; ") || "none"}
+` +
+        `  offers deleted since: ${gone.join(", ") || "none"}
+` +
+        `  offers created since: ${added.join(", ") || "none"}`,
+    );
+    check(
+      "every change since the baseline came through a save (replace-all)",
+      unexplained.length === 0,
+      unexplained.join("; ") || "none unexplained",
+    );
 
     const scope = await sql<
       {
@@ -118,11 +214,16 @@ async function dbMode() {
       (r) => r.brand_id != null && r.offer_id != null,
     );
     const outOfBrand = withPair.filter((r) => !r.assigned);
+    const fresh = outOfBrand.filter(
+      (r) => !ACKNOWLEDGED_OUT_OF_BRAND.has(r.id),
+    );
     check(
-      "zero in-scope campaigns outside their brand",
-      outOfBrand.length === 0,
+      "no in-scope campaign outside its brand beyond the acknowledged ones",
+      fresh.length === 0,
       `${withPair.length} with a brand+offer pair; out of brand: ${
-        outOfBrand.map((r) => r.id).join(", ") || "none"
+        outOfBrand
+          .map((r) => `${r.id}${ACKNOWLEDGED_OUT_OF_BRAND.has(r.id) ? " (acknowledged)" : " NEW"}`)
+          .join(", ") || "none"
       }`,
     );
   } finally {

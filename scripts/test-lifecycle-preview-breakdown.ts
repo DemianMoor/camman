@@ -32,6 +32,9 @@ async function main() {
     await import("./_fictional-phones");
   const { db } = await import("@/db/client");
   const { previewAudience } = await import("@/lib/audience-snapshot");
+  const { referencePreviewAudience } = await import(
+    "@/lib/audience-preview-reference"
+  );
   const { LIFECYCLE_CHIP_STATUSES } =
     await import("@/lib/validators/campaigns");
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
@@ -308,6 +311,41 @@ async function main() {
       legacy.lifecycle === undefined && !("lifecycle" in legacy),
       legacy.lifecycle === undefined ? "absent" : "PRESENT",
     );
+    // ── F11b: ZERO chips is an empty audience, not a 500 ─────────────────────
+    // ⭐ Found 2026-09-30: with no chip selected, lc_set is not emitted, so
+    // has_lifecycle / lifecycle_status were never projected, yet the breakdown
+    // columns read both — Postgres raised 42703 and the form showed "Could not
+    // preview" beside its own "Select at least one lifecycle status". Both
+    // implementations the route can serve (live, and the kill-switch reference)
+    // must answer 0 with every lead accounted for as status_not_selected.
+    for (const [name, run] of [
+      ["live", previewAudience],
+      ["reference", referencePreviewAudience],
+    ] as const) {
+      const z = await run({
+        orgId,
+        lifecycleRules: true,
+        segmentIds: [segId],
+        filters: { lifecycle_statuses: [] },
+        offerId: offer.id,
+        excludeInUse: false,
+      }).catch((e: unknown) => e as Error);
+      const ok = !(z instanceof Error);
+      const zSum = ok
+        ? Object.values(z.lifecycle!.excluded).reduce((a, b) => a + b, 0)
+        : -1;
+      bar(
+        `F11b (${name}) zero chips: no error, 0 in the audience, every lead accounted for`,
+        ok &&
+          z.total_matching === 0 &&
+          Object.values(z.lifecycle!.by_status).every((n) => n === 0) &&
+          zSum === Number(base.n),
+        ok
+          ? `total ${z.total_matching}, buckets ${zSum} of ${base.n}`
+          : `threw: ${(z.cause as Error | undefined)?.message ?? z.message.slice(0, 80)}`,
+      );
+    }
+
     // ── PART F2: the CREATE-MODE preview (PR 4c fix) ──────────────────────
     // ⭐ The bug this guards: a campaign being CREATED has no row, so nothing
     // could read `lifecycle_rules` off one — and the preview silently used the

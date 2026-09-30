@@ -10,6 +10,7 @@ import {
   sms_providers,
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { buildUpdates } from "@/lib/api/build-updates";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 import { verifyShortDomainAssignable } from "@/lib/providers/short-domain-assignment";
@@ -130,6 +131,7 @@ export async function PATCH(
     );
   }
 
+  const rawBody = (json ?? {}) as Record<string, unknown>;
   const parsed = providerPhoneUpdateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError(
@@ -220,19 +222,18 @@ export async function PATCH(
   // does not exist.
   const carrierLimits = editable.carrier_limits;
 
-  const updates: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(editable)) {
-    if (v === undefined) continue;
-    if (k === "carrier_limits") {
-      continue;
-    } else if (k === "brand_id") {
-      updates[k] = v ?? null;
-    } else if (k === "cost_per_sms") {
-      updates[k] = String(v);
-    } else {
-      updates[k] = v;
-    }
-  }
+  // rawBody, not the parsed data: providerPhoneUpdateSchema injects
+  // opt_out_footer = null for an absent key (its .transform sits outside
+  // .optional(), so it receives undefined and returns null). Writing that
+  // cleared the number's opt-out footer on every PATCH -- COMPLIANCE-BEARING.
+  const updates = buildUpdates(editable as Record<string, unknown>, rawBody, {
+    skip: new Set(["carrier_limits"]),
+    coerce: (k, v) => {
+      if (k === "brand_id") return v ?? null;
+      if (k === "cost_per_sms") return String(v);
+      return v;
+    },
+  });
 
   // Move to another provider: reassign provider_id in place (the row's
   // (org_id, phone_number) is unchanged, so the unique constraint is never

@@ -15,6 +15,7 @@ import {
   isUniqueViolation,
   requireApiMembership,
 } from "@/lib/api/helpers";
+import { buildUpdates } from "@/lib/api/build-updates";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { brandsBelongToOrg, replaceOfferBrands } from "@/lib/api/offer-brands";
 import { can } from "@/lib/permissions";
@@ -168,6 +169,7 @@ export async function PATCH(
     return apiError(400, "Invalid JSON body", API_ERROR_CODES.VALIDATION);
   }
 
+  const rawBody = (json ?? {}) as Record<string, unknown>;
   const parsed = offerUpdateSchema.safeParse(json);
   if (!parsed.success) {
     return apiError(
@@ -184,18 +186,17 @@ export async function PATCH(
     });
   }
 
-  const updates: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(columnInput)) {
-    if (v === undefined) continue;
-    if (NULLABLE_OPTIONAL_STRING.has(k)) {
-      updates[k] = nullIfEmpty(v as string);
-    } else if (k === "payout_cpa" || k === "payout_revshare") {
+  // rawBody, not the parsed data: offerUpdateSchema injects sales_pages = []
+  // for an absent key, which would empty the stored sales pages on any PATCH.
+  const updates = buildUpdates(columnInput as Record<string, unknown>, rawBody, {
+    coerce: (k, v) => {
+      if (NULLABLE_OPTIONAL_STRING.has(k)) return nullIfEmpty(v as string);
       // Drizzle accepts string for numeric columns; preserve precision.
-      updates[k] = v == null ? null : String(v);
-    } else {
-      updates[k] = v;
-    }
-  }
+      if (k === "payout_cpa" || k === "payout_revshare")
+        return v == null ? null : String(v);
+      return v;
+    },
+  });
 
   // If network_id is being changed, verify the new network belongs to the
   // caller's org. DB-level FK + RLS aren't enough — the Drizzle connection

@@ -3861,6 +3861,45 @@ The rest of that bucket (no mapping at all, or no status) really is counted nowh
 
 `EventCountRow.unmapped` was `unmapped?: number`, and the residual column is emitted only while some row HAS one. So a caller mapping its rows to `{ events }` rendered the per-event counts with **no residual column at all**, compiled clean, and left every scan bar green — the structural pairing (`eventCountColumns` returns both in one array) was intact and irrelevant, because the ROW SHAPE suppressed the column. The fields are required now; the bar (**Y9**) is on the DECLARATION, because "this field is optional" is not something `tsc` can fail. The same reasoning as `EMPTY_TALLY`'s freeze: the type is the weaker of the two guards, so the guard goes where the hole is.
 
+## ⭐⭐ A PATCH must never write a field the client did not send (2026-09-30)
+
+`if (v === undefined) continue` is **not** that test. A Zod schema can produce a
+value for a key that was absent from the request -- through `.default()`, or a
+`.transform()` sitting outside `.optional()` that receives `undefined` and
+returns something. Those values are not `undefined`, so an update loop that only
+skips `undefined` writes them over whatever was stored.
+
+Three update schemas inject on an absent key:
+
+| schema | sent | injected |
+| --- | --- | --- |
+| `campaignUpdateSchema` | `{name}` | `audience_filters: {}` |
+| `offerUpdateSchema` | `{name}` | `sales_pages: []` |
+| `providerPhoneUpdateSchema` | `{dashboard_id}` | `opt_out_footer: null` |
+
+The campaigns one silently emptied `audience_filters` on **every** PATCH since at
+least 2026-06-03. Production correlation is exact: of 650 campaigns with a
+create event, **36 were renamed and all 36 have empty filters; 614 were never
+renamed and all 614 are intact** -- zero renamed campaigns kept their filters.
+
+⚠️ **The audience lock could not catch it, and that is not a bug in the lock.**
+It reads the RAW body deliberately, so a `{ link_mode }` PATCH is not wrongly
+blocked by an injected default. It guards the REJECT decision; it never guarded
+the write. The fix makes the write agree with it.
+
+**How to apply.** Build every PATCH payload with `buildUpdates()`
+([lib/api/build-updates.ts](../lib/api/build-updates.ts)), which drops any key
+absent from the raw body. Presence in the raw body -- not the value -- is the
+test, so an explicitly sent `[]` or `null` is still written; clearing a field on
+purpose keeps working.
+
+⭐ **The bar has to call the real builder.** Re-implementing the loop inside the
+test and asserting against that copy proves nothing about the route (see the
+derived-comparison rule below). `scripts/test-patch-never-writes-unsent.ts`
+imports `buildUpdates` itself, and PART A first asserts the schemas *still
+inject* -- otherwise the whole suite could pass because nothing injects any
+more, and a reader would take that as proof the guard works.
+
 ## ⭐⭐ A multi-needle source scan passes if ANY needle still matches — so control every needle SEPARATELY (2026-09-19)
 
 Source-scan gates (grep a file, assert a needle is present or absent) are cheap and

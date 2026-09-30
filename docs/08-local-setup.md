@@ -66,6 +66,39 @@ Open http://localhost:3000 (or your configured port). The dev server uses Turbop
 | `verify-mint.ts`, `verify-drain.ts`, `verify-credentials.ts`, `verify-geoip-cache.ts`, `verify-poll-opt-outs.ts`, `verify-brand-domains.ts` | targeted send/link-pipeline checks |
 | `test-*-api.ts` | API test suites (need `TEST_USER_EMAIL`/`TEST_USER_PASSWORD` set temporarily against a running dev server) |
 
+## 6b. Running the HTTP API suites (preview environment)
+
+`scripts/test-campaigns-api.ts`, `test-offers-api.ts` and
+`test-provider-phones-api.ts` drive a **real running server** over `fetch`, so
+they need one — and it must authenticate against the same Supabase project its
+database lives in.
+
+⚠️ **This is why they used to be unrunnable.** A plain `next dev` reads
+`.env.local`, which points `NEXT_PUBLIC_SUPABASE_URL` at **production**
+Supabase. Pointing only `DATABASE_URL` at the preview database gives you a
+server whose signed-in user authenticates against production and therefore has
+no membership in the preview org: every suite died at seed with
+`{"error":"No organization membership"}`, which reads like a code failure and
+is not one.
+
+`scripts/with-preview-env.mjs` loads `.env.demo` (gitignored — preview URL,
+**publishable** anon key, preview `DATABASE_URL`) and execs a command with it,
+so auth and database are the same project. It refuses to run if they disagree,
+and it names no project id: it compares the ref in `NEXT_PUBLIC_SUPABASE_URL`
+to the one in `DATABASE_URL`, which is the invariant that actually matters.
+
+```bash
+npm run dev:preview        # next dev -p 3001 against the preview project
+npm run test:api:preview   # the three suites against that server
+```
+
+A shell variable still wins, so a one-off override works:
+`PORT=3002 node scripts/with-preview-env.mjs npx next dev`.
+
+`.env.demo` is **not** in the repository. Ask the owner for a copy; it must
+contain `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` and
+`DATABASE_URL` for the preview project.
+
 ## 7. Exercising cron endpoints locally
 Cron jobs are plain route handlers. Call them with the Bearer secret:
 ```powershell

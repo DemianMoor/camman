@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-29_
+_Last updated: 2026-09-30_
 
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
@@ -4230,3 +4230,15 @@ Two things that shape it, both learned the hard way on 2026-09-25:
 - **Compare the INTERSECTION of shapes, not the whole set.** It reads live production, where
   campaigns are created mid-run. Campaign 1451 appeared between capture and compare and was counted
   as a difference — a false failure. Keys present on only one side are reported, not failed.
+
+## ⭐ An identity bar must fail on an empty scope, and its baseline must name its world (2026-09-30)
+
+[`scripts/test-eligibility-layers-identical.ts`](../scripts/test-eligibility-layers-identical.ts) (the "4a byte-identical" gate) printed `✓ every shape … is byte-identical — 0 shape(s), 0 differences`. That is a success statement about nothing. It had drifted there for three reasons, each fixed:
+
+1. **The identity bar carried no scope condition.** Only a separate overlap threshold turned the run red. Now the identity bar itself fails below a floor of 20 shared shapes, and the overlap bar requires ≥ 95 % of the baseline to still be present. Zero differences across too few shapes is not evidence.
+2. **The baseline named no world-state.** It was a bare hash map in `%TEMP%` with no record of which database or commit produced it. A weeks-old production capture was compared against a different world, found 0 of 5,548 overlapping, and the result read like a statement about the code. The capture now records `db_ref` + `commit` + `captured_at`, and the file is keyed by database (`eligibility-layers-before.<ref>.json`). A compare is refused when the capture came from another database, from a commit that is not an ancestor of HEAD, or from the pre-rebuild bare format.
+3. **It did not cover the path it claimed to guard.** The stage overlay hardcoded `offerRulesEnabled: false` and the qualifier hardcoded `lifecycleRules: false`. Both now use the campaign's own settings, so the offer-limit / cooldown layers (on ~75 % of recent campaigns) and the lifecycle predicate are compared.
+
+Procedure: capture on the base (`--capture`, with the current copy of the script) and compare on the branch. Both halves must run against the **same database in the same session**. Proven 2026-09-30 on production (2,519 stages, 740 campaigns, 5,778 shapes): green on identical code. It goes red for a missing capture, a legacy capture, empty shapes, 10 shapes, a foreign database, a non-ancestor commit, one tampered hash, and a real one-character mutation of the cooldown predicate in `lib/sends/eligibility.ts` (82 overlays differ). The pre-rebuild gate could not have caught that mutation, because it never built the layer.
+
+**General rule:** any "A equals B" bar must also assert that it compared enough to mean something, and any stored baseline must record where it came from. Otherwise an empty or foreign comparison passes silently. See also *A corpus bar must name its world-state*.

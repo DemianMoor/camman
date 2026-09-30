@@ -96,11 +96,27 @@ export const providerPhoneUpdateSchema = z
       .trim()
       .max(160, "Opt-out text must be 160 characters or fewer")
       .nullable()
-      .optional()
       // "" and "   " mean NO PREFERENCE, not an empty footer. resolveOptOutFooter
       // already treats whitespace-only as absent; normalising here keeps the
       // column from storing a value that reads as set but behaves as unset.
-      .transform((v) => (v == null || v.trim() === "" ? null : v.trim())),
+      .transform((v) => (v == null || v.trim() === "" ? null : v.trim()))
+      // ⚠️ `.optional()` LAST, AFTER the transform — the order is the whole
+      // point. Written `.optional().transform(…)` the transform sits OUTSIDE
+      // the optional, so it runs for an ABSENT key too: it received `undefined`
+      // and returned `null`, meaning every parse produced `opt_out_footer:
+      // null` whether or not the client sent it.
+      //
+      // That did two things. It emptied the column on every PATCH (fixed in the
+      // route by buildUpdates), and it silently killed the refinement below:
+      // "at least one field must be provided" tests `opt_out_footer !==
+      // undefined`, which was permanently true, so an entirely EMPTY body
+      // validated. With `.optional()` outermost the absent key short-circuits
+      // to undefined, the refinement works again, and nothing is injected for
+      // the route to have to guard.
+      //
+      // An explicitly sent "" or null still reaches the transform and still
+      // clears the column — clearing on purpose is unchanged.
+      .optional(),
     // Q4: this number's per-carrier policy rows, REPLACE-ALL. The payload is
     // the complete desired state for the number — carriers omitted from it end
     // up with no row, which means allowed and uncapped. Sent in the same PATCH

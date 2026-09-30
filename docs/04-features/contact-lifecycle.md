@@ -323,6 +323,38 @@ what drip campaigns are for.
 `suppressed` never enters the audience in the first place, because it is not a
 chip; it is applied anyway so the layer list is uniform.
 
+### 3e2. The chips must reach the EDIT screen (2026-09-30)
+
+`GET /api/campaigns/[campaignId]` uses an explicit `.select({...})`, and
+`lifecycle_rules` was never in it. The editor resolves `lifecycleRules` from
+that field, so it read `undefined === true` -> **false** for every saved
+campaign, concluded the campaign was legacy, and rendered
+`mapLegacyFiltersToChips()` -- the approximate mapping of the four legacy
+booleans -- instead of the stored `audience_filters.lifecycle_statuses`.
+
+Observed on production data via Playwright, before the fix: **all four chips
+rendered as selected**, on a draft and on an activated campaign alike, with the
+note "read-only, mapped from the filters below (approximate)". The selection was
+stored and loaded correctly the whole time; only this one flag never arrived.
+
+The flag is now selected and threaded `EditModeLoader -> Inner ->
+useCampaignFormState`, and `CampaignDetail.lifecycle_rules` is **required**
+(CLAUDE.md §11b) so a future caller cannot omit it silently.
+
+⚠️ **Read-only must stay legible.** The chip styling applied a blanket
+`opacity-60` whenever `!editable`, which dimmed the SELECTED chip too. An
+activated campaign's audience is frozen, so it is *always* read-only — meaning
+the one state where the operator most needs to know what was chosen was the
+state that washed it out. Only unselected chips dim now; the cursor carries "you
+cannot edit this". The tooltip also separates the two reasons a chip is
+read-only: "this campaign predates lifecycle rules" vs "the audience was frozen
+when this campaign was activated".
+
+Guards: `scripts/test-lifecycle-chips.ts` PART R (R1/R2), red-proved against
+`origin/main`. ⚠️ They are source scans and prove a file, not a screen — the
+real verification was Playwright reading computed styles (Cold `opacity: 1` and
+filled, the other three `opacity: 0.6` and outlined, on campaign 1538).
+
 ### 3f2. The offer rules — cooldown and limit (869f53efz, PR 4d)
 
 Two more layers, for a campaign whose "Exclude leads who already got this

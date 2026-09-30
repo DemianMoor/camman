@@ -239,6 +239,42 @@ async function main() {
     }
   }
 
+  // -- PART R -- the chips must REACH the edit screen -----------------------
+  // A CHIP PREDICATE THAT WORKS IS NOT A CHIP THE OPERATOR CAN SEE. Every bar
+  // above passed on 2026-09-30 while the edit screen rendered ALL FOUR chips
+  // as selected, on drafts and activated campaigns alike -- because
+  // GET /api/campaigns/[campaignId] does not `select *`, and nobody added
+  // `lifecycle_rules` to its column list. The editor read `undefined === true`
+  // => false, decided the campaign was legacy, and drew the approximate
+  // mapping from the four legacy booleans instead of the stored
+  // audience_filters.lifecycle_statuses.
+  //
+  // THIS IS A SOURCE SCAN AND THEREFORE WEAK -- it proves a file, not a
+  // screen. The real proof was Playwright against a dev server: Cold black at
+  // opacity 1, the other three white at 0.6, on activated campaign 1538. This
+  // bar only stops the one regression that actually happened: the column
+  // silently leaving an explicit select list.
+  const { readFileSync } = await import("node:fs");
+  const routeSrc = readFileSync(
+    "app/api/campaigns/[campaignId]/route.ts",
+    "utf8",
+  );
+  bar(
+    "R1 the campaign detail route SELECTS lifecycle_rules",
+    /lifecycle_rules:\s*campaigns\.lifecycle_rules/.test(routeSrc),
+    "without it every saved campaign renders as legacy on the edit screen",
+  );
+  const editorSrc = readFileSync(
+    "components/campaigns/campaign-editor-page.tsx",
+    "utf8",
+  );
+  bar(
+    "R2 ...and the editor passes it into the form state",
+    /lifecycleRules=\{data\.lifecycle_rules === true\}/.test(editorSrc) &&
+      /^\s*lifecycleRules,\s*$/m.test(editorSrc),
+    "the loader hands it to Inner, Inner hands it to useCampaignFormState",
+  );
+
   console.log(
     fail === 0 ? "\nAll checks passed." : `\n${fail} check(s) FAILED.`,
   );

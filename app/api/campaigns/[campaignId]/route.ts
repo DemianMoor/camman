@@ -104,6 +104,15 @@ export async function GET(
       status: campaigns.status,
       previous_status: campaigns.previous_status,
       status_changed_at: campaigns.status_changed_at,
+      // ⚠️ REQUIRED BY THE EDIT SCREEN, and its absence is why every saved
+      // draft and every activated campaign showed its lifecycle chips greyed
+      // out. The editor resolves `lifecycleRules` from this field; with the
+      // field missing it read `undefined === true` → false, decided the
+      // campaign was LEGACY, and then ignored the stored
+      // audience_filters.lifecycle_statuses in favour of the approximate
+      // mapping from the four legacy booleans. The selection was stored and
+      // loaded correctly the whole time — it was this flag that never arrived.
+      lifecycle_rules: campaigns.lifecycle_rules,
       tracking_id: campaigns.tracking_id,
       link_mode: campaigns.link_mode,
       default_provider_phone_id: campaigns.default_provider_phone_id,

@@ -82,6 +82,11 @@ type CampaignDetail = {
   start_date: string | null;
   end_date: string | null;
   status: Status;
+  // ⚠️ REQUIRED, not optional. It decides whether the edit screen draws the
+  // lifecycle chips or the legacy mapping, so an optional field would let the
+  // screen keep compiling while silently rendering every campaign as legacy --
+  // which is exactly the bug this type change fixes (CLAUDE.md §11b).
+  lifecycle_rules: boolean;
   tracking_id: string | null;
   link_mode: "manual" | "tracked";
 };
@@ -301,6 +306,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
       campaignName={data.name}
       currentStatus={data.status}
       trackingId={data.tracking_id}
+      lifecycleRules={data.lifecycle_rules === true}
       initialValues={initialValues}
     />
   );
@@ -313,6 +319,9 @@ interface InnerProps {
   campaignId?: number;
   campaignSlug?: string;
   campaignName?: string;
+  // campaigns.lifecycle_rules, edit mode only. Undefined in create mode, where
+  // the form asks the engine gate instead.
+  lifecycleRules?: boolean;
   currentStatus?: Status;
   trackingId?: string | null;
   initialValues?: CampaignFormValues;
@@ -325,6 +334,7 @@ function Inner({
   campaignName,
   currentStatus,
   trackingId,
+  lifecycleRules,
   initialValues,
 }: InnerProps) {
   const router = useRouter();
@@ -498,6 +508,10 @@ function Inner({
     onSubmitDraft: isEdit ? handleEditSubmit : handleCreateDraft,
     onSubmitActivate: isEdit ? handleEditSubmit : handleCreateActivate,
     onCancel: goBack,
+    // In edit mode this is the campaign's OWN flag, read from the row. It is
+    // what the campaign was created under, and the engine's posture today
+    // cannot change that.
+    lifecycleRules,
     isSubmittingDraft: createApi.isLoading,
     isSubmittingActivate: isEdit ? updateApi.isLoading : activateApi.isLoading,
   });
@@ -1261,9 +1275,14 @@ function AudienceCard({
                     key={c.id}
                     type="button"
                     title={
-                      lifecycleRules
-                        ? c.tooltip
-                        : `${c.tooltip} — read-only: this campaign predates lifecycle rules`
+                      !lifecycleRules
+                        ? `${c.tooltip} — read-only: this campaign predates lifecycle rules`
+                        : audienceLocked
+                          ? // Two different reasons for the same greyed chip, and
+                            // only this one is about THIS campaign's state rather
+                            // than the feature's history.
+                            `${c.tooltip} — read-only: the audience was frozen when this campaign was activated`
+                          : c.tooltip
                     }
                     onClick={() =>
                       editable && toggleLifecycleChip(c.statuses, !active)
@@ -1274,9 +1293,19 @@ function AudienceCard({
                       active
                         ? "border-foreground bg-foreground text-background"
                         : "border-border bg-background text-muted-foreground",
+                      // ⚠️ NO BLANKET `opacity-60` WHEN READ-ONLY. It dimmed the
+                      // SELECTED chips too, so an activated campaign — whose
+                      // audience is frozen and therefore always read-only —
+                      // showed every chip washed out and the operator could not
+                      // tell which statuses the campaign had been built for.
+                      // Read-only is about what you may CHANGE, not about how
+                      // legible the answer is. The cursor carries "you cannot
+                      // edit this"; the fill keeps carrying "this one was
+                      // chosen", and unselected chips are dimmed on their own so
+                      // the contrast between the two survives.
                       editable
                         ? "hover:bg-muted"
-                        : "cursor-not-allowed opacity-60",
+                        : cn("cursor-default", !active && "opacity-60"),
                     )}
                   >
                     {c.label}

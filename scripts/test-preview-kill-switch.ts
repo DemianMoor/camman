@@ -9,10 +9,10 @@
 //
 //   node scripts/with-preview-env.mjs npx tsx scripts/test-preview-kill-switch.ts --expect=reference
 //
-// --no-source previews an EMPTY selection: the route still picks and names its
-// implementation, but returns before any audience query. Use it against
-// PRODUCTION outside the quiet window, where the first group could be the
-// 646K one.
+// --smallest-group previews the smallest non-empty contact group instead of
+// the first one. Use it against PRODUCTION outside the quiet window, where the
+// first group could be the 646K one. (An empty selection cannot serve as a
+// light probe: the schema rejects it with a 400 before the switch is read.)
 //
 // Writes nothing: the preview route is read-only, and this script opens no
 // database connection of its own.
@@ -22,7 +22,7 @@ config({ path: resolve(process.cwd(), ".env.local") });
 
 import { createServerClient } from "@supabase/ssr";
 
-const NO_SOURCE = process.argv.includes("--no-source");
+const SMALLEST = process.argv.includes("--smallest-group");
 const expect = process.argv
   .find((a) => a.startsWith("--expect="))
   ?.slice("--expect=".length);
@@ -70,19 +70,29 @@ async function main() {
 
   // A real group, so the preview runs its query rather than the no-source
   // early return.
-  let groupId: number | undefined;
-  if (!NO_SOURCE) {
-    const groups = (await (await apiFetch("/api/contact-groups/list?pageSize=1")).json()) as {
-      data?: { id: number }[];
-    };
-    groupId = groups.data?.[0]?.id;
-    check("a contact group exists to preview", groupId != null);
-  }
+  const groups = (await (
+    await apiFetch(`/api/contact-groups/list?pageSize=${SMALLEST ? 100 : 1}`)
+  ).json()) as { data?: { id: number; contact_count?: number }[] };
+  const pick = SMALLEST
+    ? (groups.data ?? [])
+        .filter((g) => (g.contact_count ?? 0) > 0)
+        .sort((a, b) => (a.contact_count ?? 0) - (b.contact_count ?? 0))[0]
+    : groups.data?.[0];
+  const groupId = pick?.id;
+  check(
+    "a contact group exists to preview",
+    groupId != null,
+    SMALLEST ? `smallest: ${pick?.contact_count} contact(s)` : "",
+  );
 
   const res = await apiFetch("/api/campaigns/audience-preview", {
     method: "POST",
     body: JSON.stringify({
       audience_contact_group_ids: groupId != null ? [groupId] : [],
+      // Every chip, as the form sends. With NONE selected a lifecycle org
+      // 500s (pre-existing: the breakdown reads lifecycle_status, which is only
+      // projected when a chip is selected) — a legacy org ignores the list.
+      audience_filters: { lifecycle_statuses: ["new", "hot", "warm", "cold", "freeze"] },
       exclude_in_use_contacts: false,
     }),
   });

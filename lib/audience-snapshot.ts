@@ -1480,6 +1480,10 @@ export async function computeLaneAudienceCountsBatch(
 // instead.
 export async function previewAudience(
   input: AudiencePreviewInput,
+  // Optional, for scripts/verify-preview-parity.ts only: lets the verifier run
+  // this and the frozen reference inside ONE read-only REPEATABLE READ
+  // transaction, so both read the same snapshot. The route never passes it.
+  runner?: Pick<typeof db, "transaction">,
 ): Promise<AudiencePreviewResult> {
   const cap = input.cap ?? null;
   if (!hasAnySource(input)) {
@@ -1697,7 +1701,7 @@ export async function previewAudience(
   // different load and did not survive the controlled test. The snapshot's
   // temp-table treatment (§10b) earns its keep there and does not here — don't
   // re-derive it for this function without an interleaved measurement.
-  const rows = (await db.transaction(async (tx) => {
+  const rows = (await (runner ?? db).transaction(async (tx) => {
     // A CEILING ON THE DAMAGE, not a tuning knob. An abandoned HTTP request
     // does NOT cancel the query behind it: Vercel kills the function at 60s and
     // Postgres keeps going. Measured on production 2026-09-30, four preview

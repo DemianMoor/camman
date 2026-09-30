@@ -112,28 +112,47 @@ export async function POST(req: NextRequest) {
   // it previews cannot disagree.
   const lifecycleRules = await newCampaignUsesLifecycleRules(db, orgId);
 
-  const result = await previewAudience({
-    orgId,
-    lifecycleRules,
-    segmentIds,
-    excludeSegmentIds,
-    contactGroupIds: groupIds,
-    filters: parsed.data.audience_filters ?? {},
-    cap: parsed.data.audience_cap ?? null,
-    // Default true to mirror the campaign column default — a preview with
-    // the flag omitted matches a campaign created without specifying it.
-    excludeInUse: parsed.data.exclude_in_use_contacts ?? true,
-    // Content-dedup LAYER 3 (preview only). offer_id is scoped by org_id in
-    // the query, so no separate ownership check is needed — a foreign id
-    // simply matches no exposures (and we avoid the extra round-trip).
-    excludePriorOffer: parsed.data.exclude_prior_offer_contacts ?? false,
-    // A campaign being created gets the new semantics, so the preview must
-    // use them too — otherwise the numbers on screen describe a rule the
-    // campaign will not actually run.
-    offerRulesEnabled: lifecycleRules,
-    offerCooldownDays: parsed.data.offer_cooldown_days ?? 7,
-    offerLimitTimes: parsed.data.offer_limit_times ?? 5,
-    offerId: parsed.data.offer_id ?? null,
-  });
+  // ⚠️ A TIMED-OUT PREVIEW IS A 400 WITH A SENTENCE THE OPERATOR CAN ACT ON,
+  // not a 500 and not Vercel's timeout page. previewAudience caps itself with
+  // SET LOCAL statement_timeout; Postgres raises 57014 and the transaction
+  // rolls back, which is a normal outcome for an over-broad selection, not a
+  // fault. Left unmapped it read as "Could not preview audience -- fix any
+  // issues above", which points at the form when the answer is to narrow it.
+  let result: Awaited<ReturnType<typeof previewAudience>>;
+  try {
+    result = await previewAudience({
+      orgId,
+      lifecycleRules,
+      segmentIds,
+      excludeSegmentIds,
+      contactGroupIds: groupIds,
+      filters: parsed.data.audience_filters ?? {},
+      cap: parsed.data.audience_cap ?? null,
+      // Default true to mirror the campaign column default — a preview with
+      // the flag omitted matches a campaign created without specifying it.
+      excludeInUse: parsed.data.exclude_in_use_contacts ?? true,
+      // Content-dedup LAYER 3 (preview only). offer_id is scoped by org_id in
+      // the query, so no separate ownership check is needed — a foreign id
+      // simply matches no exposures (and we avoid the extra round-trip).
+      excludePriorOffer: parsed.data.exclude_prior_offer_contacts ?? false,
+      // A campaign being created gets the new semantics, so the preview must
+      // use them too — otherwise the numbers on screen describe a rule the
+      // campaign will not actually run.
+      offerRulesEnabled: lifecycleRules,
+      offerCooldownDays: parsed.data.offer_cooldown_days ?? 7,
+      offerLimitTimes: parsed.data.offer_limit_times ?? 5,
+      offerId: parsed.data.offer_id ?? null,
+    });
+  } catch (e) {
+    if ((e as { code?: string })?.code === "57014") {
+      return apiError(
+        400,
+        "Audience preview timed out — narrow the selection (fewer contact groups, or add a status filter) and try again.",
+        API_ERROR_CODES.VALIDATION,
+        { reason: "preview_timeout" },
+      );
+    }
+    throw e;
+  }
   return NextResponse.json(result);
 }

@@ -34,8 +34,9 @@ async function main() {
   const { fictionalPhones, refuseIfPhonesInUse } =
     await import("./_fictional-phones");
   const { db } = await import("@/db/client");
-  const { buildStageEligibilityExclusions, EXCLUSION_PRIORITY } =
+  const { buildStageEligibilityExclusions, EXCLUSION_PRIORITY, offerRuleLayers } =
     await import("@/lib/sends/eligibility");
+  const { QueryBuilder } = await import("drizzle-orm/pg-core");
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const one = async <T>(q: SQL): Promise<T> =>
@@ -212,6 +213,44 @@ async function main() {
       "M7 ⭐ the CURRENT campaign is excluded from BOTH counts",
       !lim.has(cOwn) && !cd.has(cOwn),
       "one row, messages = 6, under the current campaign — stage 2 must not be blocked by stage 1",
+    );
+
+    // ⭐ M7b — the carve-out is OMITTED when there is no current campaign, and
+    // that must stay a pure perf choice. `campaign_id` is not in
+    // contact_offer_campaigns_org_offer_contact_idx, so the predicate forces a
+    // heap fetch per row (3,602 ms vs 1,909 ms on offer 62's 575,178 rows) --
+    // but it is only safe to drop because the create-mode preview passes -1,
+    // which no campaign can equal.
+    //
+    // Asserted on the emitted SQL rather than on results: with a real id the
+    // predicate must be PRESENT, with the sentinel it must be ABSENT. A
+    // results-only bar passes either way, since `campaign_id <> -1` changes
+    // nothing it selects — which is exactly why a regression here would be
+    // invisible until someone profiled it again.
+    const sqlFor = (id: number) =>
+      new QueryBuilder()
+        .select()
+        .from(
+          sql`(${
+            offerRuleLayers({
+              orgId,
+              offerId: offer.id,
+              currentCampaignId: id,
+              cooldownDays: 7,
+              limitTimes: 5,
+            })[0].sql
+          }) x` as never,
+        )
+        .toSQL().sql;
+    bar(
+      "M7b ⭐ a real campaign id still emits the carve-out",
+      sqlFor(current).includes("campaign_id <>"),
+      "the whole reason contact_offer_campaigns is keyed by campaign",
+    );
+    bar(
+      "M7b2 ⭐ …and the -1 sentinel does NOT (index-only scan)",
+      !sqlFor(-1).includes("campaign_id <>"),
+      "campaign ids are positive serials, so the predicate is a tautology that costs a heap fetch per row",
     );
 
     // Priority: a buyer inside the cooldown reports bought_offer, not cooldown.

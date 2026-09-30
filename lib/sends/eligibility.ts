@@ -231,10 +231,29 @@ export function offerRuleLayers(p: {
   limitTimes: number;
 }): EligibilityLayer[] {
   if (p.offerId == null) return [];
+  // ⚠️ THE CARVE-OUT IS OMITTED WHEN THERE IS NO CURRENT CAMPAIGN, and that is
+  // a perf fix, not a semantic one. The create-mode preview passes -1 as
+  // "no campaign exists yet", so `campaign_id <> -1` is a tautology — campaign
+  // ids are positive serials. It is not free, though: `campaign_id` is NOT in
+  // contact_offer_campaigns_org_offer_contact_idx (org_id, offer_id,
+  // contact_id), so the predicate forces a heap fetch for EVERY row and turns
+  // an index-only scan into an index scan. Measured on production, offer 62
+  // (575,178 rows, 0 contacts over the limit):
+  //
+  //   with    campaign_id <> -1   3,602 ms
+  //   without                     1,909 ms
+  //
+  // A real campaign id still carves itself out exactly as before — that is the
+  // whole reason the table is keyed by campaign, and test-offer-limit-cooldown
+  // M7 covers it.
+  const carveOut =
+    p.currentCampaignId > 0
+      ? sql`
+          AND coc.campaign_id <> ${p.currentCampaignId}::int`
+      : sql``;
   const scope = sql`
         WHERE coc.org_id = ${p.orgId}::uuid
-          AND coc.offer_id = ${p.offerId}::int
-          AND coc.campaign_id <> ${p.currentCampaignId}::int`;
+          AND coc.offer_id = ${p.offerId}::int${carveOut}`;
   return orderLayers([
     {
       key: "offer_limit",

@@ -6,6 +6,7 @@ import { contact_groups, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { newCampaignUsesLifecycleRules } from "@/lib/engagement/lifecycle-gate";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { referencePreviewAudience } from "@/lib/audience-preview-reference";
 import { previewAudience } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 import { audiencePreviewSchema } from "@/lib/validators/campaigns";
@@ -118,9 +119,21 @@ export async function POST(req: NextRequest) {
   // rolls back, which is a normal outcome for an over-broad selection, not a
   // fault. Left unmapped it read as "Could not preview audience -- fix any
   // issues above", which points at the form when the answer is to narrow it.
+  // KILL SWITCH (Task 2, [change 4]). AUDIENCE_PREVIEW_IMPL=reference routes
+  // the preview to the frozen pre-Task-2 implementation, so a production
+  // problem with the rebuilt preview is one Vercel env change and a redeploy
+  // away, with no revert. Read per request. Any other value, or none, serves
+  // the live one. The response names which implementation served it
+  // (x-audience-preview-impl), so the switch can be confirmed rather than
+  // assumed. Removed together with lib/audience-preview-reference/.
+  const impl =
+    process.env.AUDIENCE_PREVIEW_IMPL === "reference" ? "reference" : "live";
+  const preview =
+    impl === "reference" ? referencePreviewAudience : previewAudience;
+
   let result: Awaited<ReturnType<typeof previewAudience>>;
   try {
-    result = await previewAudience({
+    result = await preview({
       orgId,
       lifecycleRules,
       segmentIds,
@@ -154,5 +167,7 @@ export async function POST(req: NextRequest) {
     }
     throw e;
   }
-  return NextResponse.json(result);
+  return NextResponse.json(result, {
+    headers: { "x-audience-preview-impl": impl },
+  });
 }

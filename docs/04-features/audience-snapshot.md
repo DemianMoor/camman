@@ -103,4 +103,6 @@ While Task 2 rebuilds the campaign preview (plan: `docs/superpowers/plans/2026-0
 - **`--timing`** is the segment gate ([change 3]). It times segment evaluation alone against the whole preview (EXPLAIN ANALYZE, BUFFERS, two interleaved rounds), counting only recipes whose preview takes at least 100 ms. If the median share is above 50%, T2 stops.
 - **Production only between 05:00 and 06:00 UTC.** Any database other than the one in `.env.demo` counts as production. The script refuses to start outside 05:00–05:45 and takes no new recipe after 06:00.
 
+**Kill switch (T1b).** `AUDIENCE_PREVIEW_IMPL=reference` makes the preview route serve the reference; the response header `x-audience-preview-impl` says which one answered. [`scripts/test-preview-kill-switch.ts`](../../scripts/test-preview-kill-switch.ts) checks it over HTTP in both server modes.
+
 The reference and the harness helpers are deleted together with the kill switch once Task 2 is accepted.

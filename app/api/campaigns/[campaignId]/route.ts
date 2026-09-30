@@ -2,6 +2,7 @@ import { and, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
+import { buildUpdates } from "@/lib/api/build-updates";
 import {
   brands,
   campaign_stages,
@@ -552,12 +553,13 @@ export async function PATCH(
     }
   }
 
-  const updates: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(input)) {
-    if (v === undefined) continue;
-    if (NON_UPDATABLE.has(k)) continue;
-    updates[k] = NULLABLE_OPTIONAL_STRING.has(k) ? nullIfEmpty(v as string) : v;
-  }
+  // rawBody, not `input`: the schema injects audience_filters = {} for an
+  // absent key, and writing that emptied the stored filters on every PATCH.
+  const updates = buildUpdates(input as Record<string, unknown>, rawBody, {
+    nonUpdatable: NON_UPDATABLE,
+    coerce: (k, v) =>
+      NULLABLE_OPTIONAL_STRING.has(k) ? nullIfEmpty(v as string) : v,
+  });
 
   if (Object.keys(updates).length === 0) {
     return apiError(

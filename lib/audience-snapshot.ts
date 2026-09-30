@@ -1742,7 +1742,14 @@ export async function previewAudience(
           useLifecycle
             ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle,
           lc_set.lifecycle_status as lifecycle_status`
-            : drizzleSql``
+            : lifecycleRules
+              ? // ZERO chips on a lifecycle campaign: nothing is selected, so the
+                // audience is empty — but the breakdown columns still read these
+                // two, and without them Postgres raised 42703 and the route
+                // 500ed (2026-09-30). Projected as "no chip matched"; the legacy
+                // path stays byte-identical.
+                drizzleSql`, false as has_lifecycle, null::text as lifecycle_status`
+              : drizzleSql``
         }
         ${lifecycleFlagCols(lifecycleExclusions)}
       from sources s

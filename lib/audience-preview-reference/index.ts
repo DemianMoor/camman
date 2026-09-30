@@ -36,6 +36,11 @@ import { LIFECYCLE_CHIP_STATUSES } from "@/lib/validators/campaigns";
 // time segment evaluation against the same group universe. A fix to the live preview is NOT applied here — the difference
 // is exactly what the verifier exists to show.
 //
+// ONE DELIBERATE EXCEPTION, applied to both copies in the same PR: the
+// zero-chip fix of 2026-09-30 (a lifecycle preview with no chip selected
+// 500ed with 42703). It is a bug fix outside Task 2, and the kill switch must
+// not bring the 500 back. Anything else that changes here is a mistake.
+//
 // WHAT IS NOT COPIED, and why that is safe: the segment evaluator, the drip
 // in-use set, the send path's layer builders (lifecycleExclusionLayers /
 // offerRuleLayers) and LIFECYCLE_CHIP_STATUSES. Task 2 does not touch any of
@@ -594,7 +599,14 @@ export async function referencePreviewAudience(
           useLifecycle
             ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle,
           lc_set.lifecycle_status as lifecycle_status`
-            : drizzleSql``
+            : lifecycleRules
+              ? // ZERO chips on a lifecycle campaign: nothing is selected, so the
+                // audience is empty — but the breakdown columns still read these
+                // two, and without them Postgres raised 42703 and the route
+                // 500ed (2026-09-30). Projected as "no chip matched"; the legacy
+                // path stays byte-identical.
+                drizzleSql`, false as has_lifecycle, null::text as lifecycle_status`
+              : drizzleSql``
         }
         ${lifecycleFlagCols(lifecycleExclusions)}
       from sources s

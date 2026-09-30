@@ -273,6 +273,45 @@ async function main() {
     // the preview said 2 and the snapshot froze 2, so the two AGREED — and the
     // send still dropped one. Agreement alone is not enough; the number has to
     // be the sendable one.
+    // ── PART G — WHERE each path applies the exclusions ────────────────────
+    // ⭐ THE BAR THAT RESULTS CANNOT GIVE YOU. PART F above proves the two
+    // paths agree on WHO is in the audience. It passed on 2026-09-30 while
+    // activation was timing out at over 300s, because the join form and the
+    // DELETE form return byte-identical rows — only the PLAN differs.
+    //
+    // PR #246 applied the lifecycle exclusions as LEFT JOIN + IS NULL inside
+    // the snapshot's qualifier. Postgres estimates each such filter as removing
+    // half the rows, so three of them in front of the existing opt-out /
+    // opt-in / in-use anti-joins walked the estimate 130,080 -> 65,040 ->
+    // 32,520 -> ... -> rows=1, and the planner switched the opt-out and in-use
+    // exclusions to nested loops with a join filter. Campaign 1538 then blew a
+    // 300s statement timeout.
+    //
+    // So the invariant is structural: the qualifier must not mention them at
+    // all. snapshotAudience applies them afterwards, against the materialized +
+    // ANALYZEd set, where `contact_id in (...)` hash semi-joins.
+    console.log("\nPART G — the snapshot keeps the exclusions OUT of the qualifier");
+    const { buildAudienceQualifierForTest } = await import(
+      "@/lib/audience-snapshot"
+    );
+    const { QueryBuilder } = await import("drizzle-orm/pg-core");
+    const qualifierSql = new QueryBuilder()
+      .select()
+      .from(
+        sql`(${buildAudienceQualifierForTest({ ...base } as never)}) q` as never,
+      )
+      .toSQL().sql;
+    bar(
+      "G1 ⭐ the qualifier does NOT join lx_* — they are separate DELETEs",
+      !qualifierSql.includes("lx_"),
+      "three LEFT JOIN + IS NULL filters in front of the in-use anti-join walked its estimate to rows=1",
+    );
+    bar(
+      "G2 …and it still joins the sets it always did",
+      ["oo_set", "iu_set", "lc_set"].every((t) => qualifierSql.includes(t)),
+      "opt-outs, in-use and the chip set stay in the qualifier",
+    );
+
     bar(
       "F4 ⭐ a capped freeze campaign fills with SENDABLE contacts",
       (await snapshotTotal({

@@ -3861,6 +3861,29 @@ The rest of that bucket (no mapping at all, or no status) really is counted nowh
 
 `EventCountRow.unmapped` was `unmapped?: number`, and the residual column is emitted only while some row HAS one. So a caller mapping its rows to `{ events }` rendered the per-event counts with **no residual column at all**, compiled clean, and left every scan bar green — the structural pairing (`eventCountColumns` returns both in one array) was intact and irrelevant, because the ROW SHAPE suppressed the column. The fields are required now; the bar (**Y9**) is on the DECLARATION, because "this field is optional" is not something `tsc` can fail. The same reasoning as `EMPTY_TALLY`'s freeze: the type is the weaker of the two guards, so the guard goes where the hole is.
 
+## ⭐ A script that both reads prod and writes preview must be TWO scripts (2026-09-30)
+
+The preview-DB guard asks one question of every script: *if you can write, do
+you import `_require-preview-db`?* That import refuses any non-preview target,
+which is the point.
+
+`verify-offer-brands.ts` could not answer it. `--db` was read-only and
+documented as safe on production; `--http` wrote and was preview-only. Import
+the guard and the production read breaks; omit it and the guard is red. The
+tempting third option — an `EXCLUSIONS` entry — buys a permanent hole to avoid a
+ten-minute refactor.
+
+**Split by what the mode DOES.** The writer becomes its own file and imports the
+guard unconditionally; what remains issues no writes and passes the guard by
+being what it claims rather than by being excused.
+
+⚠️ **And drop the project literals while you are there.** That file hardcoded
+both the production and preview Supabase refs to build its own refusal — the
+exact literal the guard exists to stop spreading. The allowlist belongs in
+`_require-preview-db`; a caller asks `requirePreviewDb()` which project the
+`DATABASE_URL` resolved to, and checks the Supabase AUTH project matches it.
+Same invariant, no literal, and it survives either project being replaced.
+
 ## ⭐⭐ A PATCH must never write a field the client did not send (2026-09-30)
 
 `if (v === undefined) continue` is **not** that test. A Zod schema can produce a

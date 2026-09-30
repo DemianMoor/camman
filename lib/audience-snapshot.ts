@@ -732,48 +732,12 @@ function buildQualifierFromRelation(
     : null;
   const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
 
-  // ⚠️ THE LIFECYCLE EXCLUSIONS ARE APPLIED HERE, NOT ONLY AT SEND (owner,
-  // 2026-09-28): "the audience on the campaign configuration level should only
-  // show allowed sendable contacts... that should be the rule for every
-  // lifecycle cohort."
-  //
-  // They used to be a send-time overlay, on the reasoning that freeze due-ness
-  // moves with the clock and purchases keep arriving, so the decision belonged
-  // at send time. True — but the CAP samples the pool BEFORE any of that runs,
-  // and that is what broke: campaign 1501 targeted the freeze cohort, where
-  // only ~2% of the 69,185 freeze contacts in its groups were past their
-  // 14-day rest. Capped at 1,500 it drew 1,500 at random from all 69,185 and
-  // 1,472 of them were resting — the stage could send to 28 people.
-  // 1,500 × (1,371 ÷ 69,185) = 30. The 28 was the arithmetic, exactly.
-  //
-  // Worse, those 1,472 were then LOCKED: they sat in an active campaign's pool,
-  // so exclude_in_use_contacts kept them out of every other campaign while the
-  // campaign that held them could not message them.
-  //
-  // Filtering at selection time cannot send to anyone the old code would have
-  // blocked: lib/sends/eligibility.ts still EXCEPTs the same layers on the day,
-  // so someone who buys the offer or re-enters freeze after activation is still
-  // caught. The pool simply stops being padded with people who cannot receive
-  // the message. Same belt-and-braces as excludePriorOffer (§10b).
-  //
-  // The cost is real and accepted: the pool is frozen to who is sendable on
-  // activation day, so a contact who becomes due tomorrow is not in THIS
-  // campaign. These are daily campaigns — tomorrow's campaign picks them up,
-  // and a genuine multi-week trickle is what drip campaigns are for.
-  const lifecycleExclusions = lifecycleRules
-    ? lifecycleExclusionLayers({ orgId, offerId: input.offerId ?? null })
-    : null;
-  // The offer rules are deliberately NOT here: snapshotAudience applies them as
-  // its own DELETE after ANALYZE, for the planner reasons in that function.
-  const exclusionTerm = (lifecycleExclusions ?? []).reduce(
-    (acc, l) =>
-      drizzleSql`${acc}
-      and not coalesce(${drizzleSql.raw(`is_${l.key}`)}, false)`,
-    drizzleSql``,
-  );
-
+  // ⚠️ THE LIFECYCLE EXCLUSIONS ARE **NOT** JOINED HERE. They are applied by
+  // snapshotAudience as separate DELETEs against the materialized + ANALYZEd
+  // `audience_qualified`, for the planner reason recorded there. Joining them
+  // into this statement (as #246 did) is what timed activation out.
   return drizzleSql`
-    with ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips, lifecycleExclusions)},
+    with ${flagSetCtes(orgId, offerExposureId, dripPostureOn, lifecycleChips)},
     flagged as (
       select
         cand.contact_id,
@@ -791,9 +755,8 @@ function buildQualifierFromRelation(
             ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
             : drizzleSql``
         }
-        ${lifecycleFlagCols(lifecycleExclusions)}
       from ${candidateRelation} cand
-      ${flagJoins("cand", useOfferExposure, useLifecycle, lifecycleExclusions)}
+      ${flagJoins("cand", useOfferExposure, useLifecycle)}
     )
     select
       contact_id,
@@ -805,7 +768,6 @@ function buildQualifierFromRelation(
       and ${lifecycleChipPredicate(filters, { lifecycleRules })}
       and (not ${excludeInUse}::boolean or not is_in_use_elsewhere)
       and (not ${excludePriorOffer}::boolean or not is_offer_exposed)
-      ${exclusionTerm}
   `;
 }
 
@@ -1966,6 +1928,16 @@ export async function snapshotAudience(
   // The prior-offer exclusion is deliberately NOT part of this statement — it
   // runs below, against the materialized+ANALYZEd result. See the comment there.
   const dripPostureOn = await isDripPostureOn(input.orgId);
+  // Built here rather than inside the qualifier: they are applied as their own
+  // DELETEs below, never as joins. Null for a legacy campaign, so its plan is
+  // byte-identical to before the lifecycle engine existed.
+  const lifecycleExclusions =
+    input.lifecycleRules === true
+      ? lifecycleExclusionLayers({
+          orgId: input.orgId,
+          offerId: input.offerId ?? null,
+        })
+      : null;
   const qualifying = buildQualifierFromRelation(
     { ...input, excludePriorOffer: false },
     drizzleSql`audience_candidates`,
@@ -1974,6 +1946,48 @@ export async function snapshotAudience(
   await runner.execute(drizzleSql`
     create temp table audience_qualified on commit drop as ${qualifying}
   `);
+
+  // ── The lifecycle exclusions, as SEPARATE statements (2026-09-30) ─────────
+  // suppressed / bought_offer / freeze_not_due keep a lead out of the frozen
+  // pool (owner's ruling, §10b) — but they must NOT be joined into the
+  // qualifier above, which is how PR #246 first implemented them and how it
+  // timed activation out.
+  //
+  // ⚠️ THE FAILURE IS AN ESTIMATE CASCADE, not the cost of the layers.
+  // Postgres estimates `LEFT JOIN x … WHERE x.contact_id IS NULL` as removing
+  // half the rows. Chaining three of them in front of the existing opt-out /
+  // opt-in / in-use anti-joins walked the estimate down
+  // 130,080 → 65,040 → 32,520 → … → rows=1, and on that estimate the planner
+  // switched the opt-out and IN-USE exclusions from hash anti-joins to nested
+  // loops with a join filter:
+  //
+  //   Nested Loop Anti Join (rows=1)  Join Filter: (p.contact_id = cand.contact_id)
+  //   Nested Loop Left Join (rows=1)  Join Filter: (opt_ins.contact_id = cand.contact_id)
+  //
+  // Campaign 1538 (Weight Loss ∩ cold, 130,080 candidates) then blew a 300s
+  // statement timeout, never mind the route's 60s. The candidate temp table
+  // protects the cardinality going IN; nothing protects the estimate once a
+  // chain of anti-join filters feeds itself.
+  //
+  // Split out, each runs against the materialized + ANALYZEd qualified set with
+  // real stats, and `contact_id in (…)` hash semi-joins. The two cheap layers
+  // are index scans (46ms / 51ms on this org); `freeze_not_due` costs ~7.6s
+  // because its predicate is NOT SARGABLE —
+  // `last_sent_at > now() - make_interval(days => freeze_cadence_days)`
+  // compares a column to an expression over ANOTHER column of the same row, so
+  // no index can serve it — but it is paid ONCE instead of per candidate.
+  //
+  // Same rows out as the joined form: these only ever remove contacts, and a
+  // DELETE removes exactly the ones the join's IS NULL filter kept out.
+  if (lifecycleExclusions != null) {
+    await runner.execute(drizzleSql`analyze audience_qualified`);
+    for (const layer of lifecycleExclusions) {
+      await runner.execute(drizzleSql`
+        delete from audience_qualified q
+        where q.contact_id in (${layer.sql})
+      `);
+    }
+  }
 
   // Prior-offer exclusion (content-dedup LAYER 3) as a SEPARATE statement, for
   // the same reason the candidate set is materialized above: planner stats.

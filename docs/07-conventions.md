@@ -3887,6 +3887,16 @@ It reads the RAW body deliberately, so a `{ link_mode }` PATCH is not wrongly
 blocked by an injected default. It guards the REJECT decision; it never guarded
 the write. The fix makes the write agree with it.
 
+⚠️ **Fix it at the schema where you can.** `.optional()` must sit **after**
+`.transform()`, never before. Written `.optional().transform(…)` the transform
+is outside the optional, so it runs for an absent key -- receives `undefined`,
+returns whatever it returns -- and the field is injected on every parse.
+`providerPhoneUpdateSchema.opt_out_footer` did exactly that. Besides the write,
+it silently killed that schema's *"at least one field must be provided"*
+refinement, which tests `opt_out_footer !== undefined` and was therefore
+permanently true: an entirely **empty body validated**. A guard in the route
+stops the write; only the schema order stops the second failure.
+
 **How to apply.** Build every PATCH payload with `buildUpdates()`
 ([lib/api/build-updates.ts](../lib/api/build-updates.ts)), which drops any key
 absent from the raw body. Presence in the raw body -- not the value -- is the

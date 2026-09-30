@@ -63,7 +63,6 @@ async function main() {
   const injected: [string, Parsable, Record<string, unknown>, string][] = [
     ["campaignUpdateSchema", campaignUpdateSchema as Parsable, { name: "x" }, "audience_filters"],
     ["offerUpdateSchema", offersV.offerUpdateSchema as Parsable, { name: "x" }, "sales_pages"],
-    ["providerPhoneUpdateSchema", phonesV.providerPhoneUpdateSchema as Parsable, { dashboard_id: "d" }, "opt_out_footer"],
   ];
   for (const [label, schema, body, key] of injected) {
     const parsed = schema.parse(body);
@@ -71,6 +70,40 @@ async function main() {
       `A ${label} still injects ${key} for an absent key`,
       key in parsed,
       `parsed = ${JSON.stringify(parsed)}`,
+    );
+  }
+
+  // ⚠️ providerPhoneUpdateSchema USED to be in that list. It was fixed at the
+  // SOURCE instead: its `.optional()` now sits AFTER the `.transform()`, so an
+  // absent key short-circuits to undefined rather than running the transform
+  // and returning null. Two things came from that injection, and only one of
+  // them was the write:
+  console.log("\nPART A2 — the phones schema no longer injects, and rejects {}");
+  const phoneSchema = phonesV.providerPhoneUpdateSchema as Parsable & {
+    safeParse: (x: unknown) => { success: boolean };
+  };
+  bar(
+    "A2 an absent opt_out_footer is NOT injected",
+    !("opt_out_footer" in phoneSchema.parse({ dashboard_id: "d" })),
+    JSON.stringify(phoneSchema.parse({ dashboard_id: "d" })),
+  );
+  bar(
+    "A2 ⭐ an EMPTY body is now rejected",
+    // The refinement tests `opt_out_footer !== undefined`; the injection made
+    // that permanently true, so {} validated and a no-op PATCH was accepted.
+    phoneSchema.safeParse({}).success === false,
+    "at least one field must be provided",
+  );
+  for (const [label, body, expect] of [
+    ["explicit text is kept", { opt_out_footer: "Reply STOP" }, "Reply STOP"],
+    ['explicit "" still CLEARS', { opt_out_footer: "" }, null],
+    ["explicit null still CLEARS", { opt_out_footer: null }, null],
+  ] as const) {
+    const out = phoneSchema.parse(body as Record<string, unknown>);
+    bar(
+      `A2 ${label}`,
+      out.opt_out_footer === expect,
+      JSON.stringify(out),
     );
   }
 

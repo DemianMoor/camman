@@ -1,7 +1,18 @@
 # Task 2 — Audience preview speed-up: implementation plan
 
-_2026-09-30 · for approval · no build until approved **and** Task 0 items 2–3
-(campaigns-suite hang, 4a gate) are green_
+_2026-09-30 · **APPROVED WITH CHANGES** (owner, 2026-09-30) · build starts only
+once Task 0 items 2–3 (campaigns-suite hang, 4a gate) are green_
+
+> **Owner rulings.** D1 yes · D2 keep 30 s during the build, final value from
+> T7 · D3 decide after T7, Option C allowed as contingency · D4 keep computing,
+> do not render · D5 own card. Five changes are folded in below and marked
+> **[change N]**: cancellation safety (§2c, T6), timeout + client retry (§2c),
+> segment-share gate (T1), env kill switch (§2d), and the T7 memory/replica
+> report (§7).
+>
+> ⚠️ **All production parity and timing runs — T1 included — happen in the
+> quiet window (05:00–06:00 UTC) only.** Code and preview-database runs may
+> happen any time.
 
 Recon ran against `origin/main` @ `a986ca7a`. Builds on the recon brief
 [2026-09-30-audience-preview-perf-recon.md](../specs/2026-09-30-audience-preview-perf-recon.md).
@@ -31,7 +42,7 @@ groups × offer 62):
 **Warm, the < 5 s target is met. Cold under contention, it is not.** §5
 explains why and what would close it; that is decision **D3**.
 
-Five decisions are needed — listed in §9.
+The five decisions are **resolved** — §9.
 
 ---
 
@@ -172,21 +183,63 @@ single-statement query byte-for-byte. The engine is `write` in production.
   instances and even when the browser never reports a disconnect (closed tab,
   dropped network).
 - **Database — disconnect.** If `request.signal` reliably fires on Vercel,
-  cancel our own backend on abort as well. Guarded by an in-flight flag cleared
-  *before* COMMIT, so a pid can never be reused by another client's query while
-  we still hold it (the pooler cannot reassign the backend before our COMMIT).
-- **Statement timeout: propose 10 s** (today 30 s). Rationale: 2× the target.
-  With at most one preview per user in flight, 10 s is the most any operator can
-  cost the database in a send window. At the boundary the operator sees *"Audience
-  preview timed out — narrow the selection and try again"* (already mapped, #248);
-  a retry usually lands warm. **The cap protects the database; §5 is what
-  protects the operator.**
+  cancel our own backend on abort as well.
+
+**[change 1] Cancellation safety — no latest-wins ships without it.**
+`pg_cancel_backend(pid)` targets a *backend*, and through a shared pooler a
+backend is reassigned between transactions. Reading `application_name` and then
+cancelling is two steps: between them the preview can finish, the pooler can
+hand that backend to a **send-path** transaction, and the cancel lands on it.
+
+*Preferred — structural:* previews connect as a **dedicated database role**
+(e.g. `camman_preview`, its own `PREVIEW_DATABASE_URL`, its own Supavisor pool).
+A non-superuser role can only signal backends of its **own** role, and a pool's
+backends are only ever handed to clients of that role — so a preview cancel is
+unable to reach a send-path backend by construction, race or no race. What the
+spike must establish:
+- the role can be created and given read access plus `TEMPORARY` (the design
+  uses temp tables), **and** reads the org's rows — the app role bypasses RLS
+  today; a new role would see nothing under the existing policies unless it is
+  granted `BYPASSRLS` (Postgres 17 allows a `CREATEROLE` holder to grant
+  attributes it holds) or explicit grants;
+- Supavisor accepts `camman_preview.<ref>` and pools it separately;
+- **proof, not assumption:** from a `camman_preview` session,
+  `pg_cancel_backend()` on a `postgres`-role backend is **refused**.
+Creating a role is a database change: its SQL is shown for approval before it
+touches production, and it runs outside the send window.
+
+*If not feasible:* the plan documents the residual race — its window, measured —
+and exactly what each send-path statement does on receiving 57014 (drain claim,
+materialization, kickoff, the cron jobs), before any latest-wins code merges.
+Timeout + browser abort remain the fallback either way.
+
+**[change 2] Timeout: stays 30 s during the build.**
+- Confirmed from code: it is `SET LOCAL statement_timeout` **inside the preview's
+  own transaction** (`previewAudience`, #248). It resets at COMMIT/ROLLBACK and
+  cannot leak to a pooled backend's next client. T6 adds a bar that asserts it
+  (a fresh transaction on the same connection reads the server default).
+- **One automatic client retry on timeout** before any error is shown — a timed-out
+  first run has usually warmed the cache. The retry is visible (*"still
+  calculating…"*), counted, and never loops.
+- The **final value is proposed from T7's cold measurements**, not chosen now.
 
 Three things must be **spiked before T6**, each with a pass/fail check:
-(a) `pg_cancel_backend` is permitted for the app's role through the pooler;
-(b) `SET LOCAL application_name` is visible in `pg_stat_activity` through
-Supavisor transaction mode; (c) `request.signal` aborts on client disconnect on
-Vercel. If (a) or (b) fails, fall back to timeout + browser abort and say so.
+(a) the dedicated role, as above; (b) `SET LOCAL application_name` is visible in
+`pg_stat_activity` through Supavisor transaction mode; (c) `request.signal`
+aborts on client disconnect on Vercel. If (a) fails, the residual-race analysis
+above is mandatory; if (b) fails, latest-wins is dropped and timeout + browser
+abort + retry is what ships.
+
+### 2d. **[change 4]** Kill switch
+
+An environment variable, `AUDIENCE_PREVIEW_IMPL=reference`, routes the preview
+to the **reference implementation** (today's code, frozen). Unset — the new
+path. It exists so a production problem is one Vercel env change and a redeploy
+away, with no revert.
+
+Consequence: the reference copy lives under `lib/audience-preview-reference/`,
+not `scripts/`, because the route must be able to import it. **The switch and the
+reference copy are removed together**, in one PR, once Task 2 is accepted.
 
 ---
 
@@ -243,7 +296,7 @@ verification set is weighted toward them (§7). If they miss the target, the cau
 will be segment evaluation, and I will report that rather than widen Task 2.
 
 **R3 — Cancellation spikes may fail.** Then latest-wins degrades to "timeout +
-browser abort" — still bounded by the 10 s cap.
+browser abort + one retry" — still bounded by the statement timeout (30 s during the build, final value from T7).
 
 **R4 — "Cold" is approximate on managed Postgres.** Supabase does not let us
 flush `shared_buffers` or the OS cache. "Cold" = first run of a recipe after an
@@ -255,7 +308,7 @@ from `EXPLAIN (BUFFERS)` as the evidence.
 ## 6. Scope
 
 **In:** campaign-level preview (create + edit form), lifecycle path; the
-light/heavy split; the skips; 500 ms debounce; DB-side latest-wins; the 10 s
+light/heavy split; the skips; 500 ms debounce; DB-side latest-wins (only if the cancellation-safety proof passes); the statement
 timeout; parity verification and timings.
 
 **Out:** stage-level previews; activation/snapshot; the legacy path's
@@ -272,6 +325,8 @@ write-time facts (Task 3); a manual trigger (rejected).
 | **send path unchanged** | the 4a gate, made non-vacuous in Task 0 |
 | **interleaved before/after, cold and warm, 646 K group** | reference/new interleaved, quiet window 05:00–06:00 UTC; per run: wall time, server `Execution Time`, `shared hit` / `shared read` |
 | **target < 5 s** | reported per recipe, warm and cold, pass/fail |
+| **[change 5] memory fit** | size of every table **and index** the preview touches (`pg_relation_size` per relation and per index) against the instance's memory (`shared_buffers`, `effective_cache_size`, instance RAM). Says whether the working set can stay resident — which is what "cold" really measures |
+| **[change 5] read-replica viability** (for Task 3) | whether the temp-table design runs on a read-only replica. Expected answer, to be confirmed: **it does not** — a Postgres hot standby rejects `CREATE TEMP TABLE` and `ANALYZE`. The report names the replica-compatible variant (e.g. `MATERIALIZED` CTEs, which lose `ANALYZE` stats) and measures what it costs |
 
 Existing bars that must stay green: `test-preview-matches-snapshot`,
 `test-lifecycle-preview-breakdown` (the partition identity *audience + every
@@ -294,8 +349,9 @@ New bars:
 in `lib/`; the script only calls functions. A script carrying write-shaped SQL
 text would need a preview-DB-guard exclusion, which is off the table.
 
-The reference copy (`scripts/_preview-reference/`, today's module frozen with
-its helpers) is deleted once Task 2 is accepted.
+The reference copy (`lib/audience-preview-reference/`, today's module frozen
+with its helpers — see §2d) is deleted together with the kill switch once Task 2
+is accepted.
 
 ---
 
@@ -309,19 +365,44 @@ commit.
   *Check:* reference vs **unchanged** new code = zero differences on ≥ 10
   recipes. A harness that has never been red against itself proves nothing, so
   it is also red-proved with a deliberate one-row change.
+  **[change 3] Segment gate.** T1 also times **≥ 5 real segment recipes on
+  today's code**, and for each the share spent evaluating segment membership
+  (the membership source alone vs the whole preview, interleaved). **If segment
+  evaluation is more than half the wall time on the median segment recipe, stop
+  and report before T2** — narrowing by chips would not be the right fix for
+  most real recipes. Quiet window only.
+- **T1b — Kill switch** ([change 4]): `AUDIENCE_PREVIEW_IMPL=reference`, with a
+  bar that the route actually serves the reference when set.
 - **T2 — `base` part** + `combinePreviewParts` + bar 1.
 - **T3 — Narrowed `audience` part** (lifecycle path) + the skips + bar 2.
 - **T4 — Offer layers** (skips + one grouped scan).
 - **T5 — Client:** two effects (base keyed on segments/groups/exclude-segments;
   audience keyed on everything), 500 ms debounce, merge via
   `combinePreviewParts`, render latest only.
-- **T6 — Spikes (a)–(c), then DB latest-wins + 10 s timeout** + bars 3–4.
-- **T7 — Verification run** in the quiet window; docs (`04-features/audience-snapshot.md`,
-  `07-conventions.md`, CHANGELOG); final report against §7.
+- **T6 — Spikes (a)–(c) first, including the cancellation-safety proof
+  ([change 1]); then client retry on timeout ([change 2]) and — only if the
+  proof passes — DB latest-wins** + bars 3–4 + the `SET LOCAL` bar. The timeout
+  stays 30 s.
+- **T7 — Verification run** in the quiet window, including the memory-fit and
+  read-replica sections ([change 5]) and the proposed final timeout;
+  docs (`04-features/audience-snapshot.md`, `07-conventions.md`, CHANGELOG);
+  final report against §7. **D3 is decided from this report.**
 
 ---
 
-## 9. Decisions needed
+## 9. Decisions — resolved 2026-09-30
+
+| | ruling |
+| --- | --- |
+| D1 | **Yes** — bounded sets for in-use, offer rules and freeze in Task 2 |
+| D2 | **Keep 30 s during the build**; one automatic client retry; final value proposed from T7 |
+| D3 | **Decide after T7**; Option C allowed as contingency |
+| D4 | **Keep computing, do not render** |
+| D5 | **Own card** |
+
+The original questions follow, unchanged, for the record.
+
+## 9a. Decisions as originally asked
 
 **D1 — Rule interpretation for Task 2.** Accept bounded sets for in-use, offer
 rules and freeze (§4), with truly proportional cost deferred to Task 3?

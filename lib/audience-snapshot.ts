@@ -182,14 +182,15 @@ function flagSetCtes(
   // layers until 2026-09-28 and the preview is rarely run with no chip at all.
   // Emitting them beside lc_set rather than within it makes the two independent,
   // which is what the callers already assume.
+  const exclusionCtes = lifecycleExclusionCtes(lifecycleExclusions);
   if (lifecycleChips == null || lifecycleChips.length === 0)
-    return drizzleSql`${withOffer}${lifecycleExclusionCtes(lifecycleExclusions)}`;
+    return drizzleSql`${withOffer}${exclusionCtes}`;
   return drizzleSql`${withOffer},
     lc_set as (
       select id as contact_id, lifecycle_status from contacts
       where org_id = ${orgId}::uuid
         and lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(lifecycleChips))})
-    )${lifecycleExclusionCtes(lifecycleExclusions)}`;
+    )${exclusionCtes}`;
 }
 
 // The lifecycle exclusion layers as CTEs named lx_<key>. Empty string when
@@ -1726,7 +1727,25 @@ export async function previewAudience(
   // in-use CTE is byte-identical to pre-Phase-4.
   const dripPostureOn = await isDripPostureOn(orgId);
 
-  const rows = (await db.execute(drizzleSql`
+  // ⚠️ WRAPPED IN A TRANSACTION ONLY SO `SET LOCAL statement_timeout` APPLIES.
+  // No temp table: materialising the source and each exclusion layer was tried
+  // on 2026-09-30 and measured SLOWER in a controlled interleaved A/B on a
+  // quiet database (old 33.6s / 18.5s, materialised 35.1s / 27.8s, identical
+  // 25,267 out). An earlier "36.8s -> 25.5s" reading compared runs taken under
+  // different load and did not survive the controlled test. The snapshot's
+  // temp-table treatment (§10b) earns its keep there and does not here — don't
+  // re-derive it for this function without an interleaved measurement.
+  const rows = (await db.transaction(async (tx) => {
+    // A CEILING ON THE DAMAGE, not a tuning knob. An abandoned HTTP request
+    // does NOT cancel the query behind it: Vercel kills the function at 60s and
+    // Postgres keeps going. Measured on production 2026-09-30, four preview
+    // queries ran at once, the oldest 49s, because the form fired a new one on
+    // every edit while the previous kept burning. The client now aborts
+    // superseded requests; this is the backstop for everything else -- a
+    // bookmarked tab, a retry, a second operator on the same groups. Postgres
+    // raises 57014, which the route maps to a sentence the operator can act on.
+    await tx.execute(drizzleSql`set local statement_timeout = '30s'`);
+    return await tx.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
     sources as (
       select
@@ -1830,7 +1849,8 @@ export async function previewAudience(
       count(*) filter (where qualifies and membership_ok and is_offer_exposed)::int as got_offer_in_prior_campaign
       ${lifecycleBreakdownCols(lifecycleRules, excludeInUse, lifecycleExclusions)}
     from eligible
-  `)) as unknown as {
+  `);
+  })) as unknown as {
     total_matching: number;
     from_segments: number;
     from_groups: number;

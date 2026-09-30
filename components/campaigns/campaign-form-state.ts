@@ -557,12 +557,27 @@ export function useCampaignFormState(props: CampaignFormProps) {
       return;
     }
     let cancelled = false;
+    // ⚠️ THE SUPERSEDED REQUEST IS ABORTED, not merely ignored.
+    //
+    // `cancelled` alone only discards the RESULT: the HTTP request -- and the
+    // Postgres query behind it -- keep running to completion. The 400ms
+    // debounce stops a burst per keystroke, but it does nothing once a request
+    // is in flight, and this preview takes tens of seconds over big contact
+    // groups. Editing the form a few times stacked them up: measured on
+    // production 2026-09-30, FOUR concurrent preview queries, the oldest 49s,
+    // each scanning hundreds of thousands of rows. They starve each other, so
+    // every one of them gets slower, and the newest -- the only one anybody is
+    // waiting for -- is the one that blows the route's 60s limit.
+    //
+    // Aborting closes the connection so only the newest preview is in flight.
+    const ac = new AbortController();
     const t = setTimeout(async () => {
       setPreviewLoading(true);
       const result = await previewApi.execute(
         "/api/campaigns/audience-preview",
         {
           method: "POST",
+          signal: ac.signal,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             audience_segment_ids: watchedSegments,
@@ -609,6 +624,10 @@ export function useCampaignFormState(props: CampaignFormProps) {
     return () => {
       cancelled = true;
       clearTimeout(t);
+      // Fires for an in-flight request only; aborting a settled one is a no-op.
+      // The `cancelled` guard above already returns before any setState, so the
+      // AbortError surfaces nowhere -- no spurious "preview failed" on a keystroke.
+      ac.abort();
     };
     // segmentsKey / groupsKey / filtersKey / capKey / excludeInUseKey /
     // excludePriorOfferKey / offerKey collapse identity to stable primitives

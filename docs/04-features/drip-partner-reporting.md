@@ -319,3 +319,30 @@ non-zero** row, because today's real revenue is `0` and would pass either way.
 
 **General rule:** for a public surface, "don't show it" is a rendering decision
 and "don't send it" is a security one. Only the second is a control.
+
+---
+
+## 10. Where the controls live (added 2026-10-01)
+
+The P7 token APIs shipped in August with **no UI** — the feature was reachable
+only by calling the endpoints directly. Entry points now:
+
+| surface | where |
+|---|---|
+| Internal report | Sidebar → Reports → **By Partner**, the Reports tab strip, and a **Partner report** button on Settings → Partners |
+| Generate / rotate a link | Settings → Partners, per key. The URL is shown **once** via `CopyableId`, the same contract as the intake secret |
+| Revoke | Settings → Partners, per key, behind a confirmation |
+| Revenue visibility | Settings → Partners, per key — `report_show_revenue`, off by default |
+
+⚠️ **Generate is disabled on sandbox keys.** `resolveReportToken` requires
+`status = 'active' AND sandbox = false`, so a link issued on a sandbox key
+resolves to null and the public page 404s. The button states the precondition
+rather than letting the operator find out from a dead URL.
+
+⚠️ **The list API returns report-link STATE, never `report_token_hash`.** The
+link is unrecoverable by design; shipping the hash to the browser would hand an
+operator the one value worth attacking.
+
+⚠️ **The URL is built server-side** from `lib/app-origin` (partner-facing host,
+primary host as fallback) — never from the request `Host`, or an operator on a
+preview deployment would hand a partner a link that dies with that deployment.

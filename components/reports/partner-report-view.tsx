@@ -62,11 +62,20 @@ export function PartnerReportView({
   partnerName,
   showRevenue,
   report,
+  showDateControls = true,
 }: {
   token: string;
   partnerName: string;
   showRevenue: boolean;
   report: PartnerReportResult;
+  /**
+   * The public signed-link page owns its range through a plain GET form, so it
+   * leaves this on. The INTERNAL page owns the range in React state and refetches
+   * — rendering these as well produced two From/To pairs stacked on one screen,
+   * the second of which could not work (a GET submit the client page never
+   * reads). Caught in the browser, not by tsc.
+   */
+  showDateControls?: boolean;
 }) {
   const [from, setFrom] = useState(report.from);
   const [to, setTo] = useState(report.to);
@@ -107,25 +116,29 @@ export function PartnerReportView({
       </header>
 
       <form method="get" className="mb-4 flex flex-wrap items-end gap-3">
-        <label className="grid gap-1 text-xs">
-          <span>From</span>
-          <input
-            type="date" name="from" value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            className="rounded-md border px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="grid gap-1 text-xs">
-          <span>To</span>
-          <input
-            type="date" name="to" value={to}
-            onChange={(e) => setTo(e.target.value)}
-            className="rounded-md border px-2 py-1 text-sm"
-          />
-        </label>
-        <button type="submit" className="rounded-md border px-3 py-1.5 text-sm">
-          Apply
-        </button>
+        {showDateControls && (
+          <>
+            <label className="grid gap-1 text-xs">
+              <span>From</span>
+              <input
+                type="date" name="from" value={from}
+                onChange={(e) => setFrom(e.target.value)}
+                className="rounded-md border px-2 py-1 text-sm"
+              />
+            </label>
+            <label className="grid gap-1 text-xs">
+              <span>To</span>
+              <input
+                type="date" name="to" value={to}
+                onChange={(e) => setTo(e.target.value)}
+                className="rounded-md border px-2 py-1 text-sm"
+              />
+            </label>
+            <button type="submit" className="rounded-md border px-3 py-1.5 text-sm">
+              Apply
+            </button>
+          </>
+        )}
         <button
           type="button" onClick={downloadCsv}
           className="rounded-md border px-3 py-1.5 text-sm"

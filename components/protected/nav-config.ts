@@ -5,6 +5,8 @@ import {
   CalendarClock,
   CheckCheck,
   FolderTree,
+  Gauge,
+  Handshake,
   KeyRound,
   Layers,
   LayoutDashboard,
@@ -94,6 +96,15 @@ export const navGroups: NavGroup[] = [
         icon: CalendarClock,
         disabled: !isEntityAvailable("campaigns"),
       },
+      // Cross-campaign pause/resume fleet view. Had no entry point at all —
+      // reachable only by typing the URL until 2026-10-01.
+      {
+        label: "Autopilot",
+        href: "/sends/autopilot",
+        permission: "stages.view",
+        icon: Gauge,
+        disabled: !isEntityAvailable("campaigns"),
+      },
       {
         label: "Creatives",
         href: "/creatives",
@@ -122,6 +133,9 @@ export const navGroups: NavGroup[] = [
       { label: "By Group", href: "/reports/group", icon: FolderTree, permission: "campaigns.view" },
       { label: "Delivery", href: "/reports/delivery", icon: CheckCheck, permission: "campaigns.view" },
       { label: "Audience Stats", href: "/reports/audience", icon: Target, permission: "campaigns.view" },
+      // Partner-facing lead performance (Drip P7). Same permission as every
+      // other report; the page and its API re-check server-side.
+      { label: "By Partner", href: "/reports/partners", icon: Handshake, permission: "campaigns.view" },
     ],
   },
   {

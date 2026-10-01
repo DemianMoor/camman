@@ -53,6 +53,7 @@ export function InternalPartnerReport() {
       {report && (
         <PartnerReportView
           token="" partnerName="All partners" showRevenue report={report}
+          showDateControls={false}
         />
       )}
     </div>

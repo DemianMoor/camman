@@ -511,6 +511,26 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const excludeInUseKey = watchedExcludeInUse ? "1" : "0";
   const excludePriorOfferKey = watchedExcludePriorOffer ? "1" : "0";
   const offerKey = watchedOfferId ?? "";
+
+  // The offer-rule parameters ("Not within N days" / "Not more than N times")
+  // as last COMMITTED by the operator: on Enter or when the field loses focus,
+  // never per keystroke. ⚠️ They were read with form.getValues() while
+  // building the request but were in none of its keys, so editing them did not
+  // recalculate the audience until some other input changed (card 869faenje).
+  const [committedOfferRules, setCommittedOfferRules] = useState(() => ({
+    cooldownDays: form.getValues("offer_cooldown_days"),
+    limitTimes: form.getValues("offer_limit_times"),
+  }));
+  const commitOfferRules = () => {
+    const cooldownDays = form.getValues("offer_cooldown_days");
+    const limitTimes = form.getValues("offer_limit_times");
+    setCommittedOfferRules((prev) =>
+      prev.cooldownDays === cooldownDays && prev.limitTimes === limitTimes
+        ? prev
+        : { cooldownDays, limitTimes },
+    );
+  };
+  const offerRulesKey = `${committedOfferRules.cooldownDays}:${committedOfferRules.limitTimes}`;
   const hasSource =
     watchedSegments.length > 0 || watchedContactGroups.length > 0;
   const membership = {
@@ -534,8 +554,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
             audience_cap: watchedCap,
             exclude_in_use_contacts: watchedExcludeInUse,
             exclude_prior_offer_contacts: watchedExcludePriorOffer,
-            offer_cooldown_days: form.getValues("offer_cooldown_days"),
-            offer_limit_times: form.getValues("offer_limit_times"),
+            offer_cooldown_days: committedOfferRules.cooldownDays,
+            offer_limit_times: committedOfferRules.limitTimes,
             offer_id: watchedOfferId,
             part: "audience",
           })
@@ -551,6 +571,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
       excludeInUseKey,
       excludePriorOfferKey,
       offerKey,
+      offerRulesKey,
     ],
   );
   const basePart = usePreviewPart(baseBody);
@@ -860,6 +881,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewError,
     previewLoading,
     retryPreview,
+    commitOfferRules,
     hasAudienceSource,
     dateError,
     draftReady,

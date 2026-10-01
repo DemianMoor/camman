@@ -4254,3 +4254,12 @@ The campaign preview projected `has_lifecycle` / `lifecycle_status` only when at
 ## Test an error mapping against the error the driver actually throws (2026-10-01)
 
 `app/api/campaigns/audience-preview/route.ts` mapped a statement timeout with `err.code === "57014"`. Drizzle wraps driver errors, and the SQLSTATE is on `err.cause`, so the check never matched and every preview timeout became a 500 (card 869faaa3v). Always detect SQLSTATEs with `isStatementTimeout` (`lib/db/statement-timeout.ts`), which walks the cause chain. Test the mapping with a **real** error produced through `@/db/client` (e.g. `SET LOCAL statement_timeout = '50ms'` + `pg_sleep`), never a hand-built object: a mock encodes the same wrong assumption as the code it tests. See [`scripts/test-preview-timeout-400.ts`](../scripts/test-preview-timeout-400.ts).
+
+## The edit screen may only read what the campaign GET returns: a compile-time guard (2026-10-01)
+
+`components/campaigns/campaign-editor-page.tsx` reads a `CampaignDetail` from `GET /api/campaigns/[campaignId]`. Twice a field the editor reads was missing from that GET's select, and nothing failed. The editor fell back to a default: first `lifecycle_rules` (every campaign rendered as legacy), then `offer_cooldown_days` / `offer_limit_times`, where the edit-screen preview used 7 / 5 instead of the stored values (card 869fad9c9; campaign 1521 previewed 6,522 instead of 5,579).
+- The select now lives in [`lib/api/campaign-detail.ts`](../lib/api/campaign-detail.ts) (`CAMPAIGN_DETAIL_SELECT`).
+- The editor asserts at compile time that every key of `CampaignDetail` is a key of it. `tsc` / `next build` fail naming the missing field (`missingFromCampaignGet: "offer_cooldown_days" | "offer_limit_times"`).
+- The two fields are now **required** in `CampaignDetail`: an optional field is how the gap compiled.
+- Also fixed: a draft's cooldown/limit edits are now saved (the PATCH body never sent them). After draft they are stripped by the client and refused by the server as `audience_locked_after_draft`, matching the disabled inputs.
+- Bar: [`scripts/test-campaign-offer-rules-edit.ts`](../scripts/test-campaign-offer-rules-edit.ts).

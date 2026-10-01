@@ -44,6 +44,7 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
+import type { CAMPAIGN_DETAIL_SELECT } from "@/lib/api/campaign-detail";
 
 import { CarrierRemovedLines } from "./campaign-form-fields";
 import {
@@ -77,8 +78,11 @@ type CampaignDetail = {
   audience_cap: number | null;
   exclude_in_use_contacts: boolean;
   exclude_prior_offer_contacts: boolean;
-  offer_cooldown_days?: number;
-  offer_limit_times?: number;
+  // REQUIRED (they were optional, which is exactly how their absence from the
+  // GET went unnoticed: the screen compiled and fell back to 7 / 5 — card
+  // 869fad9c9).
+  offer_cooldown_days: number;
+  offer_limit_times: number;
   start_date: string | null;
   end_date: string | null;
   status: Status;
@@ -90,6 +94,26 @@ type CampaignDetail = {
   tracking_id: string | null;
   link_mode: "manual" | "tracked";
 };
+
+// ⭐ COMPILE-TIME GUARD: every campaign field this screen reads must be one
+// GET /api/campaigns/[campaignId] returns (CAMPAIGN_DETAIL_SELECT). A field
+// declared here but not selected there would compile and silently read
+// `undefined` — that is how lifecycle_rules and then offer_cooldown_days /
+// offer_limit_times went missing. If this line fails, add the field to
+// lib/api/campaign-detail.ts; the error names it.
+type FieldsTheGetDoesNotReturn = Exclude<
+  keyof CampaignDetail,
+  keyof typeof CAMPAIGN_DETAIL_SELECT
+>;
+const everyReadFieldIsReturned: [FieldsTheGetDoesNotReturn] extends [never]
+  ? true
+  : {
+      missingFromCampaignGet: Exclude<
+        keyof CampaignDetail,
+        keyof typeof CAMPAIGN_DETAIL_SELECT
+      >;
+    } = true;
+void everyReadFieldIsReturned;
 
 interface CreateModeProps {
   mode: "create";
@@ -486,6 +510,8 @@ function Inner({
       delete body.audience_cap;
       delete body.exclude_in_use_contacts;
       delete body.exclude_prior_offer_contacts;
+      delete body.offer_cooldown_days;
+      delete body.offer_limit_times;
     }
     const result = await updateApi.execute(`/api/campaigns/${campaignId}`, {
       method: "PATCH",
@@ -2108,6 +2134,11 @@ function buildPatchBody(values: CampaignFormValues): Record<string, unknown> {
     audience_cap: values.audience_cap,
     exclude_in_use_contacts: values.exclude_in_use_contacts,
     exclude_prior_offer_contacts: values.exclude_prior_offer_contacts,
+    // Sent so a DRAFT edit to them saves (they were never sent, so a change on
+    // the edit screen was silently dropped — card 869fad9c9). Stripped below
+    // once the campaign has left draft, like the rest of the audience.
+    offer_cooldown_days: values.offer_cooldown_days,
+    offer_limit_times: values.offer_limit_times,
     start_date: values.start_date || undefined,
     end_date: values.end_date || undefined,
   };

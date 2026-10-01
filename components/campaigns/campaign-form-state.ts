@@ -541,6 +541,26 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const excludePriorOfferKey = watchedExcludePriorOffer ? "1" : "0";
   const offerKey = watchedOfferId ?? "";
 
+  // The offer-rule parameters ("Not within N days" / "Not more than N times")
+  // as last COMMITTED by the operator: on Enter or when the field loses focus,
+  // never per keystroke. ⚠️ They were read with form.getValues() inside the
+  // preview effect but were in none of its keys, so editing them did not
+  // recalculate the audience until some other input changed (2026-10-01).
+  const [committedOfferRules, setCommittedOfferRules] = useState(() => ({
+    cooldownDays: form.getValues("offer_cooldown_days"),
+    limitTimes: form.getValues("offer_limit_times"),
+  }));
+  const commitOfferRules = () => {
+    const cooldownDays = form.getValues("offer_cooldown_days");
+    const limitTimes = form.getValues("offer_limit_times");
+    setCommittedOfferRules((prev) =>
+      prev.cooldownDays === cooldownDays && prev.limitTimes === limitTimes
+        ? prev
+        : { cooldownDays, limitTimes },
+    );
+  };
+  const offerRulesKey = `${committedOfferRules.cooldownDays}:${committedOfferRules.limitTimes}`;
+
   // ── The audience preview: single-flight, latest wins, one automatic retry ──
   //
   // ⚠️ HOTFIX 2026-10-01. The preview of a real segment recipe takes 40-100 s,
@@ -669,8 +689,8 @@ export function useCampaignFormState(props: CampaignFormProps) {
       audience_cap: watchedCap,
       exclude_in_use_contacts: watchedExcludeInUse,
       exclude_prior_offer_contacts: watchedExcludePriorOffer,
-      offer_cooldown_days: form.getValues("offer_cooldown_days"),
-      offer_limit_times: form.getValues("offer_limit_times"),
+      offer_cooldown_days: committedOfferRules.cooldownDays,
+      offer_limit_times: committedOfferRules.limitTimes,
       offer_id: watchedOfferId,
     });
     // A pending automatic retry is for values that no longer apply.
@@ -693,6 +713,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     excludeInUseKey,
     excludePriorOfferKey,
     offerKey,
+    offerRulesKey,
     previewApi.execute,
   ]);
 
@@ -955,6 +976,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewError,
     previewLoading,
     retryPreview,
+    commitOfferRules,
     hasAudienceSource,
     dateError,
     draftReady,

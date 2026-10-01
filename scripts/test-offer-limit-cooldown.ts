@@ -36,7 +36,15 @@ async function main() {
   const { db } = await import("@/db/client");
   const { buildStageEligibilityExclusions, EXCLUSION_PRIORITY, offerRuleLayers } =
     await import("@/lib/sends/eligibility");
-  const { QueryBuilder } = await import("drizzle-orm/pg-core");
+  const { QueryBuilder, PgDialect } = await import("drizzle-orm/pg-core");
+  const {
+    previewAudienceBase,
+    previewAudienceAudiencePart,
+    combinePreviewParts,
+  } = await import("@/lib/audience-snapshot");
+  const { referencePreviewAudience } = await import(
+    "@/lib/audience-preview-reference"
+  );
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const one = async <T>(q: SQL): Promise<T> =>
@@ -297,6 +305,100 @@ async function main() {
       "M12 ⭐ …and the LEGACY 'ever got' layer comes back instead",
       legacy.includes("offer"),
       "the two are alternatives, never stacked — stacked, a contact past their cooldown stays excluded forever",
+    );
+    // ── M13–M15 (Task 2 T4): the PREVIEW over real offer history ─────────
+    // The narrowed preview reads the offer rules as ONE grouped scan
+    // (count + max(last_sent_at)) instead of two layer sets. It must give
+    // exactly the reference's numbers on THIS fixture — the only one with
+    // contact_offer_campaigns rows — and the cases must not all be zero.
+    const grp = await one<{ id: number }>(sql`
+      INSERT INTO contact_groups (org_id, contact_group_id, name) VALUES (${org}, ${`g-${tag}`}, ${`G ${tag}`}) RETURNING id`);
+    await db.execute(sql`
+      INSERT INTO contact_contact_groups (org_id, contact_id, contact_group_id)
+      SELECT ${org}, id, ${grp.id} FROM contacts WHERE org_id = ${org}`);
+    const leafDiff = (a: unknown, b: unknown): string[] => {
+      const flat = (o: unknown, path = "", out = new Map<string, unknown>()) => {
+        if (o !== null && typeof o === "object")
+          for (const k of Object.keys(o as object))
+            flat((o as Record<string, unknown>)[k], path ? `${path}.${k}` : k, out);
+        else out.set(path, o);
+        return out;
+      };
+      const fa = flat(a);
+      const fb = flat(b);
+      return [...new Set([...fa.keys(), ...fb.keys()])].filter((k) => fa.get(k) !== fb.get(k));
+    };
+    const rules: [number, number][] = [
+      [7, 5],
+      [30, 5],
+      [7, 1],
+      [0, 4],
+      [3, 100],
+    ];
+    const mism: string[] = [];
+    let limitSeen = 0;
+    let cooldownSeen = 0;
+    for (const [cooldownDays, limitTimes] of rules) {
+      const input = {
+        orgId,
+        lifecycleRules: true,
+        segmentIds: [],
+        contactGroupIds: [grp.id],
+        filters: { lifecycle_statuses: ["cold"] },
+        offerId: offer.id,
+        excludePriorOffer: true,
+        offerRulesEnabled: true,
+        offerCooldownDays: cooldownDays,
+        offerLimitTimes: limitTimes,
+      };
+      const ref = await referencePreviewAudience(input);
+      const combined = combinePreviewParts(
+        await previewAudienceBase(input),
+        await previewAudienceAudiencePart(input),
+        ["cold"],
+      );
+      const d = leafDiff(combined, ref);
+      if (d.length) mism.push(`${cooldownDays}d/${limitTimes}x: ${d.join(",")}`);
+      limitSeen += ref.lifecycle!.excluded.offer_limit;
+      cooldownSeen += ref.lifecycle!.excluded.offer_cooldown;
+    }
+    bar(
+      "M13 narrowed preview = reference over real offer history, 5 rule settings",
+      mism.length === 0,
+      mism.join("; ") || "0 differences",
+    );
+    bar(
+      "M14 …and the cases are not vacuous: limit and cooldown both excluded someone",
+      limitSeen > 0 && cooldownSeen > 0,
+      `offer_limit total ${limitSeen}, offer_cooldown total ${cooldownSeen}`,
+    );
+    const dialect = new PgDialect();
+    const texts: string[] = [];
+    await previewAudienceAudiencePart(
+      {
+        orgId,
+        lifecycleRules: true,
+        segmentIds: [],
+        contactGroupIds: [grp.id],
+        filters: { lifecycle_statuses: ["cold"] },
+        offerId: offer.id,
+        excludePriorOffer: true,
+        offerRulesEnabled: true,
+      },
+      {
+        transaction: (async (fn: (tx: unknown) => Promise<unknown>) =>
+          fn({
+            execute: async (q: Parameters<typeof dialect.sqlToQuery>[0]) => {
+              texts.push(dialect.sqlToQuery(q).sql);
+              return [];
+            },
+          })) as never,
+      },
+    );
+    const emitted = texts.join(" ");
+    bar(
+      "M15 the narrowed preview reads the offer ONCE (lx_offer_stats), not as two layer sets",
+      emitted.includes("lx_offer_stats") && !emitted.includes("lx_offer_limit") && !emitted.includes("lx_offer_cooldown"),
     );
   } finally {
     if (orgId) {

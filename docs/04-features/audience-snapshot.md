@@ -107,6 +107,17 @@ While Task 2 rebuilds the campaign preview (plan: `docs/superpowers/plans/2026-0
 
 The reference and the harness helpers are deleted together with the kill switch once Task 2 is accepted.
 
+**Offer layers (T4, 2026-10-01).** On the narrowed path, the offer limit and the offer cooldown come from **one** grouped read of the offer's `contact_offer_campaigns` rows, restricted to the candidates (`lx_offer_stats`: `count(*)` and `max(last_sent_at)`):
+- limit = `count >= N`;
+- cooldown = `max(last_sent_at) > now − Y days`, the same strict `>`.
+
+The layer keys (`is_offer_limit`, `is_offer_cooldown`) and the shared aggregate are unchanged, and the send path's layer SQL is untouched (4a gate: 5,778 shapes byte-identical). Bars M13–M15 in `scripts/test-offer-limit-cooldown.ts`, the only fixture with offer history:
+- M13: 5 rule settings equal the reference;
+- M14: the reference excluded someone by limit (12) and by cooldown (9), so the bar is not vacuous;
+- M15: the SQL reads the offer once.
+
+Red-proved with `>=` → `>`. ⚠️ T3's F23 "offer rules" case runs on a fixture with no offer history, so it never exercised these two layers; M13–M15 is what does.
+
 **Narrowed audience part (T3, 2026-10-01).** `previewAudienceAudiencePart()` returns every chip-dependent number. It carries none of the group-level ones, which come from the base.
 - **Path:** lifecycle campaigns with at least one valid chip take the narrowed path. Legacy, no-source and zero-chip previews fall back to today's single statement (group-level fields stripped).
 - **Narrowed:**

@@ -37,6 +37,7 @@ import { db } from "@/db/client";
 import {
   combinePreviewParts,
   previewAudience,
+  previewAudienceAudiencePart,
   previewAudienceBase,
   type AudienceFilters,
   type AudiencePreviewInput,
@@ -49,6 +50,7 @@ import {
   contactGroupSizes,
   explainSegmentEvaluation,
   harnessRunner,
+  nonTempWritesInTransaction,
   type PlanStats,
 } from "@/lib/audience-preview-reference/timing";
 
@@ -382,6 +384,9 @@ const READ_ONLY_RR = {
   isolationLevel: "repeatable read",
   accessMode: "read only",
 } as const;
+// Read-write ONLY for the temp table the narrowed part needs; every parity
+// transaction checks it wrote nothing else (nonTempWritesInTransaction).
+const PARTS_RR = { isolationLevel: "repeatable read" } as const;
 const asRunner = (tx: unknown) => tx as PreviewRunner;
 
 let fail = 0;
@@ -408,6 +413,7 @@ async function parity(recipes: Recipe[]) {
   let nonEmpty = 0;
   let differing = 0;
   let combinedDiffering = 0;
+  let nonTempWrites = 0;
   let selfTestFailures = 0;
   for (const [n, r] of recipes.entries()) {
     if (pastWindow()) {
@@ -416,7 +422,8 @@ async function parity(recipes: Recipe[]) {
     }
     const runner = (tx: unknown) => harnessRunner(asRunner(tx), { ceilingMs: CEILING_MS });
     const t: Record<string, number> = {};
-    const [ref, live, basePart] = await db.transaction(async (tx) => {
+    let writes = 0;
+    const [ref, live, basePart, audiencePart] = await db.transaction(async (tx) => {
       const run = async (which: "ref" | "live") => {
         const t0 = performance.now();
         const out =
@@ -434,32 +441,44 @@ async function parity(recipes: Recipe[]) {
         t.base = performance.now() - t0;
         return out;
       };
+      // The Task 2 audience part (narrowed on the lifecycle path). It carries
+      // no group-level numbers, so the combine below must take them from base.
+      const runAudience = async () => {
+        const t0 = performance.now();
+        const out = await previewAudienceAudiencePart(r.input, runner(tx));
+        t.audience = performance.now() - t0;
+        return out;
+      };
+      const result = async (
+        a: Awaited<ReturnType<typeof referencePreviewAudience>>,
+        b: Awaited<ReturnType<typeof previewAudience>>,
+      ) => {
+        const base = await runBase();
+        const audience = await runAudience();
+        // ⚠️ The narrowed part creates a TEMP table, which a READ ONLY
+        // transaction refuses — so this one is read-write, and this proves
+        // nothing but temp tables was written in it.
+        writes = await nonTempWritesInTransaction(asRunner(tx));
+        return [a, b, base, audience] as const;
+      };
       if (n % 2 === 0) {
         const a = await run("ref");
         const b = await run("live");
-        return [a, b, await runBase()] as const;
+        return result(a, b);
       }
       const b = await run("live");
       const a = await run("ref");
-      return [a, b, await runBase()] as const;
-    }, READ_ONLY_RR);
+      return result(a, b);
+    }, PARTS_RR);
+    nonTempWrites += writes;
     compared++;
     if (ref.total_matching > 0) nonEmpty++;
     const d = diff(ref, live);
     if (d.length > 0) differing++;
-    // Task 2 bar 1 on real recipes: base + audience must equal the reference.
-    // The audience part's own group-level fields are poisoned first, so a
-    // combine that ignored the base could not pass.
-    const poisoned = JSON.parse(JSON.stringify(live));
-    poisoned.excluded_for_optout = -1;
-    if (poisoned.lifecycle) {
-      poisoned.lifecycle.excluded.opted_out = -1;
-      poisoned.lifecycle.excluded.suppressed = -1;
-      poisoned.lifecycle.excluded.status_not_selected = -1;
-    }
+    // Task 2 bars 1 + 2 on real recipes: base + audience = the reference.
     const dc = diff(
       ref,
-      combinePreviewParts(basePart, poisoned, r.input.filters.lifecycle_statuses ?? []),
+      combinePreviewParts(basePart, audiencePart, r.input.filters.lifecycle_statuses ?? []),
     );
     if (dc.length > 0) combinedDiffering++;
     const st = differSelfTest(ref);
@@ -468,7 +487,7 @@ async function parity(recipes: Recipe[]) {
     console.log(
       `  ${d.length === 0 ? "=" : "≠"} [${n + 1}] ${r.label}: total ${ref.total_matching}` +
         ` · ref ${(t.ref / 1000).toFixed(1)}s${slow(t.ref)} · live ${(t.live / 1000).toFixed(1)}s${slow(t.live)}` +
-        ` · base ${(t.base / 1000).toFixed(1)}s${dc.length ? ` · COMBINED ≠ ${dc.join(",")}` : ""}` +
+        ` · base ${(t.base / 1000).toFixed(1)}s · audience ${(t.audience / 1000).toFixed(1)}s${dc.length ? ` · COMBINED ≠ ${dc.join(",")}` : ""}` +
         (d.length ? `\n      differs: ${d.map((p) => `${p} ${JSON.stringify(leaves(ref).get(p))}→${JSON.stringify(leaves(live).get(p))}`).join(", ")}` : ""),
     );
   }
@@ -491,6 +510,11 @@ async function parity(recipes: Recipe[]) {
     "base + audience parts (combined) agree with the reference on every recipe",
     compared > 0 && combinedDiffering === 0,
     `${combinedDiffering} of ${compared} differ`,
+  );
+  bar(
+    "the parity transactions wrote nothing but temp tables",
+    nonTempWrites === 0,
+    `${nonTempWrites} non-temp row write(s)`,
   );
 }
 

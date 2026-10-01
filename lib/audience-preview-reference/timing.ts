@@ -132,3 +132,24 @@ export async function contactGroupSizes(
     return new Map(rows.map((r) => [Number(r.id), Number(r.n)]));
   });
 }
+
+/**
+ * Rows inserted, updated or deleted in NON-temporary tables by the current
+ * transaction so far. The parity harness runs read-write only because the
+ * narrowed audience part needs a temp table; this is the proof that nothing
+ * else was written. Temp tables live in pg_temp_N schemas.
+ */
+export async function nonTempWritesInTransaction(
+  tx: PreviewRunner | { execute: (q: SQL) => Promise<unknown> },
+): Promise<number> {
+  const exec = (tx as { execute: (q: SQL) => Promise<unknown> }).execute;
+  const rows = (await exec.call(
+    tx,
+    drizzleSql`
+      select coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::int as n
+      from pg_stat_xact_user_tables
+      where schemaname not like 'pg_temp%'
+    `,
+  )) as unknown as { n: number }[];
+  return Number(rows[0]?.n ?? 0);
+}

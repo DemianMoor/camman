@@ -101,6 +101,10 @@ async function buildExcludeSegmentUnion(
 function buildGroupMembershipClause(
   orgId: string,
   contactGroupIds: number[],
+  // Task 2 T3 only (the narrowed preview): keep only contacts whose lifecycle
+  // status is one of these chips. Absent everywhere else, so every other
+  // caller's SQL is byte-identical.
+  chipStatuses?: string[],
 ): SQL | null {
   if (contactGroupIds.length === 0) return null;
   // Landline hard stop (migration 0096): join contacts and keep only
@@ -114,7 +118,12 @@ function buildGroupMembershipClause(
     INNER JOIN contacts c
       ON c.id = ccg.contact_id
       AND c.org_id = ${orgId}::uuid
-      AND c.messaging_status = 'eligible'
+      AND c.messaging_status = 'eligible'${
+        chipStatuses
+          ? drizzleSql`
+      AND c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chipStatuses))})`
+          : drizzleSql``
+      }
     WHERE ccg.org_id = ${orgId}::uuid
       AND ccg.contact_group_id = ANY(${drizzleSql.raw(
         "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
@@ -1480,7 +1489,14 @@ export type PreviewMembershipInput = Pick<
   "orgId" | "segmentIds" | "excludeSegmentIds" | "contactGroupIds"
 >;
 
-async function buildPreviewMembership(input: PreviewMembershipInput): Promise<{
+async function buildPreviewMembership(
+  input: PreviewMembershipInput,
+  // Task 2 T3: narrow the membership to contacts whose lifecycle status is one
+  // of these chips. Valid because EVERY chip-dependent preview number requires
+  // the chip (is_eligible / qualifies / inCohort all carry it), so a contact
+  // outside the chips can never change one. Absent ⇒ byte-identical to before.
+  narrowToChips?: string[],
+): Promise<{
   unionedWithSources: SQL;
   fromSegmentExpr: SQL;
   positiveExpr: SQL;
@@ -1498,8 +1514,24 @@ async function buildPreviewMembership(input: PreviewMembershipInput): Promise<{
   // (see buildSegmentAudienceClause). This is the key perf lever: it keeps a
   // near-universal `is_not` rule from materializing the entire contacts table
   // before the intersection narrows it to the group.
-  const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
-  const restrictUniverse = bothSides ? groupClause! : undefined;
+  const groupClause = buildGroupMembershipClause(
+    orgId,
+    contactGroupIds,
+    narrowToChips,
+  );
+  // Narrowed: the is_not universe is the chip set (within the groups when there
+  // are groups). (U ∖ inner) ∩ chips = (U ∩ chips) ∖ inner, so the result over
+  // chip contacts is unchanged; only fewer rows are dragged through the EXCEPT.
+  const chipUniverse = narrowToChips
+    ? (groupClause ??
+      drizzleSql`
+      SELECT id AS contact_id FROM contacts
+      WHERE org_id = ${orgId}::uuid
+        AND messaging_status = 'eligible'
+        AND lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(narrowToChips))})`)
+    : undefined;
+  const restrictUniverse =
+    chipUniverse ?? (bothSides ? groupClause! : undefined);
 
   // Per-source clauses tagged with segment_ord / from_group /
   // from_exclude_segment markers so the aggregate query can attribute each
@@ -1537,7 +1569,8 @@ async function buildPreviewMembership(input: PreviewMembershipInput): Promise<{
       buildSegmentAudienceClause(
         id,
         orgId,
-        contactGroupIds.length > 0 ? groupClause! : undefined,
+        chipUniverse ??
+          (contactGroupIds.length > 0 ? groupClause! : undefined),
       ),
     ),
   );
@@ -1576,6 +1609,170 @@ async function buildPreviewMembership(input: PreviewMembershipInput): Promise<{
           ? drizzleSql`q.from_group`
           : drizzleSql`false`;
   return { unionedWithSources, fromSegmentExpr, positiveExpr };
+}
+
+// The preview's qualify → eligible → aggregate tail, over a relation named
+// `flagged` that the caller has already defined (Task 2: shared by
+// previewAudience and the narrowed audience part, so both run the SAME
+// aggregate). Moved verbatim from previewAudience.
+function previewAggregateTail(p: {
+  filters: AudienceFilters;
+  lifecycleRules: boolean;
+  excludeInUse: boolean;
+  excludePriorOffer: boolean;
+  exclusionTerm: SQL;
+  positiveExpr: SQL;
+  carrierMatchSql: SQL;
+  hasCarrierFilter: boolean;
+  lifecycleExclusions: EligibilityLayer[] | null;
+}): SQL {
+  const {
+    filters,
+    lifecycleRules,
+    excludeInUse,
+    excludePriorOffer,
+    exclusionTerm,
+    positiveExpr,
+    carrierMatchSql,
+    hasCarrierFilter,
+    lifecycleExclusions,
+  } = p;
+  return drizzleSql`
+    qualified as (
+      select
+        f.*,
+        (
+          not has_opt_out and ${lifecycleChipPredicate(filters, { lifecycleRules })}
+        ) as qualifies
+      from flagged f
+    ),
+    eligible as (
+      -- The actual pool the cap samples from. When the campaign-level
+      -- exclude_in_use flag is on, in-use contacts are dropped here so
+      -- total_matching reflects the unused pool.
+      --   membership_positive = the positive base (include ∩ group, or the
+      --     single populated dimension).
+      --   membership_ok = positive base MINUS exclude-mode segments (0114).
+      -- A contact only sends when in the positive base and not excluded.
+      select
+        q.*,
+        (
+          q.qualifies
+          and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
+          and (not ${excludePriorOffer}::boolean or not q.is_offer_exposed)
+          ${exclusionTerm}
+        ) as is_eligible,
+        (${positiveExpr}) as membership_positive,
+        ((${positiveExpr}) and not q.from_exclude_segment) as membership_ok
+      from qualified q
+    )
+    select
+      -- The audience that actually sends = eligible ∩ membership rule ∩ carrier filter.
+      count(*) filter (where is_eligible and membership_ok and (${carrierMatchSql}))::int as total_matching,
+      -- Per-bucket counts of contacts dropped BY the carrier filter (empty when no
+      -- filter). Unidentified is its own line. Reported over the eligible ∩ membership
+      -- audience so the UI can show "N removed as unidentified" + per-bucket removals.
+      ${
+        hasCarrierFilter
+          ? drizzleSql`jsonb_build_object(
+            'AT&T', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'AT&T'),
+            'T-Mobile', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'T-Mobile'),
+            'Verizon', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Verizon'),
+            'Other Mobile', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Other Mobile'),
+            'VoIP', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'VoIP'),
+            'Unknown', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm in ('Unknown','Unmapped')),
+            'Unidentified', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Unidentified')
+          )`
+          : drizzleSql`'{}'::jsonb`
+      } as carrier_removed,
+      -- Per-source contributions stay PRE-intersection (eligible on each
+      -- side) so the UI can show how the two dimensions narrow down; the
+      -- intersection itself is the overlap column, which equals
+      -- total_matching when both dimensions are selected.
+      count(*) filter (where is_eligible and from_segment)::int as from_segments,
+      count(*) filter (where is_eligible and from_group)::int as from_groups,
+      count(*) filter (where is_eligible and from_segment and from_group)::int as overlap,
+      -- Contacts in the positive base dropped because they belong to an
+      -- exclude-mode segment (migration 0114). Zero when no exclude segments.
+      count(*) filter (where is_eligible and membership_positive and from_exclude_segment)::int as excluded_by_segments,
+      count(*) filter (where has_opt_out)::int as excluded_for_optout,
+      -- Reported on the in-audience set (post-intersection, pre in-use
+      -- exclusion) so the UI's "N excluded" reflects the real audience.
+      count(*) filter (where qualifies and membership_ok and is_in_use_elsewhere)::int as in_use_in_other_campaigns,
+      -- In-audience leads who already got this offer (post-intersection, pre
+      -- offer exclusion). Zero when the toggle is off (is_offer_exposed=false).
+      count(*) filter (where qualifies and membership_ok and is_offer_exposed)::int as got_offer_in_prior_campaign
+      ${lifecycleBreakdownCols(lifecycleRules, excludeInUse, lifecycleExclusions)}
+    from eligible
+  `;
+}
+
+type PreviewAggregateRow = {
+    total_matching: number;
+    from_segments: number;
+    from_groups: number;
+    overlap: number;
+    excluded_by_segments: number;
+    excluded_for_optout: number;
+    in_use_in_other_campaigns: number;
+    got_offer_in_prior_campaign: number;
+    carrier_removed: Record<string, number>;
+    lc_by_status?: Record<string, number>;
+    lc_excl_opted_out?: number;
+    lc_excl_suppressed?: number;
+    lc_excl_status_not_selected?: number;
+    lc_excl_bought_offer?: number;
+    lc_excl_freeze_not_due?: number;
+    lc_excl_offer_limit?: number;
+    lc_excl_offer_cooldown?: number;
+    lc_excl_in_use_elsewhere?: number;
+};
+
+function mapPreviewRow(
+  row: PreviewAggregateRow | null,
+  cap: number | null,
+  lifecycleRules: boolean,
+): AudiencePreviewResult {
+  const total = row?.total_matching ?? 0;
+  const effective = cap !== null && cap < total ? cap : total;
+  return {
+    count: effective,
+    total_matching: total,
+    applied_cap: cap,
+    from_segments: row?.from_segments ?? 0,
+    from_groups: row?.from_groups ?? 0,
+    overlap: row?.overlap ?? 0,
+    excluded_by_segments: row?.excluded_by_segments ?? 0,
+    excluded_for_optout: row?.excluded_for_optout ?? 0,
+    in_use_in_other_campaigns: row?.in_use_in_other_campaigns ?? 0,
+    got_offer_in_prior_campaign: row?.got_offer_in_prior_campaign ?? 0,
+    carrier_removed: row?.carrier_removed ?? {},
+    // Absent, not zeroed, for a legacy campaign — see AudiencePreviewResult.
+    ...(lifecycleRules
+      ? {
+          lifecycle: {
+            by_status: Object.fromEntries(
+              LIFECYCLE_CHIP_STATUSES.map((st) => [
+                st,
+                Number(row?.lc_by_status?.[st] ?? 0),
+              ]),
+            ),
+            excluded: {
+              opted_out: Number(row?.lc_excl_opted_out ?? 0),
+              suppressed: Number(row?.lc_excl_suppressed ?? 0),
+              status_not_selected: Number(
+                row?.lc_excl_status_not_selected ?? 0,
+              ),
+              bought_offer: Number(row?.lc_excl_bought_offer ?? 0),
+              freeze_not_due: Number(row?.lc_excl_freeze_not_due ?? 0),
+              in_use_elsewhere: Number(row?.lc_excl_in_use_elsewhere ?? 0),
+              offer_limit: Number(row?.lc_excl_offer_limit ?? 0),
+              offer_cooldown: Number(row?.lc_excl_offer_cooldown ?? 0),
+            },
+          } satisfies LifecycleAudienceBreakdown,
+        }
+      : {}),
+  };
 }
 
 // Compute the count + composition breakdown for the UI's audience
@@ -1821,135 +2018,22 @@ export async function previewAudience(
       ${flagJoins("s", useOfferExposure, useLifecycle, lifecycleExclusions)}
       ${carrierJoin}
     ),
-    qualified as (
-      select
-        f.*,
-        (
-          not has_opt_out and ${lifecycleChipPredicate(filters, { lifecycleRules })}
-        ) as qualifies
-      from flagged f
-    ),
-    eligible as (
-      -- The actual pool the cap samples from. When the campaign-level
-      -- exclude_in_use flag is on, in-use contacts are dropped here so
-      -- total_matching reflects the unused pool.
-      --   membership_positive = the positive base (include ∩ group, or the
-      --     single populated dimension).
-      --   membership_ok = positive base MINUS exclude-mode segments (0114).
-      -- A contact only sends when in the positive base and not excluded.
-      select
-        q.*,
-        (
-          q.qualifies
-          and (not ${excludeInUse}::boolean or not q.is_in_use_elsewhere)
-          and (not ${excludePriorOffer}::boolean or not q.is_offer_exposed)
-          ${exclusionTerm}
-        ) as is_eligible,
-        (${positiveExpr}) as membership_positive,
-        ((${positiveExpr}) and not q.from_exclude_segment) as membership_ok
-      from qualified q
-    )
-    select
-      -- The audience that actually sends = eligible ∩ membership rule ∩ carrier filter.
-      count(*) filter (where is_eligible and membership_ok and (${carrierMatchSql}))::int as total_matching,
-      -- Per-bucket counts of contacts dropped BY the carrier filter (empty when no
-      -- filter). Unidentified is its own line. Reported over the eligible ∩ membership
-      -- audience so the UI can show "N removed as unidentified" + per-bucket removals.
-      ${
-        hasCarrierFilter
-          ? drizzleSql`jsonb_build_object(
-            'AT&T', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'AT&T'),
-            'T-Mobile', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'T-Mobile'),
-            'Verizon', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Verizon'),
-            'Other Mobile', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Other Mobile'),
-            'VoIP', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'VoIP'),
-            'Unknown', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm in ('Unknown','Unmapped')),
-            'Unidentified', count(*) filter (where is_eligible and membership_ok and not (${carrierMatchSql}) and carrier_norm = 'Unidentified')
-          )`
-          : drizzleSql`'{}'::jsonb`
-      } as carrier_removed,
-      -- Per-source contributions stay PRE-intersection (eligible on each
-      -- side) so the UI can show how the two dimensions narrow down; the
-      -- intersection itself is the overlap column, which equals
-      -- total_matching when both dimensions are selected.
-      count(*) filter (where is_eligible and from_segment)::int as from_segments,
-      count(*) filter (where is_eligible and from_group)::int as from_groups,
-      count(*) filter (where is_eligible and from_segment and from_group)::int as overlap,
-      -- Contacts in the positive base dropped because they belong to an
-      -- exclude-mode segment (migration 0114). Zero when no exclude segments.
-      count(*) filter (where is_eligible and membership_positive and from_exclude_segment)::int as excluded_by_segments,
-      count(*) filter (where has_opt_out)::int as excluded_for_optout,
-      -- Reported on the in-audience set (post-intersection, pre in-use
-      -- exclusion) so the UI's "N excluded" reflects the real audience.
-      count(*) filter (where qualifies and membership_ok and is_in_use_elsewhere)::int as in_use_in_other_campaigns,
-      -- In-audience leads who already got this offer (post-intersection, pre
-      -- offer exclusion). Zero when the toggle is off (is_offer_exposed=false).
-      count(*) filter (where qualifies and membership_ok and is_offer_exposed)::int as got_offer_in_prior_campaign
-      ${lifecycleBreakdownCols(lifecycleRules, excludeInUse, lifecycleExclusions)}
-    from eligible
+    ${previewAggregateTail({
+      filters,
+      lifecycleRules,
+      excludeInUse,
+      excludePriorOffer,
+      exclusionTerm,
+      positiveExpr,
+      carrierMatchSql,
+      hasCarrierFilter,
+      lifecycleExclusions,
+    })}
   `);
-  })) as unknown as {
-    total_matching: number;
-    from_segments: number;
-    from_groups: number;
-    overlap: number;
-    excluded_by_segments: number;
-    excluded_for_optout: number;
-    in_use_in_other_campaigns: number;
-    got_offer_in_prior_campaign: number;
-    carrier_removed: Record<string, number>;
-    lc_by_status?: Record<string, number>;
-    lc_excl_opted_out?: number;
-    lc_excl_suppressed?: number;
-    lc_excl_status_not_selected?: number;
-    lc_excl_bought_offer?: number;
-    lc_excl_freeze_not_due?: number;
-    lc_excl_offer_limit?: number;
-    lc_excl_offer_cooldown?: number;
-    lc_excl_in_use_elsewhere?: number;
-  }[];
+  })) as unknown as PreviewAggregateRow[];
 
   const row = Array.isArray(rows) ? rows[0] : null;
-  const total = row?.total_matching ?? 0;
-  const effective = cap !== null && cap < total ? cap : total;
-  return {
-    count: effective,
-    total_matching: total,
-    applied_cap: cap,
-    from_segments: row?.from_segments ?? 0,
-    from_groups: row?.from_groups ?? 0,
-    overlap: row?.overlap ?? 0,
-    excluded_by_segments: row?.excluded_by_segments ?? 0,
-    excluded_for_optout: row?.excluded_for_optout ?? 0,
-    in_use_in_other_campaigns: row?.in_use_in_other_campaigns ?? 0,
-    got_offer_in_prior_campaign: row?.got_offer_in_prior_campaign ?? 0,
-    carrier_removed: row?.carrier_removed ?? {},
-    // Absent, not zeroed, for a legacy campaign — see AudiencePreviewResult.
-    ...(lifecycleRules
-      ? {
-          lifecycle: {
-            by_status: Object.fromEntries(
-              LIFECYCLE_CHIP_STATUSES.map((st) => [
-                st,
-                Number(row?.lc_by_status?.[st] ?? 0),
-              ]),
-            ),
-            excluded: {
-              opted_out: Number(row?.lc_excl_opted_out ?? 0),
-              suppressed: Number(row?.lc_excl_suppressed ?? 0),
-              status_not_selected: Number(
-                row?.lc_excl_status_not_selected ?? 0,
-              ),
-              bought_offer: Number(row?.lc_excl_bought_offer ?? 0),
-              freeze_not_due: Number(row?.lc_excl_freeze_not_due ?? 0),
-              in_use_elsewhere: Number(row?.lc_excl_in_use_elsewhere ?? 0),
-              offer_limit: Number(row?.lc_excl_offer_limit ?? 0),
-              offer_cooldown: Number(row?.lc_excl_offer_cooldown ?? 0),
-            },
-          } satisfies LifecycleAudienceBreakdown,
-        }
-      : {}),
-  };
+  return mapPreviewRow(row, cap, lifecycleRules);
 }
 
 // ── Task 2: the preview in two parts ─────────────────────────────────────────
@@ -1987,14 +2071,10 @@ export async function previewAudienceBase(
   const lifecycleRules = input.lifecycleRules === true;
   const hasSource =
     input.segmentIds.length > 0 || (input.contactGroupIds?.length ?? 0) > 0;
-  if (!hasSource) {
-    return {
-      excluded_for_optout: 0,
-      ...(lifecycleRules
-        ? { lifecycle: { opted_out: 0, suppressed: 0, status_histogram: {} } }
-        : {}),
-    };
-  }
+  // No source: no lifecycle key either, mirroring previewAudience's early
+  // return (which omits it even for a lifecycle campaign). Returning one here
+  // made combinePreviewParts refuse the pair as "lifecycle vs legacy".
+  if (!hasSource) return { excluded_for_optout: 0 };
   const { orgId } = input;
   const { unionedWithSources, fromSegmentExpr, positiveExpr } =
     await buildPreviewMembership(input);
@@ -2158,6 +2238,203 @@ export function combinePreviewParts(
     };
   }
   return out;
+}
+
+// The group-level numbers removed, so an audience part can never be mistaken
+// for a whole preview: they are the base part's job.
+function stripGroupLevel(r: AudiencePreviewResult): AudiencePreviewAudiencePart {
+  const { excluded_for_optout: _drop, lifecycle, ...rest } = r;
+  void _drop;
+  if (!lifecycle) return rest;
+  const {
+    opted_out: _o,
+    suppressed: _s,
+    status_not_selected: _n,
+    ...excluded
+  } = lifecycle.excluded;
+  void _o;
+  void _s;
+  void _n;
+  return { ...rest, lifecycle: { by_status: lifecycle.by_status, excluded } };
+}
+
+/**
+ * The AUDIENCE part of a preview (Task 2 §2a): every chip-dependent number.
+ * Lifecycle campaigns with at least one valid chip take the narrowed path;
+ * anything else (legacy, no source, zero chips) is today's single statement,
+ * unchanged, with the group-level numbers stripped. Combine with
+ * previewAudienceBase via combinePreviewParts.
+ */
+export async function previewAudienceAudiencePart(
+  input: AudiencePreviewInput,
+  // For scripts/verify-preview-parity.ts only, as on previewAudience.
+  runner?: Pick<typeof db, "transaction">,
+): Promise<AudiencePreviewAudiencePart> {
+  const allowed = new Set<string>(LIFECYCLE_CHIP_STATUSES);
+  const chips = [
+    ...new Set(
+      ((input.filters.lifecycle_statuses as string[] | undefined) ?? []).filter(
+        (c) => allowed.has(c),
+      ),
+    ),
+  ];
+  if (input.lifecycleRules !== true || !hasAnySource(input) || chips.length === 0)
+    return stripGroupLevel(await previewAudience(input, runner));
+  return previewAudienceNarrowed(input, chips, runner);
+}
+
+// ── Task 2 T3: the narrowed audience part (plan §2b) ─────────────────────────
+//
+// Today's preview drags every member of the selected groups through every
+// join and applies the chips last. This applies them FIRST: the candidates are
+// the members whose lifecycle status is a selected chip, materialised once
+// into a temp table and ANALYZEd so the planner sees real row counts (§10b —
+// set-op and anti-join estimates are what timed activation out in #250).
+//
+// Valid because every chip-dependent number requires the chip: is_eligible,
+// qualifies and the lifecycle inCohort all carry it. A non-chip contact cannot
+// change any number this part returns.
+//
+// The flags are built under the SAME column names as previewAudience's
+// `flagged` relation, and the aggregate is the SAME previewAggregateTail, so
+// the two paths cannot disagree about what a column means.
+//
+// Skips (plan F5), each provably empty over chip candidates:
+//   suppressed     — lifecycle_status = 'suppressed', never a chip.
+//   freeze_not_due — requires status 'freeze'; skipped unless Freeze is chosen.
+//   opt-in/clicker — feed only the LEGACY predicate.
+async function previewAudienceNarrowed(
+  input: AudiencePreviewInput,
+  chips: string[],
+  runner?: Pick<typeof db, "transaction">,
+): Promise<AudiencePreviewAudiencePart> {
+  const { orgId, filters } = input;
+  const cap = input.cap ?? null;
+  const excludeInUse = input.excludeInUse === true;
+  // The same offer-rule decisions as previewAudience, line for line.
+  const offerRulesOn =
+    input.excludePriorOffer === true && input.offerRulesEnabled === true;
+  const excludePriorOffer = input.excludePriorOffer === true && !offerRulesOn;
+  const offerExposureId =
+    excludePriorOffer && input.offerId != null ? input.offerId : null;
+  const allLayers = [
+    ...lifecycleExclusionLayers({ orgId, offerId: input.offerId ?? null }),
+    ...(offerRulesOn
+      ? offerRuleLayers({
+          orgId,
+          offerId: input.offerId ?? null,
+          currentCampaignId: -1,
+          cooldownDays: input.offerCooldownDays ?? 7,
+          limitTimes: input.offerLimitTimes ?? 5,
+        })
+      : []),
+  ];
+  const layers = allLayers.filter(
+    (l) =>
+      l.key !== "suppressed" &&
+      (l.key !== "freeze_not_due" || chips.includes("freeze")),
+  );
+  const exclusionTerm = layers.reduce(
+    (acc, l) =>
+      drizzleSql`${acc}
+          and not coalesce(q.${drizzleSql.raw(`is_${l.key}`)}, false)`,
+    drizzleSql``,
+  );
+  const carrierFilter = filters.carrier_filter ?? [];
+  const hasCarrierFilter = carrierFilter.length > 0;
+  const carrierMatchSql = hasCarrierFilter
+    ? drizzleSql`carrier_norm = ANY(${drizzleSql.raw(carrierArrayLiteral(expandCarrierSelection(carrierFilter)))})`
+    : drizzleSql`true`;
+  const { unionedWithSources, fromSegmentExpr, positiveExpr } =
+    await buildPreviewMembership(input, chips);
+  const dripPostureOn = await isDripPostureOn(orgId);
+
+  const rows = (await (runner ?? db).transaction(async (tx) => {
+    await tx.execute(
+      drizzleSql.raw(`set local statement_timeout = '${PREVIEW_STATEMENT_TIMEOUT}'`),
+    );
+    // The candidates: chip members of the membership, with their sources.
+    await tx.execute(drizzleSql`
+      create temp table pv_cand on commit drop as
+      select
+        s.contact_id,
+        s.segments_matched,
+        s.from_group,
+        s.from_exclude_segment,
+        c.lifecycle_status${hasCarrierFilter ? drizzleSql`,
+        c.carrier_norm` : drizzleSql``}
+      from (
+        select
+          contact_id,
+          count(distinct segment_ord) as segments_matched,
+          bool_or(from_group) as from_group,
+          bool_or(from_exclude_segment) as from_exclude_segment
+        from (${unionedWithSources}) u
+        group by contact_id
+      ) s
+      join contacts c
+        on c.id = s.contact_id
+        and c.org_id = ${orgId}::uuid
+        and c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chips))})
+    `);
+    await tx.execute(drizzleSql`analyze pv_cand`);
+    return await tx.execute(drizzleSql`
+    with iu_set as (${inUseSetBody(orgId, dripPostureOn)}
+    )${
+      offerExposureId != null
+        ? drizzleSql`,
+    oe_set as (
+      select distinct contact_id from offer_exposures
+      where org_id = ${orgId}::uuid and offer_id = ${offerExposureId}::int
+    )`
+        : drizzleSql``
+    }${lifecycleExclusionCtes(layers)},
+    flagged as (
+      select
+        s.contact_id,
+        ${fromSegmentExpr} as from_segment,
+        s.from_group,
+        s.from_exclude_segment,
+        exists (
+          select 1 from opt_outs oo
+          where oo.org_id = ${orgId}::uuid and oo.contact_id = s.contact_id
+        ) as has_opt_out,
+        false as has_opt_in,
+        false as has_clicker,
+        (iu_set.contact_id is not null) as is_in_use_elsewhere,
+        ${
+          offerExposureId != null
+            ? drizzleSql`(oe_set.contact_id is not null)`
+            : drizzleSql`false`
+        } as is_offer_exposed${hasCarrierFilter ? drizzleSql`,
+        s.carrier_norm` : drizzleSql``},
+        true as has_lifecycle,
+        s.lifecycle_status
+        ${lifecycleFlagCols(layers)}
+      from pv_cand s
+      left join iu_set on iu_set.contact_id = s.contact_id${
+        offerExposureId != null
+          ? drizzleSql`
+      left join oe_set on oe_set.contact_id = s.contact_id`
+          : drizzleSql``
+      }
+      ${lifecycleExclusionJoins("s", layers)}
+    ),
+    ${previewAggregateTail({
+      filters,
+      lifecycleRules: true,
+      excludeInUse,
+      excludePriorOffer,
+      exclusionTerm,
+      positiveExpr,
+      carrierMatchSql,
+      hasCarrierFilter,
+      lifecycleExclusions: layers,
+    })}
+  `);
+  })) as unknown as PreviewAggregateRow[];
+  const row = Array.isArray(rows) ? rows[0] : null;
+  return stripGroupLevel(mapPreviewRow(row, cap, true));
 }
 
 

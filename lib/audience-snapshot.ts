@@ -2334,6 +2334,46 @@ async function previewAudienceNarrowed(
       l.key !== "suppressed" &&
       (l.key !== "freeze_not_due" || chips.includes("freeze")),
   );
+  // T4: the two offer-rule layers keep their KEYS (the aggregate, the
+  // exclusion order and the buckets read is_offer_limit / is_offer_cooldown),
+  // but they are not built as two separate sets. One grouped read of the
+  // offer's contact_offer_campaigns rows, restricted to the candidates, yields
+  // count(*) and max(last_sent_at) together:
+  //   limit    — count(*) >= N            (the layer's HAVING, unchanged)
+  //   cooldown — max(last_sent_at) > now - Y days
+  //              ⟺ some row is inside the cooldown (the layer's EXISTS-style
+  //                DISTINCT, unchanged; the same strict `>`)
+  // The preview never has a current campaign (currentCampaignId -1), so there
+  // is no carve-out to reproduce. The send path's layer SQL is untouched.
+  const offerRuleKeys = new Set(["offer_limit", "offer_cooldown"]);
+  const offerRulesHere = offerRulesOn && input.offerId != null;
+  const setLayers = layers.filter((l) => !offerRuleKeys.has(l.key));
+  const offerStatsCte = offerRulesHere
+    ? drizzleSql`,
+    lx_offer_stats as (
+      select
+        coc.contact_id,
+        count(*) as n,
+        max(coc.last_sent_at) as last_sent_at
+      from contact_offer_campaigns coc
+      where coc.org_id = ${orgId}::uuid
+        and coc.offer_id = ${input.offerId}::int
+        and coc.contact_id in (select contact_id from pv_cand)
+      group by coc.contact_id
+    )`
+    : drizzleSql``;
+  const offerStatsCols = offerRulesHere
+    ? drizzleSql`,
+        coalesce(os.n >= ${input.offerLimitTimes ?? 5}::int, false) as is_offer_limit,
+        coalesce(
+          os.last_sent_at > now() - make_interval(days => ${input.offerCooldownDays ?? 7}::int),
+          false
+        ) as is_offer_cooldown`
+    : drizzleSql``;
+  const offerStatsJoin = offerRulesHere
+    ? drizzleSql`
+      left join lx_offer_stats os on os.contact_id = s.contact_id`
+    : drizzleSql``;
   const exclusionTerm = layers.reduce(
     (acc, l) =>
       drizzleSql`${acc}
@@ -2388,7 +2428,7 @@ async function previewAudienceNarrowed(
       where org_id = ${orgId}::uuid and offer_id = ${offerExposureId}::int
     )`
         : drizzleSql``
-    }${lifecycleExclusionCtes(layers)},
+    }${lifecycleExclusionCtes(setLayers)}${offerStatsCte},
     flagged as (
       select
         s.contact_id,
@@ -2410,7 +2450,7 @@ async function previewAudienceNarrowed(
         s.carrier_norm` : drizzleSql``},
         true as has_lifecycle,
         s.lifecycle_status
-        ${lifecycleFlagCols(layers)}
+        ${lifecycleFlagCols(setLayers)}${offerStatsCols}
       from pv_cand s
       left join iu_set on iu_set.contact_id = s.contact_id${
         offerExposureId != null
@@ -2418,7 +2458,7 @@ async function previewAudienceNarrowed(
       left join oe_set on oe_set.contact_id = s.contact_id`
           : drizzleSql``
       }
-      ${lifecycleExclusionJoins("s", layers)}
+      ${lifecycleExclusionJoins("s", setLayers)}${offerStatsJoin}
     ),
     ${previewAggregateTail({
       filters,

@@ -31,8 +31,13 @@ async function main() {
   const { fictionalPhones, refuseIfPhonesInUse } =
     await import("./_fictional-phones");
   const { db } = await import("@/db/client");
-  const { previewAudience, previewAudienceBase, combinePreviewParts } =
-    await import("@/lib/audience-snapshot");
+  const {
+    previewAudience,
+    previewAudienceBase,
+    previewAudienceAudiencePart,
+    combinePreviewParts,
+  } = await import("@/lib/audience-snapshot");
+  const { PgDialect } = await import("drizzle-orm/pg-core");
   const { referencePreviewAudience } = await import(
     "@/lib/audience-preview-reference"
   );
@@ -474,6 +479,162 @@ async function main() {
       refused = true;
     }
     bar("F22 a legacy base and a lifecycle audience are never merged", refused);
+
+    // ── PART F4 (Task 2 T3, bar 2): the NARROWED audience part ────────────
+    // F23 base + narrowed audience = the reference, across chips, in-use, the
+    //     offer rules, the ever-got-this-offer rule, a carrier filter, zero
+    //     chips and no source. The audience part carries no group-level
+    //     numbers at all, so nothing can pass by coincidence.
+    // F24 the narrowed path really ran (its temp table is in the SQL), so F23
+    //     is not passing on the fallback.
+    // F25 STRUCTURAL skip: without the Freeze chip no statement mentions
+    //     contact_engagement or the suppressed layer. A results-only bar
+    //     cannot see a skipped join (lesson from #250).
+    // F26 BEHAVIOURAL: with Freeze chosen, the resting contact is excluded.
+    console.log("\nPART F4 — the narrowed audience part (Task 2 T3)");
+    const narrowedInputs: { label: string; input: Parameters<typeof previewAudience>[0] }[] = [];
+    const chipSets3: string[][] = [
+      ["new", "warm", "cold", "freeze"],
+      ["hot"],
+      ["hot", "warm"],
+      ["cold"],
+      ["freeze"],
+      ["new", "hot", "warm", "cold", "freeze"],
+      [],
+    ];
+    for (const chips of chipSets3)
+      for (const excludeInUse of [false, true])
+        narrowedInputs.push({
+          label: `[${chips}] in_use=${excludeInUse}`,
+          input: {
+            orgId,
+            lifecycleRules: true,
+            segmentIds: [segId],
+            filters: { lifecycle_statuses: chips },
+            offerId: offer.id,
+            excludeInUse,
+          },
+        });
+    const everyChip = ["new", "hot", "warm", "cold", "freeze"];
+    narrowedInputs.push(
+      {
+        label: "offer rules on (cooldown 30 / limit 1)",
+        input: {
+          orgId,
+          lifecycleRules: true,
+          segmentIds: [segId],
+          filters: { lifecycle_statuses: everyChip },
+          offerId: offer.id,
+          excludePriorOffer: true,
+          offerRulesEnabled: true,
+          offerCooldownDays: 30,
+          offerLimitTimes: 1,
+        },
+      },
+      {
+        label: "ever-got-this-offer rule",
+        input: {
+          orgId,
+          lifecycleRules: true,
+          segmentIds: [segId],
+          filters: { lifecycle_statuses: everyChip },
+          offerId: offer.id,
+          excludePriorOffer: true,
+          offerRulesEnabled: false,
+        },
+      },
+      {
+        label: "carrier filter",
+        input: {
+          orgId,
+          lifecycleRules: true,
+          segmentIds: [segId],
+          filters: { lifecycle_statuses: everyChip, carrier_filter: ["AT&T", "Verizon"] },
+          offerId: offer.id,
+        },
+      },
+      {
+        label: "no source",
+        input: {
+          orgId,
+          lifecycleRules: true,
+          segmentIds: [],
+          filters: { lifecycle_statuses: everyChip },
+          offerId: offer.id,
+        },
+      },
+    );
+    const narrowedMismatches: string[] = [];
+    for (const { label, input } of narrowedInputs) {
+      const combined = combinePreviewParts(
+        await previewAudienceBase(input),
+        await previewAudienceAudiencePart(input),
+        input.filters.lifecycle_statuses ?? [],
+      );
+      const d = leafDiff(combined, await referencePreviewAudience(input));
+      if (d.length) narrowedMismatches.push(`${label}: ${d.join(",")}`);
+    }
+    bar(
+      "F23 base + NARROWED audience = reference, every case",
+      narrowedMismatches.length === 0,
+      narrowedMismatches.join("; ") || `${narrowedInputs.length} cases, 0 differences`,
+    );
+
+    // Capture the emitted SQL without executing it.
+    const dialect = new PgDialect();
+    const captureSql = async (chips: string[]) => {
+      const texts: string[] = [];
+      const capture = {
+        transaction: (async (fn: (tx: unknown) => Promise<unknown>) =>
+          fn({
+            execute: async (q: Parameters<typeof dialect.sqlToQuery>[0]) => {
+              texts.push(dialect.sqlToQuery(q).sql);
+              return [];
+            },
+          })) as never,
+      };
+      await previewAudienceAudiencePart(
+        {
+          orgId,
+          lifecycleRules: true,
+          segmentIds: [segId],
+          filters: { lifecycle_statuses: chips },
+          offerId: offer.id,
+        },
+        capture,
+      );
+      return texts.join(" ");
+    };
+    const hotSql = await captureSql(["hot", "warm", "cold", "new"]);
+    const freezeSql = await captureSql(["freeze"]);
+    bar(
+      "F24 the narrowed path ran (its candidate temp table is in the SQL)",
+      /create temp table pv_cand/.test(hotSql) && /create temp table pv_cand/.test(freezeSql),
+    );
+    bar(
+      "F25 without the Freeze chip, no statement touches contact_engagement or lx_suppressed",
+      !hotSql.includes("contact_engagement") && !hotSql.includes("lx_suppressed"),
+    );
+    bar(
+      "F25b with the Freeze chip, the freeze layer IS emitted (the skip is conditional)",
+      freezeSql.includes("contact_engagement"),
+    );
+    const freezeCombined = combinePreviewParts(
+      await previewAudienceBase({ orgId, lifecycleRules: true, segmentIds: [segId] }),
+      await previewAudienceAudiencePart({
+        orgId,
+        lifecycleRules: true,
+        segmentIds: [segId],
+        filters: { lifecycle_statuses: ["freeze"] },
+        offerId: offer.id,
+      }),
+      ["freeze"],
+    );
+    bar(
+      "F26 with Freeze chosen, the resting (not-due) freeze contact is excluded",
+      freezeCombined.lifecycle!.excluded.freeze_not_due === 1,
+      `freeze_not_due=${freezeCombined.lifecycle!.excluded.freeze_not_due}`,
+    );
 
     // ── PART F2: the CREATE-MODE preview (PR 4c fix) ──────────────────────
     // ⭐ The bug this guards: a campaign being CREATED has no row, so nothing

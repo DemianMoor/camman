@@ -107,6 +107,22 @@ While Task 2 rebuilds the campaign preview (plan: `docs/superpowers/plans/2026-0
 
 The reference and the harness helpers are deleted together with the kill switch once Task 2 is accepted.
 
+**Narrowed audience part (T3, 2026-10-01).** `previewAudienceAudiencePart()` returns every chip-dependent number. It carries none of the group-level ones, which come from the base.
+- **Path:** lifecycle campaigns with at least one valid chip take the narrowed path. Legacy, no-source and zero-chip previews fall back to today's single statement (group-level fields stripped).
+- **Narrowed:**
+  - membership is built with the chips applied **first**: the group branch is filtered by `lifecycle_status`, and the `is_not` universe is the chip set;
+  - the candidates go into a `pv_cand` temp table, which is ANALYZEd;
+  - flags are built under today's `flagged` column names, and the SAME `previewAggregateTail` runs.
+- **Skips (each provably empty over chip candidates):** `suppressed`; `freeze_not_due` unless Freeze is selected; opt-in/clicker flags (legacy-only).
+- **Why it's valid:** every chip-dependent number already requires the chip (`is_eligible`, `qualifies`, lifecycle `inCohort`).
+- **Bars F23–F26** (`test-lifecycle-preview-breakdown`):
+  - 18 cases (chips × in-use, offer rules, ever-got-offer, carrier, zero chips, no source) equal the reference;
+  - the temp table is in the emitted SQL;
+  - without Freeze, no statement mentions `contact_engagement` or `lx_suppressed`; with Freeze, the layer is present and the resting contact is excluded.
+  - Red-proved by two mutations (always skip Freeze; drop the candidates' chip filter).
+- **Parity harness:** it now runs base + audience on every production recipe. Its transactions are REPEATABLE READ read-write (temp tables), and each one checks via `pg_stat_xact_user_tables` that nothing but temp tables was written. The detector itself was red-proved with a rolled-back real update.
+- Not wired to the route or the form yet (T5).
+
 **Hotfix 2026-10-01 (temporary, until Task 2 T5/T6).** Real segment recipes take 40–100 s, so with the 30 s ceiling they always timed out. The operator saw "Could not preview audience — fix any issues above" and recreated the campaign.
 - **Ceiling:** `PREVIEW_STATEMENT_TIMEOUT` = 110 s, route `maxDuration` = 120 s. Both go back down after T5.
 - **Stacking guard, server:** a per-user transaction advisory lock (`pg_try_advisory_xact_lock(hashtext('audience-preview:<org>:<user>'))`). A concurrent second preview by the same user gets 409 `preview_busy` instead of another long query.

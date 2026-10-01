@@ -107,6 +107,15 @@ While Task 2 rebuilds the campaign preview (plan: `docs/superpowers/plans/2026-0
 
 The reference and the harness helpers are deleted together with the kill switch once Task 2 is accepted.
 
+**Hotfix 2026-10-01 (temporary, until Task 2 T5/T6).** Real segment recipes take 40–100 s, so with the 30 s ceiling they always timed out. The operator saw "Could not preview audience — fix any issues above" and recreated the campaign.
+- **Ceiling:** `PREVIEW_STATEMENT_TIMEOUT` = 110 s, route `maxDuration` = 120 s. Both go back down after T5.
+- **Stacking guard, server:** a per-user transaction advisory lock (`pg_try_advisory_xact_lock(hashtext('audience-preview:<org>:<user>'))`). A concurrent second preview by the same user gets 409 `preview_busy` instead of another long query.
+- **Stacking guard, client** (`components/campaigns/campaign-form-state.ts`): one request in flight per form. Edits made meanwhile trigger one follow-up with the latest values, instead of an abort that never stopped the database query.
+- **Retries:** one automatic retry after a timeout, server error, gateway timeout or dropped connection. A 409 is waited out (every 10 s, up to 12 times).
+- **No dead end:** the panel shows the server's own message plus a **Retry preview** button.
+- A failed preview never blocked saving a draft or activating; those depend only on name, brand, offer, groups and dates.
+- Tests: `scripts/test-preview-single-flight.ts` (real lock: busy/other user/released; route 409 then 200) and `scripts/test-preview-timeout-400.ts`.
+
 **Two parts (T2, 2026-10-01).** Only four preview numbers are group-level: `excluded_for_optout` and the lifecycle buckets `opted_out`, `suppressed` and `status_not_selected`.
 - `previewAudienceBase()` computes them from membership alone. Its input type has no filters, chips or offer, so it is chip-independent by construction. It returns a per-status histogram, so `status_not_selected` (the statuses not selected) is derived without a rerun.
 - `combinePreviewParts(base, audience, chips)` is the pure merge the client and the verifier both use.

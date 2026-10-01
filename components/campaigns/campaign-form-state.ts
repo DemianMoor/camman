@@ -541,94 +541,145 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const excludePriorOfferKey = watchedExcludePriorOffer ? "1" : "0";
   const offerKey = watchedOfferId ?? "";
 
-  useEffect(() => {
-    if (watchedSegments.length === 0 && watchedContactGroups.length === 0) {
-      setPreviewCount(null);
-      setPreviewTotalMatching(null);
-      setPreviewFromSegments(null);
-      setPreviewFromGroups(null);
-      setPreviewOverlap(null);
-      setPreviewExcludedBySegments(null);
-      setPreviewExcludedOptOut(null);
-      setPreviewInUseElsewhere(null);
-      setPreviewOfferExposed(null);
-      setPreviewCarrierRemoved({});
+  // ── The audience preview: single-flight, latest wins, one automatic retry ──
+  //
+  // ⚠️ HOTFIX 2026-10-01. The preview of a real segment recipe takes 40-100 s,
+  // so the old design (abort the superseded request on every edit) did not
+  // help: aborting the HTTP request never cancels the Postgres query behind it,
+  // so every edit left another long query burning. Now:
+  //   * at most ONE preview request per form is in flight;
+  //   * edits made while it runs mark it stale, and when it returns its result
+  //     is dropped and ONE new request runs with the latest values;
+  //   * a timeout, a server error, a gateway timeout or a dropped connection is
+  //     retried automatically once; "still running" (409, the server's
+  //     per-user single-flight lock) is waited out and retried;
+  //   * retryPreview() re-runs it on demand, so a failed preview is never a
+  //     dead end that needs the campaign recreated.
+  // Superseded by T5/T6 (two-part preview, database-side cancellation).
+  const previewBodyRef = useRef<string | null>(null);
+  const previewInFlightRef = useRef(false);
+  const previewStaleRef = useRef(false);
+  const previewUnmountedRef = useRef(false);
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const previewRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const clearPreviewNumbers = () => {
+    setPreviewCount(null);
+    setPreviewTotalMatching(null);
+    setPreviewFromSegments(null);
+    setPreviewFromGroups(null);
+    setPreviewOverlap(null);
+    setPreviewExcludedBySegments(null);
+    setPreviewExcludedOptOut(null);
+    setPreviewInUseElsewhere(null);
+    setPreviewOfferExposed(null);
+    setPreviewCarrierRemoved({});
+  };
+  const runPreviewRef = useRef<(attempt: number) => Promise<void>>(
+    async () => {},
+  );
+  runPreviewRef.current = async (attempt: number) => {
+    const body = previewBodyRef.current;
+    if (!body) {
+      setPreviewLoading(false);
+      return;
+    }
+    if (previewInFlightRef.current) {
+      previewStaleRef.current = true;
+      return;
+    }
+    if (previewRetryTimerRef.current) {
+      clearTimeout(previewRetryTimerRef.current);
+      previewRetryTimerRef.current = null;
+    }
+    previewInFlightRef.current = true;
+    previewStaleRef.current = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    const ac = new AbortController();
+    previewAbortRef.current = ac;
+    const result = await previewApi.execute("/api/campaigns/audience-preview", {
+      method: "POST",
+      // Aborted only when the form unmounts — never because an input changed.
+      signal: ac.signal,
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    previewInFlightRef.current = false;
+    previewAbortRef.current = null;
+    if (previewUnmountedRef.current) return;
+    // Superseded while it ran: drop this answer, ask again with the latest.
+    if (previewStaleRef.current || body !== previewBodyRef.current) {
+      void runPreviewRef.current(0);
+      return;
+    }
+    if (result.ok) {
+      setPreviewLoading(false);
+      setPreviewCount(result.data.count);
+      setPreviewTotalMatching(result.data.total_matching);
+      setPreviewFromSegments(result.data.from_segments);
+      setPreviewFromGroups(result.data.from_groups);
+      setPreviewOverlap(result.data.overlap);
+      setPreviewExcludedBySegments(result.data.excluded_by_segments);
+      setPreviewExcludedOptOut(result.data.excluded_for_optout);
+      setPreviewInUseElsewhere(result.data.in_use_in_other_campaigns);
+      setPreviewOfferExposed(result.data.got_offer_in_prior_campaign);
+      setPreviewCarrierRemoved(result.data.carrier_removed ?? {});
       setPreviewError(null);
       return;
     }
-    let cancelled = false;
-    // ⚠️ THE SUPERSEDED REQUEST IS ABORTED, not merely ignored.
-    //
-    // `cancelled` alone only discards the RESULT: the HTTP request -- and the
-    // Postgres query behind it -- keep running to completion. The 400ms
-    // debounce stops a burst per keystroke, but it does nothing once a request
-    // is in flight, and this preview takes tens of seconds over big contact
-    // groups. Editing the form a few times stacked them up: measured on
-    // production 2026-09-30, FOUR concurrent preview queries, the oldest 49s,
-    // each scanning hundreds of thousands of rows. They starve each other, so
-    // every one of them gets slower, and the newest -- the only one anybody is
-    // waiting for -- is the one that blows the route's 60s limit.
-    //
-    // Aborting closes the connection so only the newest preview is in flight.
-    const ac = new AbortController();
-    const t = setTimeout(async () => {
-      setPreviewLoading(true);
-      const result = await previewApi.execute(
-        "/api/campaigns/audience-preview",
-        {
-          method: "POST",
-          signal: ac.signal,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            audience_segment_ids: watchedSegments,
-            audience_exclude_segment_ids: watchedExcludeSegments,
-            audience_contact_group_ids: watchedContactGroups,
-            audience_filters: watchedFilters,
-            audience_cap: watchedCap,
-            exclude_in_use_contacts: watchedExcludeInUse,
-            exclude_prior_offer_contacts: watchedExcludePriorOffer,
-            offer_cooldown_days: form.getValues("offer_cooldown_days"),
-            offer_limit_times: form.getValues("offer_limit_times"),
-            offer_id: watchedOfferId,
-          }),
+    const reason = (result.details as { reason?: string } | undefined)?.reason;
+    const busy = result.status === 409 && reason === "preview_busy";
+    const transient =
+      result.status === 0 ||
+      result.status >= 500 ||
+      reason === "preview_timeout";
+    if ((busy && attempt < 12) || (transient && attempt < 1)) {
+      previewRetryTimerRef.current = setTimeout(
+        () => {
+          previewRetryTimerRef.current = null;
+          void runPreviewRef.current(attempt + 1);
         },
+        busy ? 10_000 : 2_000,
       );
-      if (cancelled) return;
-      setPreviewLoading(false);
-      if (result.ok) {
-        setPreviewCount(result.data.count);
-        setPreviewTotalMatching(result.data.total_matching);
-        setPreviewFromSegments(result.data.from_segments);
-        setPreviewFromGroups(result.data.from_groups);
-        setPreviewOverlap(result.data.overlap);
-        setPreviewExcludedBySegments(result.data.excluded_by_segments);
-        setPreviewExcludedOptOut(result.data.excluded_for_optout);
-        setPreviewInUseElsewhere(result.data.in_use_in_other_campaigns);
-        setPreviewOfferExposed(result.data.got_offer_in_prior_campaign);
-        setPreviewCarrierRemoved(result.data.carrier_removed ?? {});
-        setPreviewError(null);
-      } else {
-        setPreviewError(result.error);
-        setPreviewCount(null);
-        setPreviewTotalMatching(null);
-        setPreviewFromSegments(null);
-        setPreviewFromGroups(null);
-        setPreviewOverlap(null);
-        setPreviewExcludedBySegments(null);
-        setPreviewExcludedOptOut(null);
-        setPreviewInUseElsewhere(null);
-        setPreviewOfferExposed(null);
-        setPreviewCarrierRemoved({});
-      }
-    }, 400);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-      // Fires for an in-flight request only; aborting a settled one is a no-op.
-      // The `cancelled` guard above already returns before any setState, so the
-      // AbortError surfaces nowhere -- no spurious "preview failed" on a keystroke.
-      ac.abort();
-    };
+      return;
+    }
+    setPreviewLoading(false);
+    clearPreviewNumbers();
+    setPreviewError(result.error);
+  };
+  // Re-run the preview on demand (the "Retry preview" button).
+  const retryPreview = () => {
+    void runPreviewRef.current(0);
+  };
+
+  useEffect(() => {
+    if (watchedSegments.length === 0 && watchedContactGroups.length === 0) {
+      previewBodyRef.current = null;
+      clearPreviewNumbers();
+      setPreviewError(null);
+      return;
+    }
+    previewBodyRef.current = JSON.stringify({
+      audience_segment_ids: watchedSegments,
+      audience_exclude_segment_ids: watchedExcludeSegments,
+      audience_contact_group_ids: watchedContactGroups,
+      audience_filters: watchedFilters,
+      audience_cap: watchedCap,
+      exclude_in_use_contacts: watchedExcludeInUse,
+      exclude_prior_offer_contacts: watchedExcludePriorOffer,
+      offer_cooldown_days: form.getValues("offer_cooldown_days"),
+      offer_limit_times: form.getValues("offer_limit_times"),
+      offer_id: watchedOfferId,
+    });
+    // A pending automatic retry is for values that no longer apply.
+    if (previewRetryTimerRef.current) {
+      clearTimeout(previewRetryTimerRef.current);
+      previewRetryTimerRef.current = null;
+    }
+    const t = setTimeout(() => void runPreviewRef.current(0), 500);
+    return () => clearTimeout(t);
     // segmentsKey / groupsKey / filtersKey / capKey / excludeInUseKey /
     // excludePriorOfferKey / offerKey collapse identity to stable primitives
     // so this only re-runs on real change.
@@ -644,6 +695,18 @@ export function useCampaignFormState(props: CampaignFormProps) {
     offerKey,
     previewApi.execute,
   ]);
+
+  useEffect(() => {
+    // Reset on (re)mount: React StrictMode mounts, unmounts and remounts in
+    // dev, and a flag left true by the simulated unmount dropped every later
+    // result, leaving the panel on "Calculating…" for good.
+    previewUnmountedRef.current = false;
+    return () => {
+      previewUnmountedRef.current = true;
+      previewAbortRef.current?.abort();
+      if (previewRetryTimerRef.current) clearTimeout(previewRetryTimerRef.current);
+    };
+  }, []);
 
   // Date sanity (purely client-side hint; the server doesn't refuse
   // end<start because either field can be null).
@@ -891,6 +954,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewCarrierRemoved,
     previewError,
     previewLoading,
+    retryPreview,
     hasAudienceSource,
     dateError,
     draftReady,

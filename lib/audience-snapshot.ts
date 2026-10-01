@@ -1590,12 +1590,32 @@ async function buildPreviewMembership(input: PreviewMembershipInput): Promise<{
 // via buildQualifierFromRelation (against a materialized temp table) for the
 // actual insert. The preview takes a different shape because it aggregates
 // instead.
+// ⚠️ HOTFIX 2026-10-01, TEMPORARY — back down after Task 2 T5. The ceiling was
+// 30 s (#248), but real segment recipes take 40–100 s (window 2026-10-01:
+// campaign 1521's recipe 39–87 s, 1519's 54–101 s), so they ALWAYS timed out and
+// the operator could not preview at all. 110 s fits the slowest measured recipe
+// inside the route's maxDuration of 120 s. Stacking is bounded by the per-user
+// single-flight lock below and the client's one-in-flight rule (until T6).
+export const PREVIEW_STATEMENT_TIMEOUT = "110s";
+
+/** Another preview by the same user holds the single-flight lock. */
+export class PreviewBusyError extends Error {
+  constructor() {
+    super("A previous audience preview for this user is still running");
+    this.name = "PreviewBusyError";
+  }
+}
+
 export async function previewAudience(
   input: AudiencePreviewInput,
   // Optional, for scripts/verify-preview-parity.ts only: lets the verifier run
   // this and the frozen reference inside ONE read-only REPEATABLE READ
   // transaction, so both read the same snapshot. The route never passes it.
   runner?: Pick<typeof db, "transaction">,
+  // Hotfix 2026-10-01 (until T6): one running preview per user. The route
+  // passes `${orgId}:${userId}`; a second concurrent preview from the same user
+  // throws PreviewBusyError instead of stacking another long query.
+  opts?: { singleFlightKey?: string },
 ): Promise<AudiencePreviewResult> {
   const cap = input.cap ?? null;
   if (!hasAnySource(input)) {
@@ -1742,7 +1762,20 @@ export async function previewAudience(
     // superseded requests; this is the backstop for everything else -- a
     // bookmarked tab, a retry, a second operator on the same groups. Postgres
     // raises 57014, which the route maps to a sentence the operator can act on.
-    await tx.execute(drizzleSql`set local statement_timeout = '30s'`);
+    await tx.execute(
+      drizzleSql.raw(`set local statement_timeout = '${PREVIEW_STATEMENT_TIMEOUT}'`),
+    );
+    if (opts?.singleFlightKey) {
+      // Transaction-scoped, so safe through the transaction pooler (the same
+      // pattern as lib/links/geoip-cache.ts). Released at commit/rollback,
+      // including when the statement times out.
+      const [lock] = (await tx.execute(drizzleSql`
+        select pg_try_advisory_xact_lock(
+          hashtext(${"audience-preview:" + opts.singleFlightKey})::int8
+        ) as ok
+      `)) as unknown as { ok: boolean }[];
+      if (!lock?.ok) throw new PreviewBusyError();
+    }
     return await tx.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
     sources as (
@@ -1976,7 +2009,9 @@ export async function previewAudienceBase(
 
   const rows = (await (runner ?? db).transaction(async (tx) => {
     // The same ceiling as the full preview, for the same reason.
-    await tx.execute(drizzleSql`set local statement_timeout = '30s'`);
+    await tx.execute(
+      drizzleSql.raw(`set local statement_timeout = '${PREVIEW_STATEMENT_TIMEOUT}'`),
+    );
     return await tx.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
     sources as (

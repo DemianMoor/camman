@@ -6,6 +6,7 @@ import { contact_groups, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { newCampaignUsesLifecycleRules } from "@/lib/engagement/lifecycle-gate";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { previewTimeoutResponse } from "@/lib/api/preview-timeout";
 import { referencePreviewAudience } from "@/lib/audience-preview-reference";
 import { previewAudience } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
@@ -157,14 +158,9 @@ export async function POST(req: NextRequest) {
       offerId: parsed.data.offer_id ?? null,
     });
   } catch (e) {
-    if ((e as { code?: string })?.code === "57014") {
-      return apiError(
-        400,
-        "Audience preview timed out — narrow the selection (fewer contact groups, or add a status filter) and try again.",
-        API_ERROR_CODES.VALIDATION,
-        { reason: "preview_timeout" },
-      );
-    }
+    // Via the cause chain: the 57014 is on err.cause, not err (869faaa3v).
+    const timeout = previewTimeoutResponse(e);
+    if (timeout) return timeout;
     throw e;
   }
   return NextResponse.json(result, {

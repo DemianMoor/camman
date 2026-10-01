@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { SANDBOX_PHONE_NOTE } from "@/lib/intake/api-contract";
 import { LEAD_FIELDS, MAX_LEADS_PER_CALL } from "@/lib/intake/fields";
 
 // Generates docs/partners/lead-intake.md FROM lib/intake/fields.ts.
@@ -145,6 +146,8 @@ Every new key starts in **sandbox**. Sandbox leads are stored and clearly
 flagged, but are never messaged and are excluded from reporting. Use it to prove
 your integration end to end: you will see real ids, real duplicate detection and
 real validation errors, with no possibility of a message going out.
+
+> **Note:** ${SANDBOX_PHONE_NOTE}
 
 When you are ready, we switch the key live. **Nothing about your request
 changes** — same URL, same credentials, same payload.

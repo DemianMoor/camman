@@ -8,6 +8,7 @@ import {
   ENDPOINT_PATH,
   EXAMPLE_202_RESPONSE,
   RESPONSE_CODES,
+  SANDBOX_PHONE_NOTE,
   SANDBOX_STEPS,
   exampleBatch,
   exampleLead,
@@ -400,8 +401,13 @@ Retry-After: 37
         <Section id="sandbox" title="Sandbox">
           <p className="text-sm leading-relaxed">
             New keys are issued in sandbox mode. Sandbox leads are stored and flagged, are
-            never messaged, and are excluded from reporting. Lead ids, duplicate detection
-            and validation behave identically to a live key.
+            never messaged, and are excluded from reporting. Lead ids and duplicate
+            detection behave identically to a live key.
+          </p>
+          {/* The one documented sandbox/live difference. Rendered from the shared
+              note so this page and the generated markdown cannot disagree. */}
+          <p className="mt-3 rounded-md border-l-2 border-amber-500 bg-amber-500/5 p-3 text-sm leading-relaxed">
+            <strong>Note:</strong> {SANDBOX_PHONE_NOTE}
           </p>
           <ol className="mt-4 space-y-3 text-sm leading-relaxed">
             {SANDBOX_STEPS.map((s, i) => (

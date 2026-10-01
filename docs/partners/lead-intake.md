@@ -123,6 +123,8 @@ flagged, but are never messaged and are excluded from reporting. Use it to prove
 your integration end to end: you will see real ids, real duplicate detection and
 real validation errors, with no possibility of a message going out.
 
+> **Note:** Phone validation in sandbox checks format only: a well-formed number is accepted even if its area code is not a real one, so test records such as +1 555 555 0100 work. Length and structure are still enforced, and a malformed number is still rejected. A live key requires a real, assigned number — switch to genuine test numbers before activation.
+
 When you are ready, we switch the key live. **Nothing about your request
 changes** — same URL, same credentials, same payload.
 

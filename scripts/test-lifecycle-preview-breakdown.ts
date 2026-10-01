@@ -31,7 +31,8 @@ async function main() {
   const { fictionalPhones, refuseIfPhonesInUse } =
     await import("./_fictional-phones");
   const { db } = await import("@/db/client");
-  const { previewAudience } = await import("@/lib/audience-snapshot");
+  const { previewAudience, previewAudienceBase, combinePreviewParts } =
+    await import("@/lib/audience-snapshot");
   const { referencePreviewAudience } = await import(
     "@/lib/audience-preview-reference"
   );
@@ -345,6 +346,134 @@ async function main() {
           : `threw: ${(z.cause as Error | undefined)?.message ?? z.message.slice(0, 80)}`,
       );
     }
+
+    // ── PART F3 (Task 2, bar 1): base + audience parts = the single query ───
+    // ⭐ The base part is computed ONCE and reused for every chip set. That is
+    // the whole point of the split (it reruns only when membership changes),
+    // so the bar must prove a stale-chips base still combines correctly.
+    // ⭐ Each audience part is POISONED before combining: its group-level
+    // fields are set to -1. In T2 the audience part is still the full query and
+    // carries correct group-level numbers itself, so without the poison a
+    // combine that ignored the base would pass.
+    console.log("\nPART F3 — base + audience = the single-query preview (Task 2)");
+    const leafDiff = (a: unknown, b: unknown): string[] => {
+      const flat = (o: unknown, path = "", out = new Map<string, unknown>()) => {
+        if (o !== null && typeof o === "object")
+          for (const k of Object.keys(o as object))
+            flat((o as Record<string, unknown>)[k], path ? `${path}.${k}` : k, out);
+        else out.set(path, o);
+        return out;
+      };
+      const fa = flat(a);
+      const fb = flat(b);
+      return [...new Set([...fa.keys(), ...fb.keys()])].filter(
+        (k) => fa.get(k) !== fb.get(k),
+      );
+    };
+    const poison = <T,>(r: T): T => {
+      const c = JSON.parse(JSON.stringify(r));
+      c.excluded_for_optout = -1;
+      if (c.lifecycle) {
+        c.lifecycle.excluded.opted_out = -1;
+        c.lifecycle.excluded.suppressed = -1;
+        c.lifecycle.excluded.status_not_selected = -1;
+      }
+      return c;
+    };
+    const basePart = await previewAudienceBase({
+      orgId,
+      lifecycleRules: true,
+      segmentIds: [segId],
+    });
+    const chipSets: string[][] = [
+      ["new", "warm", "cold", "freeze"],
+      ["hot"],
+      ["hot", "warm"],
+      ["cold"],
+      [],
+      ["new", "hot", "warm", "cold", "freeze"],
+    ];
+    let compared = 0;
+    const mismatches: string[] = [];
+    for (const chips of chipSets)
+      for (const excludeInUse of [false, true]) {
+        const input = {
+          orgId,
+          lifecycleRules: true,
+          segmentIds: [segId],
+          filters: { lifecycle_statuses: chips },
+          offerId: offer.id,
+          excludeInUse,
+        };
+        const combined = combinePreviewParts(
+          basePart,
+          poison(await previewAudience(input)),
+          chips,
+        );
+        const d = leafDiff(combined, await referencePreviewAudience(input));
+        compared++;
+        if (d.length) mismatches.push(`[${chips}] in_use=${excludeInUse}: ${d.join(",")}`);
+      }
+    bar(
+      "F19 base (once) + poisoned audience = reference, every chip set",
+      compared === 12 && mismatches.length === 0,
+      mismatches.join("; ") || `${compared} combinations, 0 differences`,
+    );
+    // Red proof: the base is really used — one unit off shows up.
+    const offBase = {
+      ...basePart,
+      lifecycle: { ...basePart.lifecycle!, opted_out: basePart.lifecycle!.opted_out + 1 },
+    };
+    const redInput = {
+      orgId,
+      lifecycleRules: true,
+      segmentIds: [segId],
+      filters: { lifecycle_statuses: ["hot"] },
+      offerId: offer.id,
+      excludeInUse: false,
+    };
+    const redDiff = leafDiff(
+      combinePreviewParts(offBase, await previewAudience(redInput), ["hot"]),
+      await referencePreviewAudience(redInput),
+    );
+    bar(
+      "F20 a base one unit off is caught, on exactly that field",
+      redDiff.length === 1 && redDiff[0] === "lifecycle.excluded.opted_out",
+      redDiff.join(",") || "NOT caught",
+    );
+    // Legacy: the base carries only excluded_for_optout, and must still match.
+    const legacyInput = {
+      orgId,
+      lifecycleRules: false,
+      segmentIds: [segId],
+      filters: { include_no_status: true },
+      offerId: offer.id,
+    };
+    const legacyDiff = leafDiff(
+      combinePreviewParts(
+        await previewAudienceBase({ orgId, lifecycleRules: false, segmentIds: [segId] }),
+        poison(await previewAudience(legacyInput)),
+        null,
+      ),
+      await referencePreviewAudience(legacyInput),
+    );
+    bar(
+      "F21 legacy: base + poisoned audience = reference",
+      legacyDiff.length === 0,
+      legacyDiff.join(",") || "0 differences",
+    );
+    // Mixing a legacy base with a lifecycle audience must refuse, not merge.
+    let refused = false;
+    try {
+      combinePreviewParts(
+        { excluded_for_optout: 0 },
+        await previewAudience(redInput),
+        ["hot"],
+      );
+    } catch {
+      refused = true;
+    }
+    bar("F22 a legacy base and a lifecycle audience are never merged", refused);
 
     // ── PART F2: the CREATE-MODE preview (PR 4c fix) ──────────────────────
     // ⭐ The bug this guards: a campaign being CREATED has no row, so nothing

@@ -1466,6 +1466,118 @@ export async function computeLaneAudienceCountsBatch(
   return new Map(rows.map((r) => [Number(r.stage_id), Number(r.count)]));
 }
 
+// The campaign preview's MEMBERSHIP: the include segments, the contact groups
+// and the exclude segments, as tagged branches, plus the two expressions that
+// turn them into "from segments" and "in the positive base". Shared by
+// previewAudience and previewAudienceBase (Task 2) so the two parts of a
+// preview cannot disagree about who is a member. The body is the block that
+// lived inline in previewAudience, moved verbatim.
+//
+// Aliases are part of the contract: fromSegmentExpr reads `s.` (the grouped
+// sources relation) and positiveExpr reads `q.` (the flagged relation).
+export type PreviewMembershipInput = Pick<
+  AudiencePreviewInput,
+  "orgId" | "segmentIds" | "excludeSegmentIds" | "contactGroupIds"
+>;
+
+async function buildPreviewMembership(input: PreviewMembershipInput): Promise<{
+  unionedWithSources: SQL;
+  fromSegmentExpr: SQL;
+  positiveExpr: SQL;
+}> {
+  const { orgId, segmentIds } = input;
+  const excludeSegmentIds = input.excludeSegmentIds ?? [];
+  const contactGroupIds = input.contactGroupIds ?? [];
+  // When BOTH dimensions are selected the audience is their INTERSECTION:
+  // a contact must be in EVERY selected segment AND in a selected group. With
+  // only one dimension populated, that side stands alone (no intersection).
+  const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
+
+  // Group side, built first so it can double as the is_not universe
+  // restriction for the segment evaluation when both dimensions are present
+  // (see buildSegmentAudienceClause). This is the key perf lever: it keeps a
+  // near-universal `is_not` rule from materializing the entire contacts table
+  // before the intersection narrows it to the group.
+  const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
+  const restrictUniverse = bothSides ? groupClause! : undefined;
+
+  // Per-source clauses tagged with segment_ord / from_group /
+  // from_exclude_segment markers so the aggregate query can attribute each
+  // contact to a source and apply the include/exclude membership rule. UNION
+  // ALL because the GROUP BY downstream dedupes.
+  //
+  // Each include-segment branch carries its ORDINAL rather than a boolean:
+  // segments AND together, so the membership test is "matched every selected
+  // segment", which needs a distinct count, not a BOOL_OR. Group and
+  // exclude branches carry a NULL ordinal so they never inflate that count
+  // (count(distinct …) ignores NULLs).
+  const perSegmentClauses = await Promise.all(
+    segmentIds.map((id) =>
+      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+    ),
+  );
+  const segmentBranches = perSegmentClauses.map(
+    (clause, i) => drizzleSql`
+      SELECT contact_id, ${i}::int AS segment_ord, false::boolean AS from_group, false::boolean AS from_exclude_segment
+      FROM (${clause}) seg_inner
+    `,
+  );
+  const groupBranches = groupClause
+    ? [
+        drizzleSql`
+          SELECT contact_id, null::int AS segment_ord, true::boolean AS from_group, false::boolean AS from_exclude_segment
+          FROM (${groupClause}) grp_inner
+        `,
+      ]
+    : [];
+  // Exclude-mode segments (migration 0114). Restricted to the group universe
+  // when a group is present (final ⊆ group). Tagged from_exclude_segment=true.
+  const perExcludeClauses = await Promise.all(
+    excludeSegmentIds.map((id) =>
+      buildSegmentAudienceClause(
+        id,
+        orgId,
+        contactGroupIds.length > 0 ? groupClause! : undefined,
+      ),
+    ),
+  );
+  const excludeBranches = perExcludeClauses.map(
+    (clause) => drizzleSql`
+      SELECT contact_id, null::int AS segment_ord, false::boolean AS from_group, true::boolean AS from_exclude_segment
+      FROM (${clause}) exc_inner
+    `,
+  );
+  const allBranches = [
+    ...segmentBranches,
+    ...groupBranches,
+    ...excludeBranches,
+  ];
+  const unionedWithSources = allBranches.reduce((acc, branch, i) =>
+    i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
+  );
+
+  // Positive-base membership expression, resolved from which dimensions are
+  // populated: include ∩ group when both, else whichever side is present.
+  const hasInc = segmentIds.length > 0;
+  const hasGrp = contactGroupIds.length > 0;
+  // Segments AND together: a contact counts as "from segments" only when it
+  // matched EVERY selected segment. This is the preview-side mirror of
+  // buildAudienceSourceClause's INTERSECT chain — the two MUST agree or the
+  // preview stops predicting what activation actually snapshots.
+  const fromSegmentExpr = hasInc
+    ? drizzleSql`(s.segments_matched = ${segmentIds.length}::int)`
+    : drizzleSql`false`;
+  const positiveExpr =
+    hasInc && hasGrp
+      ? drizzleSql`(q.from_segment and q.from_group)`
+      : hasInc
+        ? drizzleSql`q.from_segment`
+        : hasGrp
+          ? drizzleSql`q.from_group`
+          : drizzleSql`false`;
+  return { unionedWithSources, fromSegmentExpr, positiveExpr };
+}
+
 // Compute the count + composition breakdown for the UI's audience
 // preview. No DB write.
 //
@@ -1601,93 +1713,13 @@ export async function previewAudience(
   const carrierCol = hasCarrierFilter
     ? drizzleSql`, pc.carrier_norm`
     : drizzleSql``;
-  // When BOTH dimensions are selected the audience is their INTERSECTION:
-  // a contact must be in EVERY selected segment AND in a selected group. With
-  // only one dimension populated, that side stands alone (no intersection).
-  const bothSides = segmentIds.length > 0 && contactGroupIds.length > 0;
-
-  // Group side, built first so it can double as the is_not universe
-  // restriction for the segment evaluation when both dimensions are present
-  // (see buildSegmentAudienceClause). This is the key perf lever: it keeps a
-  // near-universal `is_not` rule from materializing the entire contacts table
-  // before the intersection narrows it to the group.
-  const groupClause = buildGroupMembershipClause(orgId, contactGroupIds);
-  const restrictUniverse = bothSides ? groupClause! : undefined;
-
-  // Per-source clauses tagged with segment_ord / from_group /
-  // from_exclude_segment markers so the aggregate query can attribute each
-  // contact to a source and apply the include/exclude membership rule. UNION
-  // ALL because the GROUP BY downstream dedupes.
-  //
-  // Each include-segment branch carries its ORDINAL rather than a boolean:
-  // segments AND together, so the membership test is "matched every selected
-  // segment", which needs a distinct count, not a BOOL_OR. Group and
-  // exclude branches carry a NULL ordinal so they never inflate that count
-  // (count(distinct …) ignores NULLs).
-  const perSegmentClauses = await Promise.all(
-    segmentIds.map((id) =>
-      buildSegmentAudienceClause(id, orgId, restrictUniverse),
-    ),
-  );
-  const segmentBranches = perSegmentClauses.map(
-    (clause, i) => drizzleSql`
-      SELECT contact_id, ${i}::int AS segment_ord, false::boolean AS from_group, false::boolean AS from_exclude_segment
-      FROM (${clause}) seg_inner
-    `,
-  );
-  const groupBranches = groupClause
-    ? [
-        drizzleSql`
-          SELECT contact_id, null::int AS segment_ord, true::boolean AS from_group, false::boolean AS from_exclude_segment
-          FROM (${groupClause}) grp_inner
-        `,
-      ]
-    : [];
-  // Exclude-mode segments (migration 0114). Restricted to the group universe
-  // when a group is present (final ⊆ group). Tagged from_exclude_segment=true.
-  const perExcludeClauses = await Promise.all(
-    excludeSegmentIds.map((id) =>
-      buildSegmentAudienceClause(
-        id,
-        orgId,
-        contactGroupIds.length > 0 ? groupClause! : undefined,
-      ),
-    ),
-  );
-  const excludeBranches = perExcludeClauses.map(
-    (clause) => drizzleSql`
-      SELECT contact_id, null::int AS segment_ord, false::boolean AS from_group, true::boolean AS from_exclude_segment
-      FROM (${clause}) exc_inner
-    `,
-  );
-  const allBranches = [
-    ...segmentBranches,
-    ...groupBranches,
-    ...excludeBranches,
-  ];
-  const unionedWithSources = allBranches.reduce((acc, branch, i) =>
-    i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
-  );
-
-  // Positive-base membership expression, resolved from which dimensions are
-  // populated: include ∩ group when both, else whichever side is present.
-  const hasInc = segmentIds.length > 0;
-  const hasGrp = contactGroupIds.length > 0;
-  // Segments AND together: a contact counts as "from segments" only when it
-  // matched EVERY selected segment. This is the preview-side mirror of
-  // buildAudienceSourceClause's INTERSECT chain — the two MUST agree or the
-  // preview stops predicting what activation actually snapshots.
-  const fromSegmentExpr = hasInc
-    ? drizzleSql`(s.segments_matched = ${segmentIds.length}::int)`
-    : drizzleSql`false`;
-  const positiveExpr =
-    hasInc && hasGrp
-      ? drizzleSql`(q.from_segment and q.from_group)`
-      : hasInc
-        ? drizzleSql`q.from_segment`
-        : hasGrp
-          ? drizzleSql`q.from_group`
-          : drizzleSql`false`;
+  const { unionedWithSources, fromSegmentExpr, positiveExpr } =
+    await buildPreviewMembership({
+      orgId,
+      segmentIds,
+      excludeSegmentIds,
+      contactGroupIds,
+    });
 
   // Drip posture (G2/R14). Read once per call; false means the emitted
   // in-use CTE is byte-identical to pre-Phase-4.
@@ -1886,6 +1918,213 @@ export async function previewAudience(
       : {}),
   };
 }
+
+// ── Task 2: the preview in two parts ─────────────────────────────────────────
+// (plan docs/superpowers/plans/2026-09-30-audience-preview-task2-plan.md §2a)
+//
+// Only four numbers in a preview are GROUP-LEVEL — they depend on who is a
+// member, never on the chips: excluded_for_optout, and the lifecycle buckets
+// opted_out / suppressed / status_not_selected. status_not_selected does depend
+// on the chips, but only as "members whose status is not selected", so the
+// base part returns a per-status histogram and the chips are applied in
+// combinePreviewParts without a rerun.
+//
+// The base part reruns only when the membership changes (segments, groups,
+// exclude segments). Its input type has no filters, no chips and no offer, so it
+// is chip-independent BY CONSTRUCTION, not by convention.
+export type PreviewBaseInput = PreviewMembershipInput &
+  Pick<AudiencePreviewInput, "lifecycleRules">;
+
+export interface AudiencePreviewBase {
+  excluded_for_optout: number;
+  // Lifecycle campaigns only; absent for a legacy one, as on the full result.
+  lifecycle?: {
+    opted_out: number;
+    suppressed: number;
+    // Members neither opted out nor suppressed, by contacts.lifecycle_status.
+    status_histogram: Record<string, number>;
+  };
+}
+
+export async function previewAudienceBase(
+  input: PreviewBaseInput,
+  // For scripts/verify-preview-parity.ts only, as on previewAudience.
+  runner?: Pick<typeof db, "transaction">,
+): Promise<AudiencePreviewBase> {
+  const lifecycleRules = input.lifecycleRules === true;
+  const hasSource =
+    input.segmentIds.length > 0 || (input.contactGroupIds?.length ?? 0) > 0;
+  if (!hasSource) {
+    return {
+      excluded_for_optout: 0,
+      ...(lifecycleRules
+        ? { lifecycle: { opted_out: 0, suppressed: 0, status_histogram: {} } }
+        : {}),
+    };
+  }
+  const { orgId } = input;
+  const { unionedWithSources, fromSegmentExpr, positiveExpr } =
+    await buildPreviewMembership(input);
+  // The SAME suppressed fragment the full preview (and the send path) uses.
+  const suppressed = lifecycleRules
+    ? lifecycleExclusionLayers({ orgId, offerId: null }).find(
+        (l) => l.key === "suppressed",
+      )
+    : undefined;
+  if (lifecycleRules && !suppressed)
+    throw new Error("lifecycleExclusionLayers has no suppressed layer");
+
+  const rows = (await (runner ?? db).transaction(async (tx) => {
+    // The same ceiling as the full preview, for the same reason.
+    await tx.execute(drizzleSql`set local statement_timeout = '30s'`);
+    return await tx.execute(drizzleSql`
+    with unionized as (${unionedWithSources}),
+    sources as (
+      select
+        contact_id,
+        count(distinct segment_ord) as segments_matched,
+        bool_or(from_group) as from_group,
+        bool_or(from_exclude_segment) as from_exclude_segment
+      from unionized
+      group by contact_id
+    ),
+    oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid)${
+      suppressed
+        ? drizzleSql`,
+    lx_suppressed as (${suppressed.sql})`
+        : drizzleSql``
+    },
+    flagged as (
+      select
+        s.contact_id,
+        ${fromSegmentExpr} as from_segment,
+        s.from_group,
+        s.from_exclude_segment,
+        (oo_set.contact_id is not null) as has_opt_out${
+          suppressed
+            ? drizzleSql`,
+        (lx_suppressed.contact_id is not null) as is_suppressed,
+        c.lifecycle_status`
+            : drizzleSql``
+        }
+      from sources s
+      left join oo_set on oo_set.contact_id = s.contact_id${
+        suppressed
+          ? drizzleSql`
+      left join lx_suppressed on lx_suppressed.contact_id = s.contact_id
+      left join contacts c on c.id = s.contact_id and c.org_id = ${orgId}::uuid`
+          : drizzleSql``
+      }
+    ),
+    members as (
+      select
+        q.*,
+        ((${positiveExpr}) and not q.from_exclude_segment) as membership_ok
+      from flagged q
+    )
+    select
+      -- Over EVERY source contact, as the full preview counts it — not only
+      -- members. That is today's definition; the base part keeps it.
+      count(*) filter (where has_opt_out)::int as excluded_for_optout${
+        suppressed
+          ? drizzleSql`,
+      count(*) filter (where membership_ok and has_opt_out)::int as lc_opted_out,
+      count(*) filter (where membership_ok and not has_opt_out
+        and is_suppressed)::int as lc_suppressed,
+      (
+        select coalesce(jsonb_object_agg(lifecycle_status, n), '{}'::jsonb)
+        from (
+          select lifecycle_status, count(*)::int as n
+          from members
+          where membership_ok and not has_opt_out and not is_suppressed
+          group by lifecycle_status
+        ) h
+      ) as lc_histogram`
+          : drizzleSql``
+      }
+    from members
+  `);
+  })) as unknown as {
+    excluded_for_optout: number;
+    lc_opted_out?: number;
+    lc_suppressed?: number;
+    lc_histogram?: Record<string, number>;
+  }[];
+  const row = Array.isArray(rows) ? rows[0] : null;
+  return {
+    excluded_for_optout: Number(row?.excluded_for_optout ?? 0),
+    ...(lifecycleRules
+      ? {
+          lifecycle: {
+            opted_out: Number(row?.lc_opted_out ?? 0),
+            suppressed: Number(row?.lc_suppressed ?? 0),
+            status_histogram: Object.fromEntries(
+              Object.entries(row?.lc_histogram ?? {}).map(([k, v]) => [
+                k,
+                Number(v),
+              ]),
+            ),
+          },
+        }
+      : {}),
+  };
+}
+
+// What the audience part must supply: everything except the group-level
+// numbers, which combinePreviewParts takes from the base. A full
+// AudiencePreviewResult also satisfies it; its group-level fields are ignored.
+export type AudiencePreviewAudiencePart = Omit<
+  AudiencePreviewResult,
+  "excluded_for_optout" | "lifecycle"
+> & {
+  lifecycle?: {
+    by_status: Record<string, number>;
+    excluded: Omit<
+      LifecycleAudienceBreakdown["excluded"],
+      "opted_out" | "suppressed" | "status_not_selected"
+    >;
+  };
+};
+
+/**
+ * The response the form reads, from the two parts. Pure, and used by both the
+ * client and the parity verifier, so what the form shows is what was verified.
+ * `chips` are the campaign's lifecycle_statuses; unknown values are ignored
+ * exactly as chipStatusArrayLiteral ignores them.
+ */
+export function combinePreviewParts(
+  base: AudiencePreviewBase,
+  audience: AudiencePreviewAudiencePart,
+  chips: readonly string[] | null | undefined,
+): AudiencePreviewResult {
+  const { lifecycle: audienceLc, ...rest } = audience;
+  if (!!audienceLc !== !!base.lifecycle)
+    // One part was computed as lifecycle and the other as legacy: the two
+    // answers describe different campaigns. Never merge them.
+    throw new Error("preview parts disagree on lifecycle_rules");
+  const out: AudiencePreviewResult = {
+    ...rest,
+    excluded_for_optout: base.excluded_for_optout,
+  };
+  if (audienceLc && base.lifecycle) {
+    const allowed = new Set<string>(LIFECYCLE_CHIP_STATUSES);
+    const selected = new Set((chips ?? []).filter((c) => allowed.has(c)));
+    const statusNotSelected = Object.entries(base.lifecycle.status_histogram)
+      .filter(([status]) => !selected.has(status))
+      .reduce((sum, [, n]) => sum + n, 0);
+    out.lifecycle = {
+      by_status: audienceLc.by_status,
+      excluded: {
+        ...audienceLc.excluded,
+        opted_out: base.lifecycle.opted_out,
+        suppressed: base.lifecycle.suppressed,
+        status_not_selected: statusNotSelected,
+      },
+    };
+  }
+  return out;
+}
+
 
 // Snapshot the audience for a campaign: inserts one row into
 // campaign_audience_pool for each qualifying contact with its per-row

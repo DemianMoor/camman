@@ -35,7 +35,9 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import {
+  combinePreviewParts,
   previewAudience,
+  previewAudienceBase,
   type AudienceFilters,
   type AudiencePreviewInput,
 } from "@/lib/audience-snapshot";
@@ -405,6 +407,7 @@ async function parity(recipes: Recipe[]) {
   let compared = 0;
   let nonEmpty = 0;
   let differing = 0;
+  let combinedDiffering = 0;
   let selfTestFailures = 0;
   for (const [n, r] of recipes.entries()) {
     if (pastWindow()) {
@@ -413,7 +416,7 @@ async function parity(recipes: Recipe[]) {
     }
     const runner = (tx: unknown) => harnessRunner(asRunner(tx), { ceilingMs: CEILING_MS });
     const t: Record<string, number> = {};
-    const [ref, live] = await db.transaction(async (tx) => {
+    const [ref, live, basePart] = await db.transaction(async (tx) => {
       const run = async (which: "ref" | "live") => {
         const t0 = performance.now();
         const out =
@@ -424,23 +427,48 @@ async function parity(recipes: Recipe[]) {
         return out;
       };
       // Alternate the order so neither side always runs on the warmer cache.
+      // Task 2's base part, in the SAME snapshot, for the combined comparison.
+      const runBase = async () => {
+        const t0 = performance.now();
+        const out = await previewAudienceBase(r.input, runner(tx));
+        t.base = performance.now() - t0;
+        return out;
+      };
       if (n % 2 === 0) {
         const a = await run("ref");
-        return [a, await run("live")];
+        const b = await run("live");
+        return [a, b, await runBase()] as const;
       }
       const b = await run("live");
-      return [await run("ref"), b];
+      const a = await run("ref");
+      return [a, b, await runBase()] as const;
     }, READ_ONLY_RR);
     compared++;
     if (ref.total_matching > 0) nonEmpty++;
     const d = diff(ref, live);
     if (d.length > 0) differing++;
+    // Task 2 bar 1 on real recipes: base + audience must equal the reference.
+    // The audience part's own group-level fields are poisoned first, so a
+    // combine that ignored the base could not pass.
+    const poisoned = JSON.parse(JSON.stringify(live));
+    poisoned.excluded_for_optout = -1;
+    if (poisoned.lifecycle) {
+      poisoned.lifecycle.excluded.opted_out = -1;
+      poisoned.lifecycle.excluded.suppressed = -1;
+      poisoned.lifecycle.excluded.status_not_selected = -1;
+    }
+    const dc = diff(
+      ref,
+      combinePreviewParts(basePart, poisoned, r.input.filters.lifecycle_statuses ?? []),
+    );
+    if (dc.length > 0) combinedDiffering++;
     const st = differSelfTest(ref);
     selfTestFailures += st.length;
     const slow = (ms: number) => (ms > PROD_TIMEOUT_MS ? " ⚠️>30s" : "");
     console.log(
       `  ${d.length === 0 ? "=" : "≠"} [${n + 1}] ${r.label}: total ${ref.total_matching}` +
         ` · ref ${(t.ref / 1000).toFixed(1)}s${slow(t.ref)} · live ${(t.live / 1000).toFixed(1)}s${slow(t.live)}` +
+        ` · base ${(t.base / 1000).toFixed(1)}s${dc.length ? ` · COMBINED ≠ ${dc.join(",")}` : ""}` +
         (d.length ? `\n      differs: ${d.map((p) => `${p} ${JSON.stringify(leaves(ref).get(p))}→${JSON.stringify(leaves(live).get(p))}`).join(", ")}` : ""),
     );
   }
@@ -459,6 +487,11 @@ async function parity(recipes: Recipe[]) {
     `${nonEmpty} of ${compared}`,
   );
   bar("reference and live agree on every field of every recipe", compared > 0 && differing === 0, `${differing} of ${compared} differ`);
+  bar(
+    "base + audience parts (combined) agree with the reference on every recipe",
+    compared > 0 && combinedDiffering === 0,
+    `${combinedDiffering} of ${compared} differ`,
+  );
 }
 
 async function segmentGate(recipes: Recipe[]) {

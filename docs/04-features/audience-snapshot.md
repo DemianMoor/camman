@@ -106,3 +106,11 @@ While Task 2 rebuilds the campaign preview (plan: `docs/superpowers/plans/2026-0
 **Kill switch (T1b).** `AUDIENCE_PREVIEW_IMPL=reference` makes the preview route serve the reference; the response header `x-audience-preview-impl` says which one answered. [`scripts/test-preview-kill-switch.ts`](../../scripts/test-preview-kill-switch.ts) checks it over HTTP in both server modes.
 
 The reference and the harness helpers are deleted together with the kill switch once Task 2 is accepted.
+
+**Two parts (T2, 2026-10-01).** Only four preview numbers are group-level: `excluded_for_optout` and the lifecycle buckets `opted_out`, `suppressed` and `status_not_selected`.
+- `previewAudienceBase()` computes them from membership alone. Its input type has no filters, chips or offer, so it is chip-independent by construction. It returns a per-status histogram, so `status_not_selected` (the statuses not selected) is derived without a rerun.
+- `combinePreviewParts(base, audience, chips)` is the pure merge the client and the verifier both use.
+- `buildPreviewMembership()` builds membership once and is shared with `previewAudience`.
+- Bars F19–F22 in `scripts/test-lifecycle-preview-breakdown.ts`: one base reused across six chip sets × in-use on/off equals the reference. The audience part's group-level fields are poisoned first, so the combine cannot pass by ignoring the base.
+- The parity harness runs the same comparison on production recipes.
+- Not yet wired to the route or the form (T5).

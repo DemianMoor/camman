@@ -32,6 +32,15 @@ export async function GET() {
            k.field_mapping, k.sandbox, k.rate_per_sec, k.rate_per_day,
            k.max_payload_bytes, k.status, k.created_at, k.rotated_at, k.last_seen_at,
            k.secret_last4,
+           -- Signed report link STATE only. ⚠️ NEVER report_token_hash: the
+           -- link is unrecoverable by design (hashed at rest, plaintext shown
+           -- once), and shipping the hash to the browser would hand an operator
+           -- the one value an attacker needs to go looking for a preimage.
+           -- "Is there a live link?" is all the UI needs.
+           (k.report_token_hash IS NOT NULL) AS report_link_active,
+           k.report_token_issued_at,
+           k.report_token_expires_at,
+           k.report_show_revenue,
            COALESCE(u.leads_24h, 0)::int   AS leads_24h,
            COALESCE(f.auth_fails_today, 0)::int AS auth_fails_today,
            COALESCE(l.total_leads, 0)::int AS total_leads

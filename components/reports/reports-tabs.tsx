@@ -29,6 +29,7 @@ const TABS: { href: string; label: string; exact: boolean }[] = [
   })),
   { href: "/reports/delivery", label: "Delivery", exact: false },
   { href: "/reports/audience", label: "Audience Stats", exact: false },
+  { href: "/reports/partners", label: "By Partner", exact: false },
   { href: "/reports/lifecycle", label: "Lifecycle", exact: false },
   { href: "/reports/group-lifecycle", label: "Group × Lifecycle", exact: false },
 ];

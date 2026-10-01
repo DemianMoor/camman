@@ -51,6 +51,11 @@ import {
 } from "@/lib/audience-preview-reference/timing";
 
 const TIMING = process.argv.includes("--timing");
+// Parity on the synthesized variants only — for re-running a scope gap inside
+// the quiet window without repeating every real recipe.
+const ONLY_VARIANTS = process.argv.includes("--only-variants");
+// Print the scope and stop: no preview runs.
+const SCOPE_ONLY = process.argv.includes("--scope-only");
 // Generous on purpose: today's heaviest recipe runs ~37 s, past the
 // production 30 s. The harness needs its numbers; each timing says whether
 // production would have timed out.
@@ -138,6 +143,7 @@ interface Recipe {
   label: string;
   input: AudiencePreviewInput;
   tags: Set<Tag>;
+  offerHistory: number | null;
 }
 
 interface CampaignRow {
@@ -175,7 +181,9 @@ function tagsOf(
   if (chips.length >= 3) t.add("lc_multi_chip");
   if (input.segmentIds.length > 0) t.add("segments");
   const sizes = (input.contactGroupIds ?? []).map(groupSize);
-  if (sizes.some((n) => n >= LARGE_GROUP)) t.add("group_large");
+  // LARGE is the COMBINED selection: no single production group reaches 500K
+  // (largest 230K on 2026-10-01); the plan's "646 K" case is groups 3+1+4+2.
+  if (sizes.reduce((a, n) => a + n, 0) >= LARGE_GROUP) t.add("group_large");
   if (sizes.length > 0 && sizes.every((n) => n <= SMALL_GROUP))
     t.add("group_small");
   const prior = input.excludePriorOffer === true && input.offerId != null;
@@ -256,6 +264,7 @@ async function loadRecipes(): Promise<Recipe[]> {
       label: `campaign ${r.id}`,
       input,
       tags: tagsOf(input, (g) => sizes.get(`${r.org_id}:${g}`) ?? 0, r.offer_history),
+      offerHistory: r.offer_history,
     });
   }
 
@@ -277,19 +286,47 @@ async function loadRecipes(): Promise<Recipe[]> {
   // Variants for scope items no real recipe carries, each derived from a real
   // one by flipping exactly one knob — named as a variant in the scope print.
   const base = picked.find((r) => r.tags.has("prior_offer_on")) ?? picked[0];
-  const variant = (label: string, patch: Partial<AudiencePreviewInput>, offerHistory: number | null = null) => {
+  // A variant keeps the base offer's history unless it swaps the offer. The
+  // old default of null tagged every variant "offer with no history" - on
+  // 2026-10-01 that falsely covered offer_no_history with an offer that has one.
+  const variant = (
+    label: string,
+    patch: Partial<AudiencePreviewInput>,
+    offerHistory: number | null = base.offerHistory,
+  ) => {
     const input = { ...base.input, ...patch };
     const orgId = input.orgId;
     picked.push({
       label: `${base.label} VARIANT: ${label}`,
       input,
       tags: tagsOf(input, (g) => sizes.get(`${orgId}:${g}`) ?? 0, offerHistory),
+      offerHistory,
     });
   };
   if (base && !picked.some((r) => r.tags.has("in_use_off")))
     variant("exclude_in_use off", { excludeInUse: false });
   if (base && !picked.some((r) => r.tags.has("in_use_on")))
     variant("exclude_in_use on", { excludeInUse: true });
+  if (base && !picked.some((r) => r.tags.has("lc_multi_chip")) && base.input.lifecycleRules)
+    variant("chips hot,warm,cold", {
+      filters: { ...base.input.filters, lifecycle_statuses: ["hot", "warm", "cold"] },
+    });
+  if (base && !picked.some((r) => r.tags.has("group_large"))) {
+    // The largest groups this org's recent campaigns use, until the
+    // combined selection reaches LARGE_GROUP.
+    const ranked = [...sizes]
+      .filter(([k]) => k.startsWith(`${base.input.orgId}:`))
+      .sort((a, b) => b[1] - a[1]);
+    const ids: number[] = [];
+    let total = 0;
+    for (const [k, n] of ranked) {
+      if (total >= LARGE_GROUP) break;
+      ids.push(Number(k.split(":")[1]));
+      total += n;
+    }
+    if (total >= LARGE_GROUP)
+      variant(`groups ${ids.join(",")} (${total} memberships)`, { contactGroupIds: ids, segmentIds: [] });
+  }
   if (base && !picked.some((r) => r.tags.has("cap")))
     variant("cap 1000", { cap: 1000 });
   if (base && !picked.some((r) => r.tags.has("offer_no_history")) && fresh[0] && fresh[0].org_id === base.input.orgId)
@@ -490,7 +527,8 @@ async function main() {
       process.exit(1);
     }
   }
-  const recipes = await loadRecipes();
+  const all = await loadRecipes();
+  const recipes = ONLY_VARIANTS ? all.filter((r) => r.label.includes("VARIANT")) : all;
   const covered = new Set(recipes.flatMap((r) => [...r.tags]));
   console.log(`\nSCOPE — ${recipes.length} recipe(s)`);
   for (const [n, r] of recipes.entries())
@@ -499,6 +537,15 @@ async function main() {
   console.log("");
   bar("every scope item is covered by at least one recipe", missing.length === 0, missing.length ? `missing: ${missing.join(", ")}` : `${REQUIRED.length} items`);
 
+  if (SCOPE_ONLY) {
+    console.log("");
+    console.log(
+      fail === 0
+        ? "Scope OK (--scope-only: nothing run)."
+        : `${fail} check(s) FAILED.`,
+    );
+    process.exit(fail === 0 ? 0 : 1);
+  }
   console.log(`\nPARITY — reference vs live, one READ ONLY REPEATABLE READ transaction per recipe\n`);
   await parity(recipes);
   if (TIMING) await segmentGate(recipes);

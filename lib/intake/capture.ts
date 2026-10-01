@@ -44,7 +44,13 @@ export function leadDedupKey(phoneE164: string | null, receivedAt: Date): string
  */
 export function prepareLead(
   payload: unknown,
-  key: Pick<ResolvedPartnerKey, "field_mapping" | "interest_tag_mode" | "interest_tag">,
+  // `sandbox` is in the Pick deliberately rather than as a separate optional
+  // argument: a caller that forgets it fails to compile, instead of silently
+  // getting strict validation on a sandbox key.
+  key: Pick<
+    ResolvedPartnerKey,
+    "field_mapping" | "interest_tag_mode" | "interest_tag" | "sandbox"
+  >,
   receivedAt: Date,
 ): PreparedLead {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
@@ -77,12 +83,32 @@ export function prepareLead(
     };
   }
 
-  const parsed = validatePhone(String(rawPhone));
+  // ⭐ SANDBOX VALIDATES FORMAT BUT NOT THE AREA CODE.
+  //
+  // A partner integrating against a sandbox key should not have to source real,
+  // assigned phone numbers to prove their payload is shaped right — the usual
+  // instinct is a 555-555-xxxx test record, and `555` is not an assigned NANP
+  // area code, so strict validation rejected it. Length and structure are still
+  // enforced, so a genuinely malformed number still comes back `rejected` and
+  // the partner still exercises that path.
+  //
+  // ⚠️ THIS DIVERGES SANDBOX FROM LIVE, DELIBERATELY AND ONLY HERE. A number
+  // that passes in sandbox can be refused once the key goes live. Sandbox is
+  // otherwise identical to live, so this is the single exception and it is the
+  // reason the docs tell partners to use real numbers before go-live.
+  const parsed = validatePhone(
+    String(rawPhone),
+    "US",
+    key.sandbox ? "format_only" : "strict",
+  );
   if (!parsed.valid || !parsed.normalized) {
     return {
       raw, phone_e164: null, interest_tag,
       status: "rejected",
-      error: `Invalid phone number: ${parsed.error ?? "unparseable"}`,
+      // The validator's message already names the problem; prefixing it with
+      // "Invalid phone number: " produced "Invalid phone number: Invalid phone
+      // number", which is what a partner quotes back when asking what is wrong.
+      error: parsed.error ?? "Invalid phone number",
       dedup_key: null,
     };
   }

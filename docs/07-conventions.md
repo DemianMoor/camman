@@ -4263,3 +4263,44 @@ The campaign preview projected `has_lifecycle` / `lifecycle_status` only when at
 - The two fields are now **required** in `CampaignDetail`: an optional field is how the gap compiled.
 - Also fixed: a draft's cooldown/limit edits are now saved (the PATCH body never sent them). After draft they are stripped by the client and refused by the server as `audience_locked_after_draft`, matching the disabled inputs.
 - Bar: [`scripts/test-campaign-offer-rules-edit.ts`](../scripts/test-campaign-offer-rules-edit.ts).
+
+## Sandbox partner intake validates phone FORMAT, not the area code
+
+`validatePhone(raw, country, mode)` takes a mode. `strict` (the default) is
+`isValid()` — the number must exist in the country's assigned numbering plan.
+`format_only` is `isPossible()` — structure and length only.
+
+**`format_only` is for sandbox partner intake and nothing else.** `prepareLead`
+selects it from `key.sandbox`; every other path uses the default.
+
+⚠️ **The default must stay `strict`.** 21 files call this validator, including
+provider-phone registration (the numbers we send FROM), the opt-out/suppression
+path, and the paid Telnyx lookups. There is no format CHECK on
+`contacts.phone_number`, so this function is the only thing keeping unreal
+numbers out of real data. A loose default would be invisible and expensive;
+`scripts/test-sandbox-phone-validation.ts` asserts the default explicitly.
+
+⚠️ **`format_only` is LENGTH-based, not plausibility-based.** For NANP it accepts
+any 10-digit shape — 555, 999, even area codes starting 0 or 1. That is the
+point: a sandbox partner should not have to think about area codes. Wrong
+lengths and unparseable input are still rejected, so the partner still exercises
+the rejection path.
+
+### Why not store the raw string instead
+
+Considered and rejected. `enrichment.ts` rejects a lead with a NULL
+`phone_e164` terminally, and mints contacts straight from that column under
+`contacts_org_id_phone_number_unique`. Storing unnormalized input would mean
+`555-555-0100`, `+15555550100` and `5555550100` became three contacts with three
+dedup keys — so the documented sandbox step "resubmit the same lead →
+`duplicate: true`" would return `false`. Both modes normalize through
+libphonenumber, so every spelling collapses to one E.164 and dedup stays honest.
+A second, looser normalizer was the thing to avoid.
+
+### This is the ONE sandbox/live divergence
+
+Sandbox is otherwise identical to live, and that is what makes a sandbox pass
+mean something. A number accepted in sandbox can be refused once the key is
+live, so both partner docs carry the warning from one shared constant
+(`SANDBOX_PHONE_NOTE` in `lib/intake/api-contract.ts`) and tell partners to move
+to real numbers before activation.

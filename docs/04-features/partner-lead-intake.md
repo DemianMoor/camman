@@ -1,6 +1,6 @@
 # Partner lead intake (Drip Phase 2)
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-10-01_
 
 Real-time capture of partner-submitted leads. **Zero sends, zero processing.** The endpoint
 authenticates, rate-limits, validates shape, writes one row, and returns. Everything downstream —
@@ -143,6 +143,23 @@ greps for internal names), and
 from `LEAD_FIELDS` and the accepted list *is* `LEAD_FIELDS`, so both sides move
 together (measured: deleting `state` left the whole suite green). The committed
 markdown is the independent anchor that makes a removal show up.
+
+### Sandbox relaxes phone validation (2026-10-01)
+
+A sandbox key validates phone **format only** — `validatePhone(..., "format_only")`,
+i.e. libphonenumber's `isPossible()`. A well-formed number with an unreal area
+code (`+15555550100`) is accepted; wrong lengths and unparseable input are still
+rejected. Live keys are unchanged.
+
+`prepareLead` takes `sandbox` inside its `key` Pick so a caller that omits it
+fails to compile rather than silently getting strict validation.
+
+⚠️ The validator's default stays `strict` — 21 files call it, including
+provider-phone registration, the opt-out path and the paid Telnyx lookups.
+
+See [07-conventions.md](../07-conventions.md) for why the raw string is not
+stored instead (it would break duplicate detection) and for the sandbox/live
+divergence this introduces.
 
 ## Alerts
 

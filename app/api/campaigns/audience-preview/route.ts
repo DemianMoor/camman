@@ -8,7 +8,7 @@ import { newCampaignUsesLifecycleRules } from "@/lib/engagement/lifecycle-gate";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { previewTimeoutResponse } from "@/lib/api/preview-timeout";
 import { referencePreviewAudience } from "@/lib/audience-preview-reference";
-import { previewAudience } from "@/lib/audience-snapshot";
+import { PreviewBusyError, previewAudience } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 import { audiencePreviewSchema } from "@/lib/validators/campaigns";
 
@@ -25,7 +25,12 @@ import { audiencePreviewSchema } from "@/lib/validators/campaigns";
 // reports/group-lifecycle). It is a floor under the failure, NOT a fix for the
 // latency: a preview that fires as the operator edits the form has no business
 // taking eight seconds, and that is tracked separately.
-export const maxDuration = 60;
+//
+// ⚠️ HOTFIX 2026-10-01, TEMPORARY: 120 s, back down after Task 2 T5. The
+// preview's statement ceiling is now 110 s (PREVIEW_STATEMENT_TIMEOUT) because
+// real segment recipes take 40-100 s; the function must outlive the query or
+// Vercel kills it first and the operator gets a 504 instead of the 400.
+export const maxDuration = 120;
 
 // Live count of contacts that would be in the audience pool given a set
 // of segments, contact groups, and a filter snapshot. Writes nothing.
@@ -129,8 +134,14 @@ export async function POST(req: NextRequest) {
   // assumed. Removed together with lib/audience-preview-reference/.
   const impl =
     process.env.AUDIENCE_PREVIEW_IMPL === "reference" ? "reference" : "live";
-  const preview =
-    impl === "reference" ? referencePreviewAudience : previewAudience;
+  // Hotfix 2026-10-01 (until T6): one running preview per user, so a
+  // superseded or retried preview cannot stack another long query. The
+  // frozen reference (kill switch) runs without the lock.
+  const singleFlightKey = `${orgId}:${auth.user?.id ?? "token"}`;
+  const preview = (i: Parameters<typeof previewAudience>[0]) =>
+    impl === "reference"
+      ? referencePreviewAudience(i)
+      : previewAudience(i, undefined, { singleFlightKey });
 
   let result: Awaited<ReturnType<typeof previewAudience>>;
   try {
@@ -161,6 +172,15 @@ export async function POST(req: NextRequest) {
     // Via the cause chain: the 57014 is on err.cause, not err (869faaa3v).
     const timeout = previewTimeoutResponse(e);
     if (timeout) return timeout;
+    if (e instanceof PreviewBusyError) {
+      // The form waits for the running one and retries; not an error to fix.
+      return apiError(
+        409,
+        "Your previous audience preview is still running — retrying shortly.",
+        API_ERROR_CODES.CONFLICT,
+        { reason: "preview_busy" },
+      );
+    }
     throw e;
   }
   return NextResponse.json(result, {

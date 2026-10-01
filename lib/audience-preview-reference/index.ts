@@ -39,7 +39,11 @@ import { LIFECYCLE_CHIP_STATUSES } from "@/lib/validators/campaigns";
 // ONE DELIBERATE EXCEPTION, applied to both copies in the same PR: the
 // zero-chip fix of 2026-09-30 (a lifecycle preview with no chip selected
 // 500ed with 42703). It is a bug fix outside Task 2, and the kill switch must
-// not bring the 500 back. Anything else that changes here is a mistake.
+// not bring the 500 back.
+//
+// AND THE HOTFIX OF 2026-10-01: its statement ceiling is 110 s, like the live
+// preview, because real segment recipes take 40-100 s. An operational limit,
+// not logic. Anything else that changes here is a mistake.
 //
 // WHAT IS NOT COPIED, and why that is safe: the segment evaluator, the drip
 // in-use set, the send path's layer builders (lifecycleExclusionLayers /
@@ -567,7 +571,7 @@ export async function referencePreviewAudience(
     // superseded requests; this is the backstop for everything else -- a
     // bookmarked tab, a retry, a second operator on the same groups. Postgres
     // raises 57014, which the route maps to a sentence the operator can act on.
-    await tx.execute(drizzleSql`set local statement_timeout = '30s'`);
+    await tx.execute(drizzleSql`set local statement_timeout = '110s'`);
     return await tx.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
     sources as (

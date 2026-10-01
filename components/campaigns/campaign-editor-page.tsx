@@ -1697,6 +1697,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     previewCarrierRemoved,
     previewError,
     previewLoading,
+    retryPreview,
     watchedSegments,
     watchedExcludeSegments,
     watchedContactGroups,
@@ -1744,9 +1745,25 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
             Pick at least one contact group to see your reach.
           </p>
         ) : previewError ? (
-          <p className="text-muted-foreground">
-            Could not preview audience — fix any issues above.
-          </p>
+          <div className="grid gap-2">
+            <p className="text-muted-foreground">
+              {/* The SERVER's sentence (e.g. the timeout message), not a generic
+                  "fix any issues above" that sent operators hunting for a
+                  validation error that did not exist. */}
+              {previewError}
+            </p>
+            <div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={retryPreview}
+                disabled={previewLoading}
+              >
+                Retry preview
+              </Button>
+            </div>
+          </div>
         ) : previewCount === null ? (
           <div className="flex items-center gap-2 text-muted-foreground">
             <Loader2 className="size-4 animate-spin" aria-hidden />

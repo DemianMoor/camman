@@ -130,7 +130,8 @@ async function main() {
           audience_filters: { lifecycle_statuses: ["hot", "warm"] },
         }),
       });
-    const hr = hold(`${m.org_id}:${data.user!.id}`);
+    // The route keys the lock per user AND part (T5); a part-less request is "full".
+    const hr = hold(`${m.org_id}:${data.user!.id}:full`);
     await hr.isReady;
     const r1 = await post();
     const b1 = (await r1.json().catch(() => ({}))) as { error?: string; details?: { reason?: string } };

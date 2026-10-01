@@ -291,6 +291,11 @@ export const audiencePreviewSchema = z
     // Consumed only when exclude_prior_offer_contacts is true, to count/drop
     // leads who already received this offer (content-dedup LAYER 3 preview).
     offer_id: z.number().int().positive().nullable().optional(),
+
+    // Task 2 T5: which half of the preview to compute. Absent = the whole
+    // preview in today's response shape (operator API tokens and any older
+    // client rely on that); "base" / "audience" answer { part, data }.
+    part: z.enum(["base", "audience"]).optional(),
   })
   .refine(
     // A positive base is required: include segments or groups. An exclude-only

@@ -5,6 +5,14 @@ import { useForm } from "react-hook-form";
 
 import { useAuth } from "@/components/protected/auth-context";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import {
+  combinePreviewParts,
+  type AudiencePreviewAudiencePart,
+  type AudiencePreviewBase,
+} from "@/lib/audience-preview-parts";
+import type { AudiencePreviewResult } from "@/lib/audience-snapshot";
+
+import { usePreviewPart } from "./use-preview-part";
 
 // =============== Types ===============
 
@@ -485,228 +493,125 @@ export function useCampaignFormState(props: CampaignFormProps) {
   // toggle doesn't apply a stale count. The endpoint returns the full
   // composition breakdown so the right-rail panel can show how segments
   // vs groups vs overlap contribute to the post-cap count.
-  const previewApi = useApiCall<{
-    count: number;
-    total_matching: number;
-    applied_cap: number | null;
-    from_segments: number;
-    from_groups: number;
-    overlap: number;
-    excluded_by_segments: number;
-    excluded_for_optout: number;
-    in_use_in_other_campaigns: number;
-    got_offer_in_prior_campaign: number;
-    carrier_removed: Record<string, number>;
-  }>();
-  const [previewCount, setPreviewCount] = useState<number | null>(null);
-  const [previewTotalMatching, setPreviewTotalMatching] = useState<
-    number | null
-  >(null);
-  const [previewFromSegments, setPreviewFromSegments] = useState<number | null>(
-    null,
-  );
-  const [previewFromGroups, setPreviewFromGroups] = useState<number | null>(
-    null,
-  );
-  const [previewOverlap, setPreviewOverlap] = useState<number | null>(null);
-  const [previewExcludedBySegments, setPreviewExcludedBySegments] = useState<
-    number | null
-  >(null);
-  const [previewExcludedOptOut, setPreviewExcludedOptOut] = useState<
-    number | null
-  >(null);
-  const [previewInUseElsewhere, setPreviewInUseElsewhere] = useState<
-    number | null
-  >(null);
-  // Leads in the audience who already got this offer (content-dedup LAYER 3).
-  // Only nonzero when the exclude-prior-offer toggle is on.
-  const [previewOfferExposed, setPreviewOfferExposed] = useState<number | null>(
-    null,
-  );
-  // Per-bucket counts removed by the carrier filter (bucket → count).
-  // "Unidentified" is its own key (never-looked-up numbers). Empty when no
-  // carrier filter is active.
-  const [previewCarrierRemoved, setPreviewCarrierRemoved] = useState<
-    Record<string, number>
-  >({});
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-
-  const segmentsKey = watchedSegments.join(",");
-  const excludeSegmentsKey = watchedExcludeSegments.join(",");
-  const groupsKey = watchedContactGroups.join(",");
+  // ── The audience preview, in two parts (Task 2 T5) ─────────────────────────
+  //
+  // BASE: the four group-level numbers + a per-status histogram. Depends only
+  //   on WHO is a member (segments, groups, exclude segments), so it does not
+  //   rerun when chips, offer rules, the cap or the toggles change.
+  // AUDIENCE: every chip-dependent number. Reruns on any change.
+  // The two are merged with combinePreviewParts — the same function the parity
+  // verifier checked against the frozen reference — and only when both answers
+  // describe the SAME membership. Until they do, the last good merge stays on
+  // screen with a spinner instead of a mismatched mix.
+  // Under the kill switch the server answers part "full" and that is shown as
+  // is. Each part keeps the hotfix's single-flight + retry rules
+  // (usePreviewPart).
   const filtersKey = JSON.stringify(watchedFilters);
   const capKey = watchedCap ?? "";
   const excludeInUseKey = watchedExcludeInUse ? "1" : "0";
   const excludePriorOfferKey = watchedExcludePriorOffer ? "1" : "0";
   const offerKey = watchedOfferId ?? "";
-
-  // ── The audience preview: single-flight, latest wins, one automatic retry ──
-  //
-  // ⚠️ HOTFIX 2026-10-01. The preview of a real segment recipe takes 40-100 s,
-  // so the old design (abort the superseded request on every edit) did not
-  // help: aborting the HTTP request never cancels the Postgres query behind it,
-  // so every edit left another long query burning. Now:
-  //   * at most ONE preview request per form is in flight;
-  //   * edits made while it runs mark it stale, and when it returns its result
-  //     is dropped and ONE new request runs with the latest values;
-  //   * a timeout, a server error, a gateway timeout or a dropped connection is
-  //     retried automatically once; "still running" (409, the server's
-  //     per-user single-flight lock) is waited out and retried;
-  //   * retryPreview() re-runs it on demand, so a failed preview is never a
-  //     dead end that needs the campaign recreated.
-  // Superseded by T5/T6 (two-part preview, database-side cancellation).
-  const previewBodyRef = useRef<string | null>(null);
-  const previewInFlightRef = useRef(false);
-  const previewStaleRef = useRef(false);
-  const previewUnmountedRef = useRef(false);
-  const previewAbortRef = useRef<AbortController | null>(null);
-  const previewRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const clearPreviewNumbers = () => {
-    setPreviewCount(null);
-    setPreviewTotalMatching(null);
-    setPreviewFromSegments(null);
-    setPreviewFromGroups(null);
-    setPreviewOverlap(null);
-    setPreviewExcludedBySegments(null);
-    setPreviewExcludedOptOut(null);
-    setPreviewInUseElsewhere(null);
-    setPreviewOfferExposed(null);
-    setPreviewCarrierRemoved({});
+  const hasSource =
+    watchedSegments.length > 0 || watchedContactGroups.length > 0;
+  const membership = {
+    audience_segment_ids: watchedSegments,
+    audience_exclude_segment_ids: watchedExcludeSegments,
+    audience_contact_group_ids: watchedContactGroups,
   };
-  const runPreviewRef = useRef<(attempt: number) => Promise<void>>(
-    async () => {},
-  );
-  runPreviewRef.current = async (attempt: number) => {
-    const body = previewBodyRef.current;
-    if (!body) {
-      setPreviewLoading(false);
-      return;
-    }
-    if (previewInFlightRef.current) {
-      previewStaleRef.current = true;
-      return;
-    }
-    if (previewRetryTimerRef.current) {
-      clearTimeout(previewRetryTimerRef.current);
-      previewRetryTimerRef.current = null;
-    }
-    previewInFlightRef.current = true;
-    previewStaleRef.current = false;
-    setPreviewLoading(true);
-    setPreviewError(null);
-    const ac = new AbortController();
-    previewAbortRef.current = ac;
-    const result = await previewApi.execute("/api/campaigns/audience-preview", {
-      method: "POST",
-      // Aborted only when the form unmounts — never because an input changed.
-      signal: ac.signal,
-      headers: { "Content-Type": "application/json" },
-      body,
-    });
-    previewInFlightRef.current = false;
-    previewAbortRef.current = null;
-    if (previewUnmountedRef.current) return;
-    // Superseded while it ran: drop this answer, ask again with the latest.
-    if (previewStaleRef.current || body !== previewBodyRef.current) {
-      void runPreviewRef.current(0);
-      return;
-    }
-    if (result.ok) {
-      setPreviewLoading(false);
-      setPreviewCount(result.data.count);
-      setPreviewTotalMatching(result.data.total_matching);
-      setPreviewFromSegments(result.data.from_segments);
-      setPreviewFromGroups(result.data.from_groups);
-      setPreviewOverlap(result.data.overlap);
-      setPreviewExcludedBySegments(result.data.excluded_by_segments);
-      setPreviewExcludedOptOut(result.data.excluded_for_optout);
-      setPreviewInUseElsewhere(result.data.in_use_in_other_campaigns);
-      setPreviewOfferExposed(result.data.got_offer_in_prior_campaign);
-      setPreviewCarrierRemoved(result.data.carrier_removed ?? {});
-      setPreviewError(null);
-      return;
-    }
-    const reason = (result.details as { reason?: string } | undefined)?.reason;
-    const busy = result.status === 409 && reason === "preview_busy";
-    const transient =
-      result.status === 0 ||
-      result.status >= 500 ||
-      reason === "preview_timeout";
-    if ((busy && attempt < 12) || (transient && attempt < 1)) {
-      previewRetryTimerRef.current = setTimeout(
-        () => {
-          previewRetryTimerRef.current = null;
-          void runPreviewRef.current(attempt + 1);
-        },
-        busy ? 10_000 : 2_000,
-      );
-      return;
-    }
-    setPreviewLoading(false);
-    clearPreviewNumbers();
-    setPreviewError(result.error);
-  };
-  // Re-run the preview on demand (the "Retry preview" button).
-  const retryPreview = () => {
-    void runPreviewRef.current(0);
-  };
-
-  useEffect(() => {
-    if (watchedSegments.length === 0 && watchedContactGroups.length === 0) {
-      previewBodyRef.current = null;
-      clearPreviewNumbers();
-      setPreviewError(null);
-      return;
-    }
-    previewBodyRef.current = JSON.stringify({
-      audience_segment_ids: watchedSegments,
-      audience_exclude_segment_ids: watchedExcludeSegments,
-      audience_contact_group_ids: watchedContactGroups,
-      audience_filters: watchedFilters,
-      audience_cap: watchedCap,
-      exclude_in_use_contacts: watchedExcludeInUse,
-      exclude_prior_offer_contacts: watchedExcludePriorOffer,
-      offer_cooldown_days: form.getValues("offer_cooldown_days"),
-      offer_limit_times: form.getValues("offer_limit_times"),
-      offer_id: watchedOfferId,
-    });
-    // A pending automatic retry is for values that no longer apply.
-    if (previewRetryTimerRef.current) {
-      clearTimeout(previewRetryTimerRef.current);
-      previewRetryTimerRef.current = null;
-    }
-    const t = setTimeout(() => void runPreviewRef.current(0), 500);
-    return () => clearTimeout(t);
-    // segmentsKey / groupsKey / filtersKey / capKey / excludeInUseKey /
-    // excludePriorOfferKey / offerKey collapse identity to stable primitives
-    // so this only re-runs on real change.
+  const membershipKey = JSON.stringify(membership);
+  const baseBody = useMemo(
+    () => (hasSource ? JSON.stringify({ ...membership, part: "base" }) : null),
+    // membershipKey collapses the three arrays to one stable primitive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    segmentsKey,
-    excludeSegmentsKey,
-    groupsKey,
-    filtersKey,
-    capKey,
-    excludeInUseKey,
-    excludePriorOfferKey,
-    offerKey,
-    previewApi.execute,
-  ]);
+    [hasSource, membershipKey],
+  );
+  const audienceBody = useMemo(
+    () =>
+      hasSource
+        ? JSON.stringify({
+            ...membership,
+            audience_filters: watchedFilters,
+            audience_cap: watchedCap,
+            exclude_in_use_contacts: watchedExcludeInUse,
+            exclude_prior_offer_contacts: watchedExcludePriorOffer,
+            offer_cooldown_days: form.getValues("offer_cooldown_days"),
+            offer_limit_times: form.getValues("offer_limit_times"),
+            offer_id: watchedOfferId,
+            part: "audience",
+          })
+        : null,
+    // The *Key strings collapse identity to stable primitives so this only
+    // changes on a real change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      hasSource,
+      membershipKey,
+      filtersKey,
+      capKey,
+      excludeInUseKey,
+      excludePriorOfferKey,
+      offerKey,
+    ],
+  );
+  const basePart = usePreviewPart(baseBody);
+  const audiencePart = usePreviewPart(audienceBody);
 
-  useEffect(() => {
-    // Reset on (re)mount: React StrictMode mounts, unmounts and remounts in
-    // dev, and a flag left true by the simulated unmount dropped every later
-    // result, leaving the panel on "Calculating…" for good.
-    previewUnmountedRef.current = false;
-    return () => {
-      previewUnmountedRef.current = true;
-      previewAbortRef.current?.abort();
-      if (previewRetryTimerRef.current) clearTimeout(previewRetryTimerRef.current);
+  const merged = useMemo((): AudiencePreviewResult | null => {
+    const a = audiencePart.answer;
+    if (!a) return null;
+    if (a.part === "full") return a.data as AudiencePreviewResult;
+    const b = basePart.answer;
+    if (!b || b.part !== "base") return null;
+    const sameMembership = (x: string) => {
+      const j = JSON.parse(x) as Record<string, unknown>;
+      return JSON.stringify({
+        audience_segment_ids: j.audience_segment_ids,
+        audience_exclude_segment_ids: j.audience_exclude_segment_ids,
+        audience_contact_group_ids: j.audience_contact_group_ids,
+      });
     };
-  }, []);
+    if (sameMembership(a.body) !== sameMembership(b.body)) return null;
+    const chips =
+      ((JSON.parse(a.body) as { audience_filters?: { lifecycle_statuses?: string[] } })
+        .audience_filters?.lifecycle_statuses) ?? [];
+    try {
+      return combinePreviewParts(
+        b.data as AudiencePreviewBase,
+        a.data as AudiencePreviewAudiencePart,
+        chips,
+      );
+    } catch {
+      // A legacy/lifecycle mismatch between the two answers: never show a mix.
+      return null;
+    }
+  }, [audiencePart.answer, basePart.answer]);
+  // The last good merge, kept on screen while a newer pair is on its way.
+  const lastMergedRef = useRef<AudiencePreviewResult | null>(null);
+  if (!hasSource) lastMergedRef.current = null;
+  else if (merged) lastMergedRef.current = merged;
+  const shown = hasSource ? (merged ?? lastMergedRef.current) : null;
+
+  const previewCount = shown?.count ?? null;
+  const previewTotalMatching = shown?.total_matching ?? null;
+  const previewFromSegments = shown?.from_segments ?? null;
+  const previewFromGroups = shown?.from_groups ?? null;
+  const previewOverlap = shown?.overlap ?? null;
+  const previewExcludedBySegments = shown?.excluded_by_segments ?? null;
+  const previewExcludedOptOut = shown?.excluded_for_optout ?? null;
+  const previewInUseElsewhere = shown?.in_use_in_other_campaigns ?? null;
+  const previewOfferExposed = shown?.got_offer_in_prior_campaign ?? null;
+  const previewCarrierRemoved: Record<string, number> =
+    shown?.carrier_removed ?? {};
+  const previewLoading = basePart.loading || audiencePart.loading;
+  // The audience part's error first: it is the one the operator's last edit
+  // depends on. Either part failing is shown, with Retry re-running both.
+  const previewError = hasSource
+    ? (audiencePart.error ?? basePart.error)
+    : null;
+  const retryPreview = () => {
+    if (basePart.error || !basePart.answer) basePart.retry();
+    audiencePart.retry();
+  };
 
   // Date sanity (purely client-side hint; the server doesn't refuse
   // end<start because either field can be null).

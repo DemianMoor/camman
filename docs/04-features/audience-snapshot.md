@@ -107,6 +107,17 @@ While Task 2 rebuilds the campaign preview (plan: `docs/superpowers/plans/2026-0
 
 The reference and the harness helpers are deleted together with the kill switch once Task 2 is accepted.
 
+**Client on two parts (T5).** `POST /api/campaigns/audience-preview` accepts `part: "base" | "audience"` and answers `{ part, data }`.
+- **Part-less requests are unchanged:** whole preview, today's top-level shape. Operator API tokens call this route.
+- **Kill switch:** every request is served whole by the reference, answering `part: "full"`.
+- **The form** (`components/campaigns/campaign-form-state.ts`) runs two `usePreviewPart` instances (`components/campaigns/use-preview-part.ts`), each with the hotfix rules (single-flight, latest-wins follow-up, one automatic retry, 409 waited out, Retry):
+  - base is keyed on segments / groups / exclude segments only;
+  - audience is keyed on everything;
+  - both use a 500 ms debounce.
+- **Merging:** `combinePreviewParts` (moved to the client-safe `lib/audience-preview-parts.ts`, re-exported by `lib/audience-snapshot.ts`), and only when both answers describe the same membership. Until then the last good merge stays on screen.
+- **Single-flight lock:** keyed per user **and** part.
+- **Bars:** `scripts/test-preview-parts-route.ts` (P1–P4 over HTTP: part-less shape unchanged; base + audience = part-less on 5 recipes, 3 non-empty; the audience part has no group-level numbers). Playwright on dev:preview: a membership change requests both parts, a toggle requests only audience, the panel equals the part-less route, and the kill switch shows `full`.
+
 **Offer layers (T4, 2026-10-01).** On the narrowed path, the offer limit and the offer cooldown come from **one** grouped read of the offer's `contact_offer_campaigns` rows, restricted to the candidates (`lx_offer_stats`: `count(*)` and `max(last_sent_at)`):
 - limit = `count >= N`;
 - cooldown = `max(last_sent_at) > now − Y days`, the same strict `>`.

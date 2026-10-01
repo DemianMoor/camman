@@ -99,7 +99,14 @@ const utcMinutes = () => {
   return d.getUTCHours() * 60 + d.getUTCMinutes();
 };
 const WINDOW_START = 5 * 60;
-const WINDOW_LAST_START = 5 * 60 + 45;
+// --last-start=HH:MM moves the latest allowed start, for the second run after
+// the 2026-10-02 compute resize. Never later than 05:50, so a run still ends
+// before 06:00.
+const lastStartArg = process.argv.find((x) => x.startsWith("--last-start="))?.slice(13);
+const WINDOW_LAST_START = (() => {
+  const m = lastStartArg?.match(/^05:([0-5][0-9])$/);
+  return m ? Math.min(5 * 60 + Number(m[1]), 5 * 60 + 50) : 5 * 60 + 45;
+})();
 const WINDOW_END = 6 * 60;
 const pastWindow = () => !isPreview && utcMinutes() >= WINDOW_END;
 
@@ -579,7 +586,7 @@ async function main() {
     const m = utcMinutes();
     if (m < WINDOW_START || m >= WINDOW_LAST_START) {
       console.error(
-        `\nREFUSING — production runs only in the quiet window: start 05:00–05:45 UTC (now ${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}).`,
+        `\nREFUSING — production runs only in the quiet window: start 05:00–05:${String(WINDOW_LAST_START - 300).padStart(2, "0")} UTC (now ${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}).`,
       );
       process.exit(1);
     }

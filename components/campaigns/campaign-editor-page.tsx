@@ -1226,6 +1226,17 @@ function AudienceCard({
   const lifecycleRules = state.lifecycleRules === true;
   const watchedOfferCooldown = state.form.watch("offer_cooldown_days");
   const watchedOfferLimit = state.form.watch("offer_limit_times");
+  // The two offer-rule fields recalculate the preview when COMMITTED: on Enter
+  // or when the field loses focus, never per keystroke. ⚠️ Enter must not
+  // reach the <form>: implicit submission would run onSubmit, which ACTIVATES
+  // (or saves) the campaign. Cmd/Ctrl+Enter keeps its meaning (the form-level
+  // shortcut), so only a plain Enter is taken here.
+  const commitOfferRulesOnEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      state.commitOfferRules();
+    }
+  };
   const legacyMappedChips = mapLegacyFiltersToChips(watchedFilters);
   // The Freeze note: the effective cadence of the SELECTED contact groups,
   // shown as a range when they differ. Informational only — see the note text.
@@ -1551,6 +1562,8 @@ function AudienceCard({
                             { shouldDirty: true },
                           )
                         }
+                        onBlur={state.commitOfferRules}
+                        onKeyDown={commitOfferRulesOnEnter}
                         disabled={audienceLocked || anySubmitting}
                       />
                       <span className="w-10 text-xs text-muted-foreground">
@@ -1580,6 +1593,8 @@ function AudienceCard({
                             { shouldDirty: true },
                           )
                         }
+                        onBlur={state.commitOfferRules}
+                        onKeyDown={commitOfferRulesOnEnter}
                         disabled={audienceLocked || anySubmitting}
                       />
                       <span className="w-10 text-xs text-muted-foreground">

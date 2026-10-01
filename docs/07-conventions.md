@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-09-30_
+_Last updated: 2026-10-01_
 
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
@@ -4250,3 +4250,7 @@ The campaign preview projected `has_lifecycle` / `lifecycle_status` only when at
 ## A replace-all write erases the evidence a row-count check relies on (2026-09-30)
 
 `offer_brands` is written replace-all: saving an offer deletes its rows and inserts the new set, so every row carries the time of the last save. The 0194 verifier counted "rows with the migration's timestamp" as its expectation. That count fell by 72 after the owner curated 24 offers, which read like a data-loss event. [`scripts/verify-offer-brands.ts`](../scripts/verify-offer-brands.ts) now compares against a dated, owner-confirmed baseline of pairs. A difference counts as a save only when **every** current row of that offer is newer than the baseline, which is the fingerprint of replace-all. Any other difference (a cascade, manual SQL, a partial delete) fails. Re-baseline only on the owner's confirmation, never to make a red run green.
+
+## Test an error mapping against the error the driver actually throws (2026-10-01)
+
+`app/api/campaigns/audience-preview/route.ts` mapped a statement timeout with `err.code === "57014"`. Drizzle wraps driver errors, and the SQLSTATE is on `err.cause`, so the check never matched and every preview timeout became a 500 (card 869faaa3v). Always detect SQLSTATEs with `isStatementTimeout` (`lib/db/statement-timeout.ts`), which walks the cause chain. Test the mapping with a **real** error produced through `@/db/client` (e.g. `SET LOCAL statement_timeout = '50ms'` + `pg_sleep`), never a hand-built object: a mock encodes the same wrong assumption as the code it tests. See [`scripts/test-preview-timeout-400.ts`](../scripts/test-preview-timeout-400.ts).

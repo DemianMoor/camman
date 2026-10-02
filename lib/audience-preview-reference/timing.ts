@@ -263,7 +263,31 @@ export async function measureCampaignUseFact(
         select 1 from contact_engagement ce
         where ce.contact_id = u.contact_id and ce.org_id = ${p.orgId}::uuid
           and ce.last_sent_at >= now() - ${iv})`);
-    rows.push({ period, today, fact, lastSent, factMatchesToday: today.count === fact.count });
+    // The SEGMENT shape the builder emits for a lone is_not rule — eligible
+    // contacts EXCEPT the rule — for today's rule and for the planned
+    // "last texted within N" rule (meaning b): contact_engagement through
+    // (org_id, last_sent_at), plus the lag tail: sends since the engagement
+    // job's watermark minus its own 30-minute overlap, via
+    // stage_sends_org_sent_at_idx. Timed with EXPLAIN (ANALYZE, BUFFERS).
+    const eligible = drizzleSql`select id as contact_id from contacts where org_id = ${p.orgId}::uuid and messaging_status = 'eligible'`;
+    const tail = drizzleSql`
+      select contact_id from stage_sends
+      where org_id = ${p.orgId}::uuid and status = 'sent'
+        and sent_at >= (select watermark from cron_locks where job_name = 'contact-engagement') - interval '30 minutes'`;
+    const ruleB = drizzleSql`
+      select contact_id from contact_engagement
+      where org_id = ${p.orgId}::uuid and last_sent_at >= now() - ${iv}
+      union
+      ${tail}`;
+    const exec = (x: SQL) => tx.execute(x);
+    const segToday = await explainOne(exec, drizzleSql`select count(*) from (${eligible} except ${rule}) x`);
+    const segB = await explainOne(exec, drizzleSql`select count(*) from (${eligible} except (${ruleB})) x`);
+    const notTexted = await timed(drizzleSql`select count(*)::int as n from (${eligible} except (${ruleB})) x`);
+    const tailRows = await timed(drizzleSql`select count(*)::int as n from (${tail}) t`);
+    rows.push({
+      period, today, fact, lastSent, factMatchesToday: today.count === fact.count,
+      segToday, segB, notTexted, tailRows,
+    });
   }
   return { factRows, factBuildMs, rows };
 }

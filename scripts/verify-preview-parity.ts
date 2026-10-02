@@ -669,6 +669,10 @@ async function s9(recipes: Recipe[]) {
       `  ${x.period}: today ${x.today.count} in ${ms(x.today.ms)} · fact ${x.fact.count} in ${ms(x.fact.ms)}` +
         ` · last_sent ${x.lastSent.count} in ${ms(x.lastSent.ms)}`,
     );
+    const pf = (s: PlanStats) => `${ms(s.execution_ms)} hit ${s.shared_hit} read ${s.shared_read}`;
+    console.log(`      segment shape (eligible EXCEPT rule): today ${pf(x.segToday)} | last-texted ${pf(x.segB)}`);
+    for (const n of x.segB.top_nodes ?? []) console.log(`          ${ms(n.ms)} ${n.node} rows ${n.rows}`);
+    console.log(`      not texted within ${x.period}: ${x.notTexted.count} · lag tail ${x.tailRows.count} sends`);
     bar(`  ${x.period}: the fact reproduces today's rule exactly`, x.factMatchesToday, `${x.today.count} vs ${x.fact.count}`);
   }
 

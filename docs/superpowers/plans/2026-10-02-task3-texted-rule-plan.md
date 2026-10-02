@@ -1,8 +1,10 @@
 # Task 3 — "Texted in the last…" segment rule: build plan
 
-> Status: **PLAN, not approved, nothing built.** 2026-10-02.
+> Status: **APPROVED 2026-10-02** (owner), nothing built yet. Rulings: D1 edit in place, **segment 223 first**; D2 yes as proposed; D3 try camman-v2 first, if a branch is needed report the monthly cost and wait. **Build gate:** §5 must carry the window's measured numbers and segment evaluation must be confirmed **under 1 s**; otherwise stop and report. **Required before the first segment switch:** manual sends visible to the rule (§4b, task T2b).
+>
+> Numbering: 0195 went to the campaign offer-cooldown default (card 869fb5j0e), so this rule's CHECK migration is **0196** and the manual-recipients table is **0197**.
 > Spec: [2026-10-02-task3-audience-facts-recon.md](../specs/2026-10-02-task3-audience-facts-recon.md) §11 (E0) and §12.
-> **Waits on the owner:** approval of this plan, decisions D1–D3 below and migration 0195. The expected-time numbers in §5 also wait on the 2026-10-03 window.
+> **Waits on:** migration 0196 SQL approval; the 2026-10-03 window numbers for §5 (build gate).
 
 ## 0. The decision and the order
 
@@ -69,7 +71,7 @@ With `is_not`, the builder's existing path gives "eligible contacts EXCEPT this 
 A never-texted contact has no matching row, so it **is** in "not texted". This
 matches today's "Not Used" segments.
 
-**Migration 0195 (needs approval).** It extends the `segment_rules_rule_type_check`
+**Migration 0196 (needs approval).** It extends the `segment_rules_rule_type_check`
 CHECK constraint with `'texted_in_last_period'`. The pattern copies 0189:
 - `DROP CONSTRAINT IF EXISTS` plus `ADD CONSTRAINT` with the full list;
 - hand-authored SQL, snapshot and journal entry.
@@ -131,6 +133,43 @@ The engagement job runs at :10, :25, :40 and :55 past each hour. Its watermark i
 - `contact_engagement.last_sent_at` has exactly **one** writer: [lib/engagement/refresh.ts](../../../lib/engagement/refresh.ts) (its header: "the ONLY writer"). Its value is `max(sent_at)` over `status = 'sent'` rows.
 - Both are checked by a guard: a `check:guards` needle fails if a second file writes `status = 'sent'` on `stage_sends`. A new writer is then a red build, not a silent gap.
 
+## 4b. Manual sends visible to the rule (owner requirement; task T2b, before the first switch)
+
+**Today:**
+- A manual stage (`link_mode = 'manual'`) is exported as a CSV (`GET …/export-phones`), texted in an external provider, then set to `'sent'` through the stage `status` route or `bulk-status`.
+- The export **stores nothing**; its own comment calls this "the known manual-CSV blind spot". So at "mark as sent" there is no record of who received the message.
+- Recomputing the recipients at mark time is not reliable. Opt-outs, the split, `limit` and the exclusions can all change between export and mark, and an operator can export several times.
+
+**Proposal (recommended): record at export, stamp at mark.**
+1. **Migration 0197:** a table `stage_manual_recipients`:
+   - columns: `org_id`, `stage_id`, `contact_id`, `exported_at`, `sent_at` (nullable), `created_at`;
+   - PK `(stage_id, contact_id)`, FKs explicit;
+   - index `(org_id, sent_at) WHERE sent_at IS NOT NULL`.
+2. **Export.** `export-phones` inserts each streamed chunk's contact ids (`ON CONFLICT DO NOTHING`; several exports union). This needs the recipient query to return `contact_id` next to `phone_number`; the CSV is unchanged.
+3. **Mark as sent** (both `status` and `bulk-status`, manual stages only): in the same transaction as the status change, set `sent_at = now()` on that stage's rows where `sent_at IS NULL`. Moving a stage **out** of `'sent'` clears them, so a mistaken mark is undone.
+4. **The new rule and the nightly ground truth** both union `stage_manual_recipients` rows with `sent_at` in the window. A manual send therefore counts as texted.
+
+**Why not write `stage_sends` rows (the example in your request).** `status = 'sent'` on `stage_sends` is the single shared definition of "was messaged" (CLAUDE.md §10e), and several things read it:
+- the send circuit breakers' rolling counts: marking a 10K-recipient manual stage would land 10K `'sent'` rows in one instant;
+- the reports, Overview and Delivered %;
+- the engagement job;
+- `sent_from_provider_phone`.
+
+Synthetic rows would change all of these at once, and the drain is the census's single writer of `'sent'`. A separate table changes only what this rule reads. If you want manual sends counted in the reports and the lifecycle engine as well, that is a larger, separate decision.
+
+**Known limits:**
+- `sent_at` is the moment of marking, not the external send time, which is unknown. Rows exported before T2b ships have no record and stay invisible; there were 0 manual sends in the last 30 days.
+
+**Test (bar `scripts/test-manual-send-visibility.ts`, preview DB, synthetic campaign):**
+1. Manual stage with contacts A, B, C. Export with a limit of 2 → rows for A and B, `sent_at` null; the rule `is_not 3d` still includes A and B (not marked sent).
+2. Mark as sent → `sent_at` stamped; `is_not 3d` excludes A and B and keeps C.
+3. Bulk-status path → same result.
+4. A second export adds C, and the stamp after re-marking covers it.
+5. Revert from `'sent'` → stamps cleared, A and B included again.
+6. A tracked stage is unaffected; the route still refuses `'sent'` for it.
+7. Ground truth (§6) includes the manual rows.
+8. Nothing written to `stage_sends`.
+
 ## 5. Expected preview time
 
 Run 1 (Small, 2026-10-02):
@@ -184,19 +223,20 @@ The EXCEPT against the eligible universe stays the same for both rules.
 | # | Task | Gate |
 |---|---|---|
 | T0 | E4 offer covering index | SQL proposed after run 2; owner approval |
-| T1 | Migration 0195: CHECK constraint | Owner approves the SQL; applied before T2 ships |
+| T1 | Migration 0196: CHECK constraint | Owner approves the SQL; applied before T2 ships |
+| T2b | Manual sends visible (§4b): migration 0197 + export records + mark/unmark stamps + rule/ground-truth union | Bar `test-manual-send-visibility`; **before the first segment switch** |
 | T2 | Rule type: four registration places + eval branch + tail; bar file `scripts/test-segment-rule-texted.ts` (preview DB, synthetic contacts: texted 2 days ago in the engagement table; texted 10 minutes ago in `stage_sends` only with a stale engagement table; never texted; texted 20 days ago. `is` / `is_not` × 3d/1w/2w; never-texted is in "not texted"; tail dedupe; segments 195/223/196 unchanged) | Bars + guards + tsc |
 | T3 | Rules panel: the new type appears from `RULE_TYPES`; the period picker is reused; operator select shown (both operators) | Browser check on production |
 | T4 | Kill switch `AUDIENCE_RULE_TEXTED=direct` + header; bar: direct = fact on the fixtures | Bars; one timed flip in the quiet window |
 | T5 | Nightly trial cron + Telegram + streak + manual-send check; `check:guards` needle for a second `'sent'` writer | Red proof: a seeded drift fixture alerts |
 | T6 | Speed-gate dataset + bar | Depends on D3 |
-| T7 | Docs: 03-data-model (0195), 04-features/segments, 05-flows (nightly trial), 07-conventions (lag tail, single writer), CHANGELOG | Part of each PR |
+| T7 | Docs: 03-data-model (0196, 0197), 04-features/segments, 05-flows (nightly trial), 07-conventions (lag tail, single writer), CHANGELOG | Part of each PR |
 
-Then 14 zero-drift nights, then the owner switches 195, 223 and 196 one at a time (D1).
+Build starts only when §5 has the window's numbers and segment evaluation is under 1 s. Then 14 zero-drift nights and T2b live, then the owner switches **223 first**, then 195 and 196, one at a time (D1).
 
 ## 8. Decisions for the owner
 
 - **D1:** switch in place (recommended) or new segments.
 - **D2:** run the 14-night trial before the first switch; switched segments use the rule in preview and activation alike.
 - **D3:** where the 5× speed-gate dataset lives.
-- **Migration 0195:** approve the SQL when shown.
+- **Migration 0196:** approve the SQL when shown.

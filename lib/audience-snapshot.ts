@@ -1803,6 +1803,24 @@ export class PreviewBusyError extends Error {
   }
 }
 
+// The per-user single-flight lock (hotfix 2026-10-01, until T6), taken first
+// in each preview transaction. Transaction-scoped, so it is safe through the
+// transaction pooler (the same pattern as lib/links/geoip-cache.ts), and it is
+// released at commit or rollback, including when the statement times out.
+// No key = no lock (scripts, tests).
+async function takePreviewLock(
+  tx: Pick<typeof db, "execute">,
+  key: string | undefined,
+): Promise<void> {
+  if (!key) return;
+  const [lock] = (await tx.execute(drizzleSql`
+    select pg_try_advisory_xact_lock(
+      hashtext(${"audience-preview:" + key})::int8
+    ) as ok
+  `)) as unknown as { ok: boolean }[];
+  if (!lock?.ok) throw new PreviewBusyError();
+}
+
 export async function previewAudience(
   input: AudiencePreviewInput,
   // Optional, for scripts/verify-preview-parity.ts only: lets the verifier run
@@ -1962,17 +1980,7 @@ export async function previewAudience(
     await tx.execute(
       drizzleSql.raw(`set local statement_timeout = '${PREVIEW_STATEMENT_TIMEOUT}'`),
     );
-    if (opts?.singleFlightKey) {
-      // Transaction-scoped, so safe through the transaction pooler (the same
-      // pattern as lib/links/geoip-cache.ts). Released at commit/rollback,
-      // including when the statement times out.
-      const [lock] = (await tx.execute(drizzleSql`
-        select pg_try_advisory_xact_lock(
-          hashtext(${"audience-preview:" + opts.singleFlightKey})::int8
-        ) as ok
-      `)) as unknown as { ok: boolean }[];
-      if (!lock?.ok) throw new PreviewBusyError();
-    }
+    await takePreviewLock(tx, opts?.singleFlightKey);
     return await tx.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
     sources as (
@@ -2052,21 +2060,24 @@ export async function previewAudience(
 export type PreviewBaseInput = PreviewMembershipInput &
   Pick<AudiencePreviewInput, "lifecycleRules">;
 
-export interface AudiencePreviewBase {
-  excluded_for_optout: number;
-  // Lifecycle campaigns only; absent for a legacy one, as on the full result.
-  lifecycle?: {
-    opted_out: number;
-    suppressed: number;
-    // Members neither opted out nor suppressed, by contacts.lifecycle_status.
-    status_histogram: Record<string, number>;
-  };
-}
+// The part types and the merge live in ./audience-preview-parts (no server
+// imports) so the CLIENT can call the very same combinePreviewParts.
+export type {
+  AudiencePreviewAudiencePart,
+  AudiencePreviewBase,
+} from "./audience-preview-parts";
+export { combinePreviewParts } from "./audience-preview-parts";
+import type {
+  AudiencePreviewAudiencePart,
+  AudiencePreviewBase,
+} from "./audience-preview-parts";
 
 export async function previewAudienceBase(
   input: PreviewBaseInput,
   // For scripts/verify-preview-parity.ts only, as on previewAudience.
   runner?: Pick<typeof db, "transaction">,
+  // Hotfix single-flight lock key (route only); see takePreviewLock.
+  opts?: { singleFlightKey?: string },
 ): Promise<AudiencePreviewBase> {
   const lifecycleRules = input.lifecycleRules === true;
   const hasSource =
@@ -2092,6 +2103,7 @@ export async function previewAudienceBase(
     await tx.execute(
       drizzleSql.raw(`set local statement_timeout = '${PREVIEW_STATEMENT_TIMEOUT}'`),
     );
+    await takePreviewLock(tx, opts?.singleFlightKey);
     return await tx.execute(drizzleSql`
     with unionized as (${unionedWithSources}),
     sources as (
@@ -2185,60 +2197,7 @@ export async function previewAudienceBase(
   };
 }
 
-// What the audience part must supply: everything except the group-level
-// numbers, which combinePreviewParts takes from the base. A full
-// AudiencePreviewResult also satisfies it; its group-level fields are ignored.
-export type AudiencePreviewAudiencePart = Omit<
-  AudiencePreviewResult,
-  "excluded_for_optout" | "lifecycle"
-> & {
-  lifecycle?: {
-    by_status: Record<string, number>;
-    excluded: Omit<
-      LifecycleAudienceBreakdown["excluded"],
-      "opted_out" | "suppressed" | "status_not_selected"
-    >;
-  };
-};
 
-/**
- * The response the form reads, from the two parts. Pure, and used by both the
- * client and the parity verifier, so what the form shows is what was verified.
- * `chips` are the campaign's lifecycle_statuses; unknown values are ignored
- * exactly as chipStatusArrayLiteral ignores them.
- */
-export function combinePreviewParts(
-  base: AudiencePreviewBase,
-  audience: AudiencePreviewAudiencePart,
-  chips: readonly string[] | null | undefined,
-): AudiencePreviewResult {
-  const { lifecycle: audienceLc, ...rest } = audience;
-  if (!!audienceLc !== !!base.lifecycle)
-    // One part was computed as lifecycle and the other as legacy: the two
-    // answers describe different campaigns. Never merge them.
-    throw new Error("preview parts disagree on lifecycle_rules");
-  const out: AudiencePreviewResult = {
-    ...rest,
-    excluded_for_optout: base.excluded_for_optout,
-  };
-  if (audienceLc && base.lifecycle) {
-    const allowed = new Set<string>(LIFECYCLE_CHIP_STATUSES);
-    const selected = new Set((chips ?? []).filter((c) => allowed.has(c)));
-    const statusNotSelected = Object.entries(base.lifecycle.status_histogram)
-      .filter(([status]) => !selected.has(status))
-      .reduce((sum, [, n]) => sum + n, 0);
-    out.lifecycle = {
-      by_status: audienceLc.by_status,
-      excluded: {
-        ...audienceLc.excluded,
-        opted_out: base.lifecycle.opted_out,
-        suppressed: base.lifecycle.suppressed,
-        status_not_selected: statusNotSelected,
-      },
-    };
-  }
-  return out;
-}
 
 // The group-level numbers removed, so an audience part can never be mistaken
 // for a whole preview: they are the base part's job.
@@ -2269,6 +2228,8 @@ export async function previewAudienceAudiencePart(
   input: AudiencePreviewInput,
   // For scripts/verify-preview-parity.ts only, as on previewAudience.
   runner?: Pick<typeof db, "transaction">,
+  // Hotfix single-flight lock key (route only); see takePreviewLock.
+  opts?: { singleFlightKey?: string },
 ): Promise<AudiencePreviewAudiencePart> {
   const allowed = new Set<string>(LIFECYCLE_CHIP_STATUSES);
   const chips = [
@@ -2279,8 +2240,8 @@ export async function previewAudienceAudiencePart(
     ),
   ];
   if (input.lifecycleRules !== true || !hasAnySource(input) || chips.length === 0)
-    return stripGroupLevel(await previewAudience(input, runner));
-  return previewAudienceNarrowed(input, chips, runner);
+    return stripGroupLevel(await previewAudience(input, runner, opts));
+  return previewAudienceNarrowed(input, chips, runner, opts);
 }
 
 // ── Task 2 T3: the narrowed audience part (plan §2b) ─────────────────────────
@@ -2307,6 +2268,7 @@ async function previewAudienceNarrowed(
   input: AudiencePreviewInput,
   chips: string[],
   runner?: Pick<typeof db, "transaction">,
+  opts?: { singleFlightKey?: string },
 ): Promise<AudiencePreviewAudiencePart> {
   const { orgId, filters } = input;
   const cap = input.cap ?? null;
@@ -2393,6 +2355,7 @@ async function previewAudienceNarrowed(
     await tx.execute(
       drizzleSql.raw(`set local statement_timeout = '${PREVIEW_STATEMENT_TIMEOUT}'`),
     );
+    await takePreviewLock(tx, opts?.singleFlightKey);
     // The candidates: chip members of the membership, with their sources.
     await tx.execute(drizzleSql`
       create temp table pv_cand on commit drop as

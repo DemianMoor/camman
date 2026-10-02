@@ -8,7 +8,12 @@ import { newCampaignUsesLifecycleRules } from "@/lib/engagement/lifecycle-gate";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { previewTimeoutResponse } from "@/lib/api/preview-timeout";
 import { referencePreviewAudience } from "@/lib/audience-preview-reference";
-import { PreviewBusyError, previewAudience } from "@/lib/audience-snapshot";
+import {
+  PreviewBusyError,
+  previewAudience,
+  previewAudienceAudiencePart,
+  previewAudienceBase,
+} from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
 import { audiencePreviewSchema } from "@/lib/validators/campaigns";
 
@@ -134,40 +139,61 @@ export async function POST(req: NextRequest) {
   // assumed. Removed together with lib/audience-preview-reference/.
   const impl =
     process.env.AUDIENCE_PREVIEW_IMPL === "reference" ? "reference" : "live";
-  // Hotfix 2026-10-01 (until T6): one running preview per user, so a
-  // superseded or retried preview cannot stack another long query. The
-  // frozen reference (kill switch) runs without the lock.
-  const singleFlightKey = `${orgId}:${auth.user?.id ?? "token"}`;
-  const preview = (i: Parameters<typeof previewAudience>[0]) =>
-    impl === "reference"
-      ? referencePreviewAudience(i)
-      : previewAudience(i, undefined, { singleFlightKey });
+  // Hotfix 2026-10-01 (until T6): one running preview per user AND part, so a
+  // superseded or retried preview cannot stack another long query, while the
+  // two halves of one preview (T5) still run side by side. The frozen
+  // reference (kill switch) runs without the lock.
+  const part = parsed.data.part;
+  const singleFlightKey = `${orgId}:${auth.user?.id ?? "token"}:${part ?? "full"}`;
+  const input: Parameters<typeof previewAudience>[0] = {
+    orgId,
+    lifecycleRules,
+    segmentIds,
+    excludeSegmentIds,
+    contactGroupIds: groupIds,
+    filters: parsed.data.audience_filters ?? {},
+    cap: parsed.data.audience_cap ?? null,
+    // Default true to mirror the campaign column default — a preview with
+    // the flag omitted matches a campaign created without specifying it.
+    excludeInUse: parsed.data.exclude_in_use_contacts ?? true,
+    // Content-dedup LAYER 3 (preview only). offer_id is scoped by org_id in
+    // the query, so no separate ownership check is needed — a foreign id
+    // simply matches no exposures (and we avoid the extra round-trip).
+    excludePriorOffer: parsed.data.exclude_prior_offer_contacts ?? false,
+    // A campaign being created gets the new semantics, so the preview must
+    // use them too — otherwise the numbers on screen describe a rule the
+    // campaign will not actually run.
+    offerRulesEnabled: lifecycleRules,
+    offerCooldownDays: parsed.data.offer_cooldown_days ?? 7,
+    offerLimitTimes: parsed.data.offer_limit_times ?? 5,
+    offerId: parsed.data.offer_id ?? null,
+  };
 
-  let result: Awaited<ReturnType<typeof previewAudience>>;
+  // Task 2 T5. Without `part` the answer is the whole preview in TODAY'S shape —
+  // operator API tokens call this route and must not see a change. With a
+  // part, the answer is { part, data }. Under the kill switch every request
+  // is served whole by the frozen reference and says so (part: "full"), and
+  // the form shows it as is instead of merging.
+  let body: unknown;
   try {
-    result = await preview({
-      orgId,
-      lifecycleRules,
-      segmentIds,
-      excludeSegmentIds,
-      contactGroupIds: groupIds,
-      filters: parsed.data.audience_filters ?? {},
-      cap: parsed.data.audience_cap ?? null,
-      // Default true to mirror the campaign column default — a preview with
-      // the flag omitted matches a campaign created without specifying it.
-      excludeInUse: parsed.data.exclude_in_use_contacts ?? true,
-      // Content-dedup LAYER 3 (preview only). offer_id is scoped by org_id in
-      // the query, so no separate ownership check is needed — a foreign id
-      // simply matches no exposures (and we avoid the extra round-trip).
-      excludePriorOffer: parsed.data.exclude_prior_offer_contacts ?? false,
-      // A campaign being created gets the new semantics, so the preview must
-      // use them too — otherwise the numbers on screen describe a rule the
-      // campaign will not actually run.
-      offerRulesEnabled: lifecycleRules,
-      offerCooldownDays: parsed.data.offer_cooldown_days ?? 7,
-      offerLimitTimes: parsed.data.offer_limit_times ?? 5,
-      offerId: parsed.data.offer_id ?? null,
-    });
+    if (impl === "reference") {
+      const full = await referencePreviewAudience(input);
+      body = part ? { part: "full", data: full } : full;
+    } else if (part === "base") {
+      body = {
+        part: "base",
+        data: await previewAudienceBase(input, undefined, { singleFlightKey }),
+      };
+    } else if (part === "audience") {
+      body = {
+        part: "audience",
+        data: await previewAudienceAudiencePart(input, undefined, {
+          singleFlightKey,
+        }),
+      };
+    } else {
+      body = await previewAudience(input, undefined, { singleFlightKey });
+    }
   } catch (e) {
     // Via the cause chain: the 57014 is on err.cause, not err (869faaa3v).
     const timeout = previewTimeoutResponse(e);
@@ -183,7 +209,7 @@ export async function POST(req: NextRequest) {
     }
     throw e;
   }
-  return NextResponse.json(result, {
+  return NextResponse.json(body, {
     headers: { "x-audience-preview-impl": impl },
   });
 }

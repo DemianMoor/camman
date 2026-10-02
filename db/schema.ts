@@ -1666,7 +1666,8 @@ export const segment_rules = pgTable(
         'last_message_in_last_n_days',
         'last_click_more_than_n_days_ago',
         'last_click_in_last_n_days',
-        'lifecycle_status'
+        'lifecycle_status',
+        'texted_in_last_period'
       )`,
     ),
     check(
@@ -1927,7 +1928,7 @@ export const campaigns = pgTable(
       .default(false),
     // Y. Excluded while the last send of this offer is MORE RECENT than
     // now() - Y days; exactly Y days ago is INSIDE the cooldown.
-    offer_cooldown_days: integer("offer_cooldown_days").notNull().default(7),
+    offer_cooldown_days: integer("offer_cooldown_days").notNull().default(14),
     // N. Counts CAMPAIGNS, not messages — one sequence = 1 however many
     // stages it has.
     offer_limit_times: integer("offer_limit_times").notNull().default(5),

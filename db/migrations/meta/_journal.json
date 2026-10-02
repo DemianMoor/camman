@@ -1366,6 +1366,20 @@
       "when": 1793318400000,
       "tag": "0194_offer_brands",
       "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1793404800000,
+      "tag": "0195_campaign_offer_cooldown_default_14",
+      "breakpoints": true
+    },
+    {
+      "idx": 196,
+      "version": "7",
+      "when": 1793491200000,
+      "tag": "0196_segment_rules_texted_in_last_period",
+      "breakpoints": true
     }
   ]
 }

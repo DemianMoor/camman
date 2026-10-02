@@ -367,3 +367,97 @@ plans without the temp table's statistics. It's in §9.
 | E4 | Offer rules: the covering index (D3 / Option C)? | **Yes**, after run 2 confirms the read on Large |
 | E5 | Materialised membership for other rule types (Option 2)? | **Not now**: 96% of real use is covered by E1 |
 | E6 | Target a read replica for previews? | Decide after §9 item 4 |
+
+---
+
+## 11. Owner review (2026-10-02) and E0
+
+**Decisions recorded:**
+
+| # | ruling |
+| --- | --- |
+| **E0** (new, before E1) | Which **meaning** should the "used" rule have? Measured below; the **owner decides**. |
+| E1 | Yes, pending E0. |
+| E2 | Design for exact reads, but **enable for the preview only**. Activation switches after **14 consecutive days of zero drift**. |
+| E3 | Yes. |
+| E4 | Yes, and **first**. Migration SQL to be proposed after run 2 (2026-10-03). |
+| E5 | Not now. |
+| E6 | After measuring. |
+
+§9 measurements are approved for the next quiet window. **No build**: the build needs its own plan file.
+
+### 11.1 E0: campaign-creation anchor vs "last sent"
+
+Production, read-only, 2026-10-02 ~10:40 UTC (a 64 s read, on Large); eligible contacts only.
+- **(a) today's rule:** in the pool of a live campaign **created** within N days.
+- **(b) last sent within N days** (`contact_engagement.last_sent_at`), combined with exclude-in-use (pools of `active` campaigns).
+
+| window | (a) today | (a) + exclude-in-use | (b) | only (a) | only (b) | both |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 days | 82,231 | 82,231 | 112,392 | 227 | **30,388** | 82,004 |
+| 1 week | 190,568 | 190,568 | 211,981 | 1,048 | **22,461** | 189,520 |
+| 2 weeks | 343,067 | 343,067 | 358,281 | 1,336 | **16,550** | 341,731 |
+
+**Exclude-in-use adds nothing to (a):** every contact in an active campaign's pool is already inside (a) for all three windows.
+
+**What the differences are** (concrete contacts, 1-week window; ids truncated):
+
+- **Only (b): messaged recently by a campaign created before the window.**
+  `4ca749d9…` and `e1276fbb…` are in campaign 1432, **created 09-23**, which
+  messaged them on **09-23, 09-24 and 09-25**. By creation date the campaign is
+  outside the week, so today's rule treats them as *not used* although they
+  were texted 7 days ago. This is the multi-stage / long-running campaign case,
+  and it is the large side: 16–30K contacts.
+- **Only (a): in a recent pool but never actually messaged by it.**
+  - `80ab36da…` is in campaign 1471's pool (**created 09-26**), but was last
+    texted **07-28**.
+  - `6b07938d…` is in 1503's pool (09-28); last texted 09-07.
+
+  Today's rule counts them as *used* because their snapshot exists, not
+  because they were messaged. This is the small side: 0.2–1.3K.
+
+**What each meaning does for Task 3:**
+- **(b)** is already a timestamp fact: `contact_engagement.last_sent_at` is
+  written by the engagement job and indexed `(org_id, last_sent_at)`. The rule
+  would need **no new fact table and no liveness journal**, only the read
+  `last_sent_at >= now() − N`, with the existing exclude-in-use beside it.
+  Freshness: the engagement job's cadence (every 15 min).
+- **(a)** needs the §4 design: the fact, the journal and the triggers.
+
+---
+
+## 12. Requirements added by the owner (binding for the build plan)
+
+1. **Trial period.** Before any switch, the fact-based evaluation and the
+   current evaluation are compared **nightly on real recipes** via the parity
+   harness (`scripts/verify-preview-parity.ts`, extended with the fact path as
+   a third implementation). Any difference fails and alerts. Activation
+   switches only after **14 consecutive nights of zero drift** (E2).
+2. **Kill switch per fact.** Each fact has its own switch back to today's
+   evaluation, like `AUDIENCE_PREVIEW_IMPL`. One env var per fact, e.g.
+   `AUDIENCE_FACT_CAMPAIGN_USE=off`, `AUDIENCE_FACT_FREEZE_DUE=off`, read per
+   request, with the implementation that answered named in a response header.
+3. **Drift alert and speed gate.**
+   - **Drift:** the nightly comparison posts to Telegram on any difference,
+     naming the recipe, the rule and the count delta.
+   - **Speed gate:** a bar that **fails if a preview exceeds 2 s at 5× current
+     data**. That needs a scaled dataset: about 5× contacts (≈ 4.8 M), pool
+     rows (≈ 15 M) and offer history. Built on a Supabase branch or a dedicated
+     scale database, never on production. The build plan must name where it
+     runs and how the data is generated.
+4. **Writer census in full in the build plan.**
+   - Preliminary count (code, 2026-10-02):
+     - **14 files** write `campaigns.status`;
+     - **15 Drizzle files + 29 raw-SQL sites** update `campaign_stages`, each
+       to be classified as status-changing or not;
+     - **1** pool insert (`snapshotAudience`), **1** pool delete
+       (`lib/telnyx/sync-contacts.ts`).
+   - **Design consequence (recommendation):** write the liveness journal from
+     **database triggers** (`AFTER UPDATE OF status … WHEN OLD.status IS
+     DISTINCT FROM NEW.status` on `campaigns` and `campaign_stages`;
+     `AFTER INSERT / DELETE` on `campaign_audience_pool`, statement-level), not
+     from application code. A trigger catches every writer by construction,
+     including raw SQL and future code. The census in the build plan is then a
+     **check** on the triggers (each listed writer exercised in a test), not
+     the mechanism.
+   - Only needed if E0 chooses meaning (a).

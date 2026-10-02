@@ -42,7 +42,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatPhoneInternational } from "@/lib/phone-validation";
-import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
+import {
+  CAMPAIGN_CARRIER_FILTER_VALUES,
+  OFFER_COOLDOWN_DAYS_DEFAULT,
+} from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 import type { CAMPAIGN_DETAIL_SELECT } from "@/lib/api/campaign-detail";
 
@@ -315,7 +318,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
     audience_cap: data.audience_cap ?? null,
     exclude_in_use_contacts: data.exclude_in_use_contacts ?? true,
     exclude_prior_offer_contacts: data.exclude_prior_offer_contacts ?? false,
-    offer_cooldown_days: data.offer_cooldown_days ?? 7,
+    offer_cooldown_days: data.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
     offer_limit_times: data.offer_limit_times ?? 5,
     link_mode: data.link_mode ?? "manual",
     start_date: data.start_date ?? "",
@@ -1554,7 +1557,7 @@ function AudienceCard({
                         min={0}
                         max={365}
                         className="h-8 w-16 text-right"
-                        value={watchedOfferCooldown ?? 7}
+                        value={watchedOfferCooldown ?? OFFER_COOLDOWN_DAYS_DEFAULT}
                         onChange={(e) =>
                           form.setValue(
                             "offer_cooldown_days",

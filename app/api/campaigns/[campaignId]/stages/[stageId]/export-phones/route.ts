@@ -10,6 +10,7 @@ import { chunkedQuery, streamCsvResponse } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
+import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 // Streams a chunked, content-deduped recipient query. Without an explicit
 // budget this ran on the platform default (~15s) and silently truncated the
@@ -173,7 +174,7 @@ export async function GET(
             excludePriorOffer: stage.exclude_prior_offer_contacts,
             lifecycleRules: stage.lifecycle_rules === true,
             offerRulesEnabled: stage.offer_rules_enabled === true,
-            offerCooldownDays: Number(stage.offer_cooldown_days ?? 7),
+            offerCooldownDays: Number(stage.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
             offerLimitTimes: Number(stage.offer_limit_times ?? 5),
           },
           limit: effectiveLimit,

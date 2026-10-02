@@ -15,6 +15,7 @@ import {
   stageRecipientsSql,
   type StageRecipientFilters,
 } from "@/lib/sends/recipients";
+import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 export type DbOrTx =
   typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -170,7 +171,7 @@ export async function computePreflightBreakdown(
     excludePriorOffer: cfg.exclude_prior_offer_contacts,
     lifecycleRules: cfg.lifecycle_rules === true,
     offerRulesEnabled: cfg.offer_rules_enabled === true,
-    offerCooldownDays: Number(cfg.offer_cooldown_days ?? 7),
+    offerCooldownDays: Number(cfg.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
     offerLimitTimes: Number(cfg.offer_limit_times ?? 5),
   };
 

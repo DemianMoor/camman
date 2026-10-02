@@ -10,6 +10,7 @@ import {
 } from "@/lib/sends/eligibility";
 import type { StageRecipientFilters } from "@/lib/sends/recipients";
 import { splitBucketMatch } from "@/lib/sends/split-bucket";
+import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 export type DbOrTx =
   typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -93,7 +94,7 @@ export async function computeStageReconciliation(
         excludePriorOffer: e.exclude_prior_offer_contacts,
         lifecycleRules: e.lifecycle_rules === true,
         offerRulesEnabled: e.offer_rules_enabled === true,
-        offerCooldownDays: Number(e.offer_cooldown_days ?? 7),
+        offerCooldownDays: Number(e.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
         offerLimitTimes: Number(e.offer_limit_times ?? 5),
       })
     : [];

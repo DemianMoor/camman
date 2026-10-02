@@ -22,7 +22,7 @@ import {
 import { stageRecipientsSql } from "./sends/recipients";
 import { splitBucketMatch } from "./sends/split-bucket";
 import { buildSegmentAudienceClause } from "./segment-rules-eval";
-import { LIFECYCLE_CHIP_STATUSES } from "./validators/campaigns";
+import { LIFECYCLE_CHIP_STATUSES, OFFER_COOLDOWN_DAYS_DEFAULT } from "./validators/campaigns";
 
 // Compose the audience-source set (contact_ids, before status filters /
 // opt-out / in-use exclusion) from the two selection dimensions:
@@ -1883,7 +1883,7 @@ export async function previewAudience(
               // "the current campaign" to carve out. Every row counts — which
               // is the honest preview of a campaign that has sent nothing.
               currentCampaignId: -1,
-              cooldownDays: input.offerCooldownDays ?? 7,
+              cooldownDays: input.offerCooldownDays ?? OFFER_COOLDOWN_DAYS_DEFAULT,
               limitTimes: input.offerLimitTimes ?? 5,
             })
           : []),
@@ -2288,7 +2288,7 @@ async function previewAudienceNarrowed(
           orgId,
           offerId: input.offerId ?? null,
           currentCampaignId: -1,
-          cooldownDays: input.offerCooldownDays ?? 7,
+          cooldownDays: input.offerCooldownDays ?? OFFER_COOLDOWN_DAYS_DEFAULT,
           limitTimes: input.offerLimitTimes ?? 5,
         })
       : []),
@@ -2330,7 +2330,7 @@ async function previewAudienceNarrowed(
     ? drizzleSql`,
         coalesce(os.n >= ${input.offerLimitTimes ?? 5}::int, false) as is_offer_limit,
         coalesce(
-          os.last_sent_at > now() - make_interval(days => ${input.offerCooldownDays ?? 7}::int),
+          os.last_sent_at > now() - make_interval(days => ${input.offerCooldownDays ?? OFFER_COOLDOWN_DAYS_DEFAULT}::int),
           false
         ) as is_offer_cooldown`
     : drizzleSql``;
@@ -2631,7 +2631,7 @@ export async function snapshotAudience(
             and coc.campaign_id <> ${input.campaignId}::int
           group by coc.contact_id
           having count(*) >= ${input.offerLimitTimes ?? 5}::int
-             or max(coc.last_sent_at) > now() - make_interval(days => ${input.offerCooldownDays ?? 7}::int)
+             or max(coc.last_sent_at) > now() - make_interval(days => ${input.offerCooldownDays ?? OFFER_COOLDOWN_DAYS_DEFAULT}::int)
         )
       `);
     } else {

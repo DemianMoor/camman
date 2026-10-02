@@ -15,7 +15,7 @@ import {
   previewAudienceBase,
 } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
-import { audiencePreviewSchema } from "@/lib/validators/campaigns";
+import { OFFER_COOLDOWN_DAYS_DEFAULT, audiencePreviewSchema } from "@/lib/validators/campaigns";
 
 // ⚠️ THIS ROUTE HAD NO maxDuration, on a query that takes SECONDS.
 //
@@ -164,7 +164,7 @@ export async function POST(req: NextRequest) {
     // use them too — otherwise the numbers on screen describe a rule the
     // campaign will not actually run.
     offerRulesEnabled: lifecycleRules,
-    offerCooldownDays: parsed.data.offer_cooldown_days ?? 7,
+    offerCooldownDays: parsed.data.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
     offerLimitTimes: parsed.data.offer_limit_times ?? 5,
     offerId: parsed.data.offer_id ?? null,
   };

@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-09-28_
+_Last updated: 2026-10-02_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -363,7 +363,7 @@ offer" toggle is on AND that was created with `offer_rules_enabled`:
 | layer            | excludes                                                    |
 | ---------------- | ----------------------------------------------------------- |
 | `offer_limit`    | got this offer in **N or more other CAMPAIGNS** (default 5) |
-| `offer_cooldown` | last got it **within Y days** (default 7)                   |
+| `offer_cooldown` | last got it **within Y days** (default 14 for new campaigns since 2026-10-02, `OFFER_COOLDOWN_DAYS_DEFAULT`; was 7) |
 
 Both read `contact_offer_campaigns`, the per-(contact, offer, campaign) rollup
 the engagement job maintains.

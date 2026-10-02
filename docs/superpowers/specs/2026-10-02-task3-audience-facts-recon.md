@@ -376,7 +376,7 @@ plans without the temp table's statistics. It's in §9.
 
 | # | ruling |
 | --- | --- |
-| **E0** (new, before E1) | Which **meaning** should the "used" rule have? Measured below; the **owner decides**. |
+| **E0** (new, before E1) | **Decided 2026-10-02: (b).** Built as a NEW rule type on `contact_engagement.last_sent_at`; the existing rule and segments keep their meaning; segments switch only by the owner, one at a time. Plan: [2026-10-02-task3-texted-rule-plan.md](../plans/2026-10-02-task3-texted-rule-plan.md). Task 3 order: E4 index, then this rule, then the freeze fact. The journal/trigger design for (a) (§4, §12.4) is **shelved**. |
 | E1 | Yes, pending E0. |
 | E2 | Design for exact reads, but **enable for the preview only**. Activation switches after **14 consecutive days of zero drift**. |
 | E3 | Yes. |
@@ -460,4 +460,4 @@ Production, read-only, 2026-10-02 ~10:40 UTC (a 64 s read, on Large); eligible c
      including raw SQL and future code. The census in the build plan is then a
      **check** on the triggers (each listed writer exercised in a test), not
      the mechanism.
-   - Only needed if E0 chooses meaning (a).
+   - Only needed if E0 chooses meaning (a). **E0 chose (b): shelved.** The census for (b) (writers of `stage_sends` `'sent'` and of `last_sent_at`) is in the plan, §4.

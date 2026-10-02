@@ -11,6 +11,7 @@ import postgres from "postgres";
 import {
   affiliate_networks,
   brands,
+  campaign_stages,
   campaigns,
   clickers,
   contacts,
@@ -20,6 +21,7 @@ import {
   segment_contacts,
   contact_groups,
   segments,
+  stage_manual_recipients,
 } from "../db/schema";
 
 async function main() {
@@ -130,6 +132,9 @@ async function main() {
         network_id: network.id,
         payout_model: "cpa",
         payout_cpa: 10,
+        // Required since 0194 (offer ↔ brand assignment); the campaign below
+        // pairs this offer with this brand.
+        brand_ids: [brand.id],
       }),
     });
     check("seed: offer creation returns 201", offerR.status === 201);
@@ -171,6 +176,15 @@ async function main() {
       },
     );
     check("seed: contacts upload returns 201", uploadR.status === 201);
+
+    // The audience is segment ∩ group when both are selected (CLAUDE.md §10b,
+    // since 2026-06-10), so the same contacts must be in the group too, or
+    // the launch below is refused as an empty audience.
+    const grpAddR = await apiFetch(`/api/contact-groups/${grp.id}/contacts/add`, {
+      method: "POST",
+      body: JSON.stringify({ phones: phones.join("\n") }),
+    });
+    check("seed: contacts added to the group returns 201", grpAddR.status === 201);
 
     const campR = await apiFetch("/api/campaigns", {
       method: "POST",
@@ -416,6 +430,14 @@ async function main() {
       `inserted=${previewUploadBody.inserted}`,
     );
 
+    // segment ∩ group (CLAUDE.md §10b): the preview campaign below also selects
+    // the group, so these contacts must be members of it as well.
+    const previewGrpAddR = await apiFetch(`/api/contact-groups/${grp.id}/contacts/add`, {
+      method: "POST",
+      body: JSON.stringify({ phones: previewPhones.join("\n") }),
+    });
+    check("seed: preview contacts added to the group returns 201", previewGrpAddR.status === 201);
+
     // Resolve contact_ids in upload order so we know which 10 to make clickers.
     const previewContactRows = await db
       .select({ id: contacts.id, phone_number: contacts.phone_number })
@@ -578,7 +600,12 @@ async function main() {
     );
     // POST a stage with an explicit ISO datetime (with offset). The server
     // stores it as TIMESTAMPTZ; the GET should round-trip the same instant.
-    const scheduledIso = "2026-06-15T18:30:00.000Z";
+    // A FUTURE instant: the route refuses a past schedule ("Scheduled time
+    // can't be in the past"). The fixed "2026-06-15T18:30:00.000Z" this used
+    // to be expired on that date and turned the whole section red.
+    const scheduledIso = new Date(
+      Math.ceil((Date.now() + 30 * 86_400_000) / 60_000) * 60_000,
+    ).toISOString();
     const stgSchedR = await apiFetch(`/api/campaigns/${campaign.id}/stages`, {
       method: "POST",
       body: JSON.stringify({ scheduled_at: scheduledIso }),
@@ -632,7 +659,9 @@ async function main() {
     // is no longer accepted).
     const stgSchedBadR = await apiFetch(`/api/campaigns/${campaign.id}/stages`, {
       method: "POST",
-      body: JSON.stringify({ scheduled_at: "2026-06-15" }),
+      // A FUTURE date-only string, so only the missing time/offset can reject it
+      // (a past date would be refused as "in the past" and pass vacuously).
+      body: JSON.stringify({ scheduled_at: `${new Date().getUTCFullYear() + 1}-06-15` }),
     });
     check(
       "non-ISO scheduled_at rejected with 400",
@@ -640,7 +669,10 @@ async function main() {
       `got ${stgSchedBadR.status}`,
     );
 
-    console.log("\n[8] Stage 2: draft → cancelled → 200; cancelled → sent → 409");
+    // Stage status is FREELY assignable since 5bf08880 (inline dropdown): an
+    // operator may un-cancel. This used to assert cancelled was terminal (409);
+    // owner ruling 2026-10-02: assert today's rule, equally strictly.
+    console.log("\n[8] Stage 2: draft → cancelled → 200; cancelled → sent → 200, sent_at stamped");
     const ss4R = await apiFetch(
       `/api/campaigns/${campaign.id}/stages/${s2.id}/status`,
       {
@@ -656,7 +688,17 @@ async function main() {
         body: JSON.stringify({ status: "sent" }),
       },
     );
-    check("cancelled → sent: 409 (terminal)", ss5R.status === 409);
+    const ss5 = (await ss5R.json()) as {
+      status?: string;
+      previous_status?: string | null;
+      sent_at?: string | null;
+      status_set_manually?: boolean;
+    };
+    check("cancelled → sent: 200 (status is freely assignable)", ss5R.status === 200, `got ${ss5R.status}`);
+    check("...status is now 'sent'", ss5.status === "sent", `got ${ss5.status}`);
+    check("...previous_status records 'cancelled'", ss5.previous_status === "cancelled", `got ${ss5.previous_status}`);
+    check("...entering 'sent' stamps sent_at", typeof ss5.sent_at === "string" && ss5.sent_at.length > 0, `got ${ss5.sent_at}`);
+    check("...a hand-picked status is marked manual", ss5.status_set_manually === true, `got ${ss5.status_set_manually}`);
 
     console.log("\n[9] Stage phone export — against the [7b] preview campaign");
     // Reuse the previewCamp built in [7b]: 30 pool members (20 no-status +
@@ -846,14 +888,31 @@ async function main() {
       try {
         await fn();
       } catch (e) {
-        console.log(`  cleanup step FAILED (${label}): ${(e as Error).message.split("\n")[0]}`);
+        // Drizzle wraps the driver error: the reason (code, message, detail)
+        // is on `cause`. Print it, or a failed teardown says only "Failed query".
+        const c = (e as { cause?: { code?: string; message?: string; detail?: string } }).cause;
+        console.log(
+          `  cleanup step FAILED (${label}): ${(e as Error).message.split("\n")[0]}` +
+            (c ? ` — ${c.code ?? ""} ${c.message ?? ""}${c.detail ? ` (${c.detail})` : ""}` : ""),
+        );
       }
     };
     const realIds = (ids: number[]) => ids.filter((v) => Number.isInteger(v) && v > 0);
     const orNone = (ids: number[]) => (ids.length ? ids : [-1]);
     try {
       for (const cid of realIds(createdCampaignIds)) {
-        // Stages cascade with the campaign.
+        // Migration 0197: stage_manual_recipients.stage_id is NO ACTION, so a
+        // stage whose export was recorded (the [9] export does, once T2b ships)
+        // blocks the campaign delete BY DESIGN. Remove those rows explicitly,
+        // first; then the stages cascade with the campaign.
+        await step(`manual recipients of campaign ${cid}`, () =>
+          db.delete(stage_manual_recipients).where(
+            inArray(
+              stage_manual_recipients.stage_id,
+              db.select({ id: campaign_stages.id }).from(campaign_stages).where(eq(campaign_stages.campaign_id, cid)),
+            ),
+          ),
+        );
         await step(`campaign ${cid}`, () => db.delete(campaigns).where(eq(campaigns.id, cid)));
       }
       for (const cid of realIds(createdCreativeIds)) {

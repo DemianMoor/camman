@@ -1365,6 +1365,47 @@ export const stage_manual_sales = pgTable(
   ],
 );
 
+// Migration 0197 (Task 3 §4b, card T2b): who a stage's CSV export went to, and
+// when the stage was marked 'sent'. A MANUAL send happens outside the drain and
+// writes no stage_sends rows, so this is the only record that those contacts
+// were texted. Read by the "Texted in the last…" rule and its nightly ground
+// truth; NOT by reports, breakers or the engagement job (stage_sends untouched).
+// Written by export-phones (one row per exported contact, idempotent) and by
+// the stage status routes (sent_at stamped on entering 'sent', cleared on
+// leaving it for a non-archived status) — lib/stages/manual-recipients.ts.
+// ⚠️ stage_id is NO ACTION, deliberately NOT cascade: no path can delete a stage
+// whose rows remain. deleteStage() clears only UNMARKED rows (sent_at NULL) in
+// the same statement and refuses a stage with marked ones; an org delete
+// removes the rows through org_id's cascade.
+export const stage_manual_recipients = pgTable(
+  "stage_manual_recipients",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    stage_id: integer("stage_id")
+      .notNull()
+      .references(() => campaign_stages.id, { onDelete: "no action" }),
+    contact_id: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    exported_at: timestamp("exported_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    sent_at: timestamp("sent_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.stage_id, table.contact_id] }),
+    // INCLUDE (contact_id) is in the SQL only (drizzle cannot express it).
+    index("stage_manual_recipients_org_sent_idx")
+      .on(table.org_id, table.sent_at)
+      .where(sql`sent_at IS NOT NULL`),
+  ],
+);
+
 export type StageManualSale = typeof stage_manual_sales.$inferSelect;
 export type NewStageManualSale = typeof stage_manual_sales.$inferInsert;
 

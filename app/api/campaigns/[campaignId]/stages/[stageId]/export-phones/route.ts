@@ -10,6 +10,7 @@ import { chunkedQuery, streamCsvResponse } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
+import { recordExportedRecipients } from "@/lib/stages/manual-recipients";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 // Streams a chunked, content-deduped recipient query. Without an explicit
@@ -146,7 +147,7 @@ export async function GET(
         queryLimit !== undefined
           ? Math.max(0, queryLimit - offset)
           : chunkLimit;
-      if (remaining === 0) return [] as { phone_number: string }[];
+      if (remaining === 0) return [] as { contact_id: string; phone_number: string }[];
       const effectiveLimit = Math.min(chunkLimit, remaining);
 
       // Shared recipient query (lib/sends/recipients.ts) — the same SELECT the
@@ -180,8 +181,17 @@ export async function GET(
           limit: effectiveLimit,
           offset,
         }),
-      )) as unknown as { phone_number: string }[];
-      return Array.isArray(result) ? result : [];
+      )) as unknown as { contact_id: string; phone_number: string }[];
+      const rows = Array.isArray(result) ? result : [];
+      // Migration 0197: record who this export went to. A manual send writes no
+      // stage_sends, so this (stamped when the stage is marked 'sent') is the
+      // only record that these contacts were texted. Idempotent per contact.
+      await recordExportedRecipients(db, {
+        orgId,
+        stageId: sid,
+        contactIds: rows.map((r) => r.contact_id),
+      });
+      return rows;
     },
   });
 

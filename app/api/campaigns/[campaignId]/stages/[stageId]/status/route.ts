@@ -6,6 +6,7 @@ import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { logCampaignEvent } from "@/lib/campaign-events";
+import { syncManualRecipientsOnStatus } from "@/lib/stages/manual-recipients";
 import { can } from "@/lib/permissions";
 import { stageStatusChangeSchema } from "@/lib/validators/campaign-stages";
 
@@ -106,26 +107,31 @@ export async function POST(
     );
   }
 
-  const [updated] = await db
-    .update(campaign_stages)
-    .set({
-      status: next,
-      previous_status: from,
-      status_changed_at: drizzleSql`now()`,
-      // A hand-picked status outranks the automatic draft ⇄ pending moves
-      // (lib/stages/auto-status.ts) — permanently.
-      status_set_manually: true,
-      // Only stamp sent_at when actually entering the 'sent' state.
-      sent_at: next === "sent" ? drizzleSql`now()` : undefined,
-    })
-    .where(
-      and(
-        eq(campaign_stages.id, sid),
-        eq(campaign_stages.campaign_id, cid),
-        eq(campaign_stages.org_id, orgId),
-      ),
-    )
-    .returning();
+  // The status change and the manual-recipients stamp (0197) commit together.
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(campaign_stages)
+      .set({
+        status: next,
+        previous_status: from,
+        status_changed_at: drizzleSql`now()`,
+        // A hand-picked status outranks the automatic draft ⇄ pending moves
+        // (lib/stages/auto-status.ts) — permanently.
+        status_set_manually: true,
+        // Only stamp sent_at when actually entering the 'sent' state.
+        sent_at: next === "sent" ? drizzleSql`now()` : undefined,
+      })
+      .where(
+        and(
+          eq(campaign_stages.id, sid),
+          eq(campaign_stages.campaign_id, cid),
+          eq(campaign_stages.org_id, orgId),
+        ),
+      )
+      .returning();
+    await syncManualRecipientsOnStatus(tx, { orgId, stageId: sid, from, next });
+    return row;
+  });
   await logCampaignEvent(db, {
     orgId,
     campaignId: cid,

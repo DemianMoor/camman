@@ -19,6 +19,74 @@ import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
 
 const SLUG_RETRY_LIMIT = 5;
 
+// ⚠️ FIELD GUARD. The duplicate is an explicit field-by-field literal, so a
+// column it does not name silently takes its default — a 200, a success toast
+// and the wrong data. It happened to `type` (R25), then to the offer rules,
+// lifecycle_rules, link_mode and default_provider_phone_id (found 2026-10-02,
+// card 869fb60y2). Every campaigns column must now appear EITHER in
+// duplicateValues() OR in NOT_COPIED with its reason; `everyColumnHandled`
+// below fails the BUILD when a new column is neither.
+const NOT_COPIED = [
+  "id", // generated
+  "human_id", // globally unique per org; the source keeps it
+  "tracking_id", // generated in the transaction below when brand + offer are set
+  "status", // a copy is always a fresh draft (set explicitly below)
+  "previous_status", // status history starts over
+  "status_changed_at", // status history starts over
+  "send_paused", // breaker state belongs to the source's sends
+  "send_paused_reason",
+  "send_paused_at",
+  "archived_at", // a copy is never archived
+  "created_at", // now()
+] as const;
+
+function duplicateValues(
+  source: typeof campaigns.$inferSelect,
+  c: { orgId: string; userId: string; slug: string; name: string },
+) {
+  return {
+    org_id: c.orgId,
+    slug: c.slug,
+    name: c.name,
+    // R25: without this a duplicated DRIP campaign comes back REGULAR.
+    // Asserted by scripts/test-campaign-duplicate-type.ts.
+    type: source.type,
+    notes: source.notes,
+    brand_id: source.brand_id,
+    offer_id: source.offer_id,
+    routing_type_id: source.routing_type_id,
+    traffic_type_id: source.traffic_type_id,
+    assigned_to_user_id: source.assigned_to_user_id ?? c.userId,
+    created_by_user_id: c.userId,
+    audience_segment_ids: source.audience_segment_ids,
+    audience_exclude_segment_ids: source.audience_exclude_segment_ids,
+    audience_contact_group_ids: source.audience_contact_group_ids,
+    audience_filters: source.audience_filters,
+    audience_snapshot_count: 0,
+    audience_cap: source.audience_cap,
+    exclude_in_use_contacts: source.exclude_in_use_contacts,
+    exclude_prior_offer_contacts: source.exclude_prior_offer_contacts,
+    offer_rules_enabled: source.offer_rules_enabled,
+    offer_cooldown_days: source.offer_cooldown_days,
+    offer_limit_times: source.offer_limit_times,
+    lifecycle_rules: source.lifecycle_rules,
+    link_mode: source.link_mode,
+    default_provider_phone_id: source.default_provider_phone_id,
+    start_date: source.start_date,
+    end_date: source.end_date,
+    status: "draft" as const,
+  };
+}
+
+type UnhandledColumn = Exclude<
+  keyof typeof campaigns.$inferInsert,
+  keyof ReturnType<typeof duplicateValues> | (typeof NOT_COPIED)[number]
+>;
+// If this line fails to compile, the error names the campaigns column(s) the
+// duplicate neither copies nor lists in NOT_COPIED. Decide which, add it.
+const everyColumnHandled: [UnhandledColumn] extends [never] ? true : UnhandledColumn = true;
+void everyColumnHandled;
+
 function parseId(idParam: string): number | null {
   const n = Number(idParam);
   if (!Number.isInteger(n) || n <= 0) return null;
@@ -102,37 +170,7 @@ export async function POST(
         const slug = generateCampaignSlug();
         const [inserted] = await tx
           .insert(campaigns)
-          .values({
-            org_id: orgId,
-            slug,
-            // Don't copy human_id — it's globally unique per org and the
-            // source still has it.
-            human_id: null,
-            name: newName,
-            // ⚠️ R25. This insert is an explicit field-by-field literal, so any
-            // column NOT named here silently takes its default. Without this
-            // line a duplicated DRIP campaign would come back as REGULAR — a
-            // 200, a success toast, and the wrong data. Asserted by
-            // scripts/test-campaign-duplicate-type.ts.
-            type: source.type,
-            notes: source.notes,
-            brand_id: source.brand_id,
-            offer_id: source.offer_id,
-            routing_type_id: source.routing_type_id,
-            traffic_type_id: source.traffic_type_id,
-            assigned_to_user_id: source.assigned_to_user_id ?? user.id,
-            created_by_user_id: user.id,
-            audience_segment_ids: source.audience_segment_ids,
-            audience_exclude_segment_ids: source.audience_exclude_segment_ids,
-            audience_contact_group_ids: source.audience_contact_group_ids,
-            audience_filters: source.audience_filters,
-            audience_snapshot_count: 0,
-            audience_cap: source.audience_cap,
-            exclude_in_use_contacts: source.exclude_in_use_contacts,
-            start_date: source.start_date,
-            end_date: source.end_date,
-            status: "draft",
-          })
+          .values(duplicateValues(source, { orgId, userId: user.id, slug, name: newName }))
           .returning();
 
         // Generate the cloned campaign's own tracking_id (separate

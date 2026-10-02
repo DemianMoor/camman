@@ -39,24 +39,62 @@ export async function deleteStage(
   const { orgId, campaignId, stageId } = opts;
 
   return database.transaction(async (tx) => {
-    const deleted = (await tx.execute(sql`
+    // Migration 0197: stage_manual_recipients.stage_id is NO ACTION, not
+    // cascade — a stage whose export was marked SENT (sent_at set) is refused
+    // here, and any other delete path fails on the foreign key instead of
+    // erasing the record that those contacts were texted. Rows that were only
+    // exported (sent_at NULL) record nothing and are cleared by the `cleared`
+    // CTE in this SAME statement, for the stage and its lanes; the NO ACTION
+    // check runs at the end of the statement, after that delete.
+    let deleted: { stage_number: number; split_total: number | null }[];
+    try {
+      deleted = (await tx.execute(sql`
+      WITH target AS (
+        SELECT s.id FROM campaign_stages AS s
+        WHERE s.id = ${stageId} AND s.campaign_id = ${campaignId} AND s.org_id = ${orgId}::uuid
+          AND s.sent_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM stage_sends ss WHERE ss.stage_id = s.id)
+          AND NOT EXISTS (SELECT 1 FROM stage_results_imports ri WHERE ri.stage_id = s.id)
+          AND NOT EXISTS (SELECT 1 FROM stage_manual_sales ms WHERE ms.stage_id = s.id)
+          AND NOT EXISTS (SELECT 1 FROM keitaro_stage_results kr WHERE kr.stage_id = s.id)
+          AND NOT EXISTS (SELECT 1 FROM stage_manual_recipients mr WHERE mr.stage_id = s.id AND mr.sent_at IS NOT NULL)
+          AND NOT EXISTS (
+            SELECT 1 FROM campaign_stages lane
+            WHERE lane.parent_stage_id = s.id AND lane.org_id = s.org_id
+              AND (lane.sent_at IS NOT NULL
+                OR EXISTS (SELECT 1 FROM stage_sends ss2 WHERE ss2.stage_id = lane.id)
+                OR EXISTS (SELECT 1 FROM stage_results_imports ri2 WHERE ri2.stage_id = lane.id)
+                OR EXISTS (SELECT 1 FROM stage_manual_sales ms2 WHERE ms2.stage_id = lane.id)
+                OR EXISTS (SELECT 1 FROM keitaro_stage_results kr2 WHERE kr2.stage_id = lane.id)
+                OR EXISTS (SELECT 1 FROM stage_manual_recipients mr2 WHERE mr2.stage_id = lane.id AND mr2.sent_at IS NOT NULL)))
+      ),
+      cleared AS (
+        DELETE FROM stage_manual_recipients mr
+        WHERE mr.sent_at IS NULL
+          AND mr.stage_id IN (
+            SELECT id FROM target
+            UNION
+            SELECT lane.id FROM campaign_stages lane WHERE lane.parent_stage_id IN (SELECT id FROM target))
+      )
       DELETE FROM campaign_stages AS s
-      WHERE s.id = ${stageId} AND s.campaign_id = ${campaignId} AND s.org_id = ${orgId}::uuid
-        AND s.sent_at IS NULL
-        AND NOT EXISTS (SELECT 1 FROM stage_sends ss WHERE ss.stage_id = s.id)
-        AND NOT EXISTS (SELECT 1 FROM stage_results_imports ri WHERE ri.stage_id = s.id)
-        AND NOT EXISTS (SELECT 1 FROM stage_manual_sales ms WHERE ms.stage_id = s.id)
-        AND NOT EXISTS (SELECT 1 FROM keitaro_stage_results kr WHERE kr.stage_id = s.id)
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_stages lane
-          WHERE lane.parent_stage_id = s.id AND lane.org_id = s.org_id
-            AND (lane.sent_at IS NOT NULL
-              OR EXISTS (SELECT 1 FROM stage_sends ss2 WHERE ss2.stage_id = lane.id)
-              OR EXISTS (SELECT 1 FROM stage_results_imports ri2 WHERE ri2.stage_id = lane.id)
-              OR EXISTS (SELECT 1 FROM stage_manual_sales ms2 WHERE ms2.stage_id = lane.id)
-              OR EXISTS (SELECT 1 FROM keitaro_stage_results kr2 WHERE kr2.stage_id = lane.id)))
+      WHERE s.id IN (SELECT id FROM target)
       RETURNING s.stage_number, s.split_total
     `)) as unknown as { stage_number: number; split_total: number | null }[];
+    } catch (e) {
+      // 23503: a manual-recipients row appeared between the gate and the
+      // delete (a concurrent export or mark). The FK refused, nothing was
+      // deleted — answer like the gate does.
+      if ((e as { cause?: { code?: string } })?.cause?.code === "23503" || (e as { code?: string })?.code === "23503") {
+        return {
+          ok: false,
+          status: 409,
+          code: "stage_has_send_data",
+          message: "This stage (or one of its behavioral lanes) has send or result data and can't be deleted — archive it instead.",
+          details: { reason: "has_send_data" },
+        };
+      }
+      throw e;
+    }
 
     if (deleted.length === 0) {
       // Distinguish 404 (absent) from 409 (gate blocked) with a scoped re-read.

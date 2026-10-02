@@ -7,6 +7,7 @@ import { campaign_stages } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can, type Permission } from "@/lib/permissions";
+import { syncManualRecipientsOnStatus } from "@/lib/stages/manual-recipients";
 
 // Bulk stage status changes. Same shape as campaign bulk-status: each
 // stage is processed independently, failures don't stop the batch.
@@ -136,22 +137,31 @@ export async function POST(
             ),
           );
       } else {
-        await db
-          .update(campaign_stages)
-          .set({
-            status: target_status,
-            previous_status: from,
-            status_changed_at: drizzleSql`now()`,
-            // Same as the single status route: manual outranks automatic.
-            status_set_manually: true,
-          })
-          .where(
-            and(
-              eq(campaign_stages.id, id),
-              eq(campaign_stages.campaign_id, cid),
-              eq(campaign_stages.org_id, orgId),
-            ),
-          );
+        // Status change + manual-recipients stamp (0197) commit together.
+        await db.transaction(async (tx) => {
+          await tx
+            .update(campaign_stages)
+            .set({
+              status: target_status,
+              previous_status: from,
+              status_changed_at: drizzleSql`now()`,
+              // Same as the single status route: manual outranks automatic.
+              status_set_manually: true,
+            })
+            .where(
+              and(
+                eq(campaign_stages.id, id),
+                eq(campaign_stages.campaign_id, cid),
+                eq(campaign_stages.org_id, orgId),
+              ),
+            );
+          await syncManualRecipientsOnStatus(tx, {
+            orgId,
+            stageId: id,
+            from,
+            next: target_status,
+          });
+        });
       }
       succeeded.push(id);
     } catch (err) {

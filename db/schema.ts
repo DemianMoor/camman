@@ -1666,7 +1666,8 @@ export const segment_rules = pgTable(
         'last_message_in_last_n_days',
         'last_click_more_than_n_days_ago',
         'last_click_in_last_n_days',
-        'lifecycle_status'
+        'lifecycle_status',
+        'texted_in_last_period'
       )`,
     ),
     check(

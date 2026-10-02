@@ -669,7 +669,10 @@ async function main() {
       `got ${stgSchedBadR.status}`,
     );
 
-    console.log("\n[8] Stage 2: draft → cancelled → 200; cancelled → sent → 409");
+    // Stage status is FREELY assignable since 5bf08880 (inline dropdown): an
+    // operator may un-cancel. This used to assert cancelled was terminal (409);
+    // owner ruling 2026-10-02: assert today's rule, equally strictly.
+    console.log("\n[8] Stage 2: draft → cancelled → 200; cancelled → sent → 200, sent_at stamped");
     const ss4R = await apiFetch(
       `/api/campaigns/${campaign.id}/stages/${s2.id}/status`,
       {
@@ -685,7 +688,17 @@ async function main() {
         body: JSON.stringify({ status: "sent" }),
       },
     );
-    check("cancelled → sent: 409 (terminal)", ss5R.status === 409);
+    const ss5 = (await ss5R.json()) as {
+      status?: string;
+      previous_status?: string | null;
+      sent_at?: string | null;
+      status_set_manually?: boolean;
+    };
+    check("cancelled → sent: 200 (status is freely assignable)", ss5R.status === 200, `got ${ss5R.status}`);
+    check("...status is now 'sent'", ss5.status === "sent", `got ${ss5.status}`);
+    check("...previous_status records 'cancelled'", ss5.previous_status === "cancelled", `got ${ss5.previous_status}`);
+    check("...entering 'sent' stamps sent_at", typeof ss5.sent_at === "string" && ss5.sent_at.length > 0, `got ${ss5.sent_at}`);
+    check("...a hand-picked status is marked manual", ss5.status_set_manually === true, `got ${ss5.status_set_manually}`);
 
     console.log("\n[9] Stage phone export — against the [7b] preview campaign");
     // Reuse the previewCamp built in [7b]: 30 pool members (20 no-status +

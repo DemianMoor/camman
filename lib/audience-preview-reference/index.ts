@@ -16,7 +16,7 @@ import {
   type EligibilityLayer,
 } from "@/lib/sends/eligibility";
 import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
-import { LIFECYCLE_CHIP_STATUSES } from "@/lib/validators/campaigns";
+import { LIFECYCLE_CHIP_STATUSES, OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 // ⚠️ FROZEN REFERENCE — the campaign audience preview as it was on
 // 2026-09-30 (origin/main 94bc329d), before Task 2 rebuilt it.
@@ -397,7 +397,7 @@ export async function referencePreviewAudience(
               // "the current campaign" to carve out. Every row counts — which
               // is the honest preview of a campaign that has sent nothing.
               currentCampaignId: -1,
-              cooldownDays: input.offerCooldownDays ?? 7,
+              cooldownDays: input.offerCooldownDays ?? OFFER_COOLDOWN_DAYS_DEFAULT,
               limitTimes: input.offerLimitTimes ?? 5,
             })
           : []),

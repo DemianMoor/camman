@@ -13,6 +13,7 @@ import {
 import type { AudiencePreviewResult } from "@/lib/audience-snapshot";
 
 import { usePreviewPart } from "./use-preview-part";
+import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 // =============== Types ===============
 
@@ -257,9 +258,10 @@ export function useCampaignFormState(props: CampaignFormProps) {
       exclude_in_use_contacts: initialValues?.exclude_in_use_contacts ?? true,
       exclude_prior_offer_contacts:
         initialValues?.exclude_prior_offer_contacts ?? false,
-      // Mirror migration 0191's column defaults so a new campaign's form and
-      // the row the create route writes start from the same numbers.
-      offer_cooldown_days: initialValues?.offer_cooldown_days ?? 7,
+      // New campaigns start from the column defaults (cooldown: migration 0195,
+      // OFFER_COOLDOWN_DAYS_DEFAULT; limit: 0191), so the form and the row the
+      // create route writes start from the same numbers.
+      offer_cooldown_days: initialValues?.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
       offer_limit_times: initialValues?.offer_limit_times ?? 5,
       link_mode: initialValues?.link_mode ?? "manual",
       start_date: initialValues?.start_date ?? "",

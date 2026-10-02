@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+// "Not within [N] days" (offer cooldown) for a NEW campaign. Every fallback
+// for offer_cooldown_days reads this, and migration 0195 sets the column
+// default to the same value. Stored campaigns keep their own value (the column
+// is NOT NULL, so no fallback ever applies to a stored row).
+export const OFFER_COOLDOWN_DAYS_DEFAULT = 14;
+
 export { nullIfEmpty } from "./_helpers";
 
 export const CAMPAIGN_STATUSES = [

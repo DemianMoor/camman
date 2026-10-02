@@ -28,7 +28,11 @@ import { generateCampaignSlug } from "@/lib/campaign-helpers";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { can } from "@/lib/permissions";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
-import { campaignCreateSchema, nullIfEmpty } from "@/lib/validators/campaigns";
+import {
+  OFFER_COOLDOWN_DAYS_DEFAULT,
+  campaignCreateSchema,
+  nullIfEmpty,
+} from "@/lib/validators/campaigns";
 
 const SLUG_RETRY_LIMIT = 5;
 
@@ -339,7 +343,7 @@ export async function POST(req: NextRequest) {
             // 0191 keep "ever got this offer", and only a deliberate write
             // here opts a new one into the new semantics.
             offer_rules_enabled: true,
-            offer_cooldown_days: input.offer_cooldown_days ?? 7,
+            offer_cooldown_days: input.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
             offer_limit_times: input.offer_limit_times ?? 5,
           })
           .returning();
@@ -397,7 +401,7 @@ export async function POST(req: NextRequest) {
               // never recomputed.
               lifecycleRules,
               offerRulesEnabled: true,
-              offerCooldownDays: input.offer_cooldown_days ?? 7,
+              offerCooldownDays: input.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
               offerLimitTimes: input.offer_limit_times ?? 5,
               segmentIds,
               excludeSegmentIds,

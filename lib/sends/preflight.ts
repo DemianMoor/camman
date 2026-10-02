@@ -10,6 +10,7 @@ import {
 } from "@/lib/sends/eligibility";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
+import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 export type DbOrTx =
   typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -210,7 +211,7 @@ export async function preflightStageSend(
           excludePriorOffer: row.exclude_prior_offer_contacts,
           lifecycleRules: row.lifecycle_rules === true,
           offerRulesEnabled: row.offer_rules_enabled === true,
-          offerCooldownDays: Number(row.offer_cooldown_days ?? 7),
+          offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
           offerLimitTimes: Number(row.offer_limit_times ?? 5),
         },
         // Q4: the same carrier policy kickoff will apply, so the previewed
@@ -237,7 +238,7 @@ export async function preflightStageSend(
     excludePriorOffer: row.exclude_prior_offer_contacts,
     lifecycleRules: row.lifecycle_rules === true,
     offerRulesEnabled: row.offer_rules_enabled === true,
-    offerCooldownDays: Number(row.offer_cooldown_days ?? 7),
+    offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
     offerLimitTimes: Number(row.offer_limit_times ?? 5),
   }).filter((l) =>
     (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),

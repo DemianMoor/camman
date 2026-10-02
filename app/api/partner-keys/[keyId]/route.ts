@@ -113,6 +113,9 @@ export async function PATCH(
       ...(input.rate_per_day !== undefined ? { rate_per_day: input.rate_per_day } : {}),
       ...(input.max_payload_bytes !== undefined ? { max_payload_bytes: input.max_payload_bytes } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.report_show_revenue !== undefined
+        ? { report_show_revenue: input.report_show_revenue }
+        : {}),
     })
     .where(and(eq(partner_keys.id, keyId), eq(partner_keys.org_id, orgId)))
     .returning();

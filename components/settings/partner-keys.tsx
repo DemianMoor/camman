@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, Loader2, Plus, RefreshCw } from "lucide-react";
+import { KeyRound, Link as LinkIcon, Loader2, Plus, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAuth } from "@/components/protected/auth-context";
@@ -60,6 +60,12 @@ type PartnerKeyRow = {
   rotated_at: string | null;
   last_seen_at: string | null;
   secret_last4: string | null;
+  // Signed report link STATE. The token itself is never sent to the browser —
+  // it is hashed at rest and shown once at issue, like the secret.
+  report_link_active: boolean;
+  report_token_issued_at: string | null;
+  report_token_expires_at: string | null;
+  report_show_revenue: boolean;
   leads_24h: number;
   auth_fails_today: number;
   total_leads: number;
@@ -83,6 +89,11 @@ export function PartnerKeys() {
   const [created, setCreated] = useState<CreatedKey | null>(null);
   const [rotateTarget, setRotateTarget] = useState<PartnerKeyRow | null>(null);
   const [shownToken, setShownToken] = useState<{ id: number; token: string } | null>(null);
+  // The signed report link, visible for exactly as long as this dialog is open.
+  // Same contract as the secret above: hashed at rest, never retrievable again.
+  const [reportLink, setReportLink] = useState<{ slug: string; url: string } | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<PartnerKeyRow | null>(null);
+  const reportLinkApi = useApiCall<{ token: string; url: string | null }>();
 
   const [slug, setSlug] = useState("");
   const [name, setName] = useState("");
@@ -115,6 +126,34 @@ export function PartnerKeys() {
     setName("");
     setTag("");
     setTagMode("default");
+    reload();
+  };
+
+  // Issue or rotate the partner's signed report link. Rotation is the same call:
+  // it overwrites the stored hash, so the previous URL dies instantly and there
+  // is only ever one live link per key.
+  const issueReportLink = async (row: PartnerKeyRow) => {
+    const r = await reportLinkApi.execute(`/api/partner-keys/${row.id}/report-link`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    if (!r.ok) return toastApiError(r);
+    if (!r.data.url) {
+      toast.error("Link issued, but no public host is configured for it");
+      reload();
+      return;
+    }
+    setReportLink({ slug: row.partner_slug, url: r.data.url });
+    reload();
+  };
+
+  const revokeReportLink = async (row: PartnerKeyRow) => {
+    const r = await reportLinkApi.execute(`/api/partner-keys/${row.id}/report-link`, {
+      method: "DELETE",
+    });
+    if (!r.ok) return toastApiError(r);
+    toast.success("Report link revoked — the URL now 404s");
+    setRevokeTarget(null);
     reload();
   };
 
@@ -258,7 +297,65 @@ export function PartnerKeys() {
                     >
                       {row.status === "active" ? "Disable" : "Enable"}
                     </Button>
-                    <div className="ml-auto flex items-center gap-2">
+                    {/* ---- signed report link (Drip P7) ----
+                        ⚠️ resolveReportToken requires `sandbox = false`, so a link
+                        issued on a sandbox key resolves to null and the public page
+                        404s. Issuing one here would hand the operator a dead URL,
+                        so the control states the precondition instead. */}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={reportLinkApi.isLoading || row.sandbox}
+                      title={
+                        row.sandbox
+                          ? "The public report only resolves for live keys. Switch this key out of sandbox first."
+                          : undefined
+                      }
+                      onClick={() => void issueReportLink(row)}
+                    >
+                      <LinkIcon className="mr-1 size-4" />
+                      {row.report_link_active ? "Rotate report link" : "Generate report link"}
+                    </Button>
+                    {row.sandbox && (
+                      <span className="text-muted-foreground text-xs">
+                        Report links work on live keys only
+                      </span>
+                    )}
+                    {row.report_link_active && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={reportLinkApi.isLoading}
+                        onClick={() => setRevokeTarget(row)}
+                      >
+                        Revoke report link
+                      </Button>
+                    )}
+                    <div className="ml-auto flex items-center gap-4">
+                      {/* Revenue is OFF by default (P7 R2) — it is our margin,
+                          not the partner's number. */}
+                      <div className="flex items-center gap-2">
+                        <Label htmlFor={`revenue-${row.id}`} className="text-xs">
+                          Show revenue
+                        </Label>
+                        <Switch
+                          id={`revenue-${row.id}`}
+                          checked={row.report_show_revenue}
+                          disabled={mutateApi.isLoading}
+                          onCheckedChange={(v) =>
+                            void patch(
+                              row,
+                              { report_show_revenue: v },
+                              v
+                                ? "Revenue is now visible in this partner's report"
+                                : "Revenue hidden from this partner's report",
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
                       <Label htmlFor={`sandbox-${row.id}`} className="text-xs">
                         Sandbox
                       </Label>
@@ -274,6 +371,7 @@ export function PartnerKeys() {
                           )
                         }
                       />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -366,6 +464,56 @@ export function PartnerKeys() {
           </div>
         </div>
       </FormDialog>
+
+      {/* ---- the one and only time the report link is visible ---- */}
+      <FormDialog open={reportLink !== null} onOpenChange={(o) => !o && setReportLink(null)}>
+        <DialogHeader>
+          <DialogTitle>Save this report link now</DialogTitle>
+          <DialogDescription>
+            Anyone with this URL can see {reportLink?.slug}&apos;s own lead performance —
+            no login required. It is stored only as a hash and cannot be shown again;
+            generating a new one immediately kills this URL.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <CopyableId
+            value={reportLink?.url ?? ""}
+            label="Partner report URL"
+            helperText="Scoped to this partner only. Revoke it any time — the URL then 404s."
+            copiedMessage="Report link copied"
+          />
+          <div className="flex justify-end pt-2">
+            <Button type="button" onClick={() => setReportLink(null)}>
+              I have saved it
+            </Button>
+          </div>
+        </div>
+      </FormDialog>
+
+      {/* ---- revoke confirmation ---- */}
+      <AlertDialog open={revokeTarget !== null} onOpenChange={(o) => !o && setRevokeTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke this report link?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {revokeTarget?.partner_slug}&apos;s report URL stops working immediately and
+              returns a 404. Their intake key is unaffected — leads keep arriving. You can
+              issue a new link at any time.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                if (revokeTarget) void revokeReportLink(revokeTarget);
+              }}
+            >
+              Revoke
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* ---- the one and only time the secret is visible ---- */}
       <FormDialog open={created !== null} onOpenChange={(o) => !o && setCreated(null)}>

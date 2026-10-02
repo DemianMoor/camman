@@ -36,6 +36,9 @@ const shared = {
   rate_per_day: z.number().int().positive().max(10_000_000).optional(),
   max_payload_bytes: z.number().int().min(1024).max(4_194_304).optional(),
   status: z.enum(["active", "disabled"]).optional(),
+  // Whether the partner's signed report shows revenue. Off by default (P7 R2):
+  // revenue is our margin, not the partner's number.
+  report_show_revenue: z.boolean().optional(),
 };
 
 // Mirrors the DB CHECK partner_keys_force_needs_tag_check. Enforced in both

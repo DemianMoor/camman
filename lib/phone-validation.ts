@@ -23,15 +23,54 @@ function fail(error: string): PhoneValidationResult {
   };
 }
 
+/**
+ * How strictly a number must match a real numbering plan.
+ *
+ * - `strict` (the default, and what every production path uses): the number
+ *   must be a number that could actually exist — `isValid()`, which checks the
+ *   dialled digits against the country's ASSIGNED numbering plan.
+ * - `format_only`: the number must be well-FORMED but need not be assigned —
+ *   `isPossible()`, which checks structure and length only.
+ *
+ * ⭐ `format_only` EXISTS FOR SANDBOX PARTNER INTAKE AND NOTHING ELSE. 21 files
+ * call this validator, including provider-phone registration (the numbers we
+ * send FROM), the opt-out/suppression path, and the paid Telnyx lookups. There
+ * is no format CHECK on `contacts.phone_number` either, so this function is the
+ * only thing keeping unreal numbers out of real data. Hence the default is
+ * `strict` and callers must ask for anything looser by name.
+ *
+ * ⚠️ `format_only` IS LENGTH-BASED, NOT PLAUSIBILITY-BASED. For NANP it accepts
+ * any 10-digit shape, which includes area codes that can never exist — 555, 999,
+ * and even ones starting 0 or 1. That is deliberate: the point is that a sandbox
+ * partner should not have to think about area codes at all. It still rejects
+ * wrong LENGTHS (9 or 12 digits) and anything unparseable.
+ *
+ * Both modes normalize through libphonenumber, so every spelling of the same
+ * number ("+15555550100", "5555550100", "555-555-0100") yields the same E.164.
+ * That is what keeps duplicate detection honest in sandbox — a second, looser
+ * normalizer would have broken it.
+ */
+export type PhoneValidationMode = "strict" | "format_only";
+
 export function validatePhone(
   raw: string,
   defaultCountry: CountryCode = "US",
+  mode: PhoneValidationMode = "strict",
 ): PhoneValidationResult {
   const trimmed = (raw ?? "").trim();
   if (!trimmed) return fail("Phone number is empty");
 
   const parsed = parsePhoneNumberFromString(trimmed, defaultCountry);
-  if (!parsed || !parsed.isValid()) return fail("Invalid phone number");
+  if (!parsed) return fail("Invalid phone number");
+
+  const acceptable = mode === "format_only" ? parsed.isPossible() : parsed.isValid();
+  if (!acceptable) {
+    return fail(
+      mode === "format_only"
+        ? "Phone number is not a possible number (wrong length)"
+        : "Invalid phone number",
+    );
+  }
 
   return {
     valid: true,

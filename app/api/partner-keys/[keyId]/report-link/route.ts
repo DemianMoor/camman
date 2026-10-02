@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { appOrigin, partnerOrigin } from "@/lib/app-origin";
 import { can } from "@/lib/permissions";
 import { issueReportToken, revokeReportToken } from "@/lib/reporting/partner-report-token";
 
@@ -56,7 +57,18 @@ export async function POST(
   }
   // ⚠️ SHOWN ONCE. Only the SHA-256 is stored, so this response is the single
   // opportunity to copy the link — the same contract as the intake secret.
-  return NextResponse.json({ ok: true, token, shown_once: true });
+  // ⚠️ THE FULL URL IS BUILT SERVER-SIDE, from env, never from the request Host
+  // (lib/app-origin.ts). An operator browsing a preview deployment would
+  // otherwise be handed a link on that preview's hostname, which 404s for the
+  // partner the moment the deployment is superseded. Partner-facing host first,
+  // primary host as the single-hostname fallback.
+  const origin = partnerOrigin() ?? appOrigin();
+  return NextResponse.json({
+    ok: true,
+    token,
+    url: origin ? `${origin}/partner-report/${token}` : null,
+    shown_once: true,
+  });
 }
 
 export async function DELETE(

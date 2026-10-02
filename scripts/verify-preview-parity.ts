@@ -48,8 +48,10 @@ import {
 } from "@/lib/audience-preview-reference";
 import {
   contactGroupSizes,
+  explainOfferHistoryRead,
   explainSegmentEvaluation,
   harnessRunner,
+  measureCampaignUseFact,
   nonTempWritesInTransaction,
   type PlanStats,
 } from "@/lib/audience-preview-reference/timing";
@@ -60,6 +62,19 @@ const TIMING = process.argv.includes("--timing");
 const ONLY_VARIANTS = process.argv.includes("--only-variants");
 // Print the scope and stop: no preview runs.
 const SCOPE_ONLY = process.argv.includes("--scope-only");
+// Task 3 §9 measurements (spec 2026-10-02-task3-audience-facts-recon.md):
+// per-statement breakdown of base + audience parts, the campaign-use fact
+// prototype, offer-history read buffers, CTE vs temp-table candidates.
+// Runs INSTEAD of parity. --s9-campaigns=1560 adds those campaigns' recipes;
+// --s9-offers=115,118 names the offers for item 3.
+const S9 = process.argv.includes("--s9");
+const listArg = (name: string) =>
+  (process.argv.find((x) => x.startsWith(`--${name}=`))?.slice(name.length + 3) ?? "")
+    .split(",")
+    .filter(Boolean)
+    .map(Number);
+const S9_CAMPAIGNS = listArg("s9-campaigns");
+const S9_OFFERS = listArg("s9-offers");
 // Generous on purpose: today's heaviest recipe runs ~37 s, past the
 // production 30 s. The harness needs its numbers; each timing says whether
 // production would have timed out.
@@ -342,6 +357,10 @@ async function loadRecipes(): Promise<Recipe[]> {
     variant("cap 1000", { cap: 1000 });
   if (base && !picked.some((r) => r.tags.has("offer_no_history")) && fresh[0] && fresh[0].org_id === base.input.orgId)
     variant(`offer ${fresh[0].id} (no history)`, { offerId: fresh[0].id, excludePriorOffer: true }, 0);
+  for (const id of S9_CAMPAIGNS) {
+    const r = all.find((x) => x.label === `campaign ${id}`);
+    if (r && !picked.includes(r)) picked.push(r);
+  }
   // Pad to the minimums: segment recipes first, then anything.
   for (const r of all) {
     if (picked.filter((p) => p.tags.has("segments")).length >= MIN_SEGMENT_RECIPES) break;
@@ -580,6 +599,94 @@ async function segmentGate(recipes: Recipe[]) {
     console.log("\n⛔ STOP — segment evaluation dominates. Report before T2 (plan [change 3]).");
 }
 
+async function s9(recipes: Recipe[]) {
+  const ms = (x: number) => `${(x / 1000).toFixed(2)}s`;
+  const targets = recipes.filter(
+    (r) => r.tags.has("segments") || S9_CAMPAIGNS.some((id) => r.label === `campaign ${id}`),
+  );
+  for (const id of S9_CAMPAIGNS)
+    bar(`campaign ${id} is among the recipes`, targets.some((r) => r.label === `campaign ${id}`));
+  console.log(`\n§9 ITEM 1 — per-statement breakdown, ${targets.length} recipe(s)\n`);
+  for (const [n, r] of targets.entries()) {
+    if (pastWindow()) {
+      console.log(`⚠️ 06:00 UTC reached — stopping before recipe ${n + 1}.`);
+      return;
+    }
+    console.log(`  [${n + 1}] ${r.label} — ${describe(r.input)}`);
+    for (const part of ["base", "audience"] as const) {
+      const plans: PlanStats[] = [];
+      let writes = 0;
+      const t0 = performance.now();
+      await db.transaction(async (tx) => {
+        const runner = harnessRunner(asRunner(tx), { ceilingMs: CEILING_MS, onPlan: (s) => plans.push(s) });
+        if (part === "base") await previewAudienceBase(r.input, runner);
+        else await previewAudienceAudiencePart(r.input, runner);
+        writes = await nonTempWritesInTransaction(asRunner(tx));
+      }, PARTS_RR);
+      bar(`      ${part}: nothing but temp tables written`, writes === 0, `${writes}`);
+      console.log(`      ${part} ${ms(performance.now() - t0)} wall`);
+      for (const p of plans) {
+        console.log(`        ${ms(p.execution_ms)} hit ${p.shared_hit} read ${p.shared_read} — ${p.label ?? ""}`);
+        for (const x of p.top_nodes ?? []) console.log(`            ${ms(x.ms)} ${x.node} rows ${x.rows}`);
+      }
+    }
+  }
+
+  console.log(`\n§9 ITEM 4 — candidates: temp table vs CTE (lifecycle recipes, interleaved, 2 rounds)\n`);
+  for (const r of targets.filter((x) => x.input.lifecycleRules)) {
+    if (pastWindow()) return;
+    const t: Record<string, number[]> = { temp: [], cte: [] };
+    for (let round = 0; round < 2; round++)
+      for (const mode of round === 0 ? (["temp", "cte"] as const) : (["cte", "temp"] as const)) {
+        const t0 = performance.now();
+        await db.transaction(
+          (tx) =>
+            previewAudienceAudiencePart(
+              r.input,
+              harnessRunner(asRunner(tx), { ceilingMs: CEILING_MS }),
+              { candidates: mode },
+            ),
+          PARTS_RR,
+        );
+        t[mode].push(performance.now() - t0);
+      }
+    console.log(`  ${r.label}: temp ${t.temp.map(ms).join(" / ")} · cte ${t.cte.map(ms).join(" / ")}`);
+  }
+
+  if (pastWindow()) return;
+  const orgId = targets[0]?.input.orgId ?? recipes[0].input.orgId;
+  console.log(`\n§9 ITEM 2 — campaign-use fact prototype (TEMP table), org-wide universe\n`);
+  let factWrites = 0;
+  const fact = await db.transaction(async (tx) => {
+    const out = await measureCampaignUseFact(asRunner(tx) as never, { orgId, periods: ["3d", "1w", "2w"] });
+    factWrites = await nonTempWritesInTransaction(asRunner(tx));
+    return out;
+  }, PARTS_RR);
+  bar("fact prototype: nothing but temp tables written", factWrites === 0, `${factWrites}`);
+  console.log(`  fact built: ${fact.factRows} contacts in ${ms(fact.factBuildMs)}`);
+  for (const x of fact.rows) {
+    console.log(
+      `  ${x.period}: today ${x.today.count} in ${ms(x.today.ms)} · fact ${x.fact.count} in ${ms(x.fact.ms)}` +
+        ` · last_sent ${x.lastSent.count} in ${ms(x.lastSent.ms)}`,
+    );
+    bar(`  ${x.period}: the fact reproduces today's rule exactly`, x.factMatchesToday, `${x.today.count} vs ${x.fact.count}`);
+  }
+
+  // Agreement on empty sets proves nothing.
+  bar(
+    "fact comparison is non-empty: today's rule matches contacts in at least one window",
+    fact.rows.some((x) => x.today.count > 0),
+  );
+
+  console.log(`\n§9 ITEM 3 — offer-history read: with last_sent_at (heap) vs without (index-only possible)\n`);
+  for (const offerId of S9_OFFERS) {
+    if (pastWindow()) return;
+    const o = await db.transaction((tx) => explainOfferHistoryRead(tx, orgId, offerId), READ_ONLY_RR);
+    const f = (s: PlanStats) => `${ms(s.execution_ms)} hit ${s.shared_hit} read ${s.shared_read}`;
+    console.log(`  offer ${offerId}: with last_sent_at ${f(o.withLastSent)} | without ${f(o.withoutLastSent)}`);
+  }
+}
+
 async function main() {
   console.log(`database ${dbRef} (${isPreview ? "preview" : "PRODUCTION"})`);
   if (!isPreview) {
@@ -608,6 +715,11 @@ async function main() {
         ? "Scope OK (--scope-only: nothing run)."
         : `${fail} check(s) FAILED.`,
     );
+    process.exit(fail === 0 ? 0 : 1);
+  }
+  if (S9) {
+    await s9(recipes);
+    console.log(fail === 0 ? "\nAll checks passed." : `\n${fail} check(s) FAILED.`);
     process.exit(fail === 0 ? 0 : 1);
   }
   console.log(`\nPARITY — reference vs live, one READ ONLY REPEATABLE READ transaction per recipe\n`);

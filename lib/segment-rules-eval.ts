@@ -152,7 +152,8 @@ const MSGS_WINDOW_COLUMNS: Record<7 | 14 | 30 | 90, string> = {
   90: "msgs_90d",
 };
 
-function ruleInnerQuery(
+// Exported for the Task 3 §9 fact prototype (lib/audience-preview-reference/timing.ts).
+export function ruleInnerQuery(
   rule: {
     rule_type: string;
     operator: string;

@@ -2229,7 +2229,8 @@ export async function previewAudienceAudiencePart(
   // For scripts/verify-preview-parity.ts only, as on previewAudience.
   runner?: Pick<typeof db, "transaction">,
   // Hotfix single-flight lock key (route only); see takePreviewLock.
-  opts?: { singleFlightKey?: string },
+  // candidates: "cte" is a Task 3 §9 measurement mode; the route never sets it.
+  opts?: { singleFlightKey?: string; candidates?: "temp" | "cte" },
 ): Promise<AudiencePreviewAudiencePart> {
   const allowed = new Set<string>(LIFECYCLE_CHIP_STATUSES);
   const chips = [
@@ -2268,7 +2269,8 @@ async function previewAudienceNarrowed(
   input: AudiencePreviewInput,
   chips: string[],
   runner?: Pick<typeof db, "transaction">,
-  opts?: { singleFlightKey?: string },
+  // candidates: "cte" is a Task 3 §9 measurement mode; the route never sets it.
+  opts?: { singleFlightKey?: string; candidates?: "temp" | "cte" },
 ): Promise<AudiencePreviewAudiencePart> {
   const { orgId, filters } = input;
   const cap = input.cap ?? null;
@@ -2357,8 +2359,7 @@ async function previewAudienceNarrowed(
     );
     await takePreviewLock(tx, opts?.singleFlightKey);
     // The candidates: chip members of the membership, with their sources.
-    await tx.execute(drizzleSql`
-      create temp table pv_cand on commit drop as
+    const candidatesSelect = drizzleSql`
       select
         s.contact_id,
         s.segments_matched,
@@ -2379,10 +2380,21 @@ async function previewAudienceNarrowed(
         on c.id = s.contact_id
         and c.org_id = ${orgId}::uuid
         and c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chips))})
-    `);
-    await tx.execute(drizzleSql`analyze pv_cand`);
+    `;
+    // Task 3 §9 item 4 (measurement only): "cte" keeps the candidates in a
+    // MATERIALIZED CTE instead of a temp table + ANALYZE, which is the form a
+    // read-only replica could run. The default, and the only form the route
+    // uses, is the temp table.
+    const asCte = opts?.candidates === "cte";
+    if (!asCte) {
+      await tx.execute(
+        drizzleSql`create temp table pv_cand on commit drop as ${candidatesSelect}`,
+      );
+      await tx.execute(drizzleSql`analyze pv_cand`);
+    }
     return await tx.execute(drizzleSql`
-    with iu_set as (${inUseSetBody(orgId, dripPostureOn)}
+    with ${asCte ? drizzleSql`pv_cand as materialized (${candidatesSelect}),
+    ` : drizzleSql``}iu_set as (${inUseSetBody(orgId, dripPostureOn)}
     )${
       offerExposureId != null
         ? drizzleSql`,

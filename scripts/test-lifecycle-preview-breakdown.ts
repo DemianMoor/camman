@@ -574,6 +574,20 @@ async function main() {
       const d = leafDiff(combined, await referencePreviewAudience(input));
       if (d.length) narrowedMismatches.push(`${label}: ${d.join(",")}`);
     }
+    // F27 (Task 3 §9 item 4): the measurement-only "cte" candidates mode
+    // (no temp table) must give the SAME audience part as the temp table.
+    const cteMismatches: string[] = [];
+    for (const { label, input } of narrowedInputs) {
+      const viaTemp = await previewAudienceAudiencePart(input);
+      const viaCte = await previewAudienceAudiencePart(input, undefined, { candidates: "cte" });
+      const d = leafDiff(viaTemp, viaCte);
+      if (d.length) cteMismatches.push(`${label}: ${d.join(",")}`);
+    }
+    bar(
+      "F27 CTE candidates (no temp table) = temp-table candidates, every case",
+      cteMismatches.length === 0,
+      cteMismatches.join("; ") || `${narrowedInputs.length} cases, 0 differences`,
+    );
     bar(
       "F23 base + NARROWED audience = reference, every case",
       narrowedMismatches.length === 0,

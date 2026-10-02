@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-01_
+_Last updated: 2026-10-02_
 
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
@@ -4336,3 +4336,13 @@ link issued on a sandbox key resolves to null and the public page 404s. A
 URL with nothing to explain it. The control is disabled on sandbox keys and says
 why. **When a server-side filter decides whether an action can possibly work, the
 UI states that filter — it does not let the operator discover it from a 404.**
+
+## Campaign duplicate: every column is copied or named as not copied (2026-10-02, card 869fb60y2)
+
+`POST /api/campaigns/[campaignId]/duplicate` builds its insert field by field. A column it doesn't name silently takes its default: a 200, a success toast and the wrong data. It happened to `type` (R25), then to `exclude_prior_offer_contacts`, `offer_rules_enabled`, `offer_cooldown_days`, `offer_limit_times`, `lifecycle_rules`, `link_mode` (a duplicated tracked campaign came back manual) and `default_provider_phone_id`.
+
+**Rule.** Every `campaigns` column appears either in `duplicateValues()` or in `NOT_COPIED` with its reason. `everyColumnHandled` in [the route](../app/api/campaigns/[campaignId]/duplicate/route.ts) fails the build when a new column is neither, and the error names the column (red-proved).
+
+**Runtime check.** [scripts/test-campaign-duplicate-fields.ts](../scripts/test-campaign-duplicate-fields.ts) duplicates a source holding a non-default value in every copyable field and compares every column except the fresh ones. A column dropped by a default that happens to match can't pass.
+
+**Adding a campaigns column means deciding** whether a copy carries it.

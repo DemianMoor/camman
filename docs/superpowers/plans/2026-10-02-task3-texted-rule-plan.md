@@ -4,7 +4,7 @@
 >
 > Numbering: 0195 went to the campaign offer-cooldown default (card 869fb5j0e), so this rule's CHECK migration is **0196** and the manual-recipients table is **0197**.
 > Spec: [2026-10-02-task3-audience-facts-recon.md](../specs/2026-10-02-task3-audience-facts-recon.md) §11 (E0) and §12.
-> **Waits on:** migration 0196 SQL approval; the 2026-10-03 window numbers for §5 (build gate).
+> **Waits on:** the build gate (§5): **NOT met on 2026-10-03**, build not started. Migrations 0195-0197 approved, applied on the owner's "go".
 
 ## 0. The decision and the order
 
@@ -170,24 +170,34 @@ Synthetic rows would change all of these at once, and the drain is the census's 
 7. Ground truth (§6) includes the manual rows.
 8. Nothing written to `stage_sends`.
 
-## 5. Expected preview time
+## 5. Expected preview time — MEASURED 2026-10-03 (Large, quiet window): build gate NOT met
 
-Run 1 (Small, 2026-10-02):
-- The base part took **5–6 s** on segment recipes.
-- Segment evaluation (today's in-use rule) was **3–5 s** of that.
+**Build gate (owner):** the texted rule's segment evaluation must be **under 1 s** for 3d, 1w and 2w. **It is not, so the build has NOT started.**
 
-**What changes.** The new rule replaces a join of `campaign_audience_pool` × `campaigns` × `campaign_stages` with:
-- one index range scan on `contact_engagement (org_id, last_sent_at)`: about 112K (3d), 191K (1w) or 358K (2w) entries, each with a heap fetch for `contact_id`;
-- a small tail from `stage_sends_org_sent_at_idx`.
+§9 item 2 measured both rules in the exact shape the builder emits for a lone `is_not` rule: eligible contacts EXCEPT the rule. Org-wide universe (956,522 eligible contacts), warm cache (0 disk reads), EXPLAIN ANALYZE:
 
-The EXCEPT against the eligible universe stays the same for both rules.
+| Window | Today's rule | **Texted rule** | Not texted (result) | Texted rule's own index read |
+| --- | ---: | ---: | ---: | ---: |
+| 3 days | 1.42 s | **1.50 s** | 851,657 | 0.13 s (104,865 rows) |
+| 1 week | 1.61 s | **1.71 s** | 770,539 | 0.23 s (185,983 rows) |
+| 2 weeks | 1.94 s | **2.16 s** | 603,390 | 0.42 s (353,132 rows) |
 
-**Estimate, not a measurement:** segment evaluation under 1 s, which would bring the base part to about **1.5–3 s** on today's data.
+The lag tail had **0** sends at 05:08 UTC (overnight). Its daytime size is not measured.
 
-**Measured in the 2026-10-03 window** (`--s9`, item 2, merged in #279). Today's rule and the new one are timed in the exact segment shape the builder emits (eligible EXCEPT rule), with buffers and the costliest nodes, plus the tail size. The plan is updated with those numbers before build approval.
-- If heap fetches dominate, the remedy is a covering index `(org_id, last_sent_at) INCLUDE (contact_id)`. That is a separate migration, proposed only if measured.
+**Where the time goes: the shape, not the rule.** The costliest nodes are the same for both rules:
+- Sort over 1.06–1.31M rows: 0.52–0.66 s;
+- Seq Scan of `contacts`: 0.25 s;
+- SetOp: 0.17–0.19 s;
+- Append: 0.10–0.12 s.
 
-**Risk for the speed gate (2 s at 5× data).** At 5× contacts the EXCEPT over the whole eligible universe grows linearly, whichever rule is used. Recipes without a contact group may miss 2 s at 5× even with this rule. The gate (§6) will say so; it is not assumed away.
+That is about **1.0–1.2 s that does not depend on the rule**: the EXCEPT sorts the whole eligible universe. The texted rule's own read is 0.13–0.42 s. On real recipes the universe is the selected groups; there the segment gate measured today's rule at 1.15–1.21 s (1568 class) and 4.46 s (1429, two segments, 13 groups). Still above 1 s.
+
+**So:**
+- **Swapping the rule alone cannot pass the gate.**
+- **Covering index `(org_id, last_sent_at) INCLUDE (contact_id)`: not warranted on these numbers.** It could save at most the rule's own 0.13–0.42 s; the 1.0–1.2 s shape cost stays.
+- **What could pass the gate (not built, needs a measurement and the owner's decision):** evaluate a negated rule as an **anti-join** (`NOT EXISTS`, which the planner runs as a hash anti-join) instead of `EXCEPT`. That avoids the million-row sort. The same item counted the texted set per universe row with an `EXISTS` probe in **0.53 s / 0.53 s / 0.81 s** org-wide, an indication, not the segment shape. This touches the shared set-arithmetic builder (CLAUDE.md §10e: set arithmetic was itself a perf fix for OR'd `IN`), so it would be scoped to the `is_not` / EXCEPT step and proven by the parity harness. Proposed next: time that shape in the next quiet window.
+
+**Speed gate risk (2 s at 5× data):** confirmed. The universe-sized sort grows with contacts, whichever rule is used.
 
 ## 6. Trial, kill switch, alert, speed gate (spec §12, adapted to (b))
 

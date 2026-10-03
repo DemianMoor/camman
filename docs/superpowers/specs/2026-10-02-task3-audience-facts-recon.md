@@ -355,6 +355,44 @@ plans without the temp table's statistics. It's in §9.
    campaign's status or a stage's status (grep plus `pg_stat_statements`). The
    build is only as exact as this list.
 
+
+### 9.1 Results — quiet window 2026-10-03 05:08 UTC, Large, warm cache (0 disk reads)
+
+1. **Per-layer** (EXPLAIN per statement, top nodes by exclusive time):
+   - **Base part**, dominated by the segment ∩ group membership:
+     - 1568 class: 2.25 s of 2.77 s, plus three full Seq Scans of `contacts` at about 0.25 s each;
+     - 1429 (two segments, 13 groups): 7.9 s, mostly sorts and aggregates over about 1M rows;
+     - 1560 (no segment): 1.12 s.
+   - **Narrowed audience part:** 1568 1.60 s (candidates 0.53 s, ANALYZE 0.03 s, main 0.56 s); 1560 2.72 s (main 1.95 s).
+2. **Fact prototype** (`last_live_use_at`, temp table):
+   - built for 800,954 contacts in **3.55 s**;
+   - reproduces today's rule **exactly** in every window (93,112 / 183,219 / 327,453);
+   - reads in 0.58 / 0.87 / 0.69 s (today's rule: 0.30 / 0.69 / 1.49 s).
+
+   Meaning (b), the texted rule, in the segment shape: 1.50 / 1.71 / 2.16 s, against 1.42 / 1.61 / 1.94 s for today's rule. Both are dominated by the universe sort; see the plan's §5. **The build gate (< 1 s) is not met.**
+3. **Covering index (E4):**
+   - offer 115: cooldown read with `last_sent_at` **1.87 s** (hit 192,794, read 3,058); without it (index-only possible) **0.21 s**;
+   - offer 118: 0.46 s → 0.35 s.
+
+   E4 is confirmed worth building; the gain is largest where the heap is not cached.
+4. **Temp table vs CTE** for the narrowed candidates: equal (1568: 1.33 vs 1.29 s; 1560: 2.40 vs 2.45 s, after one CTE outlier at 4.46 s). **Keep the temp table.** It doesn't argue for a read replica.
+
+**Task 2 run 2 vs run 1** (preview parts the form uses, seconds; Small 10-02 → Large 10-03):
+
+| Campaign | base (run 1) | base (Large) | audience (run 1) | audience (Large) |
+| --- | ---: | ---: | ---: | ---: |
+| 1521 | 6.0 | 3.1–3.3 | 9.4 | 2.0 |
+| 1519 | 6.2 | 3.3 | 7.1 | 2.2–2.3 |
+| 1429 | 6.8 | 6.3 | 7.0 | 6.7 |
+| 1560 | 1.3 | 0.9 | 6.9 | 2.3 |
+| 1558 | 0.3 | 0.3 | 0.5 | 0.5 |
+| 1432 | 0.2 | 0.3 | 0.7 | 0.5 |
+
+- Run 2 parity: 0 of 10 recipes differ.
+- Segment gate median share 41% (run 1: 10%). The whole preview got faster; segment evaluation did not.
+- Cache since the run-1 snapshot: DB-wide **96.81%** (Small's previous day: 93.42%); `contact_engagement` heap **93.21%** (54%).
+- 1521 and 1519 were timed separately: newer campaigns of the same shape (1568, 1567) displaced them from run 2's recipe set.
+
 ---
 
 ## 10. Decisions for the owner
@@ -364,9 +402,9 @@ plans without the temp table's statistics. It's in §9.
 | E1 | Build the timestamp fact for `in_use_in_campaign_last_period` / `in_use_in_offer`? | **Yes**, as fact + journal, read exactly (§4.4) |
 | E2 | Use it at activation too (exact via the journal correction)? | **Yes**, one definition for preview and snapshot |
 | E3 | Freeze: timestamp fact (`freeze_due_at`) or covering index? | **Timestamp fact**: same pattern, and it also serves a future `freeze_due` segment rule |
-| E4 | Offer rules: the covering index (D3 / Option C)? | **Yes**, after run 2 confirms the read on Large |
+| E4 | Offer rules: the covering index (D3 / Option C)? | **Yes**: confirmed by §9.1 item 3 (offer 115: 1.87 s → 0.21 s) |
 | E5 | Materialised membership for other rule types (Option 2)? | **Not now**: 96% of real use is covered by E1 |
-| E6 | Target a read replica for previews? | Decide after §9 item 4 |
+| E6 | Target a read replica for previews? | **No** for now: on Large everything was a cache hit, and §9.1 item 4 shows the temp table costs nothing |
 
 ---
 

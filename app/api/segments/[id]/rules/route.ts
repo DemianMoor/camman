@@ -12,6 +12,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { TEXTED_RULE_LOCKED_MESSAGE, TEXTED_RULE_TYPE, textedRuleAvailable } from "@/lib/segments/texted-rule-availability";
 import { verifyValueOwnership } from "@/lib/api/segment-rule-value-ownership";
 import { getValueShapeForRuleType } from "@/lib/validators/segment-rule-types";
 import { segmentRuleCreateSchema } from "@/lib/validators/segment-rules";
@@ -176,7 +177,12 @@ export async function GET(
     .orderBy(asc(segment_rules.position));
 
   const hydrated = await hydrateRefs(rows as RuleRow[], orgId);
-  return NextResponse.json({ data: hydrated });
+  // Whether this user may ADD the "Texted in the last…" rule (owner-only
+  // during its 14-night trial). The Rules panel hides the option on false.
+  return NextResponse.json({
+    data: hydrated,
+    texted_rule_available: await textedRuleAvailable(orgId, role),
+  });
 }
 
 export async function POST(
@@ -222,6 +228,12 @@ export async function POST(
     );
   }
   const input = parsed.data;
+
+  if (input.rule_type === TEXTED_RULE_TYPE && !(await textedRuleAvailable(orgId, role))) {
+    return apiError(403, TEXTED_RULE_LOCKED_MESSAGE, API_ERROR_CODES.FORBIDDEN, {
+      reason: "texted_rule_trial_pending",
+    });
+  }
 
   const ownership = await verifyValueOwnership(
     orgId,

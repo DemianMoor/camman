@@ -6,6 +6,7 @@ import { segment_rules, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import { TEXTED_RULE_LOCKED_MESSAGE, TEXTED_RULE_TYPE, textedRuleAvailable } from "@/lib/segments/texted-rule-availability";
 import { verifyValueOwnership } from "@/lib/api/segment-rule-value-ownership";
 import {
   segmentRuleUpdateSchema,
@@ -93,6 +94,18 @@ export async function PATCH(
   if (!existing) {
     return apiError(404, "Rule not found", API_ERROR_CODES.NOT_FOUND, {
       entity: "rule",
+    });
+  }
+
+  // Switching a rule TO the texted type is "adding" it (owner-only during
+  // its trial); editing an existing texted rule is not.
+  if (
+    patch.rule_type === TEXTED_RULE_TYPE &&
+    existing.rule_type !== TEXTED_RULE_TYPE &&
+    !(await textedRuleAvailable(orgId, role))
+  ) {
+    return apiError(403, TEXTED_RULE_LOCKED_MESSAGE, API_ERROR_CODES.FORBIDDEN, {
+      reason: "texted_rule_trial_pending",
     });
   }
 

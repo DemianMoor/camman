@@ -16,6 +16,14 @@ import { brands, campaigns, offers, routing_types, traffic_types } from "@/db/sc
 export const CAMPAIGN_DETAIL_SELECT = {
   id: campaigns.id,
   org_id: campaigns.org_id,
+  // ⚠️ LOAD-BEARING, NOT DECORATIVE. The campaign detail page gates its whole
+  // "Drip settings" section on `campaign.type === "drip"`. While this column was
+  // missing from the select the comparison was `undefined === "drip"` — always
+  // false — so the drip config panel (interest tag, partner, start/end, the
+  // three caps, priority, sending numbers, behavioural follow-ups, the journey
+  // funnel) rendered for NOBODY, on every drip campaign. Nothing failed; the
+  // section simply was not there. Found by opening the page, not by reading it.
+  type: campaigns.type,
   slug: campaigns.slug,
   human_id: campaigns.human_id,
   name: campaigns.name,

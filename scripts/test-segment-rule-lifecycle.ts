@@ -233,7 +233,10 @@ async function main() {
       else bar(`L8 ${t} evaluated as COMPLETE`, false, "audience empty ⇒ rule was dropped");
     }
     bar("L8 all eight types evaluate as COMPLETE with a valid value",
-      complete === NEW_TYPES.length && Object.keys(RULE_TYPES).length === 40,
+      // 41 since migration 0196 added texted_in_last_period (Task 3). The
+      // declared set vs the DB CHECK is asserted by
+      // scripts/test-segment-rule-type-registration.ts.
+      complete === NEW_TYPES.length && Object.keys(RULE_TYPES).length === 41,
       `${complete}/8 complete, ${Object.keys(RULE_TYPES).length} types declared`);
 
     // L9 ── the eligibility invariant the owner asked for ───────────────────

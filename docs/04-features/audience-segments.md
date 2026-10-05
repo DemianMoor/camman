@@ -1,6 +1,6 @@
 # Feature — Segments & Segment Rules
 
-_Last updated: 2026-08-19_
+_Last updated: 2026-10-05_
 
 ## 1. Purpose
 A **segment** is a named audience. Its effective membership is the **UNION** of manually-added contacts and contacts matching a chain of declarative **rules**. Segments feed campaign audiences. The rules engine compiles to SQL **set arithmetic** (not boolean predicates) so each branch can pick its own index plan against a >100K-row contacts table.
@@ -56,6 +56,7 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 | `joined_segment_in_last_n_days` | positive int | joined *this* segment ≤ N days ago |
 | `joined_segment_more_than_n_days_ago` | positive int | joined *this* segment > N days ago |
 | `in_use_in_campaign_last_period` | campaign-use period (`1d`/`3d`/`1w`/`2w`/`1m`/`3m`/`6m`/`1y`) | were in use in another campaign within the lookback window |
+| `texted_in_last_period` | campaign-use period (same codes) | were actually **texted** within the window (Task 3, migration 0196) |
 | `in_use_in_offer` | offer id | were in use in a campaign for the chosen offer |
 | `member_of_segment` | segment id | are members of another segment |
 | `is_in_contact_group` | contact_group id | carry a contact-group tag |
@@ -71,6 +72,12 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 - **Engagement ladder:** Level 1 = clicker rules (clicked the SMS / landing); Level 2 = `reached_offer*` (offer page); Level 3 = `made_purchase*` (bought). Each usable as include (`is`) or exclude (`is_not`).
 - Time-based types accept `is` only (direction encoded in the name; the UI hides the operator select).
 - **`in_use_in_campaign_last_period`** accepts `is` (include) / `is_not` (exclude). A contact counts as "in use" when it sits in a `campaign_audience_pool` for a campaign whose `created_at` falls inside the window AND whose `status` is `active`/`paused`/`completed` ("any that ran" — draft has no pool, archived excluded) AND which still has ≥1 **live stage** (`draft`/`pending`/`sent`/`success`). A campaign whose stages are all `cancelled`/`failed` (or has none) releases its contacts. The 8 period codes map to SQL `make_interval` units in [`lib/segment-rules-eval.ts`](../../lib/segment-rules-eval.ts); only the opaque code is persisted in `value`. Differs from the `exclude_in_use_contacts` flag (above), which is time-less and `active`-only.
+- **`texted_in_last_period`** ("Texted in the last…", Task 3, E0 = (b), migration `0196`) accepts `is` / `is_not`. It is anchored on the **send**, not on a campaign's creation date like `in_use_in_campaign_last_period`, so a long-running campaign that texted a contact yesterday counts even if it was created two weeks ago. It also does not count a contact that is merely in a fresh pool but was never messaged. A never-texted contact is in `is_not`. Three sources, unioned inside ONE subselect (`textedInLastPeriodSql` in [`lib/segment-rules-eval.ts`](../../lib/segment-rules-eval.ts)):
+  1. **`contact_engagement.last_sent_at`**, only while `lifecycle_settings.engine_mode = 'write'`;
+  2. **the lag tail**: `stage_sends` `'sent'` since the engagement job's watermark minus its 30-minute overlap. With the engine off or never run, it covers the whole window;
+  3. **`stage_manual_recipients`** stamped sent (migration 0197).
+
+  Existing segments keep their rule. The owner switches them one at a time (223 first), only after the 14-night trial. Test: [`scripts/test-segment-rule-texted.ts`](../../scripts/test-segment-rule-texted.ts).
 - **`in_use_in_offer`** accepts `is` (include) / `is_not` (exclude). Same "in use" definition as `in_use_in_campaign_last_period` — pool membership + campaign `active`/`paused`/`completed` + ≥1 **live stage** (`draft`/`pending`/`sent`/`success`), so archived campaigns and campaigns whose stages are all `cancelled`/`failed`/`archived` count as **not used** — but scoped by the campaign's `offer_id` (`value`) instead of a time window. Lets an operator target (or exclude) contacts already used for a specific offer. Migration `0092`.
 - **`phone_type`** accepts `is` only — a contact matches when their `line_type` is in the chosen set (`mobile`/`voip`/`toll_free`/`unknown`). `landline` is deliberately absent from the option set: landlines carry `messaging_status='not_applicable'` and are excluded from every segment's audience by the eligibility gate (`gateEligible` in `lib/segment-rules-eval.ts`), so a `landline` option could never match anything. Uses the eligible-partial index `contacts_org_linetype_eligible_idx` (migration 0096).
 - **`carrier`** accepts `is` / `is_not` — a contact matches when their `carrier_norm` is in the chosen set. `Unknown` expands to match both `Unknown` and `Unmapped` (`Unmapped` groups with `Unknown`); `Unidentified` is also selectable and matches only itself. Uses the eligible-partial index `contacts_org_carrier_eligible_idx` (migration 0096).

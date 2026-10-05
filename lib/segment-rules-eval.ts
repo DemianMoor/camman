@@ -6,6 +6,7 @@ import type { SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import { dripInUseSubquery, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
+import { ENGAGEMENT_JOB, INCREMENTAL_OVERLAP_MINUTES } from "@/lib/engagement/constants";
 import {
   purchasedClause,
   purchasedOfferContacts,
@@ -152,6 +153,67 @@ const MSGS_WINDOW_COLUMNS: Record<7 | 14 | 30 | 90, string> = {
   90: "msgs_90d",
 };
 
+// "Texted in the last <period>" (Task 3, E0 = (b); plan
+// docs/superpowers/plans/2026-10-02-task3-texted-rule-plan.md §2, §4, §4b):
+// contacts actually MESSAGED within the window, from three sources:
+//
+//   1. contact_engagement.last_sent_at — the fact, via (org_id, last_sent_at).
+//      Only while the lifecycle engine WRITES for this org; otherwise the job
+//      does not maintain it and source 2 covers the whole window instead.
+//   2. the lag tail — stage_sends 'sent' since the engagement job's last
+//      successful run minus its own INCREMENTAL_OVERLAP_MINUTES, via
+//      stage_sends_org_sent_at_idx. The job's watermark is stamped when a run
+//      FINISHES, so the overlap also covers a send committed after its read.
+//      With no watermark (never ran) the tail is the whole window. Exclude-in-use
+//      does NOT cover this lag on its own (plan §4), so the rule reads it itself.
+//   3. stage_manual_recipients — manual CSV sends, stamped when the stage is
+//      marked sent / success / failed (migration 0197).
+//
+// `sent` is stage_sends.status = 'sent', the single shared definition of "was
+// messaged" (CLAUDE.md §10e). A never-texted contact matches none of the three,
+// so `is_not` (universe EXCEPT this) includes it.
+export function textedInLastPeriodSql(orgId: string, interval: SQL): SQL {
+  const engineWrites = drizzleSql`EXISTS (
+    SELECT 1 FROM lifecycle_settings ls
+    WHERE ls.org_id = ${orgId}::uuid AND ls.engine_mode = 'write')`;
+  // ⚠️ ONE SELECT, not three. The builder composes rules with bare set
+  // operators (`universe EXCEPT <rule>`), which are left-associative at equal
+  // precedence: a bare `a UNION b UNION c` here would make `is_not` compute
+  // `(universe EXCEPT a) UNION b UNION c` — texted contacts counted as NOT
+  // texted. Caught by scripts/test-segment-rule-texted.ts (builder, IS NOT).
+  return drizzleSql`
+    SELECT texted.contact_id FROM (
+    SELECT ce.contact_id
+    FROM contact_engagement ce
+    WHERE ce.org_id = ${orgId}::uuid
+      AND ce.last_sent_at >= now() - ${interval}
+      AND ${engineWrites}
+    UNION
+    SELECT ss.contact_id
+    FROM stage_sends ss
+    WHERE ss.org_id = ${orgId}::uuid
+      AND ss.status = 'sent'
+      AND ss.contact_id IS NOT NULL
+      AND ss.sent_at IS NOT NULL
+      AND ss.sent_at >= GREATEST(
+        now() - ${interval},
+        CASE WHEN ${engineWrites}
+          THEN COALESCE(
+            (SELECT cl.watermark FROM cron_locks cl WHERE cl.job_name = ${ENGAGEMENT_JOB})
+              - make_interval(mins => ${INCREMENTAL_OVERLAP_MINUTES}::int),
+            now() - ${interval})
+          ELSE now() - ${interval}
+        END)
+    UNION
+    SELECT mr.contact_id
+    FROM stage_manual_recipients mr
+    WHERE mr.org_id = ${orgId}::uuid
+      AND mr.sent_at IS NOT NULL
+      AND mr.sent_at >= now() - ${interval}
+    ) AS texted
+  `;
+}
+
 // Exported for the Task 3 §9 fact prototype (lib/audience-preview-reference/timing.ts).
 export function ruleInnerQuery(
   rule: {
@@ -289,6 +351,11 @@ export function ruleInnerQuery(
           )
       `;
     }
+    case "texted_in_last_period":
+      return textedInLastPeriodSql(
+        orgId,
+        CAMPAIGN_USE_PERIOD_INTERVAL[v as CampaignUsePeriod],
+      );
     case "in_use_in_offer": {
       // Contacts snapshotted into a campaign for the selected offer that still
       // counts as "in use": campaign ran (status active/paused/completed — not

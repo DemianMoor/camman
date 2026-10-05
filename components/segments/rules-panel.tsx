@@ -51,6 +51,12 @@ const RULE_TYPE_OPTIONS = RULE_TYPE_KEYS.map((k) => ({
   value: k as string,
   label: RULE_TYPES[k].label,
 }));
+// "Texted in the last…" is owner-only until its 14-night trial completes
+// (lib/segments/texted-rule-availability.ts). The server refuses it; this list
+// just doesn't offer it. A row that already uses it still shows its label.
+const RULE_TYPE_OPTIONS_WITHOUT_TEXTED = RULE_TYPE_OPTIONS.filter(
+  (o) => o.value !== "texted_in_last_period",
+);
 
 // Display labels for the phone_type set editor. Carrier codes are shown as-is.
 // Lifecycle status pills (0189). Same treatment as carrier_set, which is a
@@ -94,7 +100,7 @@ export type SegmentRule = {
   ref: RefInfo;
 };
 
-type RulesResponse = { data: SegmentRule[] };
+type RulesResponse = { data: SegmentRule[]; texted_rule_available?: boolean };
 
 type PreviewResponse = {
   count: number | null;
@@ -288,6 +294,8 @@ export function RulesPanel({
 
   // Preview state.
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
+  // Hidden until the server says this user may add the texted rule.
+  const [textedAvailable, setTextedAvailable] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
   // Initial rules load.
@@ -298,8 +306,10 @@ export function RulesPanel({
     (async () => {
       const r = await listApi.execute(`/api/segments/${segmentId}/rules`);
       if (cancelled) return;
-      if (r.ok) setRules(r.data.data);
-      else setRulesError(r.error);
+      if (r.ok) {
+        setRules(r.data.data);
+        setTextedAvailable(r.data.texted_rule_available === true);
+      } else setRulesError(r.error);
     })();
     return () => {
       cancelled = true;
@@ -566,6 +576,7 @@ export function RulesPanel({
               rule={rule}
               segmentId={segmentId}
               canEdit={canEdit}
+              textedAvailable={textedAvailable}
               isFirst={idx === 0}
               brands={brands}
               offers={offers}
@@ -607,6 +618,7 @@ interface RuleRowProps {
   rule: SegmentRule;
   segmentId: number;
   canEdit: boolean;
+  textedAvailable: boolean;
   // True for the topmost rule. Its combinator is ignored at eval time,
   // so we hide the AND/OR toggle for it.
   isFirst: boolean;
@@ -630,6 +642,7 @@ function RuleRow({
   rule,
   segmentId,
   canEdit,
+  textedAvailable,
   isFirst,
   brands,
   offers,
@@ -856,7 +869,11 @@ function RuleRow({
       {/* Rule type — searchable: 24 types is more than is comfortable to
           scan in a plain select. */}
       <SearchableSelect
-        options={RULE_TYPE_OPTIONS}
+        options={
+          textedAvailable || ruleType === "texted_in_last_period"
+            ? RULE_TYPE_OPTIONS
+            : RULE_TYPE_OPTIONS_WITHOUT_TEXTED
+        }
         value={ruleType}
         onChange={(v) => handleRuleTypeChange(v as RuleType)}
         disabled={!canEdit || saving}

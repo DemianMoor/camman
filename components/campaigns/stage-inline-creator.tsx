@@ -60,6 +60,13 @@ export interface EditableStage {
   include_clickers: boolean;
   exclude_clickers: boolean;
   scheduled_at: string | null;
+  // Drip window (Drip P5). Declared here deliberately: these were missing from
+  // this interface, so the edit-path initialValues could not carry them and a
+  // saved window read as empty on re-open. The type is what makes the omission
+  // visible — leaving them undeclared is what hid it.
+  window_start_min?: number | null;
+  window_end_min?: number | null;
+  drip_active?: boolean | null;
   // When set on a tracked campaign, the send has fired → the form locks the
   // Scheduled field. NULL keeps it editable (incl. after a missed attempt).
   sent_at: string | null;
@@ -257,6 +264,14 @@ export function StageInlineEditor({
         exclude_clickers: stage.exclude_clickers,
         scheduled_at: utcToCampaignLocalInput(stage.scheduled_at),
         notes: stage.notes ?? "",
+        // ⚠️ THE DRIP WINDOW MUST BE HYDRATED HERE OR RE-OPENING LOSES IT.
+        // Omitted, the form fell back to EMPTY_STAGE_FORM (null/null/false), so
+        // a saved window read as empty on re-open — and because the submit
+        // builder only includes these three when start AND end are non-null,
+        // the Active toggle silently stopped persisting too.
+        window_start_min: stage.window_start_min ?? null,
+        window_end_min: stage.window_end_min ?? null,
+        drip_active: stage.drip_active ?? false,
       }
     : resolvedDefault
       ? {

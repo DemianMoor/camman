@@ -127,6 +127,20 @@ export async function GET(
   }
 
   const r = rows[0];
+
+  // Org drip posture, only for a drip campaign — a regular one never reads it,
+  // so a regular GET stays exactly the query it was.
+  let dripPosture: { drip_enabled: boolean; drip_paused: boolean } | null = null;
+  if (r.type === "drip") {
+    const p = (await db.execute(drizzleSql`
+      SELECT drip_enabled, drip_paused FROM org_settings
+      WHERE org_id = ${orgId}::uuid LIMIT 1
+    `)) as unknown as { drip_enabled: boolean; drip_paused: boolean }[];
+    dripPosture = p[0]
+      ? { drip_enabled: p[0].drip_enabled === true, drip_paused: p[0].drip_paused === true }
+      : { drip_enabled: false, drip_paused: false };
+  }
+
   return NextResponse.json({
     ...r,
     brand: r.brand?.id ? r.brand : null,
@@ -137,6 +151,10 @@ export async function GET(
     stage_count_by_status,
     // Earliest scheduled_at across all stages, or null when none is scheduled.
     earliest_scheduled_at,
+    // Org drip posture, so the stages list can answer "will this stage send?"
+    // with the SAME conditions the scheduler applies (lib/drip/stage-readiness).
+    // Sent for drip campaigns only — a regular campaign has no use for it.
+    drip_posture: dripPosture,
   });
 }
 

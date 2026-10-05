@@ -4493,3 +4493,56 @@ not apply to.
 Gate on `campaignType !== "drip"` and leave the regular branch byte-for-byte —
 and gate the *fetch* as well as the render, or the form keeps POSTing for an
 answer nothing shows.
+
+## "Will this drip stage send?" has ONE definition
+
+`lib/drip/stage-readiness.ts` → `dripStageReadiness()`. It mirrors
+`lib/drip/scheduler.ts` and nothing else. All of these must hold:
+
+| condition | source |
+|---|---|
+| `drip_enabled = true` and `drip_paused = false` | `org_settings` (posture) |
+| `status = 'active'` | `campaigns` |
+| `send_paused` is not true | `campaigns` (the scheduler skips a paused campaign) |
+| `drip_active IS TRUE` | `campaign_stages` |
+| `archived_at IS NULL` | `campaign_stages` |
+| **both** `window_start_min` and `window_end_min` are integers | `pickStage` drops a stage whose window is not two integers, so a half-set window never fires |
+
+⚠️ **`campaign_stages.status` takes no part.** A drip stage sits at `draft` for
+ever — nothing promotes it, because it is never materialized or approved the way
+a regular stage is. The stages list used to show that Draft / Send-Draft
+dropdown on drip campaigns, which told the operator the exact opposite of the
+truth. For a drip campaign the Status column is replaced by the window plus a
+badge driven by `dripStageReadiness`, and the Status guide switches to the drip
+variant.
+
+**The badge names the FIRST unmet condition, outermost first** — a stage toggled
+on inside a paused campaign reads "Campaign paused", not "Active".
+
+## An uncontrolled input cannot show data that arrives later
+
+`defaultValue` is read once, at mount. A form hydrated from an async fetch keeps
+the empty initial value for ever and renders its **placeholder** — which looks
+like data.
+
+The drip window fields did exactly this. Saved 09:30–11:30 appeared as
+"09:30 / 13:59": both inputs were empty and showing `placeholder="09:30"` and
+`placeholder="13:59"`. The Opens placeholder happened to match what had been
+saved, so only Closes looked wrong, which sent the investigation at the save
+path — where nothing was broken. The row held 570/690 the whole time.
+
+Use `value` + `onChange`. Two independent bugs had to line up here, and the test
+missed both because it only covered POST → GET:
+
+1. the edit form's `initialValues` never carried `window_start_min`,
+   `window_end_min` or `drip_active` — they were not even declared on
+   `EditableStage`, which is what hid the omission from tsc
+2. the inputs were uncontrolled, so a late value could not have reached them anyway
+
+**A round-trip test must cover edit-after-save, not just create-then-read.**
+
+⚠️ And ids must be unique per page: `drip-start`/`drip-end` belonged to the
+campaign config panel, and the stage window fields reused them, so each
+`<label htmlFor>` resolved to the first match — clicking the stage window's
+label focused the campaign's date picker. The stage fields are now
+`drip-window-start` / `drip-window-end`.

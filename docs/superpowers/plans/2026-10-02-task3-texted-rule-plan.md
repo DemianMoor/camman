@@ -228,6 +228,12 @@ That is about **1.0–1.2 s that does not depend on the rule**: the EXCEPT sorts
 - **Data:** a generator script scales contacts, `contact_engagement` and `stage_sends` 5× with synthetic phones.
 - **D3:** whether camman-v2's compute is enough for 4.8M contacts, or a Supabase branch is needed. The owner decides, because of the cost.
 
+### 6.1 Speed gate tooling (T6; option C approved 2026-10-05)
+
+[scripts/speed-gate-5x.ts](../../../scripts/speed-gate-5x.ts) runs `--generate --scale=5` (one SYNTHETIC org shaped like production's aggregates; no production row copied), then `--measure` (five recipes shaped like 1568 / 1521 / 1429 / 1560 and the texted twin), then `--teardown`. Each recipe's audience must be non-empty, and each preview part must take ≤ 2 s (median of 3).
+- **Validated on the preview DB at scale 0.002.** All five pass with non-empty audiences.
+- **Not yet run at scale 5.** The throwaway project needs: Large compute, its ref added temporarily to `PREVIEW_PROJECT_REFS`, a gitignored `.env.scale`, and deletion at the end of the session. The tools available here can neither size nor delete a Supabase project, so the owner does those two steps.
+
 ## 7. Tasks (each its own PR; nothing merges without its bars green)
 
 | # | Task | Gate |

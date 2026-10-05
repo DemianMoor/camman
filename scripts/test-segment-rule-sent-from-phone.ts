@@ -79,14 +79,31 @@ function testMergedShape() {
 }
 
 // Uses real prod rows: org b0ce3435… owns phones 26 (TextHub) and 43.
+// ⚠️ PRODUCTION, READ-ONLY, BY DESIGN — it has no preview guard and must not
+// get one. Pointed at another database the org has no rows; that used to
+// surface as `TypeError: Cannot read properties of undefined` (2026-10-05, run
+// against the preview DB by mistake). `requireRow` now fails with the reason.
+// The backfill invariant below counts ALL of stage_sends (~6M rows): run it in
+// the quiet window, not during working hours.
 const ORG = "b0ce3435-5ea2-4510-ab11-8cdd0d0c125b";
+
+function requireRow<T>(rows: readonly T[], what: string): T {
+  if (rows.length === 0) {
+    console.error(
+      `  FAIL precondition: ${what} — none found for org ${ORG}. This test reads PRODUCTION ` +
+        "rows (read-only); point DATABASE_URL at production, in the quiet window.",
+    );
+    process.exit(1);
+  }
+  return rows[0];
+}
 
 async function testOwnership() {
   console.log("verifyValueOwnership");
   const phoneRow = await db.execute<{ id: number; provider_id: number }>(
     drizzleSql`SELECT id, provider_id FROM provider_phones WHERE org_id = ${ORG}::uuid ORDER BY id LIMIT 1`,
   );
-  const phone = phoneRow[0];
+  const phone = requireRow(phoneRow, "a provider phone");
   const good = await verifyValueOwnership(
     ORG,
     "sent_from_provider_phone",
@@ -190,7 +207,7 @@ async function testEval() {
       LIMIT 1
     `,
   );
-  const { contact_id, provider_phone_id } = seed[0];
+  const { contact_id, provider_phone_id } = requireRow(seed, "a 'sent' stage_sends row with a provider phone");
 
   const hit = await db.execute<{ contact_id: string }>(drizzleSql`
     SELECT DISTINCT contact_id FROM stage_sends

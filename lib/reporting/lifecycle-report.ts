@@ -69,9 +69,13 @@ export interface LifecycleMetrics {
   sales: number;
   cr: number | null;
   revenue: string;
+  /** revenue / clickers — attributed revenue only, like `revenue`. */
+  epc: number | null;
   opt_outs: number;
   opt_out_rate: number | null;
   cost: string;
+  /** cost / clickers. */
+  cpc: number | null;
   /** true when ANY send in this row was reconstructed rather than stamped live. */
   reconstructed: boolean;
 }
@@ -388,9 +392,11 @@ export function foldLifecycleRows(
       sales,
       cr: clickers > 0 ? sales / clickers : null,
       revenue: revenue.toFixed(4),
+      epc: clickers > 0 ? revenue / clickers : null,
       opt_outs,
       opt_out_rate: sends > 0 ? opt_outs / sends : null,
       cost: cost.toFixed(4),
+      cpc: clickers > 0 ? cost / clickers : null,
       reconstructed: parts.some((p) => p.reconstructed),
     };
   };

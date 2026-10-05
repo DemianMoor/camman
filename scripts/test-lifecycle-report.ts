@@ -328,6 +328,24 @@ async function main() {
       near(Number(unclass.cost), 0.02),
       `${unclass.cost}`,
     );
+    // hot: 1 clicker, cost 0.04. total: 1 clicker, cost 0.21.
+    bar(
+      "D6 CPC is cost ÷ clickers",
+      near(hot.cpc ?? -1, 0.04) && near(total.cpc ?? -1, 0.21),
+      `hot ${hot.cpc}, total ${total.cpc}`,
+    );
+    bar(
+      "D7 EPC is revenue ÷ clickers",
+      total.clickers > 0 &&
+        near(total.epc ?? -1, Number(total.revenue) / total.clickers),
+      `total ${total.epc} = ${total.revenue}/${total.clickers}`,
+    );
+    bar(
+      "D8 ⭐ no clickers ⇒ CPC and EPC are null, not $0 — even with revenue",
+      cold.clickers === 0 && Number(cold.revenue) > 0 &&
+        cold.cpc === null && cold.epc === null,
+      `cold clickers ${cold.clickers}, revenue ${cold.revenue}, cpc ${cold.cpc}, epc ${cold.epc}`,
+    );
 
     console.log("\nPART E — null is not zero");
     const suppressed = row("suppressed");

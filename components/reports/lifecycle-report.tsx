@@ -46,6 +46,7 @@ const pct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(2)}
 const money = (v: string) =>
   `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const num = (v: number) => v.toLocaleString();
+const moneyOrDash = (v: number | null) => (v === null ? "—" : money(String(v)));
 
 export function LifecycleReport() {
   // Lazy initialisers: reading the clock in the render body is impure, and the
@@ -124,8 +125,10 @@ export function LifecycleReport() {
                 <th className="px-3 py-2 text-right font-medium">Sales*</th>
                 <th className="px-3 py-2 text-right font-medium">CR*</th>
                 <th className="px-3 py-2 text-right font-medium">Revenue*</th>
+                <th className="px-3 py-2 text-right font-medium">EPC*</th>
                 <th className="px-3 py-2 text-right font-medium">Opt-out</th>
                 <th className="px-3 py-2 text-right font-medium">Cost</th>
+                <th className="px-3 py-2 text-right font-medium">CPC</th>
               </tr>
             </thead>
             <tbody className="tabular-nums">
@@ -160,7 +163,7 @@ export function LifecycleReport() {
                         structurally empty, and a 0 would read as a measurement. */}
                     {suppressed ? (
                       <>
-                        {Array.from({ length: 8 }).map((_, i) => (
+                        {Array.from({ length: 10 }).map((_, i) => (
                           <td key={i} className="px-3 py-2 text-right">—</td>
                         ))}
                       </>
@@ -172,6 +175,7 @@ export function LifecycleReport() {
                         <td className="px-3 py-2 text-right">{num(r?.sales ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.cr ?? null)}</td>
                         <td className="px-3 py-2 text-right">{money(r?.revenue ?? "0")}</td>
+                        <td className="px-3 py-2 text-right">{moneyOrDash(r?.epc ?? null)}</td>
                         <td className="px-3 py-2 text-right">
                           {num(r?.opt_outs ?? 0)}
                           {r?.opt_out_rate != null ? (
@@ -181,6 +185,7 @@ export function LifecycleReport() {
                           ) : null}
                         </td>
                         <td className="px-3 py-2 text-right">{money(r?.cost ?? "0")}</td>
+                        <td className="px-3 py-2 text-right">{moneyOrDash(r?.cpc ?? null)}</td>
                       </>
                     )}
                   </tr>
@@ -199,8 +204,8 @@ export function LifecycleReport() {
           above it is otherwise read as something it is not. */}
       <div className="grid gap-1 text-xs text-muted-foreground">
         <p>
-          <span className="font-medium">*Attributed only.</span> Sales, CR and
-          Revenue count conversions attributed to an individual send. Most
+          <span className="font-medium">*Attributed only.</span> Sales, CR,
+          Revenue and EPC count conversions attributed to an individual send. Most
           conversions are not, so these read far below the true totals — a low
           CR here is an attribution gap, not performance.
         </p>
@@ -218,6 +223,11 @@ export function LifecycleReport() {
         <p>
           <span className="font-medium">Cost includes opt-out cost</span> — a
           cohort with more opt-outs costs more per send.
+        </p>
+        <p>
+          <span className="font-medium">EPC and CPC divide by this tab&apos;s
+          Clickers</span> (revenue ÷ clickers, cost ÷ clickers), not by
+          Overview&apos;s Human clicks — so EPC here is not Overview&apos;s EPC.
         </p>
         <p>
           Per-recipient numbers here do not reconcile with Overview&apos;s

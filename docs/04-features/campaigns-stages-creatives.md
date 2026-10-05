@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-09-20_
+_Last updated: 2026-10-02_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -41,13 +41,22 @@ The campaign core: a **campaign** is a long-running container with a frozen audi
 - **Full URL builder** (`lib/stage-url.ts`): selected `utm_tag_ids` append `&<label>=<value_source>` to `full_url` in order. The tracking-ID chip attaches a proper `sub_id3=<id>` param (`setUrlParam`), never a bare value. A hand-edited guidekn `full_url` that is malformed (id-in-path / empty / placeholder / mismatched `sub_id3`) blocks Save (specific defect named) and is rejected server-side — see [tracking-attribution.md §5b](tracking-attribution.md).
 - **Tracking IDs are previewed live** whenever the campaign has a tracking id and a creative is picked — in create mode (predicted `max+1` stage number), in the A/B/behavioral split dialogs, **and in edit mode for a stage that has no stored `tracking_id` yet** (e.g. a draft-split variant created without a creative). The preview uses the stage's own `stage_number` via `formatStageTrackingId`, which is byte-identical to the server's `generateStageTrackingId`, so it matches the value finalized on save — and the `tracking_id` chip becomes usable immediately, so the tag can be attached to the Full URL before saving (no reopen). A stage that already has a stored `tracking_id` keeps showing it verbatim (immutable). On save, the A/B split rebuilds **every** variant's `full_url` — the source (variant A) **and** the new siblings B..N — **canonically from its own tracking id** (guidekn/empty sources) or by rewriting `sub_id3` (custom URLs), via one shared `attachStageTracking` helper. A malformed source can't propagate.
 
+### Manual sends: who was texted (migration 0197, 2026-10-02)
+
+A manual stage's CSV export (`GET …/export-phones`) records each exported contact in `stage_manual_recipients`; the record is idempotent, and several exports add up. The stage status routes (`POST …/status`, `POST …/stages/bulk-status`) then stamp or clear `sent_at` in the same transaction as the status change ([lib/stages/manual-recipients.ts](../../lib/stages/manual-recipients.ts)):
+- Entering **sent / success / failed** stamps `sent_at`. Statuses are freely assignable, so pending → success counts as texted.
+- Moving to **draft / pending** clears it, so a mistaken mark is undone.
+- **cancelled / archived** change nothing.
+
+This is the only record that a manual send's contacts were texted, because a manual send writes no `stage_sends`. The "Texted in the last…" segment rule reads it.
+
 ### Deleting stages
 
 A stage is deletable only if it was never sent or marked-as-sent (`sent_at` is
 null) **and** has no rows in `stage_sends`, `stage_results_imports`,
 `stage_manual_sales`, or `keitaro_stage_results` — i.e. no send or result data
 of any kind, including a Prepared/materialized-but-unsent stage (which already
-has `stage_sends` rows). Such stages can be hard-deleted (`DELETE
+has `stage_sends` rows), **and** no `stage_manual_recipients` row with `sent_at` set (0197). Rows that were only exported are removed in the same statement. `stage_manual_recipients.stage_id` does not cascade, so no other path can delete a stage whose manual recipients were marked texted. Such stages can be hard-deleted (`DELETE
 /api/campaigns/[campaignId]/stages/[stageId]`, `stages.delete`, manager+). The
 delete removes the row and all its child records via DB cascade (`stage_sends`,
 `links`, result rows/imports, keitaro results, manual sales, opt-out

@@ -4346,3 +4346,14 @@ UI states that filter — it does not let the operator discover it from a 404.**
 **Runtime check.** [scripts/test-campaign-duplicate-fields.ts](../scripts/test-campaign-duplicate-fields.ts) duplicates a source holding a non-default value in every copyable field and compares every column except the fresh ones. A column dropped by a default that happens to match can't pass.
 
 **Adding a campaigns column means deciding** whether a copy carries it.
+
+## Manual sends: the "texted" stamp follows status, conservatively (2026-10-02, migration 0197)
+
+`stage_manual_recipients.sent_at` records that a manual stage's exported contacts were texted. Stage status is freely assignable, so the stamp keys off a **set** of statuses, not `'sent'` alone. It errs toward not texting the same people twice:
+- **sent, success, failed** stamp it ("failed" means sent with a poor result);
+- **draft, pending** clear it (an explicit "not sent");
+- **cancelled, archived** keep whatever is there.
+
+**The record must survive deletes.** `stage_id` is `ON DELETE NO ACTION`. `deleteStage()` refuses a stage with marked rows and clears unmarked ones in the same statement. A raw stage or campaign delete fails with 23503 rather than erasing the record. An org delete works, because `org_id` cascades and the NO ACTION check runs at the end of the statement.
+
+Test: [scripts/test-manual-send-visibility.ts](../scripts/test-manual-send-visibility.ts) (M1–M11), red-proved against the pre-0197 code.

@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-02_
+_Last updated: 2026-10-05_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -550,7 +550,9 @@ is gated on `campaigns.view`; the settings route stays denied.
 ### 3k. The cohort report (`/reports/lifecycle`, PR 5)
 
 One row per lifecycle cohort, by send date in ET: sends, clickers, CTR, sales,
-CR, revenue, opt-out rate and cost.
+CR, revenue, opt-outs and cost. The Opt-out column shows the count with
+the rate in parentheses — `1,234 (2.50%)`; with zero sends the rate is `null`
+and only the count is shown.
 [lib/reporting/lifecycle-report.ts](../../lib/reporting/lifecycle-report.ts),
 behind `GET /api/reports/lifecycle?from=&to=` (`campaigns.view`, **14-day
 cap**, `maxDuration = 60`), rendered by

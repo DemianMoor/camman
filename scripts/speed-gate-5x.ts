@@ -1,6 +1,10 @@
 import "./_env-preload";
 import "./_require-preview-db"; // second — refuses production; a scale project must be allow-listed there
 
+// ⚠️ UNUSED BY THE OWNER'S DECISION (2026-10-05): the 5× speed gate was replaced
+// by monitoring on live data, at no cost; option C (a paid throwaway project) was
+// cancelled. Kept for reference only — do not run it against any paid resource.
+//
 // Task 3 speed gate (plan §6, owner 2026-10-03): the campaign audience preview
 // must stay under 2 s at 5x today's data. Option C (owner, 2026-10-05): a
 // throwaway Supabase project on Large, SYNTHETIC data only — no production row

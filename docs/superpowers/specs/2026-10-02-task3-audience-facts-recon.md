@@ -478,6 +478,9 @@ Production, read-only, 2026-10-02 ~10:40 UTC (a 64 s read, on Large); eligible c
 3. **Drift alert and speed gate.**
    - **Drift:** the nightly comparison posts to Telegram on any difference,
      naming the recipe, the rule and the count delta.
+   - ~~**Speed gate:** a bar that fails if a preview exceeds 2 s at 5× current data.~~
+     **Replaced by the owner's decision (2026-10-05): the 5× speed gate is REPLACED by monitoring on live data, at no cost.** Option C (a throwaway Large project with synthetic 5× data) is cancelled; no paid resource is used. Instead, real preview requests are timed on production, the parity harness's real recipes are timed nightly, Telegram alerts fire when a part takes over 5 s or the nightly median rises more than 25% against the 7-night average, and a weekly line compares this week's median and worst with last week's. Card: "Preview speed: live monitoring". [scripts/speed-gate-5x.ts](../../scripts/speed-gate-5x.ts) stays in the repo, unused.
+     The original text follows for the record:
    - **Speed gate:** a bar that **fails if a preview exceeds 2 s at 5× current
      data**. That needs a scaled dataset: about 5× contacts (≈ 4.8 M), pool
      rows (≈ 15 M) and offer history. Built on a Supabase branch or a dedicated

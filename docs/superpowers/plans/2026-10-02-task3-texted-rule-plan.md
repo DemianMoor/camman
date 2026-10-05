@@ -228,7 +228,11 @@ That is about **1.0–1.2 s that does not depend on the rule**: the EXCEPT sorts
 - **Data:** a generator script scales contacts, `contact_engagement` and `stage_sends` 5× with synthetic phones.
 - **D3:** whether camman-v2's compute is enough for 4.8M contacts, or a Supabase branch is needed. The owner decides, because of the cost.
 
-### 6.1 Speed gate tooling (T6; option C approved 2026-10-05)
+### 6.1 Speed gate — REPLACED by live monitoring (owner, 2026-10-05)
+
+**Replaced by the owner's decision (2026-10-05): the 5× speed gate is REPLACED by monitoring on live data, at no cost.** Option C (a throwaway Large project with synthetic 5× data) is cancelled; no paid resource is used. Instead, real preview requests are timed on production, the parity harness's real recipes are timed nightly, Telegram alerts fire when a part takes over 5 s or the nightly median rises more than 25% against the 7-night average, and a weekly line compares this week's median and worst with last week's. Card: "Preview speed: live monitoring". [scripts/speed-gate-5x.ts](../../../scripts/speed-gate-5x.ts) stays in the repo, unused.
+
+#### (superseded) Speed gate tooling (T6; option C, approved then cancelled 2026-10-05)
 
 [scripts/speed-gate-5x.ts](../../../scripts/speed-gate-5x.ts) runs `--generate --scale=5` (one SYNTHETIC org shaped like production's aggregates; no production row copied), then `--measure` (five recipes shaped like 1568 / 1521 / 1429 / 1560 and the texted twin), then `--teardown`. Each recipe's audience must be non-empty, and each preview part must take ≤ 2 s (median of 3).
 - **Validated on the preview DB at scale 0.002.** All five pass with non-empty audiences.

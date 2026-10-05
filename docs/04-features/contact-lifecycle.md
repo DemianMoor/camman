@@ -550,9 +550,12 @@ is gated on `campaigns.view`; the settings route stays denied.
 ### 3k. The cohort report (`/reports/lifecycle`, PR 5)
 
 One row per lifecycle cohort, by send date in ET: sends, clickers, CTR, sales,
-CR, revenue, opt-outs and cost. The Opt-out column shows the count with
+CR, revenue, EPC, opt-outs, cost and CPC. The Opt-out column shows the count with
 the rate in parentheses — `1,234 (2.50%)`; with zero sends the rate is `null`
-and only the count is shown.
+and only the count is shown. **EPC = revenue / clickers** and **CPC = cost /
+clickers**, both over this tab's own Clickers (raw human clicks per send), so
+EPC here is attributed-only and is NOT Overview's EPC (which divides by
+`counted_clickers`). No clickers => both `null` (a dash), never $0.
 [lib/reporting/lifecycle-report.ts](../../lib/reporting/lifecycle-report.ts),
 behind `GET /api/reports/lifecycle?from=&to=` (`campaigns.view`, **14-day
 cap**, `maxDuration = 60`), rendered by
@@ -579,7 +582,7 @@ Rows, in order: the six statuses, then `Clickers` (hot + warm) and
 - **Every ratio with no denominator is `null`, not 0.** A 0% CTR on zero sends
   is a statement nobody measured.
 
-Four things the page says in its footer because a number above it would
+Five things the page says in its footer because a number above it would
 otherwise be read as something else:
 
 | Footer line | Why it is there |
@@ -587,6 +590,7 @@ otherwise be read as something else:
 | Sales/CR/Revenue **attributed only** | ~1,038 attributed sales across 3.88M sends. Unlabelled, that reads as catastrophic performance rather than as an attribution gap. |
 | **CTR uses raw human clicks** | Overview uses `counted_clickers`, which lags the scoring cron. The same period gave 125 here and 112 there on stage 4791 at 19 h. An unexplained discrepancy between two tabs is worse than either number. |
 | **Cost includes opt-out cost** | An opt-out reply is billed like a send, so a cohort with more opt-outs costs more per send. That is the point of the column, but only if the reader knows it. |
+| **EPC and CPC divide by this tab's Clickers** | Overview's EPC divides by `counted_clickers` and uses all revenue; this one uses attributed revenue over raw human clickers. Unlabelled, the two EPCs would read as a contradiction. |
 | **One status per contact per ET day** | For reconstructed periods the cohort is evaluated once per ET day, not per message (owner decision, 2026-09-27) — a contact messaged three times in a day carries one status for that day. |
 
 ⚠️ **The ET day becomes an instant in JS, via `etDayBounds`** — never

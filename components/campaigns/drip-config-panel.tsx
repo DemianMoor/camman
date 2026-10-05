@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { JourneyFunnel } from "@/components/drip/journey-funnel";
+import { SearchableSelect } from "@/components/searchable-select";
 import { toastApiError } from "@/lib/api/toast-error";
 import type { DripFunnel } from "@/lib/drip/funnel";
 import { CAMPAIGN_TIMEZONE_LABEL, formatCampaignDateTime, utcToCampaignLocalInput, campaignLocalInputToUtcIso }
@@ -62,6 +63,12 @@ type DripNumber = {
   provider: string | null;
   daily_limit: number | null;
   position?: number;
+  // Present on SELECTED numbers only. False once the phone or its provider has
+  // been archived: the row is kept so the operator can see what was configured,
+  // and flagged, because rotation will skip it.
+  usable?: boolean;
+  phone_status?: string | null;
+  provider_status?: string | null;
 };
 
 type Journey = {
@@ -152,6 +159,14 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   }, [loadF, campaignId, tick]);
 
   const reload = useCallback(() => setTick((n) => n + 1), []);
+
+  // Numbers offered by the picker: the brand's active ones minus what is already
+  // selected. `availableNumbers` is already filtered server-side to active
+  // phones on active providers.
+  const addable = availableNumbers.filter(
+    (a) => !selectedNumbers.some((s) => s.provider_phone_id === a.provider_phone_id),
+  );
+  const unusableCount = selectedNumbers.filter((n) => n.usable === false).length;
 
   const toggleBehavioral = async (on: boolean) => {
     const r = await followupsApi.execute(`/api/campaigns/${campaignId}/drip-followups`, {
@@ -415,6 +430,16 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
                 <li key={n.provider_phone_id} className="flex items-center gap-2 px-3 py-2">
                   <span className="font-mono text-sm">{n.phone_number}</span>
                   <Badge variant="outline" className="text-[10px]">{n.provider ?? "?"}</Badge>
+                  {/* ⚠️ Flagged, not hidden. A number archived after selection
+                      stays listed so the operator can see why their configured
+                      number never sends; rotation already skips it. */}
+                  {n.usable === false && (
+                    <Badge variant="destructive" className="text-[10px]">
+                      {n.provider_status === "archived" && n.phone_status === "active"
+                        ? "provider archived — will not send"
+                        : "archived — will not send"}
+                    </Badge>
+                  )}
                   <div className="ml-auto flex items-center gap-2">
                     <Label htmlFor={`lim-${n.provider_phone_id}`} className="text-xs">
                       Daily limit
@@ -455,27 +480,40 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
             </ul>
           )}
 
-          {canEdit && availableNumbers.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {availableNumbers
-                .filter(
-                  (a) => !selectedNumbers.some((s2) => s2.provider_phone_id === a.provider_phone_id),
-                )
-                .map((a) => (
-                  <Button
-                    key={a.provider_phone_id}
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      const next = [...selectedNumbers, { ...a, daily_limit: null }];
-                      setSelectedNumbers(next);
-                      void saveNumbers(next);
-                    }}
-                  >
-                    + {a.phone_number}
-                  </Button>
-                ))}
+          {/* ⚠️ A SEARCHABLE DROPDOWN, NOT A WALL OF CHIPS. This brand offers 30
+              numbers; a chip per number is unreadable and the old chips rendered
+              "+ +1202…" because the literal "+" affordance sat in front of an
+              E.164 number that already starts with one. SearchableSelect is the
+              project's single-select-over-many component (CLAUDE.md §9) — not a
+              fourth popover-search widget. */}
+          {canEdit && (
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1 sm:max-w-sm">
+                <SearchableSelect
+                  options={addable.map((a) => ({
+                    value: String(a.provider_phone_id),
+                    label: a.phone_number,
+                    searchText: a.provider ?? undefined,
+                  }))}
+                  value={null}
+                  onChange={(v) => {
+                    const a = addable.find((x) => String(x.provider_phone_id) === v);
+                    if (!a) return;
+                    const next = [...selectedNumbers, { ...a, daily_limit: null }];
+                    setSelectedNumbers(next);
+                    void saveNumbers(next);
+                  }}
+                  placeholder={addable.length === 0 ? "All numbers added" : "Add a number…"}
+                  searchPlaceholder="Search numbers…"
+                  emptyMessage="No matching numbers"
+                  disabled={addable.length === 0}
+                  aria-label="Add a sending number"
+                />
+              </div>
+              <span className="text-muted-foreground text-xs">
+                {selectedNumbers.length} selected · {addable.length} available
+                {unusableCount > 0 ? ` · ${unusableCount} archived` : ""}
+              </span>
             </div>
           )}
         </CardContent>

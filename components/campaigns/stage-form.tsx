@@ -844,6 +844,10 @@ export function StageForm({
   const [audienceLoading, setAudienceLoading] = useState(false);
 
   useEffect(() => {
+    // ⚠️ A drip stage has no frozen pool, so this preview can only ever return
+    // zero. Skipping the request as well as the panel keeps the form from
+    // POSTing on every keystroke for an answer nothing renders.
+    if (campaignType === "drip") return;
     let cancelled = false;
     const t = setTimeout(async () => {
       setAudienceLoading(true);
@@ -887,6 +891,7 @@ export function StageForm({
     splitTotal,
     watchedCreativeId,
     previewApi.execute,
+    campaignType,
   ]);
 
   // Mutex enforcement for the clicker toggles
@@ -1345,7 +1350,13 @@ export function StageForm({
                 />
               </div>
 
-              {/* Scheduled + quick-schedule presets, stacked in the right column */}
+              {/* Scheduled + quick-schedule presets, stacked in the right column.
+                  ⚠️ NOT RENDERED FOR A DRIP STAGE. A drip stage has no send
+                  date: each journey is sent when its own timer elapses inside
+                  the daily window, so a single scheduled_at is meaningless and
+                  offering one invites an operator to set a date that nothing
+                  reads. The daily window (above) is the only timing control. */}
+              {campaignType !== "drip" ? (
               <div className="space-y-2">
                 <FormField
                   control={form.control}
@@ -1394,6 +1405,7 @@ export function StageForm({
                   </p>
                 ) : null}
               </div>
+              ) : null}
             </div>
 
         {/* ============ Destination & URLs ============ */}
@@ -1950,7 +1962,13 @@ export function StageForm({
               </CardContent>
             </Card>
 
-            {/* Stage audience preview */}
+            {/* Stage audience preview.
+                ⚠️ NOT RENDERED FOR A DRIP STAGE. There is no frozen pool to
+                preview — it read "0 contacts of 0 frozen", which looks like a
+                broken campaign rather than a type that never freezes one. The
+                journey funnel on the campaign page is where drip volume lives. */}
+            {campaignType !== "drip" ? (
+            
             <Card size="sm">
               <CardContent className="grid gap-1.5 p-2.5 text-sm">
                 <div className="flex items-center justify-between">
@@ -2104,6 +2122,7 @@ export function StageForm({
                 )}
               </CardContent>
             </Card>
+            ) : null}
 
             {/* Results (edit mode only) */}
             {isEdit && resultsCounters ? (

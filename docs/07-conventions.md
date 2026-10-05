@@ -4446,3 +4446,50 @@ gates on `!== 'drip'`. It runs in `vercel-build`.
 
 ⚠️ It is a source scan: it proves the gate exists, not that the button works.
 Both were verified in a browser against a real session before merge.
+
+## "Active number" is a TWO-LEVEL test: the phone AND its provider
+
+`provider_phones.status = 'active'` alone is not enough. The drip number picker
+offered 30 numbers for one brand, of which **25 were active phones on an
+ARCHIVED provider** (`snx`, no credential) — numbers that can never send.
+
+The regular stage path gets this right implicitly: the operator picks a provider
+from `/api/providers/list?status=active` first, and only then its phones. Drip
+has no provider step, so both filters must be stated explicitly:
+
+```
+provider_phones.status = 'active'
+AND sms_providers.status  = 'active'
+AND (phone.brand_id IS NULL OR phone.brand_id = campaign.brand_id)
+```
+
+⚠️ **Provider `status`, not `sends_enabled`.** `sends_enabled` is a runtime pause
+an operator flips back; archiving is permanent. A paused provider's numbers stay
+selectable, exactly as they do for a regular stage.
+
+⚠️ **The same two-level test belongs at SEND time, not just in the picker.**
+`numbersWithHeadroom` filtered only the phone, so a number selected before its
+provider was archived stayed eligible for rotation and would have failed at the
+adapter. A selected number is never deleted when something upstream is archived —
+the row is kept so the operator can see what was configured — so every reader
+must re-check.
+
+### Flag an archived selection, never hide it
+
+A number archived after selection still comes back from the API, with
+`usable: false`, and renders flagged ("archived — will not send"). Dropping it
+silently would leave the campaign looking correctly configured while rotation
+skips it.
+
+## Regular-campaign copy on a drip screen is a bug, not a cosmetic
+
+Three places described a frozen audience to a campaign type that never freezes
+one: the stage "Scheduled" date (a drip stage has no send date — each journey
+fires when its own timer elapses inside the daily window), the "Stage audience …
+of 0 frozen" panel, and the Stages empty state ("a slice of the frozen
+audience"). Each reads as a broken campaign rather than as a type the copy does
+not apply to.
+
+Gate on `campaignType !== "drip"` and leave the regular branch byte-for-byte —
+and gate the *fetch* as well as the render, or the form keeps POSTing for an
+answer nothing shows.

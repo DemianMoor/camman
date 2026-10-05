@@ -1,6 +1,6 @@
 # Feature — Audience Snapshot (freeze-at-activation)
 
-_Last updated: 2026-09-30_
+_Last updated: 2026-10-05_
 
 ## 1. Purpose
 A campaign's audience is **computed and frozen** the moment it transitions `draft → active`, into `campaign_audience_pool`. The whole point: adding a contact to a referenced segment later does **not** retroactively expand a live campaign's reach. Drafts carry only the *recipe* (segment ids, group ids, filters, cap); the *contacts* are materialized once.
@@ -146,7 +146,7 @@ Red-proved with `>=` → `>`. ⚠️ T3's F23 "offer rules" case runs on a fixtu
 - Not wired to the route or the form yet (T5).
 
 **Hotfix 2026-10-01 (temporary, until Task 2 T5/T6).** Real segment recipes take 40–100 s, so with the 30 s ceiling they always timed out. The operator saw "Could not preview audience — fix any issues above" and recreated the campaign.
-- **Ceiling:** `PREVIEW_STATEMENT_TIMEOUT` = 110 s, route `maxDuration` = 120 s. Both go back down after T5.
+- **Ceiling:** was `PREVIEW_STATEMENT_TIMEOUT` = 110 s with route `maxDuration` = 120 s. **Back to 30 s / 60 s on 2026-10-03** (owner), measured on Large: slowest form-path part 6.7 s, part-less path 9.4 s, kill-switch reference 22.1 s. Revisit if compute is reduced: on Small the reference took up to 105 s.
 - **Stacking guard, server:** a per-user transaction advisory lock (`pg_try_advisory_xact_lock(hashtext('audience-preview:<org>:<user>'))`). A concurrent second preview by the same user gets 409 `preview_busy` instead of another long query.
 - **Stacking guard, client** (`components/campaigns/campaign-form-state.ts`): one request in flight per form. Edits made meanwhile trigger one follow-up with the latest values, instead of an abort that never stopped the database query.
 - **Retries:** one automatic retry after a timeout, server error, gateway timeout or dropped connection. A 409 is waited out (every 10 s, up to 12 times).

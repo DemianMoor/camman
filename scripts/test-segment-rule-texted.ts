@@ -138,6 +138,25 @@ async function main() {
       const segNot = await inSeg(segIds[1]);
       bar("builder, texted 3d IS NOT: everyone else, incl. never-texted D", segNot === "A10,B2,C0,F,D", segNot);
 
+      // T4 kill switch: AUDIENCE_RULE_TEXTED=direct reads the sends themselves.
+      process.env.AUDIENCE_RULE_TEXTED = "direct";
+      const d3 = await texted("3d");
+      bar("KILL SWITCH direct, 3d: the fact is not read (A out), sends over the whole window (B2 in)", d3 === "B,B2,C", d3);
+      // A CONSISTENT fixture — every engagement row backed by a real send, as
+      // the job leaves it — must give the same set either way, every window.
+      await send("A", "sent", "2 days");
+      await send("A10", "sent", "10 days");
+      await eng("B", "10 minutes");
+      await eng("B2", "2 hours");
+      for (const p of ["3d", "1w", "2w"]) {
+        process.env.AUDIENCE_RULE_TEXTED = "direct";
+        const direct = await texted(p);
+        delete process.env.AUDIENCE_RULE_TEXTED;
+        const fact = await texted(p);
+        bar(`KILL SWITCH: direct = fact on a consistent fixture, ${p}`, direct === fact && direct.length > 0, `${direct} vs ${fact}`);
+      }
+      delete process.env.AUDIENCE_RULE_TEXTED;
+
       throw new Error(ROLLBACK);
     });
   } catch (e) {

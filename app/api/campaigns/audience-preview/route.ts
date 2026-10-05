@@ -15,6 +15,7 @@ import {
   previewAudienceBase,
 } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
+import { TEXTED_RULE_IMPL_HEADER, textedRuleImpl } from "@/lib/segment-rules-eval";
 import { OFFER_COOLDOWN_DAYS_DEFAULT, audiencePreviewSchema } from "@/lib/validators/campaigns";
 
 // ⚠️ THIS ROUTE HAD NO maxDuration, on a query that takes SECONDS.
@@ -209,6 +210,9 @@ export async function POST(req: NextRequest) {
     throw e;
   }
   return NextResponse.json(body, {
-    headers: { "x-audience-preview-impl": impl },
+    headers: {
+      "x-audience-preview-impl": impl,
+      [TEXTED_RULE_IMPL_HEADER]: textedRuleImpl(),
+    },
   });
 }

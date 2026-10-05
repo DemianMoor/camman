@@ -6,7 +6,7 @@ import { segment_contacts, segment_stats, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import { previewSegmentAudienceCount } from "@/lib/segment-rules-eval";
+import { previewSegmentAudienceCount, TEXTED_RULE_IMPL_HEADER, textedRuleImpl } from "@/lib/segment-rules-eval";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -71,7 +71,7 @@ export async function POST(
       rule_filtered_count: null,
       duration_ms: result.durationMs,
       truncated: true,
-    });
+    }, { headers: { [TEXTED_RULE_IMPL_HEADER]: textedRuleImpl() } });
   }
 
   // Persist the freshly computed count to segment_stats so the segments
@@ -102,5 +102,5 @@ export async function POST(
     rule_filtered_count: result.count,
     duration_ms: result.durationMs,
     truncated: false,
-  });
+  }, { headers: { [TEXTED_RULE_IMPL_HEADER]: textedRuleImpl() } });
 }

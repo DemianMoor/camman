@@ -111,6 +111,52 @@ async function main() {
   check("⭐ window_end_min round-tripped", got?.window_end_min, END);
   check("⭐ drip_active round-tripped", got?.drip_active, true);
 
+  // ── EDIT AFTER SAVE ──────────────────────────────────────────────────────
+  // ⭐ THE GAP THAT LET THE BUG SHIP. The checks above prove POST → GET. They
+  // say nothing about re-opening a saved stage and changing it, which is where
+  // the window was actually lost: the edit form's initialValues never carried
+  // window_start_min / window_end_min / drip_active, so a re-opened stage
+  // presented an empty window — and because the submit builder only sends those
+  // three when start AND end are non-null, the Active toggle stopped persisting
+  // with them. A POST-only test is green through all of that.
+  console.log("\n⭐ PATCH the window (edit-after-save), then read it back:");
+  // ⚠️ Must not overlap or touch a sibling's window — validateWindowSet refuses
+  // that, correctly. Picked clear of any real stage on the smoke campaign; if
+  // this ever 400s with "Windows overlap", move it, do not relax the rule.
+  const NEW_START = 1180; // 19:40
+  const NEW_END = 1240; //   20:40
+  const patch = await api("PATCH", `/api/campaigns/${CAMPAIGN}/stages/${stageId}`, {
+    window_start_min: NEW_START,
+    window_end_min: NEW_END,
+    drip_active: true,
+  });
+  if (patch.status !== 200) console.log("        PATCH said:", JSON.stringify(patch.body));
+  check("PATCH accepted", patch.status, 200);
+
+  const list2 = await api("GET", `/api/campaigns/${CAMPAIGN}/stages`);
+  const got2 = ((list2.body?.data ?? list2.body ?? []) as unknown as ApiBody[])
+    .find((r) => r.id === stageId);
+  check("⭐ edited window_start_min round-tripped", got2?.window_start_min, NEW_START);
+  check("⭐ edited window_end_min round-tripped", got2?.window_end_min, NEW_END);
+  check("⭐ drip_active survived the edit", got2?.drip_active, true);
+
+  // ⭐ And the shape the EDIT FORM reads. The list is what hydrates
+  // initialValues, so if these keys are missing or null the form cannot show
+  // the saved window no matter how the inputs are written — which is exactly
+  // what happened. Asserting presence, not just value.
+  check("⭐ the list exposes window_start_min (edit form hydrates from it)",
+        got2 !== undefined && "window_start_min" in got2, true);
+  check("⭐ the list exposes window_end_min", got2 !== undefined && "window_end_min" in got2, true);
+  check("⭐ the list exposes drip_active", got2 !== undefined && "drip_active" in got2, true);
+
+  // A half-set window must not be silently accepted as a sending window.
+  console.log("\n⭐ a half-set window is refused (pickStage would skip it anyway):");
+  const half = await api("PATCH", `/api/campaigns/${CAMPAIGN}/stages/${stageId}`, {
+    window_start_min: 600,
+    window_end_min: null,
+  });
+  check("PATCH with only one end is rejected", half.status >= 400, true);
+
   console.log("\ncleanup:");
   const arch = await api("POST", `/api/campaigns/${CAMPAIGN}/stages/${stageId}/archive`, {});
   check("probe stage archived", arch.status === 200 || arch.status === 201, true);

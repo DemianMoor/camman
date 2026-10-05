@@ -49,6 +49,9 @@ export const CAMPAIGN_DETAIL_SELECT = {
   start_date: campaigns.start_date,
   end_date: campaigns.end_date,
   status: campaigns.status,
+  // The pause latch. Needed by anything that answers "will this send?" — the
+  // drip stages list could not tell a paused campaign from a running one.
+  send_paused: campaigns.send_paused,
   previous_status: campaigns.previous_status,
   status_changed_at: campaigns.status_changed_at,
   // ⚠️ REQUIRED BY THE EDIT SCREEN, and its absence is why every saved

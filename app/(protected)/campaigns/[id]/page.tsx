@@ -31,6 +31,8 @@ import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
 import { DripConfigPanel } from "@/components/campaigns/drip-config-panel";
+import { dripStageReadiness } from "@/lib/drip/stage-readiness";
+import { minutesToLabel } from "@/lib/drip/windows";
 import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
 import { CampaignActivitySection } from "@/components/campaigns/campaign-activity-section";
 import { ClickReportSection } from "@/components/campaigns/click-report-section";
@@ -207,6 +209,8 @@ type CampaignDetail = {
   start_date: string | null;
   end_date: string | null;
   status: CampaignStatus;
+  send_paused?: boolean | null;
+  drip_posture?: { drip_enabled: boolean; drip_paused: boolean } | null;
   status_changed_at: string;
   tracking_id: string | null;
   link_mode: "manual" | "tracked";
@@ -1003,6 +1007,9 @@ export default function CampaignDetailPage() {
     });
   }
 
+  // Drip stages are governed by the window + Active toggle, not the regular
+  // draft/sent lifecycle — the Status column swaps entirely for them.
+  const isDrip = campaign?.type === "drip";
   const stageColumns = useMemo<ColumnDef<Stage>[]>(
     () => [
       {
@@ -1311,10 +1318,47 @@ export default function CampaignDetailPage() {
       },
       {
         id: "status",
-        header: "Status",
+        header: isDrip ? "Window / Sending" : "Status",
         enableSorting: false,
         cell: ({ row }) => {
           const s = row.original;
+          // ⭐ DRIP TRUTH, NOT THE REGULAR LIFECYCLE. A drip stage sits at
+          // 'draft' for ever — nothing promotes it, because it is never
+          // materialized or approved. Showing that dropdown told the operator
+          // the stage would not send when the only thing that decides is
+          // dripStageReadiness(). One definition, shared with the scheduler.
+          if (isDrip) {
+            const r = dripStageReadiness({
+              postureEnabled: campaign?.drip_posture?.drip_enabled === true,
+              posturePaused: campaign?.drip_posture?.drip_paused === true,
+              campaignStatus: campaign?.status,
+              campaignPaused: campaign?.send_paused,
+              stageActive: s.drip_active,
+              stageArchived: s.status === "archived",
+              windowStartMin: s.window_start_min,
+              windowEndMin: s.window_end_min,
+            });
+            return (
+              <div className="flex flex-col gap-1">
+                <span className="font-mono text-xs">
+                  {s.window_start_min != null && s.window_end_min != null
+                    ? `${minutesToLabel(s.window_start_min)}–${minutesToLabel(s.window_end_min)} ET`
+                    : "— no window —"}
+                </span>
+                <Badge
+                  variant={r.willSend ? "default" : "outline"}
+                  className="w-fit text-[10px]"
+                  title={
+                    r.willSend
+                      ? "Campaign active, drip on, stage active, window set."
+                      : `Not sending: ${r.blockers.join(", ")}`
+                  }
+                >
+                  {r.willSend ? "Active — will send" : r.label}
+                </Badge>
+              </div>
+            );
+          }
           if (s.status === "archived") {
             return (
               <Badge className={cn("capitalize", STAGE_STATUS_COLOR.archived)}>
@@ -1631,6 +1675,15 @@ export default function CampaignDetailPage() {
       // The Results cell closes over the registry — without this the segments
       // keep rendering the set the table was first built with.
       shownEventTypes,
+      // The drip status cell reads the campaign's posture, status and pause
+      // latch. Without these the badge keeps whatever the table was first built
+      // with and goes stale the moment any of them changes — the failure would
+      // be a stage still reading "will send" after the campaign was paused.
+      isDrip,
+      campaign?.drip_posture?.drip_enabled,
+      campaign?.drip_posture?.drip_paused,
+      campaign?.status,
+      campaign?.send_paused,
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stageOpStatus and
     // setPrepareTarget are stable; STAGE_STATUS_META is a module constant.
@@ -2014,7 +2067,11 @@ export default function CampaignDetailPage() {
             <h2 className="text-lg font-medium">Stages</h2>
             <p className="text-sm text-muted-foreground">{rollupSubtitle}</p>
           </div>
-          {campaign.link_mode === "tracked" ? <StageStatusLegend /> : null}
+          {isDrip ? (
+            <StageStatusLegend variant="drip" />
+          ) : campaign.link_mode === "tracked" ? (
+            <StageStatusLegend />
+          ) : null}
         </div>
 
         {/* Behavioral-lane explainer — shown once any lanes exist so the

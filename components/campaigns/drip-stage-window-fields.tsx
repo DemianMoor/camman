@@ -83,31 +83,43 @@ export function DripStageWindowFields({
         </div>
       </div>
 
+      {/* ⚠️ CONTROLLED, type="time". These were uncontrolled `defaultValue`
+          inputs, which React reads only at first mount — so a stage loaded
+          asynchronously kept the empty initial value and rendered its
+          PLACEHOLDER. The placeholders were "09:30" and "13:59", which is
+          exactly the "09:30 / 13:59" a saved 09:30–11:30 window appeared to
+          become. The value is HH:MM 24h, the same string minutesToLabel emits
+          and parseHHMM consumes, so the stored minutes are unchanged. */}
+      {/* ⚠️ ids are drip-window-*, NOT drip-start/drip-end: the campaign config
+          panel already owns those for the campaign's Start/End datetimes, and
+          both render on the campaign page at once. Duplicate ids made each
+          <label htmlFor> resolve to the FIRST match — so clicking this field's
+          label focused the campaign's date picker. */}
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
-          <Label htmlFor="drip-start" className="text-xs">
+          <Label htmlFor="drip-window-start" className="text-xs">
             Opens<span aria-hidden className="text-destructive ml-0.5">*</span>
           </Label>
           <Input
-            id="drip-start"
-            placeholder="09:30"
-            defaultValue={startMin == null ? "" : minutesToLabel(startMin)}
+            id="drip-window-start"
+            type="time"
+            value={startMin == null ? "" : minutesToLabel(startMin)}
             disabled={disabled}
             className="font-mono"
-            onBlur={(e) => onChange({ startMin: parseHHMM(e.target.value), endMin, active })}
+            onChange={(e) => onChange({ startMin: parseHHMM(e.target.value), endMin, active })}
           />
         </div>
         <div>
-          <Label htmlFor="drip-end" className="text-xs">
+          <Label htmlFor="drip-window-end" className="text-xs">
             Closes<span aria-hidden className="text-destructive ml-0.5">*</span>
           </Label>
           <Input
-            id="drip-end"
-            placeholder="13:59"
-            defaultValue={endMin == null ? "" : minutesToLabel(endMin)}
+            id="drip-window-end"
+            type="time"
+            value={endMin == null ? "" : minutesToLabel(endMin)}
             disabled={disabled}
             className="font-mono"
-            onBlur={(e) => onChange({ startMin, endMin: parseHHMM(e.target.value), active })}
+            onChange={(e) => onChange({ startMin, endMin: parseHHMM(e.target.value), active })}
           />
           <p className="text-muted-foreground mt-1 text-xs">
             Exclusive — a lead arriving exactly at this minute belongs to the next window.

@@ -38,7 +38,7 @@ import type {
 // Kept server-side: the wire/persisted form is only the opaque code. Built
 // with make_interval so the units are explicit (weeks/months/years, not a
 // flattened day count) and DST/calendar math is Postgres's job.
-const CAMPAIGN_USE_PERIOD_INTERVAL: Record<CampaignUsePeriod, SQL> = {
+export const CAMPAIGN_USE_PERIOD_INTERVAL: Record<CampaignUsePeriod, SQL> = {
   "1d": drizzleSql`make_interval(days => 1)`,
   "3d": drizzleSql`make_interval(days => 3)`,
   "1w": drizzleSql`make_interval(weeks => 1)`,

@@ -238,6 +238,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/tells-monitors": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/tells-sweep": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/textrequest-poll": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/texted-rule-trial": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/tracking-monitors": null, // cron / webhook / import machinery -- no operator session reaches these
 
   // ── dashboard ─────────────────────────────────────────────────────────────

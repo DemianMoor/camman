@@ -4361,3 +4361,7 @@ Test: [scripts/test-manual-send-visibility.ts](../scripts/test-manual-send-visib
 ## A rule's SQL must be ONE select (2026-10-05, Task 3 T2)
 
 The segment builder composes rule sets with bare set operators, e.g. `universe EXCEPT <rule>` for `is_not`. `UNION` and `EXCEPT` have **equal precedence and associate left to right**, so a rule emitting `a UNION b UNION c` turns `is_not` into `(universe EXCEPT a) UNION b UNION c`: texted contacts reported as NOT texted. That's what `texted_in_last_period` did until its test caught it. **Wrap a multi-source rule in a single subselect** (`SELECT x.contact_id FROM (a UNION b UNION c) x`). Every rule type must stay a single SELECT.
+
+## One writer marks stage_sends 'sent' (2026-10-05, Task 3 T5)
+
+`stage_sends.status = 'sent'` is written **only** by the drain ([lib/sends/drain.ts](../lib/sends/drain.ts)). Reports, send breakers, the engagement job, the "Texted in the last…" rule (its lag tail) and the rule's nightly trial (its ground truth) all assume this. [scripts/test-sent-writer-guard.ts](../scripts/test-sent-writer-guard.ts), part of `npm run check:guards`, fails on any other raw or Drizzle write of `'sent'` to `stage_sends` in `app/` or `lib/`. It has a self-test and was red-proved by planting a writer. A new writer needs the owner's approval and a check of every reader.

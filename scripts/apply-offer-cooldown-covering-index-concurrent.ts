@@ -26,7 +26,7 @@
 // statement_timeout would then bind the build.
 //
 //   npx tsx scripts/apply-offer-cooldown-covering-index-concurrent.ts            # dry run
-//   npx tsx scripts/apply-offer-cooldown-covering-index-concurrent.ts --apply    # build (window only)
+//   npx tsx scripts/apply-offer-cooldown-covering-index-concurrent.ts --apply    # build (05:00–05:50 UTC only, any target)
 //   npx tsx scripts/apply-offer-cooldown-covering-index-concurrent.ts --verify   # plan check, read-only
 import { config } from "dotenv";
 import { resolve } from "node:path";
@@ -40,7 +40,6 @@ const DDL =
 const APPLY = process.argv.includes("--apply");
 const VERIFY = process.argv.includes("--verify");
 const DROP_INVALID = process.argv.includes("--drop-invalid");
-const PROD_REF = "rtdarhkkjwcetlmruftl";
 
 function sessionUrl(raw: string): string {
   const u = new URL(raw);
@@ -51,16 +50,18 @@ function sessionUrl(raw: string): string {
 
 async function main() {
   const raw = process.env.DATABASE_URL!;
-  const isProd = raw.includes(PROD_REF);
   const now = new Date();
   const minutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-  if (APPLY && isProd && (minutes < 5 * 60 || minutes >= 5 * 60 + 50)) {
-    console.error(`REFUSING — production build runs only in the quiet window (start 05:00–05:50 UTC); now ${now.toISOString()}`);
+  // Every --apply is window-only, whatever the target: the script carries no
+  // project-ref literal (scripts/test-preview-db-guard.ts), so it cannot tell
+  // production from preview — and does not need to.
+  if (APPLY && (minutes < 5 * 60 || minutes >= 5 * 60 + 50)) {
+    console.error(`REFUSING — --apply runs only in the quiet window (start 05:00–05:50 UTC); now ${now.toISOString()}`);
     process.exit(1);
   }
   const pg = postgres(sessionUrl(raw), { prepare: false, max: 1 });
   const host = new URL(raw).hostname;
-  console.log(`${APPLY ? "APPLYING to" : VERIFY ? "VERIFYING on" : "DRY RUN against"} ${host}${isProd ? " (PRODUCTION)" : ""}\n`);
+  console.log(`${APPLY ? "APPLYING to" : VERIFY ? "VERIFYING on" : "DRY RUN against"} ${host}\n`);
   try {
     await pg.unsafe(`SET statement_timeout = '600s'`);
     await pg.unsafe(`SET maintenance_work_mem = '256MB'`);

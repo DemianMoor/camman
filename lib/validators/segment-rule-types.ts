@@ -342,6 +342,18 @@ export const RULE_TYPES = {
     operators: ["is", "is_not"],
     value_shape: "campaign_use_period",
   },
+  // "Texted in the last <period>" (Task 3, E0 = (b), migration 0196). A
+  // contact counts as texted when it was actually MESSAGED within the window —
+  // anchored on the send, not on a campaign's creation date like the rule
+  // above. Same period codes and picker, so a segment switches like for like.
+  // `is_not` includes never-texted contacts. Sources (lib/segment-rules-eval.ts):
+  // contact_engagement.last_sent_at + a lag tail of stage_sends since the
+  // engagement job's watermark + stage_manual_recipients (manual sends, 0197).
+  texted_in_last_period: {
+    label: "Texted in the last…",
+    operators: ["is", "is_not"],
+    value_shape: "campaign_use_period",
+  },
   // "In use in a specific offer". A contact counts as in-use when it sits in
   // a campaign_audience_pool for a campaign whose offer is the selected one,
   // where the campaign ran (status active/paused/completed) AND still has at

@@ -4357,3 +4357,7 @@ UI states that filter — it does not let the operator discover it from a 404.**
 **The record must survive deletes.** `stage_id` is `ON DELETE NO ACTION`. `deleteStage()` refuses a stage with marked rows and clears unmarked ones in the same statement. A raw stage or campaign delete fails with 23503 rather than erasing the record. An org delete works, because `org_id` cascades and the NO ACTION check runs at the end of the statement.
 
 Test: [scripts/test-manual-send-visibility.ts](../scripts/test-manual-send-visibility.ts) (M1–M11), red-proved against the pre-0197 code.
+
+## A rule's SQL must be ONE select (2026-10-05, Task 3 T2)
+
+The segment builder composes rule sets with bare set operators, e.g. `universe EXCEPT <rule>` for `is_not`. `UNION` and `EXCEPT` have **equal precedence and associate left to right**, so a rule emitting `a UNION b UNION c` turns `is_not` into `(universe EXCEPT a) UNION b UNION c`: texted contacts reported as NOT texted. That's what `texted_in_last_period` did until its test caught it. **Wrap a multi-source rule in a single subselect** (`SELECT x.contact_id FROM (a UNION b UNION c) x`). Every rule type must stay a single SELECT.

@@ -4498,6 +4498,16 @@ export const contact_offer_campaigns = pgTable(
       table.offer_id,
       table.contact_id,
     ),
+    // Migration 0198 (Task 3 E4): the same key + INCLUDE (last_sent_at), so the
+    // offer rules' cooldown read is index-only. The INCLUDE is in the SQL only
+    // (drizzle cannot express it). Built CONCURRENTLY on production by
+    // scripts/apply-offer-cooldown-covering-index-concurrent.ts. The index above
+    // is redundant once this exists; dropping it needs owner approval.
+    index("contact_offer_campaigns_org_offer_contact_sent_idx").on(
+      table.org_id,
+      table.offer_id,
+      table.contact_id,
+    ),
   ],
 );
 

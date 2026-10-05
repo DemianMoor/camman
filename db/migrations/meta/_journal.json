@@ -1387,6 +1387,13 @@
       "when": 1793577600000,
       "tag": "0197_stage_manual_recipients",
       "breakpoints": true
+    },
+    {
+      "idx": 198,
+      "version": "7",
+      "when": 1793664000000,
+      "tag": "0198_contact_offer_campaigns_covering_index",
+      "breakpoints": true
     }
   ]
 }

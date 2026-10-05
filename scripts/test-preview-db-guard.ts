@@ -210,6 +210,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "builds migration 0189's two contact_engagement indexes with CREATE INDEX CONCURRENTLY, which cannot run inside drizzle-kit's migration transaction; dry run by default and it issues only CREATE INDEX",
   },
   {
+    file: "apply-offer-cooldown-covering-index-concurrent.ts",
+    why: "builds migration 0198's contact_offer_campaigns covering index with CREATE INDEX CONCURRENTLY (cannot run inside drizzle-kit's transaction); owner-approved 2026-10-03; dry run by default, --apply only 05:00-05:50 UTC, issues only CREATE INDEX (and DROP INDEX of its own INVALID half-build with --drop-invalid)",
+  },
+  {
     file: "engagement-cron-pause.ts",
     why: "pauses/resumes the contact-engagement cron against production for the migration 0188 window by holding the lease row the job already respects (cron_locks.contact-engagement-run); writes only that one lease row, and its 30-minute TTL self-clears",
   },

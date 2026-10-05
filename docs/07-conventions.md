@@ -4414,3 +4414,35 @@ would otherwise have landed on a screen nobody could reach.
 **When a UI branch keys off a field, the payload that feeds it is part of that
 feature.** A render condition reading `undefined` is indistinguishable from a
 feature that was never built.
+
+## A campaign type-gate must cover EVERY path that activates
+
+`snapshotAudience` freezes the recipients of a blast and raises
+`EmptyAudienceError` when that set is empty. For a drip campaign that is wrong:
+leads arrive *after* activation and the routing worker admits them one at a
+time, so an empty audience is the correct state, not a failure.
+
+There are **three** places that decide this, and all three must agree:
+
+| path | file |
+|---|---|
+| the create validator | `lib/validators/campaigns.ts` |
+| create-and-activate (`save_as_draft: false`) | `app/api/campaigns/route.ts` |
+| activate-from-detail (draft → active) | `app/api/campaigns/[campaignId]/status/route.ts` |
+
+PR #125 gated the validator and the status route and missed the create route's
+own launch branch — so **"Save as draft" then Activate worked while "Activate"
+on /campaigns/new returned 400 `empty_audience`**. Two of three gated is
+indistinguishable from three of three until someone clicks the third.
+
+⚠️ **The gate is a POSITIVE read of `'drip'`** (R13). `type !== "regular"` would
+let a NULL or a future type skip the snapshot — the dangerous direction, because
+that is a *regular* campaign launching to nobody.
+
+`scripts/test-drip-activation-paths.ts` enumerates every API route that calls
+`snapshotAudience` and asserts each carries a positive `'drip'` gate, that the
+create route's gate sits on the launch branch specifically, and that no route
+gates on `!== 'drip'`. It runs in `vercel-build`.
+
+⚠️ It is a source scan: it proves the gate exists, not that the button works.
+Both were verified in a browser against a real session before merge.

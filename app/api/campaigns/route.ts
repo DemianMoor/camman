@@ -70,6 +70,10 @@ export async function POST(req: NextRequest) {
   }
   const input = parsed.data;
   const saveAsDraft = input.save_as_draft === true;
+  // ⚠️ DIRECTION (R13): only a POSITIVE read of 'drip' takes the new path. An
+  // absent or unknown type keeps today's behaviour, so a regular campaign still
+  // cannot launch to an empty audience.
+  const isDrip = input.type === "drip";
 
   // For draft saves, the only certain field is `name`. For launches, the
   // full create-time set was already validated by the schema.
@@ -385,6 +389,46 @@ export async function POST(req: NextRequest) {
             .update(campaigns)
             .set({ tracking_id: trackingId })
             .where(eq(campaigns.id, inserted.id));
+        }
+
+        if (!saveAsDraft && isDrip) {
+          // ⚠️ NO SNAPSHOT FOR A DRIP CAMPAIGN, AND THE ZERO IS NOT A FAILURE.
+          // Identical reasoning to the activate-from-detail path in
+          // app/api/campaigns/[campaignId]/status/route.ts — kept in step with
+          // it deliberately, because the two are the same decision reached by
+          // two routes.
+          //
+          // snapshotAudience freezes the set of contacts a blast will send to.
+          // A drip campaign has no such set at activation: leads arrive after
+          // it, one at a time, and each is admitted by the routing worker. The
+          // EmptyAudienceError exists to stop a blast launching to nobody —
+          // applied here it rejects EVERY drip campaign created straight to
+          // active, which is exactly the reported regression. PR #125 gated the
+          // validator and the status route; this third path was missed, so
+          // "Save as draft" then activate worked while "Activate" did not.
+          //
+          // 0 is therefore the CORRECT frozen count, and campaign_audience_pool
+          // stays empty for this campaign forever. The drip in-use branch reads
+          // drip_journeys, not the pool, so nothing downstream expects rows.
+          const [updated] = await tx
+            .update(campaigns)
+            .set({
+              audience_snapshot_count: 0,
+              status: "active",
+              previous_status: "draft",
+              status_changed_at: drizzleSql`now()`,
+            })
+            .where(eq(campaigns.id, inserted.id))
+            .returning();
+          await logCampaignEvent(tx, {
+            orgId,
+            campaignId: inserted.id,
+            actorUserId: user.id,
+            eventType: "campaign_created",
+            summary: `Created and activated drip campaign “${updated.name}”; audience arrives as leads, nothing frozen`,
+            metadata: { status: "active", audience_count: 0, type: "drip" },
+          });
+          return { ...updated, tracking_id: trackingId };
         }
 
         if (!saveAsDraft) {

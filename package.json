@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "vercel-build": "npm run check:docs && if [ \"$VERCEL_ENV\" = \"preview\" ] && [ \"$RUN_PREVIEW_MIGRATIONS\" = \"1\" ]; then npm run db:migrate; fi && next build",
+    "vercel-build": "npm run check:docs && npm run check:activation && if [ \"$VERCEL_ENV\" = \"preview\" ] && [ \"$RUN_PREVIEW_MIGRATIONS\" = \"1\" ]; then npm run db:migrate; fi && next build",
     "start": "next start",
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
@@ -15,7 +15,8 @@
     "check:authz": "tsx scripts/test-operator-permission-matrix.ts && tsx scripts/test-route-map-coverage.ts",
     "check:guards": "tsx scripts/test-preview-db-guard.ts && tsx scripts/test-sent-writer-guard.ts",
     "dev:preview": "node scripts/with-preview-env.mjs npx next dev -p 3001",
-    "test:api:preview": "node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-campaigns-api.ts && node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-offers-api.ts && node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-provider-phones-api.ts"
+    "test:api:preview": "node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-campaigns-api.ts && node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-offers-api.ts && node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-provider-phones-api.ts",
+    "check:activation": "tsx scripts/test-drip-activation-paths.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

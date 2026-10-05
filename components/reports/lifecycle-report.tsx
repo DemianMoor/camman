@@ -172,7 +172,14 @@ export function LifecycleReport() {
                         <td className="px-3 py-2 text-right">{num(r?.sales ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.cr ?? null)}</td>
                         <td className="px-3 py-2 text-right">{money(r?.revenue ?? "0")}</td>
-                        <td className="px-3 py-2 text-right">{pct(r?.opt_out_rate ?? null)}</td>
+                        <td className="px-3 py-2 text-right">
+                          {num(r?.opt_outs ?? 0)}
+                          {r?.opt_out_rate != null ? (
+                            <span className="ml-1 text-muted-foreground">
+                              ({pct(r.opt_out_rate)})
+                            </span>
+                          ) : null}
+                        </td>
                         <td className="px-3 py-2 text-right">{money(r?.cost ?? "0")}</td>
                       </>
                     )}

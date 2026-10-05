@@ -28,6 +28,7 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { formatInTimeZone } from "date-fns-tz";
 
 import {
+  CAMPAIGN_TIMEZONE_LABEL,
   campaignLocalInputToUtcIso,
   CAMPAIGN_TIMEZONE,
 } from "@/lib/campaign-timezone";
@@ -1351,7 +1352,7 @@ export function StageForm({
                   name="scheduled_at"
                   render={({ field }) => (
                     <FormItem className="flex items-center gap-3 space-y-0">
-                      <FormLabel className="shrink-0">Scheduled</FormLabel>
+                      <FormLabel className="shrink-0">Scheduled ({CAMPAIGN_TIMEZONE_LABEL})</FormLabel>
                       <div className="flex-1">
                         <FormControl>
                           <Input

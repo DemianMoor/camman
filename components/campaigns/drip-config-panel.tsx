@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { JourneyFunnel } from "@/components/drip/journey-funnel";
 import { toastApiError } from "@/lib/api/toast-error";
 import type { DripFunnel } from "@/lib/drip/funnel";
-import { formatCampaignDateTime, utcToCampaignLocalInput, campaignLocalInputToUtcIso }
+import { CAMPAIGN_TIMEZONE_LABEL, formatCampaignDateTime, utcToCampaignLocalInput, campaignLocalInputToUtcIso }
   from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
@@ -249,7 +249,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
               </p>
             </div>
             <div>
-              <Label htmlFor="drip-start">Start</Label>
+              <Label htmlFor="drip-start">Start ({CAMPAIGN_TIMEZONE_LABEL})</Label>
               <Input
                 id="drip-start"
                 type="datetime-local"
@@ -259,7 +259,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
               />
             </div>
             <div>
-              <Label htmlFor="drip-end">End</Label>
+              <Label htmlFor="drip-end">End ({CAMPAIGN_TIMEZONE_LABEL})</Label>
               <Input
                 id="drip-end"
                 type="datetime-local"

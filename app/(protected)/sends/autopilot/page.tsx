@@ -14,7 +14,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { toastApiError } from "@/lib/api/toast-error";
 import type { PreflightBreakdown } from "@/lib/sends/preflight-breakdown";
-import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import {
+  CAMPAIGN_TIMEZONE_LABEL,
+  campaignLocalInputToUtcIso,
+  formatCampaignDateTime,
+} from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
   STAGE_STATUS_META,
@@ -318,13 +322,18 @@ function StageRow({
 
           {s.operational_status === "held" ? (
             <>
-              <input
-                type="datetime-local"
-                value={redate}
-                onChange={(e) => setRedate(e.target.value)}
-                className="rounded border bg-background px-1.5 py-0.5 text-xs"
-                aria-label="Re-date"
-              />
+              <label className="flex items-center gap-1 text-xs">
+                <span className="text-muted-foreground">
+                  Re-date ({CAMPAIGN_TIMEZONE_LABEL})
+                </span>
+                <input
+                  type="datetime-local"
+                  value={redate}
+                  onChange={(e) => setRedate(e.target.value)}
+                  className="rounded border bg-background px-1.5 py-0.5 text-xs"
+                  aria-label={`Re-date (${CAMPAIGN_TIMEZONE_LABEL})`}
+                />
+              </label>
               <Button
                 size="sm"
                 variant="outline"
@@ -332,7 +341,13 @@ function StageRow({
                   act(
                     `${base}/release-hold`,
                     redate
-                      ? { scheduled_at: new Date(redate).toISOString() }
+                      ? // ⚠️ campaignLocalInputToUtcIso, NOT new Date(redate).
+                        // A datetime-local value is a bare ET wall-clock string
+                        // with no offset; `new Date()` parses it in the BROWSER's
+                        // zone, so an operator in Warsaw re-dating to 09:00 was
+                        // sending 07:00Z — 03:00 ET, six hours early. The whole
+                        // project treats these inputs as ET (CLAUDE.md §6).
+                        { scheduled_at: campaignLocalInputToUtcIso(redate) }
                       : {},
                     redate ? "Hold released and re-dated" : "Hold released",
                   )

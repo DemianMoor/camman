@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { CAMPAIGN_TIMEZONE_LABEL } from "@/lib/campaign-timezone";
 import { AGE_BANDS, bandLabel, GENDERS, INCOME_BANDS } from "@/lib/drip/demographics";
 
 // The drip campaign's audience, as ONE field block (Drip UI review).
@@ -134,8 +135,13 @@ export function DripAudienceFields({
           </p>
         </div>
 
+        {/* ⚠️ These are ET wall-clock, like every other campaign time
+            (CLAUDE.md §6). The conversion is correct — the editor sends them
+            through campaignLocalInputToUtcIso — but a datetime-local input
+            renders no zone of its own, so without the label an operator abroad
+            reads it as their own clock and types an hour they did not mean. */}
         <div className="min-w-0">
-          <Label htmlFor="drip-start">Start</Label>
+          <Label htmlFor="drip-start">Start ({CAMPAIGN_TIMEZONE_LABEL})</Label>
           <Input
             id="drip-start"
             type="datetime-local"
@@ -145,7 +151,7 @@ export function DripAudienceFields({
           />
         </div>
         <div className="min-w-0">
-          <Label htmlFor="drip-end">End</Label>
+          <Label htmlFor="drip-end">End ({CAMPAIGN_TIMEZONE_LABEL})</Label>
           <Input
             id="drip-end"
             type="datetime-local"
@@ -154,6 +160,10 @@ export function DripAudienceFields({
             disabled={disabled}
           />
         </div>
+        <p className="text-muted-foreground col-span-full -mt-1 text-xs">
+          Entered and shown in {CAMPAIGN_TIMEZONE_LABEL}, whatever your own
+          timezone is.
+        </p>
       </div>
 
       {/* ⚠️ THREE CAPS, THREE WINDOWS, NAMED APART ON PURPOSE. A journey routed

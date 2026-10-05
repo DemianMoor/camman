@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-02_
+_Last updated: 2026-10-05_
 
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
@@ -4365,3 +4365,52 @@ The segment builder composes rule sets with bare set operators, e.g. `universe E
 ## One writer marks stage_sends 'sent' (2026-10-05, Task 3 T5)
 
 `stage_sends.status = 'sent'` is written **only** by the drain ([lib/sends/drain.ts](../lib/sends/drain.ts)). Reports, send breakers, the engagement job, the "Texted in the last…" rule (its lag tail) and the rule's nightly trial (its ground truth) all assume this. [scripts/test-sent-writer-guard.ts](../scripts/test-sent-writer-guard.ts), part of `npm run check:guards`, fails on any other raw or Drizzle write of `'sent'` to `stage_sends` in `app/` or `lib/`. It has a self-test and was red-proved by planting a writer. A new writer needs the owner's approval and a check of every reader.
+
+## A `datetime-local` value is ET wall-clock — never pass it to `new Date()`
+
+`<input type="datetime-local">` emits a bare string with **no offset**
+(`2026-10-10T09:00`). `new Date(thatString)` parses it in the **browser's** zone,
+so an operator in Warsaw typing 09:00 produces `07:00Z` — **03:00 ET, six hours
+early** — and it fails silently, because the result is a perfectly valid instant.
+
+Always `campaignLocalInputToUtcIso()` on the way out and
+`utcToCampaignLocalInput()` on the way in. Both pin `CAMPAIGN_TIMEZONE`
+explicitly and are independent of the runtime zone.
+
+This was live on the Autopilot re-date control
+(`{ scheduled_at: new Date(redate).toISOString() }`), which moves a held stage's
+send time.
+
+### Label the field, not just the conversion
+
+A correct conversion still produces the wrong hour if the operator didn't know
+which zone they were typing in. A `datetime-local` input renders no zone of its
+own, so every campaign time field carries `(ET)` —
+`Start (ET)`, `Scheduled (ET)`, `Daily send window (ET)`.
+
+`scripts/test-campaign-time-inputs.ts` asserts both halves across every file
+containing a `datetime-local`: no value reaches `new Date(...)`, and each such
+file names the timezone. It also prints the two conversions side by side, so on
+a non-ET machine the 6-hour gap is visible in the output rather than asserted in
+the abstract.
+
+⚠️ **A source scan cannot prove the field is on screen.** See below.
+
+## A missing column in a SELECT silently deletes UI
+
+`CAMPAIGN_DETAIL_SELECT` did not include `campaigns.type`. The campaign detail
+page gates its whole Drip settings section on `campaign.type === "drip"`, so the
+comparison was `undefined === "drip"` — always false. Nothing threw, nothing
+logged, no test failed. **Invisible, on every drip campaign:**
+
+- the entire drip config panel — interest tag, partner, start/end, all three
+  caps, priority, sending numbers, behavioural follow-ups, the journey funnel
+- `DripStageWindowFields` ("Daily send window (ET)") on stages created from the
+  detail page, because the same value feeds `campaignType` into the stage form
+
+Found by **opening the page**, while verifying an unrelated label change — which
+would otherwise have landed on a screen nobody could reach.
+
+**When a UI branch keys off a field, the payload that feeds it is part of that
+feature.** A render condition reading `undefined` is indistinguishable from a
+feature that was never built.

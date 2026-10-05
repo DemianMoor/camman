@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-02_
+_Last updated: 2026-10-05_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -14,6 +14,8 @@ Every domain table carries `org_id UUID → organizations.id` and an index on it
 
 > **`stage_sends.status` gains `skipped_ineligible` (migration `0190`).** A terminal status for a row dropped at dispatch by a lifecycle check — suppressed, freeze cadence, or bought this offer — with the reason in `last_error`. Distinct from `skipped_opted_out` (a STOP after materialization) and `skipped_duplicate` (the 1-hour gate). Added `NOT VALID` then `VALIDATE`d separately rather than the `DROP`+`ADD` that 0065/0090/0116 used: `stage_sends` is 5,621,175 rows / 2,092 MB of heap, and a revalidating `ADD` holds `ACCESS EXCLUSIVE` for the ~15 s scan (measured), which would stall the drain. Nothing writes the value until PR 4c.
 >
+> **`contact_offer_campaigns_org_offer_contact_sent_idx` (migration `0198`, Task 3 E4).** `(org_id, offer_id, contact_id) INCLUDE (last_sent_at)`, so the campaign offer rules' cooldown read is index-only. Measured: offer 115 1.87 s with heap fetches vs 0.21 s index-only. Estimated 220–230 MB. **On production it is built first, CONCURRENTLY**, by [scripts/apply-offer-cooldown-covering-index-concurrent.ts](../scripts/apply-offer-cooldown-covering-index-concurrent.ts) in the quiet window (session pooler, 600 s statement timeout); the migration's plain `CREATE INDEX IF NOT EXISTS` then no-ops. The old `contact_offer_campaigns_org_offer_contact_idx` (188 MB) becomes redundant; dropping it needs a separate owner approval after a week.
+
 > **`stage_manual_recipients` (migration `0197`, Task 3 T2b).** New table recording manual-export recipients and when the stage was marked sent, so manual sends count for the "Texted in the last…" rule. `stage_id` does not cascade, so a deleted stage can't erase the record. See the table row below.
 
 > **`texted_in_last_period` rule type (migration `0196`, Task 3).** Widens `segment_rules_rule_type_check` from 40 to 41 values. The list in the file is production's live constraint (`pg_get_constraintdef`, 2026-10-02) plus this one value, and is re-compared before applying. It is inert until the rule code ships: it reads `contact_engagement.last_sent_at` plus a `stage_sends` lag tail. Plan: [2026-10-02-task3-texted-rule-plan.md](superpowers/plans/2026-10-02-task3-texted-rule-plan.md).

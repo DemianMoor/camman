@@ -1,9 +1,9 @@
 import "./_env-preload";
 import "./_require-preview-db"; // second — refuses any target but the preview DB
 
-// Hotfix 2026-10-01: the preview's 110 s ceiling, and the per-user
+// The preview's statement ceiling (30 s since 2026-10-03; 110 s in the 2026-10-01 hotfix), and the per-user
 // single-flight lock that keeps a superseded or retried preview from stacking
-// another long query (until Task 2 T6).
+// another long query.
 //
 // The lock is REAL: a second connection takes the same transaction-scoped
 // advisory lock the route takes, holds it, and the preview is called while it
@@ -71,9 +71,9 @@ async function main() {
       })) as never,
   });
   bar(
-    "the preview sets a 110 s statement ceiling",
-    PREVIEW_STATEMENT_TIMEOUT === "110s" &&
-      texts.some((t) => t.includes("set local statement_timeout = '110s'")),
+    "the preview sets a 30 s statement ceiling",
+    PREVIEW_STATEMENT_TIMEOUT === "30s" &&
+      texts.some((t) => t.includes("set local statement_timeout = '30s'")),
     texts.find((t) => t.includes("statement_timeout")) ?? "none",
   );
 

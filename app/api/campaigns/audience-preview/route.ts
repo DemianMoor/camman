@@ -31,11 +31,10 @@ import { OFFER_COOLDOWN_DAYS_DEFAULT, audiencePreviewSchema } from "@/lib/valida
 // latency: a preview that fires as the operator edits the form has no business
 // taking eight seconds, and that is tracked separately.
 //
-// ⚠️ HOTFIX 2026-10-01, TEMPORARY: 120 s, back down after Task 2 T5. The
-// preview's statement ceiling is now 110 s (PREVIEW_STATEMENT_TIMEOUT) because
-// real segment recipes take 40-100 s; the function must outlive the query or
-// Vercel kills it first and the operator gets a 504 instead of the 400.
-export const maxDuration = 120;
+// The function must outlive the statement ceiling (PREVIEW_STATEMENT_TIMEOUT,
+// 30 s) or Vercel kills it first and the operator gets a 504 instead of the
+// 400. Back to 60 s on 2026-10-03 (owner) from the 2026-10-01 hotfix's 120 s.
+export const maxDuration = 60;
 
 // Live count of contacts that would be in the audience pool given a set
 // of segments, contact groups, and a filter snapshot. Writes nothing.

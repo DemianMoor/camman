@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-09-27_
+_Last updated: 2026-10-05_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -512,6 +512,29 @@ sequenceDiagram
 ```
 
 > A REPLAY, not a lookup: `contact_engagement` holds only current rollups and `contact_engagement_transitions` begins after every row this targets, so the facts are rebuilt and fed to the one evaluator. `suppressed` is never written — suppression could not have happened before launch. One-shot: it uses today's thresholds and is NOT re-run after a threshold change, so re-running would produce different history for the same day.
+
+## L. "Texted in the last…" rule — nightly trial (Task 3 T5, 05:20 UTC)
+
+`/api/cron/texted-rule-trial` ([lib/segments/texted-rule-trial.ts](../lib/segments/texted-rule-trial.ts)). Fourteen consecutive clean nights must pass before the first segment switch (owner, 2026-10-03).
+
+```mermaid
+sequenceDiagram
+  participant Cron as Vercel cron 05:20 UTC
+  participant Route as /api/cron/texted-rule-trial
+  participant DB as Postgres (REPEATABLE READ, read only)
+  participant TG as Telegram
+  Cron->>Route: GET (Bearer CRON_SECRET)
+  Route->>DB: orgs with engine_mode = 'write'
+  loop each org
+    Route->>DB: per period 3d/1w/2w (+ periods of active texted rules): served set (fact + lag tail + manual) vs sends set (direct), counts both ways
+    Route->>DB: manual stages marked sent/success/failed in 26 h with nothing recorded (gaps)
+    Route->>DB: segments with a lone in-use is_not rule: today's count vs texted-rule count (info)
+    Route->>DB: operator_rollups 'texted_rule_trial': streak (+1 if clean on the next UTC day, 1 after a missed night, 0 on drift)
+    alt drift, gaps, or streak reaches 14
+      Route->>TG: message (periods, deltas, example ids / gap stages / "may switch")
+    end
+  end
+```
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)
 

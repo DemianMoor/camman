@@ -45,20 +45,37 @@ export async function GET(
 
   // Selected numbers, plus every number the campaign's brand COULD use, so the
   // picker never offers something the brand guard would then reject.
+  // ⚠️ SELECTED IS NEVER FILTERED BY STATUS. A number archived after it was
+  // chosen must still come back — silently dropping it would make the campaign
+  // look correctly configured while rotation skips it. It comes back with
+  // `usable: false` so the UI can flag it instead.
   const selected = await db.execute(drizzleSql`
     SELECT n.provider_phone_id, n.daily_limit, n.position, pp.phone_number,
-           sp.sms_provider_id AS provider
+           sp.sms_provider_id AS provider,
+           (pp.status = 'active' AND sp.status = 'active') AS usable,
+           pp.status AS phone_status, sp.status AS provider_status
     FROM drip_campaign_numbers n
     JOIN provider_phones pp ON pp.id = n.provider_phone_id
     LEFT JOIN sms_providers sp ON sp.id = pp.provider_id
     WHERE n.campaign_id = ${cid} AND n.org_id = ${orgId}::uuid
     ORDER BY n.position, n.provider_phone_id
   `);
+  // ⭐ USABLE MEANS BOTH LEVELS ARE ACTIVE, NOT JUST THE PHONE.
+  // `provider_phones.status = 'active'` alone offered 25 numbers belonging to an
+  // ARCHIVED provider (snx) with no credential — active phones that can never
+  // send. The regular stage path filters both levels implicitly, because the
+  // operator picks a provider first from /api/providers/list?status=active and
+  // only then its phones; drip has no provider step, so both filters are
+  // explicit here. Same definition, stated once.
+  //
+  // ⚠️ PROVIDER `status`, NOT `sends_enabled`. sends_enabled is a runtime pause
+  // an operator flips back; archiving is permanent. A paused provider's numbers
+  // stay selectable, exactly as they do for a regular stage.
   const available = await db.execute(drizzleSql`
     SELECT pp.id AS provider_phone_id, pp.phone_number, sp.sms_provider_id AS provider
     FROM provider_phones pp
     JOIN campaigns c ON c.id = ${cid} AND c.org_id = ${orgId}::uuid
-    LEFT JOIN sms_providers sp ON sp.id = pp.provider_id
+    JOIN sms_providers sp ON sp.id = pp.provider_id AND sp.status = 'active'
     WHERE pp.org_id = ${orgId}::uuid
       AND pp.status = 'active'
       AND (pp.brand_id IS NULL OR pp.brand_id = c.brand_id)

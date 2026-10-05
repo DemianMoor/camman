@@ -2159,9 +2159,13 @@ export default function CampaignDetailPage() {
             <Send className="size-10 text-muted-foreground/40" aria-hidden />
             <div className="space-y-1">
               <p className="text-sm font-medium">No stages yet</p>
+              {/* Same defect family as the "of 0 frozen" panel: a drip campaign
+                  never freezes an audience, so the regular copy describes
+                  something that does not exist for it. */}
               <p className="text-sm text-muted-foreground">
-                Each stage is a discrete SMS send to a slice of the frozen
-                audience.
+                {campaign.type === "drip"
+                  ? "Each stage is an SMS sent to a journey when its timer elapses inside the stage's daily window."
+                  : "Each stage is a discrete SMS send to a slice of the frozen audience."}
               </p>
             </div>
           </div>

@@ -61,6 +61,13 @@ export async function numbersWithHeadroom(
            ), 0) AS sent_today
     FROM drip_campaign_numbers n
     JOIN provider_phones pp ON pp.id = n.provider_phone_id
+    -- ⚠️ BOTH LEVELS, NOT JUST THE PHONE. A selected number is never deleted
+    -- when its phone or its provider is archived — the row stays so the
+    -- operator can see what was configured. Rotation must therefore re-check
+    -- both every time. Filtering only pp.status left 25 active phones on an
+    -- ARCHIVED provider (no credential) eligible to be picked: the send would
+    -- have been attempted and failed at the adapter.
+    JOIN sms_providers sp ON sp.id = pp.provider_id AND sp.status = 'active'
     WHERE n.campaign_id = ${campaignId}
       AND pp.status = 'active'
     ORDER BY n.position, n.provider_phone_id

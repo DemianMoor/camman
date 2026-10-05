@@ -1787,13 +1787,13 @@ function mapPreviewRow(
 // via buildQualifierFromRelation (against a materialized temp table) for the
 // actual insert. The preview takes a different shape because it aggregates
 // instead.
-// ⚠️ HOTFIX 2026-10-01, TEMPORARY — back down after Task 2 T5. The ceiling was
-// 30 s (#248), but real segment recipes take 40–100 s (window 2026-10-01:
-// campaign 1521's recipe 39–87 s, 1519's 54–101 s), so they ALWAYS timed out and
-// the operator could not preview at all. 110 s fits the slowest measured recipe
-// inside the route's maxDuration of 120 s. Stacking is bounded by the per-user
-// single-flight lock below and the client's one-in-flight rule (until T6).
-export const PREVIEW_STATEMENT_TIMEOUT = "110s";
+// 30 s (owner-approved 2026-10-03; back down from the 2026-10-01 hotfix's
+// 110 s). Measured on Large in the 2026-10-03 window: the slowest form-path part
+// is 6.7 s (campaign 1429), the part-less path 9.4 s, the reference behind the
+// kill switch 22.1 s. On Small the reference took up to 105 s — revisit this
+// ceiling if compute is ever reduced. Stacking stays bounded by the per-user
+// single-flight lock below and the client's one-in-flight rule.
+export const PREVIEW_STATEMENT_TIMEOUT = "30s";
 
 /** Another preview by the same user holds the single-flight lock. */
 export class PreviewBusyError extends Error {

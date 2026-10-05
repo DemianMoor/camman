@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-09-30_
+_Last updated: 2026-10-05_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -138,6 +138,7 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 | `CRON_SECRET` | server | shared secret for cron endpoints (Bearer). Also gates the send drain. Unset ⇒ click-scoring endpoint returns 503 |
 | `PROVIDER_CREDENTIALS_KEY` | server | 32-byte base64 master key for AES-256-GCM encryption of `provider_credentials.api_key_encrypted` (migration 0110). MUST be byte-identical between Vercel and any local `.env.local` that encrypts (the backfill script) or decrypts (dev drain/pollers) — a mismatch makes existing rows silently fail to decrypt, not error at write time. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Never commit a value |
 | `AUDIENCE_PREVIEW_IMPL` | server | **Temporary kill switch (Task 2).** `reference` routes `POST /api/campaigns/audience-preview` to the frozen pre-Task-2 preview in `lib/audience-preview-reference/`. Unset, or any other value, serves the live preview. Read per request; the response header `x-audience-preview-impl` names which implementation served it, so a flip can be confirmed. Leave unset in normal operation. Removed together with the reference copy once Task 2 is accepted |
+| `AUDIENCE_RULE_TEXTED` | server | **Kill switch for the "Texted in the last…" segment rule (Task 3 T4).** `direct` makes `texted_in_last_period` read the sends themselves (`stage_sends` over the whole window + `stage_manual_recipients`) instead of `contact_engagement.last_sent_at` plus the lag tail. Same meaning, no dependency on the engagement job; slower. Read per call (a Vercel change needs a redeploy). The campaign preview and segment-rule preview responses name it in `x-audience-rule-texted`. Unset or any other value: `fact` |
 | `SEND_ENABLED` | server | deploy-level **backstop** for the send **drain**; must be exactly `"true"` to send. Left permanently on in Vercel — the day-to-day on/off is the DB flag `org_settings.sends_enabled` (Settings → Sending). The drain requires BOTH. Re-checked between batches mid-drain |
 | `TELEGRAM_BOT_TOKEN` | server | Telegram bot token — best-effort alerts (unset ⇒ silent no-op) **and** the performance report (unset ⇒ report returns 500 when a send is due) |
 | `TELEGRAM_CHAT_ID` | server | numeric chat/group id for alerts + the performance report |

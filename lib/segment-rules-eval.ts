@@ -172,8 +172,25 @@ const MSGS_WINDOW_COLUMNS: Record<7 | 14 | 30 | 90, string> = {
 // `sent` is stage_sends.status = 'sent', the single shared definition of "was
 // messaged" (CLAUDE.md §10e). A never-texted contact matches none of the three,
 // so `is_not` (universe EXCEPT this) includes it.
-export function textedInLastPeriodSql(orgId: string, interval: SQL): SQL {
-  const engineWrites = drizzleSql`EXISTS (
+// Kill switch (plan §6, task T4): AUDIENCE_RULE_TEXTED=direct makes the rule
+// read the sends themselves — stage_sends over the WHOLE window plus
+// stage_manual_recipients — instead of the engagement fact. Same meaning, no
+// dependency on the engagement job; slower. Read per call, so a Vercel env
+// change takes effect on the next deployment. Responses name the
+// implementation in TEXTED_RULE_IMPL_HEADER. Anything else means "fact".
+export type TextedRuleImpl = "fact" | "direct";
+export const TEXTED_RULE_IMPL_HEADER = "x-audience-rule-texted";
+export function textedRuleImpl(): TextedRuleImpl {
+  return process.env.AUDIENCE_RULE_TEXTED === "direct" ? "direct" : "fact";
+}
+
+export function textedInLastPeriodSql(
+  orgId: string,
+  interval: SQL,
+  impl: TextedRuleImpl = textedRuleImpl(),
+): SQL {
+  // Direct: the fact contributes nothing and the tail spans the whole window.
+  const engineWrites = impl === "direct" ? drizzleSql`false` : drizzleSql`EXISTS (
     SELECT 1 FROM lifecycle_settings ls
     WHERE ls.org_id = ${orgId}::uuid AND ls.engine_mode = 'write')`;
   // ⚠️ ONE SELECT, not three. The builder composes rules with bare set

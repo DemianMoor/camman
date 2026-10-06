@@ -30,18 +30,47 @@ interface StageRollup {
   total: number;
   last_sent_at: string | null;
 }
+// Mirrors DeliveryCardCells in lib/reporting/campaign-activity.ts. The DLR
+// fields are null — never 0 — when nothing behind them is DLR-capable.
+interface DeliveryCells {
+  sent: number;
+  dlr_capable: boolean;
+  capable_sent: number | null;
+  matured: number | null;
+  delivered: number | null;
+  undelivered: number | null;
+  no_receipt: number | null;
+  pending: number | null;
+  delivered_pct: number | null;
+  undelivered_pct: number | null;
+  no_receipt_pct: number | null;
+  pending_pct: number | null;
+}
+interface StagePhoneDelivery extends DeliveryCells {
+  stage_id: number;
+  provider_phone_id: number | null;
+  phone_number: string | null;
+  provider_key: string | null;
+}
+interface CampaignDelivery extends DeliveryCells {
+  maturity_minutes: number;
+  by_stage_phone: StagePhoneDelivery[];
+}
 interface ActivitySummary {
   sent: number;
   failed: number;
   rejected: number;
   filtered: number;
   skipped_duplicate: number;
+  skipped_opted_out: number;
+  skipped_ineligible: number;
   pending: number;
   sending: number;
   total: number;
-  replies: number;
+  opt_outs: number;
   last_sent_at: string | null;
   by_stage: StageRollup[];
+  delivery: CampaignDelivery;
 }
 interface ActivityEvent {
   id: string;
@@ -177,6 +206,7 @@ export function CampaignActivitySection({
   }
 
   const s = activity.summary;
+  const skipped = s.skipped_duplicate + s.skipped_opted_out + s.skipped_ineligible;
 
   return (
     <div className="space-y-3">
@@ -185,7 +215,12 @@ export function CampaignActivitySection({
       {/* Summary cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
         <SummaryCard label="Messages sent" value={s.sent} accent="text-emerald-700 dark:text-emerald-400" />
-        <SummaryCard label="Failed" value={s.failed} accent={s.failed > 0 ? "text-red-700 dark:text-red-400" : undefined} />
+        <SummaryCard
+          label="Failed at send"
+          value={s.failed}
+          accent={s.failed > 0 ? "text-red-700 dark:text-red-400" : undefined}
+          hint="The send itself errored (provider API failure after retries) — no message went out. A send-time outcome, not a delivery receipt; see Failed delivery below for that."
+        />
         <SummaryCard
           label="Filtered"
           value={s.filtered}
@@ -193,23 +228,35 @@ export function CampaignActivitySection({
           hint="Rejected by TextHub as suppressed/unsubscribed on their side. Not opted out here and not skipped in future campaigns — label only."
         />
         <SummaryCard
-          label="Skipped (1h)"
-          value={s.skipped_duplicate}
-          accent={s.skipped_duplicate > 0 ? "text-orange-700 dark:text-orange-400" : undefined}
-          hint="Excluded by the global 1-hour dedup gate: the number already received a message within the last hour (any campaign). Not sent, not opted out."
+          label="Skipped"
+          value={skipped}
+          accent={skipped > 0 ? "text-orange-700 dark:text-orange-400" : undefined}
+          hint={[
+            "Not sent: dropped by a safety check before sending.",
+            `1-hour dedup (messaged within the last hour, any campaign): ${s.skipped_duplicate.toLocaleString()}`,
+            `Opted out after the audience was built: ${s.skipped_opted_out.toLocaleString()}`,
+            `Lifecycle check (suppressed, freeze cadence or bought this offer): ${s.skipped_ineligible.toLocaleString()}`,
+          ].join("\n")}
         />
         <SummaryCard label="In flight" value={s.pending + s.sending} />
-        <SummaryCard label="Replies" value={s.replies} />
+        <SummaryCard
+          label="Opt-outs"
+          value={s.opt_outs}
+          hint="Sends with a STOP reply linked to them, across every provider. Other replies are not counted."
+        />
         <SummaryCard
           label="Last send"
           valueText={s.last_sent_at ? formatCampaignDateTime(s.last_sent_at) : "—"}
         />
       </div>
 
+      <DeliveryCards d={s.delivery} />
+
       <Tabs defaultValue="timeline">
         <TabsList>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
           <TabsTrigger value="messages">Messages</TabsTrigger>
+          <TabsTrigger value="delivery">By stage &amp; number</TabsTrigger>
         </TabsList>
 
         <TabsContent value="timeline" className="mt-3">
@@ -225,6 +272,10 @@ export function CampaignActivitySection({
         <TabsContent value="messages" className="mt-3">
           <MessagesPanel campaignId={campaignId} stages={stages} />
         </TabsContent>
+
+        <TabsContent value="delivery" className="mt-3">
+          <DeliveryByStagePhone rows={s.delivery.by_stage_phone} stages={stages} />
+        </TabsContent>
       </Tabs>
     </div>
   );
@@ -236,12 +287,15 @@ function SummaryCard({
   valueText,
   accent,
   hint,
+  sub,
 }: {
   label: string;
   value?: number;
   valueText?: string;
   accent?: string;
   hint?: string;
+  /** A second, smaller line under the value (the delivery cards' %). */
+  sub?: string;
 }) {
   return (
     <Card>
@@ -257,6 +311,144 @@ function SummaryCard({
         >
           {valueText ?? (value ?? 0).toLocaleString()}
         </div>
+        {sub ? <div className="text-xs text-muted-foreground">{sub}</div> : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+const fmtPct = (p: number | null) => (p === null ? "—" : `${p.toFixed(1)}%`);
+
+const NO_STATUS_HINT =
+  "No final delivery receipt recorded — either the provider didn't send one or our intake didn't capture it. txr receipts can keep arriving for a day or more, so this number shrinks over time.";
+
+// Delivery receipts (DLR), every stage, whole lifetime. Delivered + Failed
+// delivery + No status foot to the MATURED sends on DLR-capable numbers;
+// Pending is every capable send younger than the maturity cutoff. A campaign
+// with no DLR-capable sends shows N/A — never 0 / 0%, which would read as a
+// total delivery outage.
+function DeliveryCards({ d }: { d: CampaignDelivery }) {
+  const mins = d.maturity_minutes;
+  if (!d.dlr_capable) {
+    return (
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">Delivery</h3>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {["Delivered", "Failed delivery", "No status", "Pending"].map((label) => (
+            <SummaryCard key={label} label={label} valueText="N/A" sub="no reliable DLR" />
+          ))}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {d.sent > 0
+            ? "None of this campaign's sends went out on a provider with trustworthy delivery receipts (TextHub has none)."
+            : "Nothing sent yet."}
+        </p>
+      </div>
+    );
+  }
+  const capable = d.capable_sent ?? 0;
+  const matured = d.matured ?? 0;
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-medium">Delivery</h3>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <SummaryCard
+          label="Delivered"
+          value={d.delivered ?? 0}
+          sub={fmtPct(d.delivered_pct)}
+          accent="text-emerald-700 dark:text-emerald-400"
+          hint="Final 'delivered' receipt from the provider. A message with both receipts counts as delivered."
+        />
+        <SummaryCard
+          label="Failed delivery"
+          value={d.undelivered ?? 0}
+          sub={fmtPct(d.undelivered_pct)}
+          accent={(d.undelivered ?? 0) > 0 ? "text-red-700 dark:text-red-400" : undefined}
+          hint="Final 'undelivered' receipt from the provider: the message went out but the carrier did not deliver it. Not the same as Failed at send."
+        />
+        <SummaryCard
+          label="No status"
+          value={d.no_receipt ?? 0}
+          sub={fmtPct(d.no_receipt_pct)}
+          hint={NO_STATUS_HINT}
+        />
+        <SummaryCard
+          label="Pending"
+          value={d.pending ?? 0}
+          sub={`${fmtPct(d.pending_pct)} of capable sent`}
+          hint={`Sent less than ${mins} minutes ago, too recent for a receipt to be expected. Not in the % base until it matures.`}
+        />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Delivered, Failed delivery and No status are % of {matured.toLocaleString()} matured
+        sends (sent ≥ {mins} min ago) on numbers with delivery receipts.
+        {capable < d.sent
+          ? ` Based on ${capable.toLocaleString()} of ${d.sent.toLocaleString()} sent; the rest went out on a provider with no reliable receipts.`
+          : ""}
+      </p>
+    </div>
+  );
+}
+
+function DeliveryByStagePhone({
+  rows,
+  stages,
+}: {
+  rows: StagePhoneDelivery[];
+  stages: StageOption[];
+}) {
+  const stageNo = new Map(stages.map((st) => [st.id, st.stage_number]));
+  const n = (v: number | null) => (v === null ? "N/A" : v.toLocaleString());
+  return (
+    <Card>
+      <CardContent className="p-0">
+        {rows.length === 0 ? (
+          <p className="p-4 text-sm text-muted-foreground">Nothing sent yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="border-b text-left text-xs uppercase text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Stage</th>
+                  <th className="px-3 py-2 font-medium">Number</th>
+                  <th className="px-3 py-2 font-medium">Provider</th>
+                  <th className="px-3 py-2 text-right font-medium">Sent</th>
+                  <th className="px-3 py-2 text-right font-medium">Delivered</th>
+                  <th className="px-3 py-2 text-right font-medium">Failed delivery</th>
+                  <th className="px-3 py-2 text-right font-medium" title={NO_STATUS_HINT}>
+                    No status
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium">Pending</th>
+                  <th className="px-3 py-2 text-right font-medium">Delivered %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr
+                    key={`${r.stage_id}|${r.provider_phone_id ?? "none"}`}
+                    className="border-b last:border-0"
+                  >
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      Stage {stageNo.get(r.stage_id) ?? r.stage_id}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap font-mono text-xs">
+                      {r.phone_number ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 text-xs">{r.provider_key ?? "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{r.sent.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{n(r.delivered)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{n(r.undelivered)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{n(r.no_receipt)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{n(r.pending)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {r.dlr_capable ? fmtPct(r.delivered_pct) : "N/A"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

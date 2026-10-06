@@ -1,6 +1,6 @@
 # Delivery Report
 
-_Last updated: 2026-09-22_
+_Last updated: 2026-10-06_
 
 Delivery-rate visibility across every provider. Three surfaces read from **one**
 query layer — [lib/reporting/delivery.ts](../../lib/reporting/delivery.ts) — so
@@ -263,6 +263,8 @@ volume grew; nothing re-measured it until the Overview reached 30 s.
 
 
 **Status.** Migration 0186 was applied to prod on 2026-09-22, and the backfill wrote 2,122 cells whose `sent` totals match `stage_sends` exactly (5,202,994 sends). The refresh and reconciliation crons have been live since PR #208. **Since the cutover PR, `/reports/delivery` and the Overview's Delivered % column read the rollup** through `getDeliveryByStage` in [lib/reporting/delivery-rollup.ts](../../lib/reporting/delivery-rollup.ts). The tripwire and the reconciliation still read the live `queryDeliveryByStage`. ClickUp `869f5q5au`.
+
+⭐ **Since 2026-10-06 the campaign Activity block reads it too**, per campaign and lifetime: `getDeliveryByStage(orgId, range, stageIds)` (the optional `stageIds` narrows the read on the rollup's `(stage_id, …)` unique index) for days up to two before the 60-minute maturity cutoff, and the live `queryDeliveryByStage` for the last two ET days, in a transaction with `enable_nestloop = off` (a single-stage `stageIds` misplans to 8–12 s otherwise). See [campaign-activity-log.md](campaign-activity-log.md#delivery-cards). ⚠️ **The tripwire has the same exposure:** it calls `queryDeliveryByStage` with `stageIds` and the default planner — not changed here, follow-up card.
 
 **"As of" and stale.** Both surfaces show how current the cells are, from the two refresh heartbeats in `cron_locks` (`deliveryFreshness`, a pure function with its own test bars):
 

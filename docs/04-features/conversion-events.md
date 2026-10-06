@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-09-23_
+_Last updated: 2026-10-06_
 
 **Status (2026-09-21):** Phases 1–4 are LIVE on production and Phase 5 (per-event columns) ships with this change; migrations **0181** (applied 2026-09-18) and **0182–0185** (applied 2026-09-21 19:05–19:07 UTC, one transaction) are recorded on production, byte-identical to `db/migrations`. The history below is how the phases got there. The ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). (Until 2026-09-21 these readers were verified on camman-v2 and by read-only checks against prod; since the Gate 3 cutover they run on production.)
 
@@ -63,12 +63,26 @@ A status-only mapping (NULL event type, e.g. Affise `rejected`) neither raises n
 | Secco (`scc`) | rejected | purchase | rejected | |
 | PsychoBook (`psb`) | lead | **registration** | approved | the advertiser can only send `lead`/`sale`, on two separate postback URLs: `lead` = registration ($0) |
 | PsychoBook (`psb`) | sale | purchase | approved | sent only after the customer pays; no hold |
-| PsychoBook (`psb`) | rejected | — (keeps existing) | rejected | declines either event |
+| PsychoBook (`psb`) | rejected | purchase | rejected | declines either event. Seeded status-only ("keeps existing"); prod holds `purchase` as of 2026-10-06 |
 | PsychoBook (`psb`) | registration | registration | approved | Keitaro built-in type; unused today |
+
+**Default rules for every other network (2026-10-06).** Adcombo (44), Clickbank (45), The Fellas Ads (46), Affiliati (47) and Digistore24 (48) had zero rules, so every conversion from them landed unmapped (Digistore24's first three did). Each got the defaults below by a one-off config insert (rule ids 13–27); Digistore24's three rows healed on the next poll. New networks get the same defaults pre-filled in the create form — see [Managing network rules](#managing-network-rules-affiliate-networks-page).
 
 > `lead` does **not** mean the same thing across networks: paid on Sweeply, registration on PsychoBook. That is why mappings are per network. PsychoBook conversions arrive under Keitaro network #5 ("Affise.com PsychoBook", offer #41), but the mapping keys on the CamMan network reached through the offer, never on Keitaro's network id.
 
-## How to add an event type or a mapping
+## Managing network rules (Affiliate Networks page)
+
+Network-level rules are managed in the UI; offer-level rules and event types are still SQL-only (below).
+
+- **Create network** ([components/networks/network-form.tsx](../../components/networks/network-form.tsx)): a "Conversion mapping" section pre-fills `DEFAULT_NETWORK_MAPPINGS` ([lib/validators/conversion-mappings.ts](../../lib/validators/conversion-mappings.ts)): `lead` → purchase approved, `sale` → purchase approved, `rejected` → purchase rejected. Saving untouched is the normal path; rows can be edited, removed or added first. `POST /api/networks` takes them as `mappings[]` and inserts network + rules in one transaction. A default whose event type key the org doesn't have is left out, not guessed.
+- **Existing network:** row ⋯ menu → **Conversion mapping** ([components/networks/conversion-mapping.tsx](../../components/networks/conversion-mapping.tsx)) lists the active rules. Manager and above (`networks.update`) can add, edit (event type + status; the Keitaro type is fixed — change it by deactivating and adding) and deactivate (`status = 'archived'`). Operators and viewers see the rules read-only.
+- **Edit and deactivate confirm first**, spelling out the 7-day effect: the next poll re-reads the last 7 ET days, so a status change rewrites those rows' status (sales/revenue/EPC change), an event-type change leaves their LOCKED type and records a type conflict (Telegram `type_conflicts` page), and deactivating turns them unmapped. Older rows need the backfill.
+- **No status-only rules from the form** (`event_type_id` is required by the validator) — see [A status-only rule on a conversion we have never seen](#a-status-only-rule-on-a-conversion-we-have-never-seen). An existing one (made by SQL) is shown as "(keeps existing type)".
+- **Zero-rule warning:** `GET /api/networks/list` returns `active_rule_count`; the list shows an amber **No conversion rules** badge at 0, and the dialog a banner.
+- **API:** `GET/POST /api/networks/[id]/mappings`, `PATCH /api/networks/[id]/mappings/[mappingId]`, `POST …/[mappingId]/archive`, plus `GET /api/event-types` for the pickers. Every query is org-scoped, the event type is re-checked against the org (`eventTypesBelongToOrg`, [lib/conversions/network-mappings.ts](../../lib/conversions/network-mappings.ts) — the FK alone would accept another org's id), a second active rule for a type is `409 duplicate`. Operator route map: the two GETs allowed, every write `null`. `resolveMapping()` is unchanged.
+- Verified by [scripts/test-network-mappings-api.ts](../../scripts/test-network-mappings-api.ts) on a PR preview (throwaway owner → operator users).
+
+## How to add an event type or a mapping (SQL)
 
 ```sql
 -- New event type (per org)

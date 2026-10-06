@@ -6,14 +6,20 @@ import {
   ArchiveRestore,
   Archive as ArchiveIcon,
   ExternalLink,
+  Loader2,
   MoreHorizontal,
   Network as NetworkIcon,
   Pencil,
   Plus,
+  Workflow,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
+import {
+  ConversionMappingDialog,
+  type EventTypeOption,
+} from "@/components/networks/conversion-mapping";
 import {
   NetworkForm,
   type NetworkFormValues,
@@ -64,6 +70,7 @@ type Network = {
   created_at: string;
   org_id: string;
   offer_count: number;
+  active_rule_count: number;
 };
 
 type ListResponse = {
@@ -156,6 +163,22 @@ export default function AffiliateNetworksPage() {
   const updateApi = useApiCall<Network>();
   const archiveApi = useApiCall<Network>();
   const restoreApi = useApiCall<Network>();
+  const { execute: fetchEventTypes } = useApiCall<{ data: EventTypeOption[] }>();
+
+  // Feeds the conversion mapping pickers (create form + mapping dialog).
+  const [eventTypes, setEventTypes] = useState<EventTypeOption[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await fetchEventTypes("/api/event-types");
+      if (cancelled) return;
+      if (result.ok) setEventTypes(result.data.data);
+      else toastApiError(result, "Couldn't load event types");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchEventTypes]);
 
   const [data, setData] = useState<Network[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -205,6 +228,7 @@ export default function AffiliateNetworksPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<Network | null>(null);
+  const [mappingFor, setMappingFor] = useState<Network | null>(null);
   const [confirming, setConfirming] = useState<
     | { kind: "archive"; network: Network }
     | { kind: "restore"; network: Network }
@@ -312,6 +336,29 @@ export default function AffiliateNetworksPage() {
         },
       },
       {
+        id: "active_rule_count",
+        header: "Conversion rules",
+        enableSorting: false,
+        cell: ({ row }) => {
+          const n = row.original.active_rule_count ?? 0;
+          if (n === 0) {
+            return (
+              <Badge
+                className="border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+                title="Every conversion from this network lands unmapped until a rule is added."
+              >
+                No conversion rules
+              </Badge>
+            );
+          }
+          return (
+            <span className="text-sm text-muted-foreground">
+              {n} {n === 1 ? "rule" : "rules"}
+            </span>
+          );
+        },
+      },
+      {
         id: "status",
         header: "Status",
         cell: ({ row }) => <StatusBadge status={row.original.status} />,
@@ -336,7 +383,6 @@ export default function AffiliateNetworksPage() {
           const showEdit = canUpdate;
           const showArchive = network.status === "active" && canArchive;
           const showRestore = network.status === "archived" && canRestore;
-          if (!showEdit && !showArchive && !showRestore) return null;
           return (
             <div className="flex justify-end">
               <DropdownMenu>
@@ -359,6 +405,10 @@ export default function AffiliateNetworksPage() {
                       <Pencil className="size-4" aria-hidden /> Edit
                     </DropdownMenuItem>
                   ) : null}
+                  <DropdownMenuItem onSelect={() => setMappingFor(network)}>
+                    <Workflow className="size-4" aria-hidden /> Conversion
+                    mapping
+                  </DropdownMenuItem>
                   {showArchive ? (
                     <DropdownMenuItem
                       onSelect={() =>
@@ -522,7 +572,7 @@ export default function AffiliateNetworksPage() {
       <FormDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        className="sm:max-w-lg"
+        className="sm:max-w-xl"
       >
         <DialogHeader>
           <DialogTitle>New network</DialogTitle>
@@ -530,14 +580,34 @@ export default function AffiliateNetworksPage() {
             Platforms where you source affiliate offers.
           </DialogDescription>
         </DialogHeader>
-        <NetworkForm
-          key="create"
-          mode="create"
-          onSubmit={handleCreate}
-          onCancel={() => setCreateOpen(false)}
-          isSubmitting={createApi.isLoading}
-        />
+        {eventTypes === null ? (
+          <div className="flex justify-center py-8">
+            <Loader2
+              className="size-5 animate-spin text-muted-foreground"
+              aria-hidden
+            />
+          </div>
+        ) : (
+          <NetworkForm
+            key="create"
+            mode="create"
+            onSubmit={handleCreate}
+            onCancel={() => setCreateOpen(false)}
+            isSubmitting={createApi.isLoading}
+            eventTypes={eventTypes}
+          />
+        )}
       </FormDialog>
+
+      <ConversionMappingDialog
+        network={mappingFor}
+        onOpenChange={(open) => {
+          if (!open) setMappingFor(null);
+        }}
+        canEdit={canUpdate}
+        eventTypes={eventTypes}
+        onChanged={refetch}
+      />
 
       {/* Edit dialog */}
       <FormDialog

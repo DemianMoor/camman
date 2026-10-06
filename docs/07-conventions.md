@@ -2,6 +2,14 @@
 
 _Last updated: 2026-10-06_
 
+## A network with no conversion rules counts nothing — new networks get defaults (2026-10-06)
+
+`resolveMapping()` ([lib/conversions/build-rows.ts](../lib/conversions/build-rows.ts)) matches a conversion on (offer, Keitaro type), then (the offer's network, Keitaro type). No match ⇒ stored with NULL event type and status: **unmapped**, in no sale, revenue or EPC. Attribution can be perfect and the conversion still counts as nothing — Digistore24's first three did exactly that.
+
+- The create-network form pre-fills `lead`/`sale` → purchase approved, `rejected` → purchase rejected. Change them only when the network differs (PsychoBook's `lead` is a registration; Secco has no `lead` rule).
+- The networks list badges any network with zero active rules. Treat the badge as a to-do, not decoration.
+- Editing or deactivating a rule re-classifies the last 7 days on the next poll; the UI confirms first. See [conversion-events.md](04-features/conversion-events.md#managing-network-rules-affiliate-networks-page).
+
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
 The Group x Lifecycle report was too slow, so its parts were timed separately — base counts, the engagement join, the in-use join — to find what to fix. The attribution would not hold still.

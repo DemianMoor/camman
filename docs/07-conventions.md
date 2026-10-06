@@ -4587,3 +4587,7 @@ The txr poll's owed ranges and pass stamps are written by the CRON run only (`st
 
 The inbound pre-filter skips a row only when it is captured AND processed (`processed_at IS NOT NULL`), not merely stored. Here the poll's capture and processing are one transaction, but the webhook's are two — "stored" alone would have skipped a webhook row whose processing failed. Prove such a skip on real data with a before/after diff of every table the processing writes, not just the counts.
 
+## An owed range is read oldest-first, and its start never moves backwards (2026-10-06)
+
+The first version read the txr poll's owed range newest-first. Under a time budget it re-read the same newest pages of dashboard 68804 every run, the merged range stretched back to 09:49 forever, and the backlog could not shrink. Now an owed range is walked oldest-first (`sort=asc`), so what it still owes is `[newest read, end]`; a cut-short window merged into it may only push the owed END (`txrMergeOwed`) — everything before an owed start has been read, so re-owing it would loop again. Time a dashboard does not use goes back to dashboards that still owe, not only to the ones after it in the order. The test that pins it: a big owed range + a window that gets zero time, over several runs — the start must strictly advance every run and the range must complete.
+

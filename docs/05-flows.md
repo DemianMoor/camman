@@ -283,10 +283,11 @@ sequenceDiagram
   Cron->>TR: contacts poll · webhook health (before outbound, so a slow outbound walk can't skip them)
   Cron->>DB: read pass stamps + owed ranges (cron_locks textrequest-poll:pass|gap-from|gap-to:<dashboard>:<R|S>; cron runs only)
   loop each dashboard — oldest complete pass first — equal share of the time left before 45 s
-    Cron->>TR: GET /dashboards/{id}/messages (S, sort=desc, page_size 1000): owed range first, then the 6 h window
+    Cron->>TR: GET /dashboards/{id}/messages (S, page_size 1000): owed range first OLDEST-first (sort=asc), then the 6 h window newest-first (sort=desc)
     Cron->>DB: ONE INSERT…SELECT per page (method='poll') ON CONFLICT (provider_id,message_id,status) DO NOTHING, matched via texthub_message_id
     Cron->>DB: walk stopped (time, page cap, failed page or write) ⇒ owed range = [start, oldest read + 1 s]; all read ⇒ pass stamp, owed range cleared
   end
+  Cron->>TR: time left before 45 s ⇒ more oldest-first owed-range walks for dashboards that still owe (owed start only moves forward)
   Cron->>DB: pass-age check (outbound > 4 runs, inbound > 2 runs ⇒ Telegram once per streak) · stamp textrequest-poll:finished
   Note over Cron,DB: tells-monitors (hourly) also watches textrequest-poll:finished (45 min) for a cron that stops firing
 ```

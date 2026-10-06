@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-08-23_
+_Last updated: 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -48,6 +48,21 @@ transaction**, so there is no window where the lead is neither a row nor a count
 
 `lead_events.inbox_id` is `ON DELETE SET NULL`, **not** cascade. A cascade would take the lead event
 with the deleted inbox row, destroying the evidence the ledger exists to preserve.
+
+## Contact groups
+
+Every processed lead joins **"Drip intake"** (sandbox: **"Drip sandbox"**). Since 2026-10-07 a
+**real** lead also joins its **partner × tag group**, named `<partner_slug>-<interest_tag>` in
+lowercase (e.g. `pml-aca`; no tag ⇒ `pml-untagged`). Created on first use by
+`ensurePartnerTagGroup` in [lib/drip/groups.ts](../../lib/drip/groups.ts); membership is
+`ON CONFLICT DO NOTHING`, so a repeat lead is a no-op.
+
+- **Sandbox leads never join one** — the sandbox group stays the only place they live.
+- **⚠️ The group's `contact_group_id` is `drip:<org_id>:<name>`.** `contact_group_id` is unique across
+  ALL orgs and the upsert returns whichever row owns the key, so a key without the org id would write
+  one org's contacts into another org's group the day two orgs share a partner slug.
+- Leads that arrived before the change: `scripts/backfill-partner-tag-groups.ts`
+  (dry run by default; `--apply` writes; `--partner=<slug>` scopes it). Idempotent.
 
 ## Sandbox
 

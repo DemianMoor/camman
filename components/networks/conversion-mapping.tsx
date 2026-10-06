@@ -536,10 +536,10 @@ function ConfirmBody({
         {intro}
         <ul className="list-disc space-y-1 pl-5">
           <li>
-            they become <span className="font-medium">unmapped</span> and drop
-            out of sales, revenue and EPC for those days;
+            They become <span className="font-medium">unmapped</span> and drop
+            out of sales, revenue and EPC for those days.
           </li>
-          <li>new conversions of this type also land unmapped until a rule is added again.</li>
+          <li>New conversions of this type also land unmapped until a rule is added again.</li>
         </ul>
         {outro}
       </>
@@ -556,14 +556,14 @@ function ConfirmBody({
       <ul className="list-disc space-y-1 pl-5">
         {statusChanged && draft.conversion_status ? (
           <li>
-            their status becomes{" "}
+            Their status becomes{" "}
             <span className="font-medium">{STATUS_LABELS[draft.conversion_status]}</span>,
-            so sales, revenue and EPC for those days change;
+            so sales, revenue and EPC for those days change.
           </li>
         ) : null}
         {typeChanged ? (
           <li>
-            they <span className="font-medium">keep their current event type</span>{" "}
+            They <span className="font-medium">keep their current event type</span>{" "}
             (it is locked once set) and are flagged as event-type conflicts,
             which sends a Telegram alert. Only new conversions are counted as{" "}
             {newLabel}.

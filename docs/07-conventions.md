@@ -4559,3 +4559,11 @@ A budgeted or page-capped walk that restarts from the newest page next time sile
 
 It repeats the same 50 rows over and over (5,000 rows held 50 distinct log ids, all inside 1.7 s), and `--status-code` returned nothing even for real traffic. Use it only to ask "was there ANY request in this window?" — logs come back newest-first — and always run a control window known to have traffic. Count from your own tables, or log one summary line per run (the txr poll's `txr_poll_run`) and keep each query under 50 runs.
 
+## Only the lease holder owns poll state
+
+The txr poll's owed ranges and pass stamps are written by the CRON run only (`stateful: true`). A manual "poll now" run bypasses the lease and can overlap a cron run; if it deleted an owed range or stamped a pass from what it read at its own start, it could clear a range the cron wrote meanwhile. Any state a job keeps between runs belongs to whoever holds the lease — a manual trigger reads its own window and leaves the state alone.
+
+## Skip a known row only if its processing is proven done
+
+The inbound pre-filter skips a row only when it is captured AND processed (`processed_at IS NOT NULL`), not merely stored. Here the poll's capture and processing are one transaction, but the webhook's are two — "stored" alone would have skipped a webhook row whose processing failed. Prove such a skip on real data with a before/after diff of every table the processing writes, not just the counts.
+

@@ -6,7 +6,12 @@
 import "./_env-preload";
 
 import type { TxrMessagesPollResult } from "@/lib/sends/textrequest-messages-poll";
-import { runTxrPollTick, type TxrPollSteps } from "@/lib/sends/textrequest-poll-run";
+import {
+  INBOUND_DEADLINE_MS,
+  OUTBOUND_DEADLINE_MS,
+  runTxrPollTick,
+  type TxrPollSteps,
+} from "@/lib/sends/textrequest-poll-run";
 
 delete process.env.TELEGRAM_BOT_TOKEN;
 
@@ -18,13 +23,13 @@ function check(name: string, cond: boolean, detail = "") {
 
 const emptyPoll = (dash: string): TxrMessagesPollResult => ({
   credentials_polled: 1, dashboards_polled: 1, fetched: 0, outbound_with_status: 0, captured: 0, dupe: 0,
-  matched: 0, unmatched: 0, inbound_seen: 0, inbound_captured: 0, inbound_dupe: 0, inbound_suppressed: 0,
+  matched: 0, unmatched: 0, inbound_seen: 0, inbound_captured: 0, inbound_dupe: 0, inbound_known: 0, inbound_suppressed: 0,
   truncated: false, sort_fallbacks: 0, error: null,
   walks: [{ dashboard_id: dash, direction: "R", kind: "window", from: "", to: "", pages_read: 0, complete: true, stopped: null }],
-  outbound_gaps: [],
+  owed: [],
 });
 
-function stubs(ran: string[], throwing: Set<string>): TxrPollSteps {
+function stubs(ran: string[], throwing: Set<string>, deadlines: Record<string, number> = {}): TxrPollSteps {
   const s = <T>(name: string, value: T) => async () => {
     ran.push(name);
     if (throwing.has(name)) throw new Error(`${name} exploded (test)`);
@@ -32,10 +37,16 @@ function stubs(ran: string[], throwing: Set<string>): TxrPollSteps {
   };
   return {
     begin: s("begin", { previous_died: false, previous_started: null, alerted: false }),
-    inbound: s("inbound", emptyPoll("d1")),
+    inbound: async (deadlineAt) => {
+      deadlines.inbound = deadlineAt;
+      return s("inbound", emptyPoll("d1"))();
+    },
     contacts: s("contacts", {}),
     health: s("health", {}),
-    outbound: s("outbound", emptyPoll("d1")),
+    outbound: async (deadlineAt) => {
+      deadlines.outbound = deadlineAt;
+      return s("outbound", emptyPoll("d1"))();
+    },
     passCheck: async () => {
       ran.push("passCheck");
       if (throwing.has("passCheck")) throw new Error("passCheck exploded (test)");
@@ -83,7 +94,20 @@ async function main() {
     const r3 = await runTxrPollTick(stubs(ran3, new Set(["inbound", "contacts"])), { cron: true, startedAt: Date.now(), log: quiet });
     check("inbound and contacts threw, health and outbound still ran", r3.health.ok && r3.outbound.ok, ran3.join());
 
-    // 4. Manual (session) run: no bookkeeping at all.
+    // 4. Budgets: inbound is bounded at start + 20 s, so the contacts poll and
+    //    webhook health start by then whatever the STOP volume (the walk
+    //    itself honours the deadline — see test-textrequest-poll.ts "inbound
+    //    budget"); outbound gets start + 45 s.
+    const ran5: string[] = [];
+    const dl: Record<string, number> = {};
+    const started = 1_000_000;
+    await runTxrPollTick(stubs(ran5, new Set(), dl), { cron: true, startedAt: started, log: quiet });
+    check("inbound is handed a deadline of start + 20 s", INBOUND_DEADLINE_MS === 20_000 && dl.inbound === started + 20_000, JSON.stringify(dl));
+    check("outbound is handed a deadline of start + 45 s", OUTBOUND_DEADLINE_MS === 45_000 && dl.outbound === started + 45_000, JSON.stringify(dl));
+    check("contacts and health run after the bounded inbound step, before outbound",
+      ran5.indexOf("inbound") < ran5.indexOf("contacts") && ran5.indexOf("health") < ran5.indexOf("outbound"), ran5.join());
+
+    // 5. Manual (session) run: no bookkeeping at all.
     const ran4: string[] = [];
     await runTxrPollTick(stubs(ran4, new Set()), { cron: false, startedAt: Date.now(), log: quiet });
     check("manual run does not touch begin / pass check / finish",

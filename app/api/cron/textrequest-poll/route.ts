@@ -29,20 +29,15 @@ import { defaultTxrPollSteps, runTxrPollTick } from "@/lib/sends/textrequest-pol
 // ran first and unbudgeted; on the night of 2026-10-05 it hit the 60 s limit on
 // 25 runs in a row, so the contacts opt-out backstop and webhook health — which
 // ran after it — did not run at all. Now: inbound walks (STOP backstop) →
-// contacts poll → webhook health → outbound walks, which get only the time left
-// before OUTBOUND_DEADLINE_MS. A walk that runs out of time records what it owes
-// and reads it first next run (lib/sends/textrequest-messages-poll.ts).
+// contacts poll → webhook health → outbound walks. Inbound gets 20 s, outbound
+// the time left before 45 s (lib/sends/textrequest-poll-run.ts). A walk that
+// runs out of time records what it owes and reads it first next run
+// (lib/sends/textrequest-messages-poll.ts) — cron runs only.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-/** Outbound pages are not started past this many ms into the request (of 60 s). */
-const OUTBOUND_DEADLINE_MS = 45_000;
-
 function run(startedAt: number, orgId: string | undefined, cron: boolean) {
-  return runTxrPollTick(defaultTxrPollSteps(db, { orgId, deadlineAt: startedAt + OUTBOUND_DEADLINE_MS }), {
-    cron,
-    startedAt,
-  });
+  return runTxrPollTick(defaultTxrPollSteps(db, { orgId, stateful: cron }), { cron, startedAt });
 }
 
 async function handle(req: NextRequest): Promise<NextResponse> {

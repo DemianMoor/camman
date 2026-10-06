@@ -33,27 +33,41 @@ export async function step<T>(name: string, fn: () => Promise<T>): Promise<StepR
   }
 }
 
+/** Inbound walks start no page past this many ms into the request (of 60 s). */
+export const INBOUND_DEADLINE_MS = 20_000;
+/** Outbound walks start no page past this many ms into the request (of 60 s). */
+export const OUTBOUND_DEADLINE_MS = 45_000;
+
+// Budgets (ClickUp 869fcqhcu): inbound gets 20 s so the contacts poll and
+// webhook health always start by ~20–25 s, however big a STOP flood is — on
+// 2026-09-10 the unbudgeted inbound walk alone would have taken ~145 s. A walk
+// cut short keeps its owed range (textrequest-messages-poll.ts), so STOPs are
+// late by at most a run, never lost. Outbound gets what is left before 45 s.
 export interface TxrPollSteps {
   begin: () => Promise<TxrRunStart>;
-  inbound: () => Promise<TxrMessagesPollResult>;
+  inbound: (deadlineAt: number) => Promise<TxrMessagesPollResult>;
   contacts: () => Promise<unknown>;
   health: () => Promise<unknown>;
-  outbound: () => Promise<TxrMessagesPollResult>;
+  outbound: (deadlineAt: number) => Promise<TxrMessagesPollResult>;
   passCheck: (dashboards: string[]) => Promise<TxrPassCheck[]>;
   finish: () => Promise<{ recovered: boolean }>;
 }
 
+// `stateful` is the CRON flag: only a cron run (under the lease) reads and
+// writes the owed ranges and pass stamps. A manual run that could delete an
+// owed range from what IT read could clear one the cron wrote meanwhile.
 export function defaultTxrPollSteps(
   database: typeof db,
-  o: { orgId?: string; deadlineAt: number },
+  o: { orgId?: string; stateful: boolean },
 ): TxrPollSteps {
   return {
     begin: () => beginTxrPollRun(database),
-    inbound: () => pollTxrMessages(database, { orgId: o.orgId, directions: ["R"] }),
+    inbound: (deadlineAt) =>
+      pollTxrMessages(database, { orgId: o.orgId, directions: ["R"], deadlineAt, stateful: o.stateful }),
     contacts: () => pollTxrOptedOutContacts(database, { orgId: o.orgId }),
     health: () => checkTxrWebhookHealth(database, { orgId: o.orgId }),
-    outbound: () =>
-      pollTxrMessages(database, { orgId: o.orgId, directions: ["S"], deadlineAt: o.deadlineAt }),
+    outbound: (deadlineAt) =>
+      pollTxrMessages(database, { orgId: o.orgId, directions: ["S"], deadlineAt, stateful: o.stateful }),
     passCheck: (dashboards) => checkTxrPassAges(database, dashboards),
     finish: () => finishTxrPollRun(database),
   };
@@ -66,10 +80,10 @@ export async function runTxrPollTick(
   // Bookkeeping only for the CRON run: manual runs bypass the lease and must not
   // read as a dead cron run.
   const begin = o.cron ? await step("begin", steps.begin) : null;
-  const inbound = await step("inbound", steps.inbound);
+  const inbound = await step("inbound", () => steps.inbound(o.startedAt + INBOUND_DEADLINE_MS));
   const contacts = await step("contacts", steps.contacts);
   const health = await step("health", steps.health);
-  const outbound = await step("outbound", steps.outbound);
+  const outbound = await step("outbound", () => steps.outbound(o.startedAt + OUTBOUND_DEADLINE_MS));
   const dashboards = [
     ...new Set([inbound, outbound].flatMap((r) => (r.ok ? r.result.walks.map((w) => w.dashboard_id) : []))),
   ];
@@ -88,14 +102,16 @@ export async function runTxrPollTick(
         inbound_ms: inbound.ms,
         inbound_seen: inbound.ok ? inbound.result.inbound_seen : null,
         inbound_captured: inbound.ok ? inbound.result.inbound_captured : null,
+        inbound_known: inbound.ok ? inbound.result.inbound_known : null,
+        inbound_complete: inbound.ok ? inbound.result.owed.length === 0 : false,
         contacts: contacts.ok,
         contacts_ms: contacts.ms,
         health: health.ok,
         health_ms: health.ms,
         outbound: outbound.ok,
         outbound_ms: outbound.ms,
-        outbound_complete: outbound.ok ? outbound.result.outbound_gaps.length === 0 : false,
-        gaps: outbound.ok ? outbound.result.outbound_gaps.length : null,
+        outbound_complete: outbound.ok ? outbound.result.owed.length === 0 : false,
+        owed: [inbound, outbound].reduce((n, r) => n + (r.ok ? r.result.owed.length : 0), 0),
         captured: outbound.ok ? outbound.result.captured : null,
         finish: finish?.ok ?? null,
       },

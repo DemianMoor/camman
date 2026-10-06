@@ -278,9 +278,10 @@ sequenceDiagram
   Hook-->>TR: 200 ALWAYS (a non-2XX counts toward TR's 10-strike hook disconnect)
   Note over Drain,Hook: no inbound_webhook_token or no origin ⇒ NO status_callback is requested at all; the poll is then the only reconciler
   Cron->>DB: stamp textrequest-poll:started (previous run never finished ⇒ Telegram "did not finish", once per streak)
-  Cron->>TR: inbound walks, every dashboard (message_direction=R) — unbudgeted, per-row opt-out processing (E7)
+  Cron->>TR: inbound walks (message_direction=R), 20 s budget split per dashboard, owed range first
+  Cron->>DB: one lookup per page: skip rows already captured AND processed (processed_at set); the rest per-row opt-out processing (E7), unchanged
   Cron->>TR: contacts poll · webhook health (before outbound, so a slow outbound walk can't skip them)
-  Cron->>DB: read pass stamps + owed ranges (cron_locks textrequest-poll:pass|gap-from|gap-to:*)
+  Cron->>DB: read pass stamps + owed ranges (cron_locks textrequest-poll:pass|gap-from|gap-to:<dashboard>:<R|S>; cron runs only)
   loop each dashboard — oldest complete pass first — equal share of the time left before 45 s
     Cron->>TR: GET /dashboards/{id}/messages (S, sort=desc, page_size 1000): owed range first, then the 6 h window
     Cron->>DB: ONE INSERT…SELECT per page (method='poll') ON CONFLICT (provider_id,message_id,status) DO NOTHING, matched via texthub_message_id

@@ -96,6 +96,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "campaigns/[campaignId]/drip-config": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-followups": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-journeys": null, // drip / partner intake -- hidden from the operator
+  "campaigns/[campaignId]/drip-journeys/export": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-numbers": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-pause": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/duplicate": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },

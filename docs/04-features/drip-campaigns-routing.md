@@ -183,6 +183,19 @@ omitted it until 2026-10-06, so the first aged-out lead failed with 23514 and th
 Candidates are oldest-first, so that one lead headed every batch and **stopped all routing** — found
 the moment drip posture was first switched on, by an Aug-24 internal-test lead.
 
+## Routed leads (campaign page)
+
+The drip campaign page shows a **collapsed** "Routed leads" header with the lifetime journey count.
+Expanding it reveals an **Export CSV** button — the page no longer lists journeys inline (the old list
+showed the latest 50 with each one's raw routing JSON, which stopped being readable at real volume).
+
+`GET /api/campaigns/[campaignId]/drip-journeys/export`
+([route](../../app/api/campaigns/[campaignId]/drip-journeys/export/route.ts)) streams EVERY journey
+of the campaign, newest first: phone, journey status, close reason, routed / first-sent / closed
+times, partner, interest tag, lead received time, line type and US state. Times are ET wall-clock
+`yyyy-MM-dd HH:mm` so the file sorts in a spreadsheet. `campaigns.view`; operator-denied in the
+route map like the rest of drip. `/drip-journeys` itself now returns only `{ funnel }`.
+
 ## "Why not routed"
 
 `/drip/why-not-routed` → [components/drip/why-not-routed.tsx](../../components/drip/why-not-routed.tsx).

@@ -132,7 +132,13 @@ async function main() {
   // Delegate to the production poller, with the walk scoped to these
   // dashboards' INBOUND direction. Everything outside the scope returns an
   // empty page, so no outbound DLR re-reconciliation is triggered.
+  //
+  // ⚠️ directions: ["R"] is REQUIRED, not belt-and-braces. The poll keeps
+  // per-dashboard outbound state (owed ranges + pass stamps, 869fcqhcu): an
+  // outbound walk that "completes" on the empty pages below would stamp a pass
+  // and DELETE any range a cron run still owes — silently losing receipts.
   const result = await pollTxrMessages(db, {
+    directions: ["R"],
     lookbackHours: hours,
     fetchMessages: async (opts) => {
       if (opts.direction !== "R" || !want.has(opts.dashboardId)) {

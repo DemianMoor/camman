@@ -68,7 +68,14 @@ async function main() {
       H.HEARTBEAT_JOBS.deliveryRollup.first_run_grace_hours === 20 / 60 &&
         H.HEARTBEAT_JOBS.deliveryRollupSettle.first_run_grace_hours === 6 &&
         H.HEARTBEAT_JOBS.deliveryRollupReconcile.first_run_grace_hours === 48);
-    const others = Object.entries(H.HEARTBEAT_JOBS).filter(([k]) => !k.startsWith("deliveryRollup"));
+    // The Text Request poll heartbeat (869fcqhcu) is the second job to opt in:
+    // its first stamp lands on the first cron run after deploy, up to 15 min
+    // later, and tells-monitors must not page "never ran" in between.
+    bar("E1b the Text Request poll heartbeat carries a grace of 2x its 15-min interval",
+      H.HEARTBEAT_JOBS.textrequestPoll.first_run_grace_hours === 0.5);
+    const others = Object.entries(H.HEARTBEAT_JOBS).filter(
+      ([k]) => !k.startsWith("deliveryRollup") && k !== "textrequestPoll",
+    );
     bar(`E2 no other job's behaviour changed (${others.length} expectations without a grace)`,
       others.length > 0 && others.every(([, e]) => e.first_run_grace_hours === undefined), others.map(([k]) => k).join(", "));
 

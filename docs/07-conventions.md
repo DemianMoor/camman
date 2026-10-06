@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-05_
+_Last updated: 2026-10-06_
 
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
@@ -4546,3 +4546,16 @@ campaign config panel, and the stage window fields reused them, so each
 `<label htmlFor>` resolved to the first match — clicking the stage window's
 label focused the campaign's date picker. The stage fields are now
 `drip-window-start` / `drip-window-end`.
+
+## A poll that writes one transaction per row cannot keep up (2026-10-06, card 869fcqhcu)
+
+Measured on the Text Request messages poll: one transaction + ~4 round trips per row through the transaction pooler = **~200 ms per row** (3,196 rows in 629 s). A 1,000-row page is ~200 s against a 60 s function limit, so the poll timed out on every run of a busy night and nothing said so. A page of capture + match is one `INSERT … SELECT FROM jsonb_to_recordset(…) ON CONFLICT … DO NOTHING` with the match resolved by a `LEFT JOIN LATERAL` before the insert (a data-modifying CTE cannot UPDATE rows a sibling CTE inserted in the same statement). Same result, 1.8 s. Keep compliance paths that can trip a breaker per row; batch the bulk side.
+
+## A walk that stops early must record what it did not read
+
+A budgeted or page-capped walk that restarts from the newest page next time silently loses its oldest pages once they age out of the window. Record the unread range (`[window start, oldest read + 1 s]` for a newest-first walk) and read it first on the next run; stop the walk at a failed page or failed write rather than skipping it, or "everything older than the oldest row read is owed" stops being true. A dashboard counts as having a complete pass only when nothing is owed.
+
+## `vercel logs --json` cannot count requests
+
+It repeats the same 50 rows over and over (5,000 rows held 50 distinct log ids, all inside 1.7 s), and `--status-code` returned nothing even for real traffic. Use it only to ask "was there ANY request in this window?" — logs come back newest-first — and always run a control window known to have traffic. Count from your own tables, or log one summary line per run (the txr poll's `txr_poll_run`) and keep each query under 50 runs.
+

@@ -20,11 +20,21 @@ import { db, sql as pgConn } from "@/db/client";
 import { applyTxrMigrationsInTx, isLockContentionError } from "./_txr-migration-fixture";
 import { checkTxrWebhookHealth, type TxrHook } from "@/lib/sends/textrequest-hooks";
 import {
+  txrAlertTransition,
+  txrPassThresholdMin,
+  txrPreviousRunDied,
+} from "@/lib/sends/textrequest-poll-health";
+import {
   computeTxrMessagesWindow,
   parseTxrUtcTimestamp,
   planTxrPageWalk,
   planTxrSortedWalk,
   pollTxrMessages,
+  txrBudgetEnd,
+  txrMergeRanges,
+  txrOutboundOrder,
+  txrPassKey,
+  txrUnreadRange,
   type TxrMessageRow,
   type TxrMessagesFetcher,
 } from "@/lib/sends/textrequest-messages-poll";
@@ -115,6 +125,52 @@ check(
 );
 
 // ---------- 2. DB-BACKED (rolled back) ----------
+// ---------- 1b. PURE: owed ranges, outbound order, budget, run health (869fcqhcu) ----------
+console.log("— pure: owed ranges, outbound order, budget, run health —");
+{
+  const from = new Date("2026-10-05T17:00:00Z");
+  const to = new Date("2026-10-05T23:05:00Z");
+  const u = txrUnreadRange(from, to, new Date("2026-10-05T23:01:30Z"));
+  check(
+    "unread = [window start, oldest read + 1 s]",
+    u.from.toISOString() === from.toISOString() && u.to.toISOString() === "2026-10-05T23:01:31.000Z",
+    JSON.stringify(u),
+  );
+  const none = txrUnreadRange(from, to, null);
+  check("nothing read ⇒ the whole window is owed", none.from === from && none.to === to);
+  check(
+    "+1 s never runs past the window end",
+    txrUnreadRange(from, to, new Date("2026-10-05T23:05:00Z")).to.toISOString() === to.toISOString(),
+  );
+  const m = txrMergeRanges([
+    { from: new Date("2026-10-04T10:00:00Z"), to: new Date("2026-10-04T11:00:00Z") },
+    { from: new Date("2026-10-05T17:00:00Z"), to: new Date("2026-10-05T18:00:00Z") },
+  ]);
+  check(
+    "two owed ranges merge into one covering span",
+    m?.from.toISOString() === "2026-10-04T10:00:00.000Z" && m?.to.toISOString() === "2026-10-05T18:00:00.000Z",
+    JSON.stringify(m),
+  );
+  check("no owed ranges ⇒ no gap", txrMergeRanges([]) === null);
+  const order = txrOutboundOrder(
+    [{ dashboard_id: "a" }, { dashboard_id: "b" }, { dashboard_id: "c" }],
+    new Map([
+      [txrPassKey("a", "S"), new Date("2026-10-06T10:00:00Z")],
+      [txrPassKey("b", "S"), new Date("2026-10-06T09:00:00Z")],
+    ]),
+  );
+  check("order: never-passed first, then oldest pass first", order.map((x) => x.dashboard_id).join() === "c,b,a", JSON.stringify(order));
+  check("budget: equal share of what is left", txrBudgetEnd(1000, 46000, 3) === 16000);
+  check("budget: past the deadline ⇒ no time at all", txrBudgetEnd(50000, 45000, 2) === 50000);
+  check("died: started after finished", txrPreviousRunDied(new Date("2026-10-06T10:15:00Z"), new Date("2026-10-06T10:00:40Z")) === true);
+  check("died: never finished at all", txrPreviousRunDied(new Date("2026-10-06T10:15:00Z"), null) === true);
+  check("not died: finished after started", txrPreviousRunDied(new Date("2026-10-06T10:15:00Z"), new Date("2026-10-06T10:15:41Z")) === false);
+  check("not died: first ever run", txrPreviousRunDied(null, null) === false);
+  check("alert once per streak", txrAlertTransition(true, false) === "alert" && txrAlertTransition(true, true) === "none");
+  check("recover once", txrAlertTransition(false, true) === "recover" && txrAlertTransition(false, false) === "none");
+  check("thresholds: outbound 4 runs, inbound 2 runs (+5 min slack)", txrPassThresholdMin("S") === 65 && txrPassThresholdMin("R") === 35);
+}
+
 async function main() {
   try {
     await db.transaction(async (tx) => {
@@ -139,17 +195,20 @@ async function main() {
 
       const org = await one<{ id: string }>(sql`SELECT id FROM organizations LIMIT 1`);
       const orgId = org.id;
-      const prov = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txr'`);
-      if (!prov) {
-        console.log("SKIP: no txr provider row (migration 0120 not applied).");
-        throw ROLLBACK;
-      }
-      const cred = await one<{ id: number }>(sql`
-        SELECT id FROM provider_credentials WHERE provider_id = ${prov.id} AND org_id = ${orgId} ORDER BY id LIMIT 1`);
-      if (!cred) {
-        console.log("SKIP: no txr credential row.");
-        throw ROLLBACK;
-      }
+      // The preview DB has no txr provider or credential, so this half used to
+      // SKIP there and exercised nothing. Create them inside this (rolled-back)
+      // transaction when absent.
+      const prov =
+        (await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txr'`)) ??
+        (await one<{ id: number }>(sql`
+          INSERT INTO sms_providers (org_id, sms_provider_id, name)
+          VALUES (${orgId}, 'txr', 'Text Request (test fixture)') RETURNING id`));
+      const cred =
+        (await one<{ id: number }>(sql`
+          SELECT id FROM provider_credentials WHERE provider_id = ${prov.id} AND org_id = ${orgId} ORDER BY id LIMIT 1`)) ??
+        (await one<{ id: number }>(sql`
+          INSERT INTO provider_credentials (org_id, provider_id, api_key)
+          VALUES (${orgId}, ${prov.id}, 'test-fixture-key') RETURNING id`));
 
       // A txr sending number bound to that credential + a dashboard. Phone 114
       // (dashboard 68093) is configured and LIVE in production now, so the poll
@@ -194,6 +253,13 @@ async function main() {
         (f: TxrMessagesFetcher): TxrMessagesFetcher =>
         async (o) =>
           o.dashboardId === dashboardId ? f(o) : { ok: true as const, items: [], totalItems: 0 };
+
+      // The poll now keeps per-dashboard state between runs (owed outbound
+      // ranges, pass stamps). A page-capped fixture run leaves an owed range
+      // that the NEXT call would read first, so blocks that assert exact counts
+      // start from a clean slate.
+      const clearPollState = () =>
+        tx.execute(sql`DELETE FROM cron_locks WHERE job_name LIKE ${"textrequest-poll:%"}`);
 
       // The real API filters by `message_direction` server-side, so the fixture
       // does too — otherwise each direction walk would see every row and the
@@ -344,6 +410,13 @@ async function main() {
       );
       check("blast: the outbound truncation is still reported", rBlast.truncated === true, JSON.stringify(rBlast));
 
+      check(
+        "blast: the outbound overflow is now an OWED range, not a silent drop",
+        rBlast.outbound_gaps.some((g) => g.dashboard_id === dashboardId),
+        JSON.stringify(rBlast.outbound_gaps),
+      );
+      await clearPollState();
+
       // ---- defense: TR SILENTLY IGNORES unknown params, so never trust the
       // server-side filter alone. If message_direction stopped being honored,
       // both walks would see every row — that must not double-process anything.
@@ -384,6 +457,7 @@ async function main() {
         fetchMessages: onlyFixture(async () => ({ ok: true as const, items: [rows[1]!], totalItems: 50 })),
       });
       check("page cap sets truncated=true", rTrunc.truncated === true, JSON.stringify(rTrunc));
+      await clearPollState();
 
       // A fetch failure must not throw out of the poll.
       const rFail = await pollTxrMessages(tx as unknown as typeof db, {
@@ -391,6 +465,82 @@ async function main() {
         fetchMessages: onlyFixture(async () => ({ ok: false as const, error: "HTTP 500" })),
       });
       check("fetch failure is reported, not thrown", rFail.error === "HTTP 500" && rFail.captured === 0, JSON.stringify(rFail));
+      check(
+        "fetch failure owes the whole window (nothing was read)",
+        rFail.outbound_gaps.some((g) => g.dashboard_id === dashboardId),
+        JSON.stringify(rFail.outbound_gaps),
+      );
+      await clearPollState();
+
+      // ---- time budget: a cut-short walk is LATE, never lossy (869fcqhcu) ----
+      // Three outbound pages, newest first. A fake clock advances 30 per fetch;
+      // the deadline leaves this dashboard a budget of 50, so it reads the head
+      // and page 1, then stops before page 2. The unread part must be recorded
+      // and read FIRST on the next run.
+      const iso = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString().slice(0, 19);
+      const budgetRows: TxrMessageRow[] = [30, 40, 50].map((ago, i) => ({
+        ...rows[0]!,
+        message_id: `guid-budget-${i}-${sfx}`,
+        message_timestamp_utc: iso(ago),
+      }));
+      // Dashboard 2 has a fresh pass stamp and dashboard 1 none ⇒ dashboard 1 walks first.
+      await tx.execute(sql`
+        INSERT INTO cron_locks (job_name, watermark) VALUES (${txrPassKey(dashboardId2, "S")}, now())`);
+      let fakeNow = 0;
+      const inWindow = (w: { start_date: string; end_date: string }) =>
+        budgetRows.filter((r) => {
+          const t = new Date(r.message_timestamp_utc + "Z").toISOString();
+          return t >= w.start_date && t <= w.end_date;
+        });
+      const budgetFetch: TxrMessagesFetcher = async (o) => {
+        if (o.dashboardId !== dashboardId || o.direction !== "S") return { ok: true as const, items: [], totalItems: 0 };
+        fakeNow += 30;
+        const rowsIn = inWindow(o.window);
+        return { ok: true as const, items: rowsIn.slice(o.page, o.page + 1), totalItems: rowsIn.length };
+      };
+      const rB1 = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        directions: ["S"],
+        pageSize: 1,
+        fetchMessages: budgetFetch,
+        clock: () => fakeNow,
+        deadlineAt: 100,
+      });
+      const w1 = rB1.walks.find((w) => w.dashboard_id === dashboardId && w.kind === "window");
+      check("budget: the walk stopped for time after 2 pages", w1?.stopped === "budget" && w1?.pages_read === 2, JSON.stringify(w1));
+      check("budget: the 2 pages read were captured", rB1.captured === 2, JSON.stringify(rB1));
+      const g1 = rB1.outbound_gaps.find((g) => g.dashboard_id === dashboardId);
+      const expectTo = new Date(new Date(budgetRows[1]!.message_timestamp_utc + "Z").getTime() + 1000).toISOString();
+      check("budget: owed range = [window start, oldest read + 1 s]", g1?.to === expectTo, JSON.stringify({ g1, expectTo }));
+      const passAfterCut = (await tx.execute(sql`
+        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "S")}`)) as unknown as unknown[];
+      check("budget: a cut-short dashboard does NOT get a pass stamp", passAfterCut.length === 0);
+
+      const firstWindows: string[] = [];
+      const rB2 = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        directions: ["S"],
+        pageSize: 1,
+        fetchMessages: async (o) => {
+          if (o.dashboardId === dashboardId && o.direction === "S" && o.page === 0) {
+            firstWindows.push(`${o.window.start_date}..${o.window.end_date}`);
+          }
+          return budgetFetch(o);
+        },
+      });
+      check("next run: the owed range is walked FIRST", firstWindows[0] === `${g1?.from}..${g1?.to}`, JSON.stringify({ firstWindows, g1 }));
+      check("next run: the unread oldest row is captured (1 new, the rest dupes)", rB2.captured === 1, JSON.stringify(rB2));
+      check(
+        "next run: no range owed any more",
+        !rB2.outbound_gaps.some((g) => g.dashboard_id === dashboardId),
+        JSON.stringify(rB2.outbound_gaps),
+      );
+      const passAfter = (await tx.execute(sql`
+        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "S")}`)) as unknown as unknown[];
+      check("next run: the dashboard gets its pass stamp back", passAfter.length === 1);
+      const owedRows = (await tx.execute(sql`
+        SELECT job_name FROM cron_locks WHERE job_name LIKE ${"textrequest-poll:gap-%:" + dashboardId}`)) as unknown as unknown[];
+      check("next run: the owed-range rows are deleted", owedRows.length === 0, JSON.stringify(owedRows));
 
       // ---- webhook health ----
       const ourUrl = `https://app.example.com/api/webhooks/textrequest/events/tok-${sfx}`;

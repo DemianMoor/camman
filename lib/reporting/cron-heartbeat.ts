@@ -48,6 +48,16 @@ export function awaitingFirstRunKey(jobName: string): string {
 }
 
 export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
+  // The Text Request poll (15-min). `finished` is stamped by the run's LAST step
+  // (lib/sends/textrequest-poll-health.ts), so a run killed at the 60 s limit
+  // does not refresh it. The poll alerts on its own dead runs within one
+  // interval; this catches the cron not firing at all. Watched by tells-monitors.
+  textrequestPoll: {
+    job_name: "textrequest-poll:finished",
+    max_age_hours: 0.75,
+    label: "Text Request poll (15-min)",
+    first_run_grace_hours: 0.5,
+  },
   // The drip scheduler (Phase 5). Watched by drip-monitors.
   dripScheduler: {
     job_name: "drip-scheduler",

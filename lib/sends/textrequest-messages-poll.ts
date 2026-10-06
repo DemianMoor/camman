@@ -4,7 +4,7 @@ import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 import { decryptCredentialKey } from "@/lib/sends/provider-credential";
 import { optOutBreakerAlertText, type OptOutRateCheckResult } from "@/lib/sends/optout-rate-breaker";
-import { captureTxrPollDlrEvent, reconcileTxrDlrEvent } from "@/lib/sends/textrequest-dlr";
+import { captureTxrPollDlrBatch, type TxrPollDlrBatchRow } from "@/lib/sends/textrequest-dlr";
 import { captureTxrInboundEvent, processTextrequestOptOut } from "@/lib/sends/textrequest-optout";
 import { textrequestBaseUrl } from "@/lib/sends/providers/textrequest";
 
@@ -216,6 +216,10 @@ export interface TxrMessagesPollResult {
   truncated: boolean; // a page cap bit somewhere
   sort_fallbacks: number; // walks that had to drop `sort=desc` and read oldest-first
   error: string | null;
+  /** Every walk this run made, with how far it got. */
+  walks: TxrPollWalkReport[];
+  /** Outbound ranges left owed after this run (read first on the next run). */
+  outbound_gaps: { dashboard_id: string; from: string; to: string }[];
 }
 
 interface TxrPollTarget {
@@ -284,6 +288,124 @@ export async function resolveTxrPollTargets(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Per-dashboard poll state (cron_locks rows — no migration; ClickUp 869fcqhcu)
+// ---------------------------------------------------------------------------
+//
+//   textrequest-poll:pass:<dashboard>:<R|S>  last time a walk of that dashboard
+//                                            and direction read EVERYTHING it
+//                                            was owed (alerts: textrequest-poll-health.ts)
+//   textrequest-poll:gap-from:<dashboard>    an outbound range a run was owed but
+//   textrequest-poll:gap-to:<dashboard>      did not finish reading (time budget,
+//                                            page cap or a failed page). Read
+//                                            FIRST on the next run, until empty.
+//
+// ⚠️ WHY THE GAP EXISTS. Each outbound walk now gets a time budget so one busy
+// dashboard cannot starve the others (on 2026-10-05 dashboard 68093 used the
+// whole 60 s every run and 68804 was never reached). A budget means a walk can
+// stop early — and before this, a walk that stopped early simply lost its oldest
+// pages: the next run starts from the newest again, and after 6 h those
+// messages leave the window for good. Recording the unread range and reading it
+// first next time means a cut-short walk is LATE, never lossy. Text Request
+// serves the full message history (verified 2026-10-06 back to the first send),
+// so an old gap is still readable.
+
+export function txrPassKey(dashboardId: string, direction: "R" | "S"): string {
+  return `textrequest-poll:pass:${dashboardId}:${direction}`;
+}
+const gapFromKey = (d: string) => `textrequest-poll:gap-from:${d}`;
+const gapToKey = (d: string) => `textrequest-poll:gap-to:${d}`;
+
+async function readStamps(database: typeof db, keys: string[]): Promise<Map<string, Date>> {
+  if (keys.length === 0) return new Map();
+  const rows = (await database.execute(sql`
+    SELECT job_name, watermark FROM cron_locks
+    WHERE job_name = ANY(${sql`ARRAY[${sql.join(keys.map((k) => sql`${k}`), sql`, `)}]::text[]`})
+      AND watermark IS NOT NULL
+  `)) as unknown as { job_name: string; watermark: string | Date }[];
+  return new Map(rows.map((r) => [r.job_name, new Date(r.watermark)]));
+}
+
+async function writeStamp(database: typeof db, key: string, at: Date): Promise<void> {
+  // Bound as text: postgres-js drops microseconds from a bound timestamptz, and
+  // these are compared, not displayed.
+  await database.execute(sql`
+    INSERT INTO cron_locks (job_name, watermark) VALUES (${key}, ${at.toISOString()}::timestamptz)
+    ON CONFLICT (job_name) DO UPDATE SET watermark = EXCLUDED.watermark
+  `);
+}
+
+async function deleteStamps(database: typeof db, keys: string[]): Promise<void> {
+  await database.execute(sql`
+    DELETE FROM cron_locks
+    WHERE job_name = ANY(${sql`ARRAY[${sql.join(keys.map((k) => sql`${k}`), sql`, `)}]::text[]`})
+  `);
+}
+
+export interface TxrRange {
+  from: Date;
+  to: Date;
+}
+
+/**
+ * What a walk still owes after stopping early. A sorted walk reads newest-first,
+ * so everything OLDER than the oldest row read is unread: [window start, oldest
+ * read + 1 s]. The second of overlap re-reads the boundary timestamp (cheap — the
+ * capture dedups) rather than risking a row that shares it. Nothing read at all ⇒
+ * the whole window. Pure.
+ */
+export function txrUnreadRange(walkFrom: Date, walkTo: Date, oldestRead: Date | null): TxrRange {
+  if (!oldestRead) return { from: walkFrom, to: walkTo };
+  const to = new Date(Math.min(walkTo.getTime(), oldestRead.getTime() + 1000));
+  return { from: walkFrom, to: to < walkFrom ? walkFrom : to };
+}
+
+/** One span covering every unread range (the middle may be re-read; dedup makes that free). Pure. */
+export function txrMergeRanges(ranges: TxrRange[]): TxrRange | null {
+  if (ranges.length === 0) return null;
+  return {
+    from: new Date(Math.min(...ranges.map((r) => r.from.getTime()))),
+    to: new Date(Math.max(...ranges.map((r) => r.to.getTime()))),
+  };
+}
+
+/**
+ * Outbound walk order: the dashboard whose last COMPLETE pass is oldest goes
+ * first; never-completed dashboards before all of them. Ties keep input order.
+ * Pure.
+ */
+export function txrOutboundOrder<T extends { dashboard_id: string }>(
+  targets: T[],
+  lastPass: Map<string, Date>,
+): T[] {
+  return targets
+    .map((t, i) => ({ t, i, at: lastPass.get(txrPassKey(t.dashboard_id, "S"))?.getTime() ?? -Infinity }))
+    .sort((a, b) => a.at - b.at || a.i - b.i)
+    .map((x) => x.t);
+}
+
+/**
+ * The time a dashboard's outbound walks may run until: an equal share of what is
+ * left before the deadline, split over the dashboards not yet walked. A
+ * dashboard that finishes early hands its unused time to the ones after it.
+ * Pure.
+ */
+export function txrBudgetEnd(nowMs: number, deadlineAt: number, dashboardsLeft: number): number {
+  return nowMs + Math.max(0, deadlineAt - nowMs) / Math.max(1, dashboardsLeft);
+}
+
+export interface TxrPollWalkReport {
+  dashboard_id: string;
+  direction: "R" | "S";
+  kind: "window" | "gap";
+  from: string;
+  to: string;
+  pages_read: number;
+  complete: boolean;
+  /** Why the walk stopped short; null when complete. */
+  stopped: null | "budget" | "page_cap" | "fetch_error" | "write_error";
+}
+
 export async function pollTxrMessages(
   database: typeof db,
   opts?: {
@@ -293,11 +415,21 @@ export async function pollTxrMessages(
     lookbackHours?: number;
     pageSize?: number;
     maxPages?: number;
+    /** Which walks to run. The cron runs inbound first, then the contacts poll
+     *  and webhook health, then outbound with the time that is left. Default both. */
+    directions?: ("R" | "S")[];
+    /** Epoch ms. Outbound pages are not started past it (split per dashboard).
+     *  Omitted (manual trigger, tests) ⇒ no budget. Inbound is never budgeted. */
+    deadlineAt?: number;
+    /** Injectable clock for the budget, so tests need not sleep. */
+    clock?: () => number;
   },
 ): Promise<TxrMessagesPollResult> {
   const fetchMessages = opts?.fetchMessages ?? realFetchTxrMessages;
   const pageSize = opts?.pageSize ?? PAGE_SIZE;
   const maxPages = opts?.maxPages ?? MAX_PAGES;
+  const clock = opts?.clock ?? Date.now;
+  const directions = opts?.directions ?? ["R", "S"];
   const window = computeTxrMessagesWindow(opts?.now ?? new Date(), opts?.lookbackHours);
   const targets = await resolveTxrPollTargets(database, { orgId: opts?.orgId });
 
@@ -317,42 +449,96 @@ export async function pollTxrMessages(
     truncated: false,
     sort_fallbacks: 0,
     error: null,
+    walks: [],
+    outbound_gaps: [],
   };
   const breakerTrips: { campaignId: number; result: OptOutRateCheckResult }[] = [];
-
-  // Outbound and inbound get their OWN walk, and their own page budget, so they
-  // can never compete for one: a big campaign must not push a STOP reply out of
-  // the read. INBOUND RUNS FIRST, and that ordering is load-bearing: the page
-  // budget is per-direction but the function budget (maxDuration 60s) is shared,
-  // and outbound is the big side — a 10K-message campaign takes several ticks
-  // to drain (measured 2026-08-20: five ticks, ~1,000-3,000 rows each, each one
-  // killed at 60s mid-walk). Outbound first would mean STOP intake never gets a
-  // turn for the whole campaign, which is the opposite of the split's purpose.
-  // Inbound is the small side (239 rows against 10,000 on 2026-08-21) and the
-  // compliance-critical one, so it goes first and always completes.
-  //
-  // ⚠️ DIRECTION IS THE OUTER LOOP, dashboards the inner one — every dashboard's
-  // inbound walk runs before ANY dashboard's outbound walk. It read the other
-  // way round until 2026-09-03 (`targets.flatMap(t => ["R","S"])`), which is the
-  // same thing only while a single dashboard exists. With two, dashboard A's
-  // 10K-row outbound walk sits ahead of dashboard B's inbound walk and eats the
-  // whole shared 60s budget before STOP intake for B gets a turn — and
-  // resolveTxrPollTargets has no ORDER BY, so which dashboard loses is
-  // arbitrary. Flattened to (direction x dashboard) pairs rather than nested so
-  // the row handling below keeps its shape. `message_direction` is honored
-  // server-side (verified live), but TR SILENTLY IGNORES unknown params, so the
-  // per-row direction checks below remain the real guard — if the filter ever
-  // stopped working, both walks would just see every row and capture dedupes.
-  const walks = (["R", "S"] as const).flatMap((direction) => targets.map((t) => ({ t, direction })));
   const dashboardsSeen = new Set<string>();
 
-  for (const { t, direction } of walks) {
+  // Inbound rows are the opt-out intake's business (Phase 4 signal 3a) — the
+  // backstop for a lost or disconnected msg_received hook. They go to
+  // textrequest_inbound_events, never the DLR table, and stay ONE TRANSACTION
+  // PER ROW: each can trip the opt-out-rate breaker, volume is small, and this
+  // is the compliance path — it is not what timed out.
+  const handleInbound = async (t: TxrPollTarget, m: TxrMessageRow) => {
+    res.inbound_seen++;
+    try {
+      const outcome = await database.transaction(async (tx) => {
+        const captured = await captureTxrInboundEvent(tx, {
+          orgId: t.org_id,
+          credentialId: t.credential_id,
+          providerId: t.provider_id,
+          channel: "poll_messages",
+          method: "poll",
+          sourceNumber: m.customer_phone,
+          destinationNumber: m.dashboard_phone,
+          message: m.body,
+          // Same GUID the msg_received webhook carries, so whichever
+          // channel arrives second is dropped by the unique index rather
+          // than double-writing the opt-out.
+          providerUuid: m.message_id,
+          optedOutUtc: null,
+          rawBody: JSON.stringify(m),
+          receivedAt: parseTxrUtcTimestamp(m.message_timestamp_utc) ?? new Date(),
+        });
+        if (!captured) return { kind: "dupe" as const };
+        const r = await processTextrequestOptOut(tx, {
+          eventId: captured.id,
+          orgId: t.org_id,
+          sourceNumber: m.customer_phone,
+          message: m.body,
+          channel: "poll_messages",
+          receivedAt: parseTxrUtcTimestamp(m.message_timestamp_utc) ?? new Date(),
+        });
+        return { kind: "new" as const, res: r };
+      });
+      if (outcome.kind === "dupe") res.inbound_dupe++;
+      else {
+        res.inbound_captured++;
+        if (outcome.res.kind === "suppressed") {
+          res.inbound_suppressed++;
+          if (outcome.res.breakerTrip) breakerTrips.push(outcome.res.breakerTrip);
+        }
+      }
+    } catch (e) {
+      console.error("[textrequest-messages-poll] inbound row failed, will retry next tick:", e);
+    }
+  };
+
+  // One walk of one (dashboard, direction) over [w.start_date, w.end_date],
+  // newest-first. Returns whether everything was read and, if not, the oldest
+  // row it did read (txrUnreadRange turns that into the owed range).
+  const walk = async (
+    t: TxrPollTarget,
+    direction: "R" | "S",
+    w: TxrMessagesWindow,
+    kind: "window" | "gap",
+    budgetEnd: number | null,
+  ): Promise<{ complete: boolean; oldestRead: Date | null }> => {
     if (!dashboardsSeen.has(t.dashboard_id)) {
       dashboardsSeen.add(t.dashboard_id);
       res.dashboards_polled++;
     }
+    const report: TxrPollWalkReport = {
+      dashboard_id: t.dashboard_id,
+      direction,
+      kind,
+      from: w.start_date,
+      to: w.end_date,
+      pages_read: 0,
+      complete: false,
+      stopped: null,
+    };
+    res.walks.push(report);
+    const outOfTime = () => budgetEnd !== null && clock() >= budgetEnd;
+    let oldestRead: Date | null = null;
+    if (outOfTime()) {
+      report.stopped = "budget";
+      return { complete: false, oldestRead };
+    }
+
     const label = direction === "S" ? "outbound" : "inbound";
-    const req = { apiKey: t.api_key, dashboardId: t.dashboard_id, window, pageSize, direction };
+    const req = { apiKey: t.api_key, dashboardId: t.dashboard_id, window: w, pageSize, direction };
 
     // Ask for newest-first explicitly instead of relying on TR's default order,
     // so page 0 is the newest page whatever meta.total_items says. Page 0
@@ -373,149 +559,161 @@ export async function pollTxrMessages(
     }
     if (!head.ok) {
       res.error = head.error;
+      report.stopped = "fetch_error";
       await notifyTelegram(
         `⚠️ Text Request messages poll FAILED (DLR reconcile backstop down)\n` +
           `error: ${head.error}\ncredential ${t.credential_id} · dashboard ${t.dashboard_id} (${label})`,
       ).catch(() => {});
-      continue;
+      return { complete: false, oldestRead };
     }
 
-    const walk = sort
+    const plan = sort
       ? planTxrSortedWalk(head.totalItems, pageSize, maxPages)
       : planTxrPageWalk(head.totalItems, pageSize, maxPages);
-    if (walk.truncated) {
+    if (plan.truncated) {
       res.truncated = true;
       // Never a silent cap: say exactly what was skipped and why.
       const pagesTotal = Math.ceil(head.totalItems / pageSize);
+      const fate =
+        direction === "S"
+          ? "Oldest pages are recorded as a backlog and read first on the next run."
+          : "Oldest pages skipped (already covered by earlier ticks).";
       console.warn(
-        `[textrequest-messages-poll] page cap hit — dashboard ${t.dashboard_id} (${label}): ` +
-          `${head.totalItems} messages across ${pagesTotal} pages, reading the newest ${maxPages}. ` +
-          `Oldest ${pagesTotal - maxPages} page(s) skipped (already covered by earlier ticks).`,
+        `[textrequest-messages-poll] page cap hit — dashboard ${t.dashboard_id} (${label}, ${kind}): ` +
+          `${head.totalItems} messages across ${pagesTotal} pages, reading the newest ${maxPages}. ${fate}`,
       );
       await notifyTelegram(
         `⚠️ Text Request messages poll hit its page cap\n` +
-          `dashboard ${t.dashboard_id} (${label}): ${head.totalItems} messages in the ${
-            opts?.lookbackHours ?? DEFAULT_LOOKBACK_HOURS
-          }h window (${pagesTotal} pages, cap ${maxPages}).\n` +
-          `Newest pages were read; oldest skipped. Consider a shorter lookback or a higher cap.`,
+          `dashboard ${t.dashboard_id} (${label}, ${kind}): ${head.totalItems} messages ` +
+          `(${pagesTotal} pages, cap ${maxPages}).\nNewest pages were read. ${fate}`,
       ).catch(() => {});
     }
 
-    for (const page of walk.pages) {
+    for (const page of plan.pages) {
       // Page 0's rows are already in hand from the head request — under
       // sort=desc it is the first page of the walk, so it is always reusable.
-      const pageRes =
-        page === 0 && (sort || walk.pages.length === 1)
-          ? head
-          : await fetchMessages({ ...req, page, sort });
+      const reuseHead = page === 0 && (sort || plan.pages.length === 1);
+      if (!reuseHead && outOfTime()) {
+        report.stopped = "budget";
+        return { complete: false, oldestRead };
+      }
+      const pageRes = reuseHead ? head : await fetchMessages({ ...req, page, sort });
       if (!pageRes.ok) {
+        // Stop the walk rather than skip the page: the walk reads newest-first,
+        // and "everything older than the oldest row read is owed" only holds if
+        // no page in between was skipped.
         res.error = pageRes.error;
+        report.stopped = "fetch_error";
         console.warn(
           `[textrequest-messages-poll] page ${page} failed for dashboard ${t.dashboard_id}: ${pageRes.error}`,
         );
-        continue;
+        return { complete: false, oldestRead };
       }
       res.fetched += pageRes.items.length;
 
+      const batch: TxrPollDlrBatchRow[] = [];
       for (const m of pageRes.items) {
-        // Inbound rows are the opt-out intake's business (Phase 4 signal 3a) —
-        // the backstop for a lost or disconnected msg_received hook. They go to
-        // textrequest_inbound_events, never the DLR table.
         if (m.message_direction === "R") {
-          res.inbound_seen++;
-          try {
-            const outcome = await database.transaction(async (tx) => {
-              const captured = await captureTxrInboundEvent(tx, {
-                orgId: t.org_id,
-                credentialId: t.credential_id,
-                providerId: t.provider_id,
-                channel: "poll_messages",
-                method: "poll",
-                sourceNumber: m.customer_phone,
-                destinationNumber: m.dashboard_phone,
-                message: m.body,
-                // Same GUID the msg_received webhook carries, so whichever
-                // channel arrives second is dropped by the unique index rather
-                // than double-writing the opt-out.
-                providerUuid: m.message_id,
-                optedOutUtc: null,
-                rawBody: JSON.stringify(m),
-                receivedAt: parseTxrUtcTimestamp(m.message_timestamp_utc) ?? new Date(),
-              });
-              if (!captured) return { kind: "dupe" as const };
-              const r = await processTextrequestOptOut(tx, {
-                eventId: captured.id,
-                orgId: t.org_id,
-                sourceNumber: m.customer_phone,
-                message: m.body,
-                channel: "poll_messages",
-                receivedAt: parseTxrUtcTimestamp(m.message_timestamp_utc) ?? new Date(),
-              });
-              return { kind: "new" as const, res: r };
-            });
-            if (outcome.kind === "dupe") res.inbound_dupe++;
-            else {
-              res.inbound_captured++;
-              if (outcome.res.kind === "suppressed") {
-                res.inbound_suppressed++;
-                if (outcome.res.breakerTrip) breakerTrips.push(outcome.res.breakerTrip);
-              }
-            }
-          } catch (e) {
-            console.error("[textrequest-messages-poll] inbound row failed, will retry next tick:", e);
-          }
+          await handleInbound(t, m);
           continue;
         }
         // Outbound rows carry the delivery facts the DLR backstop exists for.
         if (m.message_direction !== "S") continue;
         // A null delivery_status carries no DLR information AND would defeat the
         // poll's uniqueness key (NULLs are distinct in a Postgres unique index),
-        // so it is skipped rather than captured — see captureTxrPollDlrEvent.
+        // so it is skipped rather than captured.
         if (!m.delivery_status) continue;
         res.outbound_with_status++;
-
+        batch.push({
+          messageId: m.message_id,
+          status: m.delivery_status.trim().toLowerCase(),
+          // The list endpoint spells this `delivery_error`; the webhook spells
+          // the same fact `errorCode`. Both land in error_code.
+          errorCode: m.delivery_error ?? null,
+          rawBody: JSON.stringify(m),
+        });
+      }
+      if (batch.length > 0) {
         try {
-          // Capture + reconcile atomically per row, mirroring pollAhoiCdr: if
-          // reconcile throws, the capture rolls back too, so the same message is
-          // naturally re-read and retried on the next tick.
-          const outcome = await database.transaction(async (tx) => {
-            const captured = await captureTxrPollDlrEvent(tx, {
-              orgId: t.org_id,
-              credentialId: t.credential_id,
-              providerId: t.provider_id,
-              method: "poll",
-              query: { dashboard_id: t.dashboard_id, start_date: window.start_date, end_date: window.end_date },
-              headers: {},
-              rawBody: JSON.stringify(m),
-              stageSendId: null,
-              parsed: {
-                messageId: m.message_id,
-                status: m.delivery_status!.trim().toLowerCase(),
-                // The list endpoint spells this `delivery_error`; the webhook
-                // spells the same fact `errorCode`. Both land in error_code.
-                errorCode: m.delivery_error ?? null,
-              },
-            });
-            if (!captured) return { kind: "dupe" as const };
-            // No ?ss= on this channel — reconcile falls back to
-            // message_id -> stage_sends.texthub_message_id.
-            const r = await reconcileTxrDlrEvent(tx, {
-              eventId: captured.id,
-              orgId: t.org_id,
-              stageSendId: null,
-              messageId: m.message_id,
-            });
-            return { kind: "new" as const, result: r.result };
+          // One statement per page: capture + match (see captureTxrPollDlrBatch).
+          // No ?ss= on this channel — the match is message_id ->
+          // stage_sends.texthub_message_id.
+          const b = await captureTxrPollDlrBatch(database, {
+            orgId: t.org_id,
+            credentialId: t.credential_id,
+            providerId: t.provider_id,
+            query: { dashboard_id: t.dashboard_id, start_date: w.start_date, end_date: w.end_date },
+            rows: batch,
           });
-          if (outcome.kind === "dupe") res.dupe++;
-          else {
-            res.captured++;
-            if (outcome.result === "matched") res.matched++;
-            else res.unmatched++;
-          }
+          res.captured += b.captured;
+          res.dupe += b.dupe;
+          res.matched += b.matched;
+          res.unmatched += b.unmatched;
         } catch (e) {
-          console.error("[textrequest-messages-poll] row failed, will retry next tick:", e);
+          // The page is NOT counted as read, so its range stays owed and is
+          // retried — a failed write must not advance the walk past it.
+          console.error("[textrequest-messages-poll] page write failed, will retry next run:", e);
+          report.stopped = "write_error";
+          return { complete: false, oldestRead };
         }
+      }
+      for (const m of pageRes.items) {
+        const ts = parseTxrUtcTimestamp(m.message_timestamp_utc);
+        if (ts && (!oldestRead || ts < oldestRead)) oldestRead = ts;
+      }
+      report.pages_read++;
+    }
+    if (plan.truncated) {
+      report.stopped = "page_cap";
+      return { complete: false, oldestRead };
+    }
+    report.complete = true;
+    return { complete: true, oldestRead };
+  };
+
+  // Inbound first, every dashboard, unbudgeted — the compliance side.
+  if (directions.includes("R")) {
+    for (const t of targets) {
+      const r = await walk(t, "R", window, "window", null);
+      if (r.complete) await writeStamp(database, txrPassKey(t.dashboard_id, "R"), new Date());
+    }
+  }
+
+  if (directions.includes("S")) {
+    const dashboards = [...new Set(targets.map((t) => t.dashboard_id))];
+    const state = await readStamps(database, [
+      ...dashboards.map((d) => txrPassKey(d, "S")),
+      ...dashboards.flatMap((d) => [gapFromKey(d), gapToKey(d)]),
+    ]);
+    const order = txrOutboundOrder(targets, state);
+    for (let i = 0; i < order.length; i++) {
+      const t = order[i];
+      const budgetEnd =
+        opts?.deadlineAt === undefined ? null : txrBudgetEnd(clock(), opts.deadlineAt, order.length - i);
+      const owed: TxrRange[] = [];
+      const gFrom = state.get(gapFromKey(t.dashboard_id));
+      const gTo = state.get(gapToKey(t.dashboard_id));
+      if (gFrom && gTo) {
+        const gw = { start_date: gFrom.toISOString(), end_date: gTo.toISOString() };
+        const g = await walk(t, "S", gw, "gap", budgetEnd);
+        if (!g.complete) owed.push(txrUnreadRange(gFrom, gTo, g.oldestRead));
+      }
+      const r = await walk(t, "S", window, "window", budgetEnd);
+      if (!r.complete) {
+        owed.push(txrUnreadRange(new Date(window.start_date), new Date(window.end_date), r.oldestRead));
+      }
+      const gap = txrMergeRanges(owed);
+      if (gap) {
+        await writeStamp(database, gapFromKey(t.dashboard_id), gap.from);
+        await writeStamp(database, gapToKey(t.dashboard_id), gap.to);
+        res.outbound_gaps.push({
+          dashboard_id: t.dashboard_id,
+          from: gap.from.toISOString(),
+          to: gap.to.toISOString(),
+        });
+      } else {
+        await deleteStamps(database, [gapFromKey(t.dashboard_id), gapToKey(t.dashboard_id)]);
+        await writeStamp(database, txrPassKey(t.dashboard_id, "S"), new Date());
       }
     }
   }

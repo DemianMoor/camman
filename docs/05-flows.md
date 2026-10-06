@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-05_
+_Last updated: 2026-10-06_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -277,10 +277,17 @@ sequenceDiagram
   Hook->>Hook: errorCode 2100 ⇒ opt-out (E7 signal 4a)
   Hook-->>TR: 200 ALWAYS (a non-2XX counts toward TR's 10-strike hook disconnect)
   Note over Drain,Hook: no inbound_webhook_token or no origin ⇒ NO status_callback is requested at all; the poll is then the only reconciler
-  Cron->>TR: GET /dashboards/{id}/messages?start_date&end_date&page&page_size
-  TR-->>Cron: {items (oldest→newest), meta{total_items}}
-  Cron->>Cron: read page 0 for total_items, then walk pages BACKWARDS (newest first)
-  Cron->>DB: INSERT textrequest_dlr_events (method='poll') ON CONFLICT (provider_id,message_id,status) DO NOTHING
+  Cron->>DB: stamp textrequest-poll:started (previous run never finished ⇒ Telegram "did not finish", once per streak)
+  Cron->>TR: inbound walks, every dashboard (message_direction=R) — unbudgeted, per-row opt-out processing (E7)
+  Cron->>TR: contacts poll · webhook health (before outbound, so a slow outbound walk can't skip them)
+  Cron->>DB: read pass stamps + owed ranges (cron_locks textrequest-poll:pass|gap-from|gap-to:*)
+  loop each dashboard — oldest complete pass first — equal share of the time left before 45 s
+    Cron->>TR: GET /dashboards/{id}/messages (S, sort=desc, page_size 1000): owed range first, then the 6 h window
+    Cron->>DB: ONE INSERT…SELECT per page (method='poll') ON CONFLICT (provider_id,message_id,status) DO NOTHING, matched via texthub_message_id
+    Cron->>DB: walk stopped (time, page cap, failed page or write) ⇒ owed range = [start, oldest read + 1 s]; all read ⇒ pass stamp, owed range cleared
+  end
+  Cron->>DB: pass-age check (outbound > 4 runs, inbound > 2 runs ⇒ Telegram once per streak) · stamp textrequest-poll:finished
+  Note over Cron,DB: tells-monitors (hourly) also watches textrequest-poll:finished (45 min) for a cron that stops firing
 ```
 
 ## E7. Text Request opt-out intake — 4 signals converge on `opt_outs`

@@ -129,12 +129,19 @@ export async function runDripRoutingBatch(now: Date = new Date()): Promise<Routi
           // unroutable lead matched NOTHING, so naming a campaign would inflate
           // that campaign's journey count and lie to the debugging tool. The
           // 0163 CHECK permits NULL only for this state.
+          //
+          // ⚠️ closed_at is REQUIRED: drip_journeys_closed_at_check demands it on
+          // every state other than routed/active, and 'unroutable' is terminal.
+          // Without it this INSERT fails 23514 and throws out of the batch — and
+          // since candidates are oldest-first, the same aged-out lead heads every
+          // batch, so ONE unroutable lead stopped all routing (2026-10-06).
           await db.execute(sql`
             INSERT INTO drip_journeys
-              (org_id, campaign_id, contact_id, lead_event_id, state, routed_at, reason)
+              (org_id, campaign_id, contact_id, lead_event_id, state, routed_at, closed_at, reason)
             VALUES (${orgId}::uuid, NULL, ${verdict.contact_id}::uuid,
                     ${verdict.lead_event_id}::uuid, 'unroutable',
-                    ${now.toISOString()}::timestamptz, ${JSON.stringify(reason)}::jsonb)
+                    ${now.toISOString()}::timestamptz, ${now.toISOString()}::timestamptz,
+                    ${JSON.stringify(reason)}::jsonb)
           `);
           res.markedUnroutable++;
         } catch (e) {

@@ -4547,6 +4547,18 @@ campaign config panel, and the stage window fields reused them, so each
 label focused the campaign's date picker. The stage fields are now
 `drip-window-start` / `drip-window-end`.
 
+## Delivery "matured" has two thresholds, on purpose (2026-10-06, card 869fchavb)
+
+The undelivered tripwire matures a send at **10 min** (`DLR_MATURITY_MINUTES`, lib/sends/tells-monitors.ts); the campaign Activity cards at **60 min** (`ACTIVITY_DLR_MATURITY_MINUTES`, lib/reporting/campaign-activity.ts). The tripwire wants an early alarm; a card that an operator reads as a count wants the bucket to be right — at 10 min ~8% of tls receipts have not landed yet and would show as No status. Measured share of first final receipts within 1 h: tls 98.7%, txr 97.1%, ahi 99.2%. Don't "unify" them. txr's reconcile-poll tail (p99 ≈ 29 h) is not covered by either: No status on a txr campaign keeps shrinking for a day or more.
+
+## `queryDeliveryByStage` with ONE stage misplans to a nested loop (2026-10-06)
+
+With `stageIds` of a single stage, the sends side's BitmapAnd estimates ~7 rows (4,491 actual on campaign 1595) and the planner nested-loops them over every receipt group in the window: 131M join-filter comparisons, 8–12 s. Two stages estimate higher and hash-join in 0.25 s. The Activity route runs it inside a transaction with `SET LOCAL enable_nestloop = off` (~0.35 s, identical rows — `scripts/verify-delivery-grains.ts` re-proves the equality). Any NEW per-stage caller needs the same; the undelivered tripwire still runs the default plan.
+
+## `stage_sends.status = 'rejected'` is not a provider rejection
+
+It is an operator-canceled / recalled send kept for audit (`…/send/abort`). A send that errored at the provider is `failed`. Card and column names must not call `failed` "rejected".
+
 ## A poll that writes one transaction per row cannot keep up (2026-10-06, card 869fcqhcu)
 
 Measured on the Text Request messages poll: one transaction + ~4 round trips per row through the transaction pooler = **~200 ms per row** (3,196 rows in 629 s). A 1,000-row page is ~200 s against a 60 s function limit, so the poll timed out on every run of a busy night and nothing said so. A page of capture + match is one `INSERT … SELECT FROM jsonb_to_recordset(…) ON CONFLICT … DO NOTHING` with the match resolved by a `LEFT JOIN LATERAL` before the insert (a data-modifying CTE cannot UPDATE rows a sibling CTE inserted in the same statement). Same result, 1.8 s. Keep compliance paths that can trip a breaker per row; batch the bulk side.

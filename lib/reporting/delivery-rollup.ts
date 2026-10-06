@@ -221,7 +221,10 @@ export async function readDeliveryRollup(
   dbc: DbOrTx,
   orgId: string,
   range: EtDayRange,
+  /** Restrict to these stages (the campaign Activity block). Omit for the whole org. */
+  stageIds?: number[],
 ): Promise<DeliveryStageRow[]> {
+  if (stageIds?.length === 0) return [];
   const rows = (await dbc.execute(sql`
     SELECT stage_id, provider_phone_id,
            sum(sent)::int        AS sent,
@@ -231,6 +234,14 @@ export async function readDeliveryRollup(
     FROM stage_delivery_rollup
     WHERE org_id = ${orgId}::uuid
       AND sent_date_et BETWEEN ${range.from}::date AND ${range.to}::date
+      ${
+        stageIds
+          ? sql`AND stage_id = ANY(${sql`ARRAY[${sql.join(
+              stageIds.map((id) => sql`${id}`),
+              sql`, `,
+            )}]::int[]`})`
+          : sql``
+      }
     GROUP BY 1, 2
   `)) as unknown as Record<string, unknown>[];
   return rows.map((r) => ({
@@ -250,8 +261,12 @@ export async function readDeliveryRollup(
  * matured sends — a day-grain rollup cannot express either) and for the
  * nightly reconciliation that checks this table against it.
  */
-export async function getDeliveryByStage(orgId: string, range: EtDayRange): Promise<DeliveryStageRow[]> {
-  return readDeliveryRollup(db, orgId, range);
+export async function getDeliveryByStage(
+  orgId: string,
+  range: EtDayRange,
+  stageIds?: number[],
+): Promise<DeliveryStageRow[]> {
+  return readDeliveryRollup(db, orgId, range, stageIds);
 }
 
 /** A tier-A heartbeat older than this means the 10-minute refresh has missed ~3 runs. */

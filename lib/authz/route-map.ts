@@ -251,6 +251,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // ── drip ─────────────────────────────────────────────────────────────
   "drip/why-not-routed": null, // drip / partner intake -- hidden from the operator
 
+  // ── event-types ─────────────────────────────────────────────────────────────
+  // Read-only list feeding the conversion mapping dialog on Affiliate Networks.
+  "event-types": { methods: ["GET"] },
+
   // ── intake ─────────────────────────────────────────────────────────────
   "intake/leads/[token]": null, // drip / partner intake -- hidden from the operator
 
@@ -282,6 +286,9 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "networks": { methods: ["GET"] },
   "networks/[id]": { methods: ["GET"] },
   "networks/[id]/archive": null, // not granted by the access matrix
+  "networks/[id]/mappings": { methods: ["GET"] }, // conversion mapping dialog, view-only; POST (add rule) stays denied
+  "networks/[id]/mappings/[mappingId]": null, // edit rule -- registry write, not granted by the matrix
+  "networks/[id]/mappings/[mappingId]/archive": null, // deactivate rule -- registry write, not granted by the matrix
   "networks/[id]/restore": null, // not granted by the access matrix
   "networks/list": { methods: ["GET"], token: ["GET"] },
 

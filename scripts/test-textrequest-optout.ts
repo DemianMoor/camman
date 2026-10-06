@@ -116,13 +116,20 @@ async function main() {
 
       const org = await one<{ id: string }>(sql`SELECT id FROM organizations LIMIT 1`);
       const orgId = org.id;
-      const prov = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txr'`);
-      const cred = await one<{ id: number }>(sql`
-        SELECT id FROM provider_credentials WHERE provider_id = ${prov.id} AND org_id = ${orgId} ORDER BY id LIMIT 1`);
-      if (!prov || !cred) {
-        console.log("SKIP: txr provider/credential missing.");
-        throw ROLLBACK;
-      }
+      // The preview DB has no txr provider or credential. This used to read
+      // prov.id before its own SKIP check and crash there, so the DB half never
+      // ran on preview. Create them inside this (rolled-back) transaction.
+      const prov =
+        (await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txr'`)) ??
+        (await one<{ id: number }>(sql`
+          INSERT INTO sms_providers (org_id, sms_provider_id, name)
+          VALUES (${orgId}, 'txr', 'Text Request (test fixture)') RETURNING id`));
+      const cred =
+        (await one<{ id: number }>(sql`
+          SELECT id FROM provider_credentials WHERE provider_id = ${prov.id} AND org_id = ${orgId} ORDER BY id LIMIT 1`)) ??
+        (await one<{ id: number }>(sql`
+          INSERT INTO provider_credentials (org_id, provider_id, api_key)
+          VALUES (${orgId}, ${prov.id}, 'test-fixture-key') RETURNING id`));
 
       const dashboardId = `d${sfx}`;
       // Phone 114 (dashboard 68093) is CONFIGURED and live in production, so the

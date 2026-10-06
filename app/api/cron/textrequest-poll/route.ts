@@ -4,9 +4,7 @@ import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { can } from "@/lib/permissions";
-import { pollTxrOptedOutContacts } from "@/lib/sends/textrequest-contacts-poll";
-import { checkTxrWebhookHealth } from "@/lib/sends/textrequest-hooks";
-import { pollTxrMessages } from "@/lib/sends/textrequest-messages-poll";
+import { defaultTxrPollSteps, runTxrPollTick } from "@/lib/sends/textrequest-poll-run";
 
 // Text Request poll tick (Phases 3b + 4) — three jobs behind one cron entry:
 //   1. messages poll: DLR reconciliation backstop for the per-message
@@ -26,17 +24,24 @@ import { pollTxrMessages } from "@/lib/sends/textrequest-messages-poll";
 // Every step runs even if an earlier one errored (each reports its own failure
 // and alerts internally) — the opt-out paths are compliance-critical, so one
 // dashboard's outage must not skip the rest of the work.
+//
+// ⚠️ ORDER AND DEADLINE (ClickUp 869fcqhcu). Until 2026-10-06 the messages poll
+// ran first and unbudgeted; on the night of 2026-10-05 it hit the 60 s limit on
+// 25 runs in a row, so the contacts opt-out backstop and webhook health — which
+// ran after it — did not run at all. Now: inbound walks (STOP backstop) →
+// contacts poll → webhook health → outbound walks. Inbound gets 20 s, outbound
+// the time left before 45 s (lib/sends/textrequest-poll-run.ts). A walk that
+// runs out of time records what it owes and reads it first next run
+// (lib/sends/textrequest-messages-poll.ts) — cron runs only.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-async function run(orgId?: string) {
-  const poll = await pollTxrMessages(db, { orgId });
-  const contacts = await pollTxrOptedOutContacts(db, { orgId });
-  const health = await checkTxrWebhookHealth(db, { orgId });
-  return { poll, contacts, health };
+function run(startedAt: number, orgId: string | undefined, cron: boolean) {
+  return runTxrPollTick(defaultTxrPollSteps(db, { orgId, stateful: cron }), { cron, startedAt });
 }
 
 async function handle(req: NextRequest): Promise<NextResponse> {
+  const startedAt = Date.now();
   const secret = process.env.CRON_SECRET;
   const bearerMatches = !!secret && req.headers.get("authorization") === `Bearer ${secret}`;
 
@@ -51,7 +56,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
 
   if (bearerMatches) {
-    const leased = await withCronLease("textrequest-poll", () => run(orgId));
+    const leased = await withCronLease("textrequest-poll", () => run(startedAt, orgId, true));
     if (!leased.ran) {
       return NextResponse.json({
         skipped: true,
@@ -62,7 +67,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json(leased.result);
   }
 
-  return NextResponse.json(await run(orgId));
+  return NextResponse.json(await run(startedAt, orgId, false));
 }
 
 export async function GET(req: NextRequest) {

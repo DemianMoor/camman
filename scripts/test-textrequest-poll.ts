@@ -20,11 +20,21 @@ import { db, sql as pgConn } from "@/db/client";
 import { applyTxrMigrationsInTx, isLockContentionError } from "./_txr-migration-fixture";
 import { checkTxrWebhookHealth, type TxrHook } from "@/lib/sends/textrequest-hooks";
 import {
+  txrAlertTransition,
+  txrPassThresholdMin,
+  txrPreviousRunDied,
+} from "@/lib/sends/textrequest-poll-health";
+import {
   computeTxrMessagesWindow,
   parseTxrUtcTimestamp,
   planTxrPageWalk,
   planTxrSortedWalk,
   pollTxrMessages,
+  txrBudgetEnd,
+  txrMergeRanges,
+  txrWalkOrder,
+  txrPassKey,
+  txrUnreadRange,
   type TxrMessageRow,
   type TxrMessagesFetcher,
 } from "@/lib/sends/textrequest-messages-poll";
@@ -115,6 +125,53 @@ check(
 );
 
 // ---------- 2. DB-BACKED (rolled back) ----------
+// ---------- 1b. PURE: owed ranges, outbound order, budget, run health (869fcqhcu) ----------
+console.log("— pure: owed ranges, outbound order, budget, run health —");
+{
+  const from = new Date("2026-10-05T17:00:00Z");
+  const to = new Date("2026-10-05T23:05:00Z");
+  const u = txrUnreadRange(from, to, new Date("2026-10-05T23:01:30Z"));
+  check(
+    "unread = [window start, oldest read + 1 s]",
+    u.from.toISOString() === from.toISOString() && u.to.toISOString() === "2026-10-05T23:01:31.000Z",
+    JSON.stringify(u),
+  );
+  const none = txrUnreadRange(from, to, null);
+  check("nothing read ⇒ the whole window is owed", none.from === from && none.to === to);
+  check(
+    "+1 s never runs past the window end",
+    txrUnreadRange(from, to, new Date("2026-10-05T23:05:00Z")).to.toISOString() === to.toISOString(),
+  );
+  const m = txrMergeRanges([
+    { from: new Date("2026-10-04T10:00:00Z"), to: new Date("2026-10-04T11:00:00Z") },
+    { from: new Date("2026-10-05T17:00:00Z"), to: new Date("2026-10-05T18:00:00Z") },
+  ]);
+  check(
+    "two owed ranges merge into one covering span",
+    m?.from.toISOString() === "2026-10-04T10:00:00.000Z" && m?.to.toISOString() === "2026-10-05T18:00:00.000Z",
+    JSON.stringify(m),
+  );
+  check("no owed ranges ⇒ no gap", txrMergeRanges([]) === null);
+  const order = txrWalkOrder(
+    [{ dashboard_id: "a" }, { dashboard_id: "b" }, { dashboard_id: "c" }],
+    new Map([
+      [txrPassKey("a", "S"), new Date("2026-10-06T10:00:00Z")],
+      [txrPassKey("b", "S"), new Date("2026-10-06T09:00:00Z")],
+    ]),
+    "S",
+  );
+  check("order: never-passed first, then oldest pass first", order.map((x) => x.dashboard_id).join() === "c,b,a", JSON.stringify(order));
+  check("budget: equal share of what is left", txrBudgetEnd(1000, 46000, 3) === 16000);
+  check("budget: past the deadline ⇒ no time at all", txrBudgetEnd(50000, 45000, 2) === 50000);
+  check("died: started after finished", txrPreviousRunDied(new Date("2026-10-06T10:15:00Z"), new Date("2026-10-06T10:00:40Z")) === true);
+  check("died: never finished at all", txrPreviousRunDied(new Date("2026-10-06T10:15:00Z"), null) === true);
+  check("not died: finished after started", txrPreviousRunDied(new Date("2026-10-06T10:15:00Z"), new Date("2026-10-06T10:15:41Z")) === false);
+  check("not died: first ever run", txrPreviousRunDied(null, null) === false);
+  check("alert once per streak", txrAlertTransition(true, false) === "alert" && txrAlertTransition(true, true) === "none");
+  check("recover once", txrAlertTransition(false, true) === "recover" && txrAlertTransition(false, false) === "none");
+  check("thresholds: outbound 4 runs, inbound 2 runs (+5 min slack)", txrPassThresholdMin("S") === 65 && txrPassThresholdMin("R") === 35);
+}
+
 async function main() {
   try {
     await db.transaction(async (tx) => {
@@ -139,17 +196,20 @@ async function main() {
 
       const org = await one<{ id: string }>(sql`SELECT id FROM organizations LIMIT 1`);
       const orgId = org.id;
-      const prov = await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txr'`);
-      if (!prov) {
-        console.log("SKIP: no txr provider row (migration 0120 not applied).");
-        throw ROLLBACK;
-      }
-      const cred = await one<{ id: number }>(sql`
-        SELECT id FROM provider_credentials WHERE provider_id = ${prov.id} AND org_id = ${orgId} ORDER BY id LIMIT 1`);
-      if (!cred) {
-        console.log("SKIP: no txr credential row.");
-        throw ROLLBACK;
-      }
+      // The preview DB has no txr provider or credential, so this half used to
+      // SKIP there and exercised nothing. Create them inside this (rolled-back)
+      // transaction when absent.
+      const prov =
+        (await one<{ id: number }>(sql`SELECT id FROM sms_providers WHERE sms_provider_id = 'txr'`)) ??
+        (await one<{ id: number }>(sql`
+          INSERT INTO sms_providers (org_id, sms_provider_id, name)
+          VALUES (${orgId}, 'txr', 'Text Request (test fixture)') RETURNING id`));
+      const cred =
+        (await one<{ id: number }>(sql`
+          SELECT id FROM provider_credentials WHERE provider_id = ${prov.id} AND org_id = ${orgId} ORDER BY id LIMIT 1`)) ??
+        (await one<{ id: number }>(sql`
+          INSERT INTO provider_credentials (org_id, provider_id, api_key)
+          VALUES (${orgId}, ${prov.id}, 'test-fixture-key') RETURNING id`));
 
       // A txr sending number bound to that credential + a dashboard. Phone 114
       // (dashboard 68093) is configured and LIVE in production now, so the poll
@@ -194,6 +254,13 @@ async function main() {
         (f: TxrMessagesFetcher): TxrMessagesFetcher =>
         async (o) =>
           o.dashboardId === dashboardId ? f(o) : { ok: true as const, items: [], totalItems: 0 };
+
+      // The poll now keeps per-dashboard state between runs (owed outbound
+      // ranges, pass stamps). A page-capped fixture run leaves an owed range
+      // that the NEXT call would read first, so blocks that assert exact counts
+      // start from a clean slate.
+      const clearPollState = () =>
+        tx.execute(sql`DELETE FROM cron_locks WHERE job_name LIKE ${"textrequest-poll:%"}`);
 
       // The real API filters by `message_direction` server-side, so the fixture
       // does too — otherwise each direction walk would see every row and the
@@ -344,6 +411,13 @@ async function main() {
       );
       check("blast: the outbound truncation is still reported", rBlast.truncated === true, JSON.stringify(rBlast));
 
+      check(
+        "blast: the outbound overflow is now an OWED range, not a silent drop",
+        rBlast.owed.some((g) => g.dashboard_id === dashboardId && g.direction === "S"),
+        JSON.stringify(rBlast.owed),
+      );
+      await clearPollState();
+
       // ---- defense: TR SILENTLY IGNORES unknown params, so never trust the
       // server-side filter alone. If message_direction stopped being honored,
       // both walks would see every row — that must not double-process anything.
@@ -384,6 +458,7 @@ async function main() {
         fetchMessages: onlyFixture(async () => ({ ok: true as const, items: [rows[1]!], totalItems: 50 })),
       });
       check("page cap sets truncated=true", rTrunc.truncated === true, JSON.stringify(rTrunc));
+      await clearPollState();
 
       // A fetch failure must not throw out of the poll.
       const rFail = await pollTxrMessages(tx as unknown as typeof db, {
@@ -391,6 +466,207 @@ async function main() {
         fetchMessages: onlyFixture(async () => ({ ok: false as const, error: "HTTP 500" })),
       });
       check("fetch failure is reported, not thrown", rFail.error === "HTTP 500" && rFail.captured === 0, JSON.stringify(rFail));
+      check(
+        "fetch failure owes the whole window (nothing was read)",
+        rFail.owed.some((g) => g.dashboard_id === dashboardId && g.direction === "S"),
+        JSON.stringify(rFail.owed),
+      );
+      await clearPollState();
+
+      // ---- time budget: a cut-short walk is LATE, never lossy (869fcqhcu) ----
+      // Three outbound pages, newest first. A fake clock advances 30 per fetch;
+      // the deadline leaves this dashboard a budget of 50, so it reads the head
+      // and page 1, then stops before page 2. The unread part must be recorded
+      // and read FIRST on the next run.
+      const iso = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString().slice(0, 19);
+      const budgetRows: TxrMessageRow[] = [30, 40, 50].map((ago, i) => ({
+        ...rows[0]!,
+        message_id: `guid-budget-${i}-${sfx}`,
+        message_timestamp_utc: iso(ago),
+      }));
+      // Dashboard 2 has a fresh pass stamp and dashboard 1 none ⇒ dashboard 1 walks first.
+      await tx.execute(sql`
+        INSERT INTO cron_locks (job_name, watermark) VALUES (${txrPassKey(dashboardId2, "S")}, now())`);
+      let fakeNow = 0;
+      const inWindow = (w: { start_date: string; end_date: string }) =>
+        budgetRows.filter((r) => {
+          const t = new Date(r.message_timestamp_utc + "Z").toISOString();
+          return t >= w.start_date && t <= w.end_date;
+        });
+      const budgetFetch: TxrMessagesFetcher = async (o) => {
+        if (o.dashboardId !== dashboardId || o.direction !== "S") return { ok: true as const, items: [], totalItems: 0 };
+        fakeNow += 30;
+        const rowsIn = inWindow(o.window);
+        return { ok: true as const, items: rowsIn.slice(o.page, o.page + 1), totalItems: rowsIn.length };
+      };
+      const rB1 = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        directions: ["S"],
+        pageSize: 1,
+        fetchMessages: budgetFetch,
+        clock: () => fakeNow,
+        deadlineAt: 100,
+        stateful: true,
+      });
+      const w1 = rB1.walks.find((w) => w.dashboard_id === dashboardId && w.kind === "window");
+      check("budget: the walk stopped for time after 2 pages", w1?.stopped === "budget" && w1?.pages_read === 2, JSON.stringify(w1));
+      check("budget: the 2 pages read were captured", rB1.captured === 2, JSON.stringify(rB1));
+      const g1 = rB1.owed.find((g) => g.dashboard_id === dashboardId && g.direction === "S");
+      const expectTo = new Date(new Date(budgetRows[1]!.message_timestamp_utc + "Z").getTime() + 1000).toISOString();
+      check("budget: owed range = [window start, oldest read + 1 s]", g1?.to === expectTo, JSON.stringify({ g1, expectTo }));
+      const passAfterCut = (await tx.execute(sql`
+        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "S")}`)) as unknown as unknown[];
+      check("budget: a cut-short dashboard does NOT get a pass stamp", passAfterCut.length === 0);
+
+      const firstWindows: string[] = [];
+      const rB2 = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        directions: ["S"],
+        pageSize: 1,
+        stateful: true,
+        fetchMessages: async (o) => {
+          if (o.dashboardId === dashboardId && o.direction === "S" && o.page === 0) {
+            firstWindows.push(`${o.window.start_date}..${o.window.end_date}`);
+          }
+          return budgetFetch(o);
+        },
+      });
+      check("next run: the owed range is walked FIRST", firstWindows[0] === `${g1?.from}..${g1?.to}`, JSON.stringify({ firstWindows, g1 }));
+      check("next run: the unread oldest row is captured (1 new, the rest dupes)", rB2.captured === 1, JSON.stringify(rB2));
+      check(
+        "next run: no range owed any more",
+        !rB2.owed.some((g) => g.dashboard_id === dashboardId),
+        JSON.stringify(rB2.owed),
+      );
+      const passAfter = (await tx.execute(sql`
+        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "S")}`)) as unknown as unknown[];
+      check("next run: the dashboard gets its pass stamp back", passAfter.length === 1);
+      const owedRows = (await tx.execute(sql`
+        SELECT job_name FROM cron_locks WHERE job_name LIKE ${"textrequest-poll:gap-%:" + dashboardId + ":S"}`)) as unknown as unknown[];
+      check("next run: the owed-range rows are deleted", owedRows.length === 0, JSON.stringify(owedRows));
+      await clearPollState();
+
+      // ---- inbound has a budget too (20 s in the cron) and keeps what it owes ----
+      // Same shape as the outbound test above, on the STOP side: three inbound
+      // pages, a fake clock that advances 30 per fetch, a budget of 50 ⇒ two
+      // pages read, the third owed and read FIRST next run.
+      const inRows: TxrMessageRow[] = [30, 40, 50].map((ago, i) => ({
+        dashboard_phone: "18449903688",
+        customer_phone: `1315588${sfx.slice(-3)}${i}`,
+        customer_friendly_name: null,
+        segments_count: 1,
+        message_id: `guid-in-budget-${i}-${sfx}`,
+        body: `thanks ${i}`,
+        message_direction: "R",
+        message_timestamp_utc: iso(ago),
+        delivery_status: null,
+        delivery_error: null,
+      }));
+      let inNow = 0;
+      const inWin = (w: { start_date: string; end_date: string }) =>
+        inRows.filter((r) => {
+          const t = new Date(r.message_timestamp_utc + "Z").toISOString();
+          return t >= w.start_date && t <= w.end_date;
+        });
+      const inboundFetch: TxrMessagesFetcher = async (o) => {
+        if (o.dashboardId !== dashboardId || o.direction !== "R") return { ok: true as const, items: [], totalItems: 0 };
+        inNow += 30;
+        const r = inWin(o.window);
+        return { ok: true as const, items: r.slice(o.page, o.page + 1), totalItems: r.length };
+      };
+      await tx.execute(sql`
+        INSERT INTO cron_locks (job_name, watermark) VALUES (${txrPassKey(dashboardId2, "R")}, now())`);
+      const rI1 = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId, directions: ["R"], pageSize: 1, fetchMessages: inboundFetch, clock: () => inNow, deadlineAt: 100, stateful: true,
+      });
+      const wi = rI1.walks.find((w) => w.dashboard_id === dashboardId && w.direction === "R");
+      check("inbound budget: the walk stopped for time after 2 pages", wi?.stopped === "budget" && wi?.pages_read === 2, JSON.stringify(wi));
+      check("inbound budget: the 2 rows read were captured + processed", rI1.inbound_captured === 2, JSON.stringify(rI1));
+      const gi = rI1.owed.find((g) => g.dashboard_id === dashboardId && g.direction === "R");
+      const giTo = new Date(new Date(inRows[1]!.message_timestamp_utc + "Z").getTime() + 1000).toISOString();
+      check("inbound budget: owed range recorded = [window start, oldest read + 1 s]", gi?.to === giTo, JSON.stringify({ gi, giTo }));
+      const giRows = (await tx.execute(sql`
+        SELECT job_name FROM cron_locks WHERE job_name IN (${"textrequest-poll:gap-from:" + dashboardId + ":R"}, ${"textrequest-poll:gap-to:" + dashboardId + ":R"})`)) as unknown as unknown[];
+      check("inbound budget: the owed range is stored in cron_locks", giRows.length === 2, JSON.stringify(giRows));
+      const inFirst: string[] = [];
+      const rI2 = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId, directions: ["R"], pageSize: 1, stateful: true,
+        fetchMessages: async (o) => {
+          if (o.dashboardId === dashboardId && o.direction === "R" && o.page === 0) inFirst.push(`${o.window.start_date}..${o.window.end_date}`);
+          return inboundFetch(o);
+        },
+      });
+      check("inbound next run: the owed range is walked FIRST", inFirst[0] === `${gi?.from}..${gi?.to}`, JSON.stringify({ inFirst, gi }));
+      check("inbound next run: the unread oldest STOP-side row is captured", rI2.inbound_captured === 1, JSON.stringify(rI2));
+      const inPass = (await tx.execute(sql`
+        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "R")}`)) as unknown as unknown[];
+      check("inbound next run: pass stamp written once nothing is owed", inPass.length === 1 && rI2.owed.length === 0, JSON.stringify(rI2.owed));
+      await clearPollState();
+
+      // ---- manual runs own no state (the race with a cron run mid-walk) ----
+      // Seed an owed range and a pass stamp for BOTH directions, then run a
+      // manual (stateful: false) poll that reads everything it asks for. It must
+      // not delete the owed ranges and must not stamp passes.
+      const seedAt = "2026-10-01T00:00:00.000Z";
+      const seedKeys = (["R", "S"] as const).flatMap((d) => [
+        `textrequest-poll:gap-from:${dashboardId}:${d}`,
+        `textrequest-poll:gap-to:${dashboardId}:${d}`,
+        txrPassKey(dashboardId, d),
+      ]);
+      for (const k of seedKeys) {
+        await tx.execute(sql`INSERT INTO cron_locks (job_name, watermark) VALUES (${k}, ${seedAt}::timestamptz)`);
+      }
+      const manualCalls: string[] = [];
+      const rManual = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId,
+        fetchMessages: onlyFixture(async (o) => {
+          manualCalls.push(`${o.direction}:${o.window.start_date}`);
+          return { ok: true as const, items: [], totalItems: 0 };
+        }),
+      });
+      const after = (await tx.execute(sql`
+        SELECT job_name, watermark::text AS w FROM cron_locks
+        WHERE job_name = ANY(${sql`ARRAY[${sql.join(seedKeys.map((k) => sql`${k}`), sql`, `)}]::text[]`})`)) as unknown as { job_name: string; w: string }[];
+      check("manual run: every seeded owed range and pass stamp is still there (both directions)", after.length === seedKeys.length, JSON.stringify(after));
+      check("manual run: none of them was rewritten", after.every((r) => new Date(r.w).toISOString() === seedAt), JSON.stringify(after));
+      check("manual run: it does not read the owed range either (walks only its own window)",
+        !manualCalls.some((c) => c.endsWith(seedAt)), JSON.stringify(manualCalls));
+      check("manual run: walks completed (so a stateful run WOULD have cleared the ranges)", rManual.walks.every((w) => w.complete));
+      await clearPollState();
+
+      // ---- inbound pre-filter: skip only rows captured AND processed ----
+      // X: stored + processed (processed_at set)  → skipped by the page lookup
+      // Y: stored, processed_at NULL (a webhook capture whose processing failed)
+      //    → NOT skipped: takes the per-row path, whose capture conflicts → dupe,
+      //      exactly as before this change
+      // Z: new → per-row path → captured + processed
+      const mk = (id: string, body: string): TxrMessageRow => ({
+        dashboard_phone: "18449903688", customer_phone: `13155890${id.length}${sfx.slice(-2)}`, customer_friendly_name: null,
+        segments_count: 1, message_id: `${id}-${sfx}`, body, message_direction: "R",
+        message_timestamp_utc: iso(5), delivery_status: null, delivery_error: null,
+      });
+      const X = mk("pf-x", "thanks"), Y = mk("pf-yy", "thanks"), Z = mk("pf-zzz", "thanks");
+      await tx.execute(sql`
+        INSERT INTO textrequest_inbound_events (org_id, credential_id, provider_id, source, method, provider_uuid, received_at, result, processed_at)
+        VALUES (${orgId}, ${cred.id}, ${prov.id}, 'webhook_msg_received', 'POST', ${X.message_id}, now(), 'ignored', now()),
+               (${orgId}, ${cred.id}, ${prov.id}, 'webhook_msg_received', 'POST', ${Y.message_id}, now(), NULL, NULL)`);
+      const rPf = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId, directions: ["R"],
+        fetchMessages: onlyFixture(async () => ({ ok: true as const, items: [X, Y, Z], totalItems: 3 })),
+      });
+      check("pre-filter: all 3 inbound rows seen", rPf.inbound_seen === 3, JSON.stringify(rPf));
+      check("pre-filter: only the processed row (X) is skipped by the lookup", rPf.inbound_known === 1, JSON.stringify(rPf));
+      check("pre-filter: the unprocessed row (Y) took the per-row path and conflicted, as before", rPf.inbound_dupe === 2, JSON.stringify(rPf));
+      check("pre-filter: the new row (Z) was captured and processed", rPf.inbound_captured === 1, JSON.stringify(rPf));
+      const yRow = (await tx.execute(sql`
+        SELECT count(*)::int AS n, bool_and(processed_at IS NULL) AS still_unprocessed FROM textrequest_inbound_events
+        WHERE provider_id = ${prov.id} AND provider_uuid = ${Y.message_id}`)) as unknown as { n: number; still_unprocessed: boolean }[];
+      check("pre-filter: Y is unchanged (one row, still unprocessed — same as the per-row path leaves it)",
+        yRow[0]?.n === 1 && yRow[0]?.still_unprocessed === true, JSON.stringify(yRow));
+      const zRow = (await tx.execute(sql`
+        SELECT result, processed_at IS NOT NULL AS done FROM textrequest_inbound_events
+        WHERE provider_id = ${prov.id} AND provider_uuid = ${Z.message_id}`)) as unknown as { result: string; done: boolean }[];
+      check("pre-filter: Z stored with result + processed_at in one go", zRow[0]?.done === true && zRow[0]?.result === "ignored", JSON.stringify(zRow));
 
       // ---- webhook health ----
       const ourUrl = `https://app.example.com/api/webhooks/textrequest/events/tok-${sfx}`;

@@ -4567,3 +4567,23 @@ With `stageIds` of a single stage, the sends side's BitmapAnd estimates ~7 rows 
 
 It is an operator-canceled / recalled send kept for audit (`…/send/abort`). A send that errored at the provider is `failed`. Card and column names must not call `failed` "rejected".
 
+## A poll that writes one transaction per row cannot keep up (2026-10-06, card 869fcqhcu)
+
+Measured on the Text Request messages poll: one transaction + ~4 round trips per row through the transaction pooler = **~200 ms per row** (3,196 rows in 629 s). A 1,000-row page is ~200 s against a 60 s function limit, so the poll timed out on every run of a busy night and nothing said so. A page of capture + match is one `INSERT … SELECT FROM jsonb_to_recordset(…) ON CONFLICT … DO NOTHING` with the match resolved by a `LEFT JOIN LATERAL` before the insert (a data-modifying CTE cannot UPDATE rows a sibling CTE inserted in the same statement). Same result, 1.8 s. Keep compliance paths that can trip a breaker per row; batch the bulk side.
+
+## A walk that stops early must record what it did not read
+
+A budgeted or page-capped walk that restarts from the newest page next time silently loses its oldest pages once they age out of the window. Record the unread range (`[window start, oldest read + 1 s]` for a newest-first walk) and read it first on the next run; stop the walk at a failed page or failed write rather than skipping it, or "everything older than the oldest row read is owed" stops being true. A dashboard counts as having a complete pass only when nothing is owed.
+
+## `vercel logs --json` cannot count requests
+
+It repeats the same 50 rows over and over (5,000 rows held 50 distinct log ids, all inside 1.7 s), and `--status-code` returned nothing even for real traffic. Use it only to ask "was there ANY request in this window?" — logs come back newest-first — and always run a control window known to have traffic. Count from your own tables, or log one summary line per run (the txr poll's `txr_poll_run`) and keep each query under 50 runs.
+
+## Only the lease holder owns poll state
+
+The txr poll's owed ranges and pass stamps are written by the CRON run only (`stateful: true`). A manual "poll now" run bypasses the lease and can overlap a cron run; if it deleted an owed range or stamped a pass from what it read at its own start, it could clear a range the cron wrote meanwhile. Any state a job keeps between runs belongs to whoever holds the lease — a manual trigger reads its own window and leaves the state alone.
+
+## Skip a known row only if its processing is proven done
+
+The inbound pre-filter skips a row only when it is captured AND processed (`processed_at IS NOT NULL`), not merely stored. Here the poll's capture and processing are one transaction, but the webhook's are two — "stored" alone would have skipped a webhook row whose processing failed. Prove such a skip on real data with a before/after diff of every table the processing writes, not just the counts.
+

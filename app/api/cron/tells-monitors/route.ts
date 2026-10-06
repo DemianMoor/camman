@@ -60,6 +60,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const heartbeats = await checkHeartbeats(db, [
     HEARTBEAT_JOBS.tellsSweep,
     HEARTBEAT_JOBS.trackingMonitors,
+    // Text Request poll: catches the cron not firing at all (its own runs alert
+    // on a dead previous run). Same hourly piggyback as the line above.
+    HEARTBEAT_JOBS.textrequestPoll,
   ]);
   const allBreaches = [...report.breaches, ...heartbeatBreaches(heartbeats)];
 

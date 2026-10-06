@@ -274,6 +274,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "production gate for stage_delivery_rollup: its refresh (via lib/reporting/delivery-rollup) runs inside a REPEATABLE READ tx that always rolls back; --persisted is read-only",
   },
   {
+    file: "verify-txr-inbound-prefilter.ts",
+    why: "production proof that the txr inbound pre-filter leaves identical state on REAL Text Request pages (869fcqhcu): both paths, including its DELETE reset of chosen STOP senders, run inside transactions that always roll back; preview has no Text Request data to prove it on",
+  },
+  {
     file: "verify-drip-enrichment-production.ts",
     why: "production proof of the deployed enrichment sweeper; synthetic +1999 numbers, self-cleaning",
   },

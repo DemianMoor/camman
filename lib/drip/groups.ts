@@ -46,6 +46,43 @@ export async function ensureDripGroup(
   return id;
 }
 
+/** Display name of a partner x tag group, e.g. "pml-aca". */
+export function partnerTagGroupName(partnerSlug: string, interestTag: string | null): string {
+  const tag = (interestTag ?? "").trim().toLowerCase();
+  return `${partnerSlug.trim().toLowerCase()}-${tag || "untagged"}`;
+}
+
+/**
+ * Resolve (creating if absent) the per-partner x tag group, e.g. "pml-aca".
+ * Real leads only — a sandbox lead must never join a group a campaign could
+ * target (see the sandbox note above).
+ *
+ * ⚠️ The external key carries the ORG ID. `contact_group_id` is unique across
+ * ALL orgs, and the upsert below returns whichever row owns the key — so a bare
+ * "drip-pml-aca" would hand org B the id of org A's group the day two orgs share
+ * a partner slug, and its contacts would be written into another org's group.
+ */
+export async function ensurePartnerTagGroup(
+  dbc: DbOrTx,
+  { orgId, partnerSlug, interestTag }: { orgId: string; partnerSlug: string; interestTag: string | null },
+): Promise<number> {
+  const name = partnerTagGroupName(partnerSlug, interestTag);
+  const externalId = `drip:${orgId}:${name}`;
+
+  const rows = (await dbc.execute(sql`
+    INSERT INTO contact_groups (contact_group_id, org_id, name, description, status)
+    VALUES (${externalId}, ${orgId}::uuid, ${name},
+            ${`Partner leads from "${partnerSlug}" tagged "${(interestTag ?? "").trim() || "(none)"}". Added automatically by drip intake.`},
+            'active')
+    ON CONFLICT (contact_group_id) DO UPDATE SET name = contact_groups.name
+    RETURNING id
+  `)) as unknown as { id: number }[];
+
+  const id = rows[0]?.id;
+  if (id === undefined) throw new Error(`ensurePartnerTagGroup: no row for ${externalId}`);
+  return id;
+}
+
 /**
  * Idempotent membership. Mirrors /api/contacts/bulk-apply-groups.
  *

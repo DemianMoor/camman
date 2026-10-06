@@ -13,7 +13,12 @@ import {
 import { extractLeadFields } from "@/lib/intake/fields";
 import { enqueueNormalized } from "@/lib/telnyx/enqueue";
 import { bumpIntakeCounters, counterForLineType, etDay } from "./counters";
-import { addContactsToGroup, ensureDripGroup } from "./groups";
+import {
+  addContactsToGroup,
+  ensureDripGroup,
+  ensurePartnerTagGroup,
+  partnerTagGroupName,
+} from "./groups";
 import { dripLookupBudget } from "./lookup-guard";
 
 // The lead_inbox consumer (Drip Phase 3). ZERO SENDS.
@@ -158,6 +163,8 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
     // Group ids resolved once per batch, not per lead.
     const realGroup = await ensureDripGroup(tx, { orgId, sandbox: false });
     const sandboxGroup = await ensureDripGroup(tx, { orgId, sandbox: true });
+    // Partner x tag groups, resolved lazily — a batch usually spans one or two.
+    const partnerTagGroups = new Map<string, number>();
 
     // Budget for THIS batch's cache misses (ET-day drip sub-cap).
     const misses = rows.filter(
@@ -299,6 +306,20 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
         groupId: row.sandbox ? sandboxGroup : realGroup,
         contactIds: [contactId],
       });
+
+      // Real leads also join their partner x tag group ("pml-aca"). Never
+      // sandbox — that group must stay the only place a sandbox lead lives.
+      if (!row.sandbox) {
+        const gkey = partnerTagGroupName(row.partner_slug, row.interest_tag);
+        let groupId = partnerTagGroups.get(gkey);
+        if (groupId === undefined) {
+          groupId = await ensurePartnerTagGroup(tx, {
+            orgId, partnerSlug: row.partner_slug, interestTag: row.interest_tag,
+          });
+          partnerTagGroups.set(gkey, groupId);
+        }
+        await addContactsToGroup(tx, { orgId, groupId, contactIds: [contactId] });
+      }
 
       await tx.execute(sql`
         UPDATE lead_inbox SET status='processed', processed_at=now(),

@@ -31,7 +31,8 @@ import {
   planTxrSortedWalk,
   pollTxrMessages,
   txrBudgetEnd,
-  txrMergeRanges,
+  txrMergeOwed,
+  txrOwedAfterAscending,
   txrWalkOrder,
   txrPassKey,
   txrUnreadRange,
@@ -142,16 +143,28 @@ console.log("— pure: owed ranges, outbound order, budget, run health —");
     "+1 s never runs past the window end",
     txrUnreadRange(from, to, new Date("2026-10-05T23:05:00Z")).to.toISOString() === to.toISOString(),
   );
-  const m = txrMergeRanges([
-    { from: new Date("2026-10-04T10:00:00Z"), to: new Date("2026-10-04T11:00:00Z") },
-    { from: new Date("2026-10-05T17:00:00Z"), to: new Date("2026-10-05T18:00:00Z") },
-  ]);
-  check(
-    "two owed ranges merge into one covering span",
-    m?.from.toISOString() === "2026-10-04T10:00:00.000Z" && m?.to.toISOString() === "2026-10-05T18:00:00.000Z",
-    JSON.stringify(m),
-  );
-  check("no owed ranges ⇒ no gap", txrMergeRanges([]) === null);
+  // Owed range after an OLDEST-first walk: from the newest row read, never backwards.
+  const owed0 = { from: new Date("2026-10-06T09:49:00Z"), to: new Date("2026-10-06T16:09:00Z") };
+  check("asc walk: owed start moves to the newest row read",
+    txrOwedAfterAscending(owed0, new Date("2026-10-06T11:00:00Z")).from.toISOString() === "2026-10-06T11:00:00.000Z");
+  check("asc walk: nothing read ⇒ unchanged (never backwards)", txrOwedAfterAscending(owed0, null) === owed0);
+  check("asc walk: a row older than the start does not move it back",
+    txrOwedAfterAscending(owed0, new Date("2026-10-06T09:00:00Z")) === owed0);
+  // Merge: the window may only push the owed END.
+  const win = { from: new Date("2026-10-06T10:20:00Z"), to: new Date("2026-10-06T16:25:00Z") };
+  const after = { from: new Date("2026-10-06T11:00:00Z"), to: owed0.to };
+  const m1 = txrMergeOwed(owed0, after, win);
+  check("merge: open owed range + starved window ⇒ start stays at the progress point, end extends",
+    m1?.from.toISOString() === "2026-10-06T11:00:00.000Z" && m1?.to.toISOString() === "2026-10-06T16:25:00.000Z", JSON.stringify(m1));
+  const m2 = txrMergeOwed(owed0, null, win);
+  check("merge: owed range finished ⇒ window leftover clipped to start no earlier than what was read",
+    m2?.from.toISOString() === owed0.to.toISOString() && m2?.to.toISOString() === win.to.toISOString(), JSON.stringify(m2));
+  check("merge: owed range finished + window leftover inside it ⇒ nothing owed",
+    txrMergeOwed(owed0, null, { from: win.from, to: new Date("2026-10-06T16:00:00Z") }) === null);
+  const m3 = txrMergeOwed(null, null, win);
+  check("merge: first cut-short run ⇒ the window leftover as is",
+    m3?.from.getTime() === win.from.getTime() && m3?.to.getTime() === win.to.getTime(), JSON.stringify(m3));
+  check("merge: nothing left anywhere ⇒ null", txrMergeOwed(owed0, null, null) === null);
   const order = txrWalkOrder(
     [{ dashboard_id: "a" }, { dashboard_id: "b" }, { dashboard_id: "c" }],
     new Map([
@@ -393,7 +406,13 @@ async function main() {
         segments_count: 1, message_id: `guid-stop-${sfx}`, body: "STOP", message_direction: "R",
         message_timestamp_utc: "2026-07-25T11:10:00", delivery_status: null, delivery_error: null,
       };
-      const blastRow: TxrMessageRow = { ...rows[1]!, message_id: `guid-blast-${sfx}` };
+      // Dated INSIDE the 6 h window: an unread part that lies entirely before
+      // the window owes nothing, so an out-of-window fixture proves nothing here.
+      const blastRow: TxrMessageRow = {
+        ...rows[1]!,
+        message_id: `guid-blast-${sfx}`,
+        message_timestamp_utc: new Date(Date.now() - 10 * 60_000).toISOString().slice(0, 19),
+      };
       const rBlast = await pollTxrMessages(tx as unknown as typeof db, {
         orgId,
         maxPages: 1,
@@ -473,134 +492,127 @@ async function main() {
       );
       await clearPollState();
 
-      // ---- time budget: a cut-short walk is LATE, never lossy (869fcqhcu) ----
-      // Three outbound pages, newest first. A fake clock advances 30 per fetch;
-      // the deadline leaves this dashboard a budget of 50, so it reads the head
-      // and page 1, then stops before page 2. The unread part must be recorded
-      // and read FIRST on the next run.
+      // ---- owed ranges: oldest-first, start never backwards, leftover time back ----
+      // A fake API that honours the window, the page and the sort order, and a
+      // fake clock that only the fixture dashboard's fetches advance (30 each).
       const iso = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString().slice(0, 19);
-      const budgetRows: TxrMessageRow[] = [30, 40, 50].map((ago, i) => ({
-        ...rows[0]!,
-        message_id: `guid-budget-${i}-${sfx}`,
-        message_timestamp_utc: iso(ago),
-      }));
-      // Dashboard 2 has a fresh pass stamp and dashboard 1 none ⇒ dashboard 1 walks first.
-      await tx.execute(sql`
-        INSERT INTO cron_locks (job_name, watermark) VALUES (${txrPassKey(dashboardId2, "S")}, now())`);
-      let fakeNow = 0;
-      const inWindow = (w: { start_date: string; end_date: string }) =>
-        budgetRows.filter((r) => {
-          const t = new Date(r.message_timestamp_utc + "Z").toISOString();
-          return t >= w.start_date && t <= w.end_date;
-        });
-      const budgetFetch: TxrMessagesFetcher = async (o) => {
-        if (o.dashboardId !== dashboardId || o.direction !== "S") return { ok: true as const, items: [], totalItems: 0 };
-        fakeNow += 30;
-        const rowsIn = inWindow(o.window);
-        return { ok: true as const, items: rowsIn.slice(o.page, o.page + 1), totalItems: rowsIn.length };
+      const tsOf = (r: TxrMessageRow) => new Date(r.message_timestamp_utc + "Z").getTime();
+      type FetchLog = { kind: string; sort?: string; page: number; ts: number[] };
+      const pager =
+        (all: TxrMessageRow[], direction: "R" | "S", clk: { now: number }, log?: FetchLog[]): TxrMessagesFetcher =>
+        async (o) => {
+          if (o.dashboardId !== dashboardId || o.direction !== direction) return { ok: true as const, items: [], totalItems: 0 };
+          clk.now += 30;
+          const inWin = all
+            .filter((r) => {
+              const t = new Date(r.message_timestamp_utc + "Z").toISOString();
+              return t >= o.window.start_date && t <= o.window.end_date;
+            })
+            .sort((a, b) => (o.sort === "desc" ? tsOf(b) - tsOf(a) : tsOf(a) - tsOf(b)));
+          const items = inWin.slice(o.page * o.pageSize, (o.page + 1) * o.pageSize);
+          log?.push({ kind: o.sort ?? "default", sort: o.sort, page: o.page, ts: items.map(tsOf) });
+          return { ok: true as const, items, totalItems: inWin.length };
+        };
+      const gapFrom = async (dir: "R" | "S") => {
+        const r = (await tx.execute(sql`
+          SELECT watermark FROM cron_locks WHERE job_name = ${`textrequest-poll:gap-from:${dashboardId}:${dir}`}`)) as unknown as { watermark: string | Date }[];
+        return r[0] ? new Date(r[0].watermark).getTime() : null;
       };
-      const rB1 = await pollTxrMessages(tx as unknown as typeof db, {
-        orgId,
-        directions: ["S"],
-        pageSize: 1,
-        fetchMessages: budgetFetch,
-        clock: () => fakeNow,
-        deadlineAt: 100,
-        stateful: true,
-      });
-      const w1 = rB1.walks.find((w) => w.dashboard_id === dashboardId && w.kind === "window");
-      check("budget: the walk stopped for time after 2 pages", w1?.stopped === "budget" && w1?.pages_read === 2, JSON.stringify(w1));
-      check("budget: the 2 pages read were captured", rB1.captured === 2, JSON.stringify(rB1));
-      const g1 = rB1.owed.find((g) => g.dashboard_id === dashboardId && g.direction === "S");
-      const expectTo = new Date(new Date(budgetRows[1]!.message_timestamp_utc + "Z").getTime() + 1000).toISOString();
-      check("budget: owed range = [window start, oldest read + 1 s]", g1?.to === expectTo, JSON.stringify({ g1, expectTo }));
-      const passAfterCut = (await tx.execute(sql`
-        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "S")}`)) as unknown as unknown[];
-      check("budget: a cut-short dashboard does NOT get a pass stamp", passAfterCut.length === 0);
+      const hasPass = async (dir: "R" | "S") =>
+        ((await tx.execute(sql`SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, dir)}`)) as unknown as unknown[]).length === 1;
 
-      const firstWindows: string[] = [];
-      const rB2 = await pollTxrMessages(tx as unknown as typeof db, {
-        orgId,
-        directions: ["S"],
-        pageSize: 1,
-        stateful: true,
-        fetchMessages: async (o) => {
-          if (o.dashboardId === dashboardId && o.direction === "S" && o.page === 0) {
-            firstWindows.push(`${o.window.start_date}..${o.window.end_date}`);
-          }
-          return budgetFetch(o);
-        },
-      });
-      check("next run: the owed range is walked FIRST", firstWindows[0] === `${g1?.from}..${g1?.to}`, JSON.stringify({ firstWindows, g1 }));
-      check("next run: the unread oldest row is captured (1 new, the rest dupes)", rB2.captured === 1, JSON.stringify(rB2));
-      check(
-        "next run: no range owed any more",
-        !rB2.owed.some((g) => g.dashboard_id === dashboardId),
-        JSON.stringify(rB2.owed),
-      );
-      const passAfter = (await tx.execute(sql`
-        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "S")}`)) as unknown as unknown[];
-      check("next run: the dashboard gets its pass stamp back", passAfter.length === 1);
-      const owedRows = (await tx.execute(sql`
-        SELECT job_name FROM cron_locks WHERE job_name LIKE ${"textrequest-poll:gap-%:" + dashboardId + ":S"}`)) as unknown as unknown[];
-      check("next run: the owed-range rows are deleted", owedRows.length === 0, JSON.stringify(owedRows));
+      // A. A window cut short by the budget; the time left before the deadline
+      //    goes back to this dashboard, which reads its owed range OLDEST-first
+      //    and finishes it in the same run. (Dashboard 2 has a fresh pass stamp
+      //    and dashboard 1 none, so dashboard 1 walks first, on half the time.)
       await clearPollState();
+      await tx.execute(sql`INSERT INTO cron_locks (job_name, watermark) VALUES (${txrPassKey(dashboardId2, "S")}, now())`);
+      const aRows = [30, 40, 50].map((ago, i) => ({ ...rows[0]!, message_id: `guid-a-${i}-${sfx}`, message_timestamp_utc: iso(ago) }));
+      const aClk = { now: 0 };
+      const aLog: FetchLog[] = [];
+      const rA = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId, directions: ["S"], pageSize: 1, fetchMessages: pager(aRows, "S", aClk, aLog),
+        clock: () => aClk.now, deadlineAt: 100, stateful: true,
+      });
+      const aWin = rA.walks.find((w) => w.dashboard_id === dashboardId && w.kind === "window");
+      const aGap = rA.walks.find((w) => w.dashboard_id === dashboardId && w.kind === "gap");
+      check("A: the window walk stopped for time after 2 pages (newest-first)", aWin?.stopped === "budget" && aWin?.pages_read === 2, JSON.stringify(aWin));
+      check("A: leftover time went back — an owed-range walk ran in the SAME run and completed", aGap?.complete === true, JSON.stringify(aGap));
+      check("A: the owed range was read OLDEST-first (sort=asc)", aLog.some((l) => l.sort === "asc"), JSON.stringify(aLog));
+      check("A: all 3 rows captured once, nothing owed, pass stamp written",
+        rA.captured === 3 && rA.owed.length === 0 && (await hasPass("S")), JSON.stringify({ captured: rA.captured, owed: rA.owed }));
 
-      // ---- inbound has a budget too (20 s in the cron) and keeps what it owes ----
-      // Same shape as the outbound test above, on the STOP side: three inbound
-      // pages, a fake clock that advances 30 per fetch, a budget of 50 ⇒ two
-      // pages read, the third owed and read FIRST next run.
-      const inRows: TxrMessageRow[] = [30, 40, 50].map((ago, i) => ({
-        dashboard_phone: "18449903688",
-        customer_phone: `1315588${sfx.slice(-3)}${i}`,
-        customer_friendly_name: null,
-        segments_count: 1,
-        message_id: `guid-in-budget-${i}-${sfx}`,
-        body: `thanks ${i}`,
-        message_direction: "R",
-        message_timestamp_utc: iso(ago),
-        delivery_status: null,
-        delivery_error: null,
-      }));
-      let inNow = 0;
-      const inWin = (w: { start_date: string; end_date: string }) =>
-        inRows.filter((r) => {
-          const t = new Date(r.message_timestamp_utc + "Z").toISOString();
-          return t >= w.start_date && t <= w.end_date;
-        });
-      const inboundFetch: TxrMessagesFetcher = async (o) => {
-        if (o.dashboardId !== dashboardId || o.direction !== "R") return { ok: true as const, items: [], totalItems: 0 };
-        inNow += 30;
-        const r = inWin(o.window);
-        return { ok: true as const, items: r.slice(o.page, o.page + 1), totalItems: r.length };
-      };
+      // B. The 68804 shape: a BIG owed range + a window that gets ZERO time,
+      //    several runs in a row. The owed start must strictly advance every run
+      //    (never back over time already read oldest-first) and the range must
+      //    complete; every row is captured exactly once.
+      await clearPollState();
+      await tx.execute(sql`INSERT INTO cron_locks (job_name, watermark) VALUES (${txrPassKey(dashboardId2, "S")}, now())`);
+      const oldRows = Array.from({ length: 21 }, (_, i) => ({ ...rows[0]!, message_id: `guid-b-old-${i}-${sfx}`, message_timestamp_utc: iso(300 - i * 10) }));
+      const newRows = Array.from({ length: 10 }, (_, i) => ({ ...rows[0]!, message_id: `guid-b-new-${i}-${sfx}`, message_timestamp_utc: iso(5 + i * 5) }));
+      const bRows = [...oldRows, ...newRows];
+      const seedFrom = new Date(tsOf(oldRows[0]!)).toISOString();
+      const seedTo = new Date(tsOf(oldRows[20]!) + 1000).toISOString();
       await tx.execute(sql`
-        INSERT INTO cron_locks (job_name, watermark) VALUES (${txrPassKey(dashboardId2, "R")}, now())`);
-      const rI1 = await pollTxrMessages(tx as unknown as typeof db, {
-        orgId, directions: ["R"], pageSize: 1, fetchMessages: inboundFetch, clock: () => inNow, deadlineAt: 100, stateful: true,
+        INSERT INTO cron_locks (job_name, watermark) VALUES
+          (${`textrequest-poll:gap-from:${dashboardId}:S`}, ${seedFrom}::timestamptz),
+          (${`textrequest-poll:gap-to:${dashboardId}:S`}, ${seedTo}::timestamptz)`);
+      const starts: (number | null)[] = [new Date(seedFrom).getTime()];
+      let bCaptured = 0;
+      let bRuns = 0;
+      let windowStarved = true;
+      const N_B = 8;
+      for (let run = 1; run <= N_B; run++) {
+        const clk = { now: 0 };
+        const r = await pollTxrMessages(tx as unknown as typeof db, {
+          orgId, directions: ["S"], pageSize: 1, fetchMessages: pager(bRows, "S", clk),
+          clock: () => clk.now, deadlineAt: 200, stateful: true,
+        });
+        bCaptured += r.captured;
+        bRuns = run;
+        const firstWindow = r.walks.find((w) => w.dashboard_id === dashboardId && w.kind === "window");
+        const s = await gapFrom("S");
+        starts.push(s);
+        if (s !== null && firstWindow && firstWindow.pages_read !== 0) windowStarved = false;
+        if (s === null) break;
+      }
+      const advancing = starts.slice(1).every((s, i) => s === null || (starts[i] !== null && s > starts[i]!));
+      console.log(`   B: owed start per run: ${starts.map((s) => (s === null ? "done" : new Date(s).toISOString().slice(11, 19))).join(" → ")}`);
+      check("B: the window walk got zero time while the range was owed (the 68804 shape)", windowStarved);
+      check("B: the owed start strictly advanced every run, never backwards", advancing, JSON.stringify(starts));
+      check(`B: the owed range completed within N = ${N_B} runs (took ${bRuns})`, starts[starts.length - 1] === null, JSON.stringify(starts));
+      check(`B: every one of the ${bRows.length} rows captured exactly once across the runs`, bCaptured === bRows.length, `${bCaptured}`);
+      check("B: pass stamp written once nothing is owed", await hasPass("S"));
+
+      // C. Inbound shares the mechanism: an owed STOP range is read OLDEST-first
+      //    and every STOP in it is fully processed. Budget (20 s) and the 2-run
+      //    alert are unchanged — asserted here and in test-textrequest-poll-run.ts.
+      await clearPollState();
+      const stopRows: TxrMessageRow[] = [120, 110, 100, 90].map((ago, i) => ({
+        dashboard_phone: "18449903688", customer_phone: `1315591${sfx.slice(-3)}${i}`, customer_friendly_name: null,
+        segments_count: 1, message_id: `guid-c-stop-${i}-${sfx}`, body: "STOP", message_direction: "R",
+        message_timestamp_utc: iso(ago), delivery_status: null, delivery_error: null,
+      }));
+      await tx.execute(sql`
+        INSERT INTO cron_locks (job_name, watermark) VALUES
+          (${`textrequest-poll:gap-from:${dashboardId}:R`}, ${new Date(tsOf(stopRows[0]!)).toISOString()}::timestamptz),
+          (${`textrequest-poll:gap-to:${dashboardId}:R`}, ${new Date(tsOf(stopRows[3]!) + 1000).toISOString()}::timestamptz)`);
+      const cClk = { now: 0 };
+      const cLog: FetchLog[] = [];
+      const rC = await pollTxrMessages(tx as unknown as typeof db, {
+        orgId, directions: ["R"], pageSize: 1, fetchMessages: pager(stopRows, "R", cClk, cLog), stateful: true,
       });
-      const wi = rI1.walks.find((w) => w.dashboard_id === dashboardId && w.direction === "R");
-      check("inbound budget: the walk stopped for time after 2 pages", wi?.stopped === "budget" && wi?.pages_read === 2, JSON.stringify(wi));
-      check("inbound budget: the 2 rows read were captured + processed", rI1.inbound_captured === 2, JSON.stringify(rI1));
-      const gi = rI1.owed.find((g) => g.dashboard_id === dashboardId && g.direction === "R");
-      const giTo = new Date(new Date(inRows[1]!.message_timestamp_utc + "Z").getTime() + 1000).toISOString();
-      check("inbound budget: owed range recorded = [window start, oldest read + 1 s]", gi?.to === giTo, JSON.stringify({ gi, giTo }));
-      const giRows = (await tx.execute(sql`
-        SELECT job_name FROM cron_locks WHERE job_name IN (${"textrequest-poll:gap-from:" + dashboardId + ":R"}, ${"textrequest-poll:gap-to:" + dashboardId + ":R"})`)) as unknown as unknown[];
-      check("inbound budget: the owed range is stored in cron_locks", giRows.length === 2, JSON.stringify(giRows));
-      const inFirst: string[] = [];
-      const rI2 = await pollTxrMessages(tx as unknown as typeof db, {
-        orgId, directions: ["R"], pageSize: 1, stateful: true,
-        fetchMessages: async (o) => {
-          if (o.dashboardId === dashboardId && o.direction === "R" && o.page === 0) inFirst.push(`${o.window.start_date}..${o.window.end_date}`);
-          return inboundFetch(o);
-        },
-      });
-      check("inbound next run: the owed range is walked FIRST", inFirst[0] === `${gi?.from}..${gi?.to}`, JSON.stringify({ inFirst, gi }));
-      check("inbound next run: the unread oldest STOP-side row is captured", rI2.inbound_captured === 1, JSON.stringify(rI2));
-      const inPass = (await tx.execute(sql`
-        SELECT 1 FROM cron_locks WHERE job_name = ${txrPassKey(dashboardId, "R")}`)) as unknown as unknown[];
-      check("inbound next run: pass stamp written once nothing is owed", inPass.length === 1 && rI2.owed.length === 0, JSON.stringify(rI2.owed));
+      const gapReads = cLog.filter((l) => l.sort === "asc").flatMap((l) => l.ts);
+      check("C: the owed STOP range was read with sort=asc", gapReads.length === 4, JSON.stringify(cLog));
+      check("C: STOPs were read oldest-first", gapReads.every((t, i) => i === 0 || t > gapReads[i - 1]!), JSON.stringify(gapReads));
+      check("C: all 4 STOPs were captured and suppressed", rC.inbound_captured === 4 && rC.inbound_suppressed === 4, JSON.stringify(rC));
+      const cDone = (await tx.execute(sql`
+        SELECT count(*)::int AS n FROM textrequest_inbound_events
+        WHERE provider_id = ${prov.id} AND provider_uuid = ANY(${sql`ARRAY[${sql.join(stopRows.map((r) => sql`${r.message_id}`), sql`, `)}]::text[]`})
+          AND result = 'suppressed' AND processed_at IS NOT NULL`)) as unknown as { n: number }[];
+      check("C: each STOP row is stored processed (result suppressed, processed_at set)", cDone[0]?.n === 4, JSON.stringify(cDone));
+      check("C: the inbound owed range is cleared and the R pass stamp written", rC.owed.length === 0 && (await hasPass("R")), JSON.stringify(rC.owed));
+      check("C: the inbound 'no complete pass' alert is still 2 runs (35 min)", txrPassThresholdMin("R") === 35);
       await clearPollState();
 
       // ---- manual runs own no state (the race with a cron run mid-walk) ----

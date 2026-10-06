@@ -106,7 +106,7 @@ export type TxrMessagesFetcher = (opts: {
   page: number;
   pageSize: number;
   direction?: "S" | "R";
-  sort?: "desc";
+  sort?: "desc" | "asc";
 }) => Promise<TxrMessagesPage>;
 
 async function realFetchTxrMessages(opts: {
@@ -116,7 +116,7 @@ async function realFetchTxrMessages(opts: {
   page: number;
   pageSize: number;
   direction?: "S" | "R";
-  sort?: "desc";
+  sort?: "desc" | "asc";
 }): Promise<TxrMessagesPage> {
   try {
     const u = new URL(`${textrequestBaseUrl()}/dashboards/${encodeURIComponent(opts.dashboardId)}/messages`);
@@ -309,7 +309,10 @@ export async function resolveTxrPollTargets(
 // walk that stopped early simply lost its oldest pages: the next run starts from
 // the newest again, and after 6 h those messages leave the window for good.
 // Recording the unread range and reading it first next time makes a cut-short
-// walk LATE, never lossy. Text Request serves the full message history
+// walk LATE, never lossy. Owed ranges are read OLDEST-first and the owed start
+// never moves backwards (txrMergeOwed), so a backlog shrinks every run instead of
+// re-reading its newest pages; time left before the deadline goes back to the
+// dashboards that still owe. Text Request serves the full message history
 // (verified 2026-10-06 back to the first send), so an old range is still readable.
 //
 // ⚠️ ONLY THE CRON OWNS THIS STATE (`stateful: true`). A manual "poll now" run is
@@ -367,13 +370,44 @@ export function txrUnreadRange(walkFrom: Date, walkTo: Date, oldestRead: Date | 
   return { from: walkFrom, to: to < walkFrom ? walkFrom : to };
 }
 
-/** One span covering every unread range (the middle may be re-read; dedup makes that free). Pure. */
-export function txrMergeRanges(ranges: TxrRange[]): TxrRange | null {
-  if (ranges.length === 0) return null;
-  return {
-    from: new Date(Math.min(...ranges.map((r) => r.from.getTime()))),
-    to: new Date(Math.max(...ranges.map((r) => r.to.getTime()))),
-  };
+/**
+ * What an owed range still owes after an OLDEST-first walk that stopped early:
+ * everything from the newest row read onwards. The start is inclusive, so rows
+ * sharing that timestamp are read again (the capture dedups) rather than lost.
+ * It never moves backwards: no row read ⇒ the range is unchanged. Pure.
+ */
+export function txrOwedAfterAscending(owed: TxrRange, newestRead: Date | null): TxrRange {
+  if (!newestRead || newestRead <= owed.from) return owed;
+  return { from: newestRead < owed.to ? newestRead : owed.to, to: owed.to };
+}
+
+/**
+ * The owed range after one run, from what was owed before (`prior`), what the
+ * owed-range walk left (`gapAfter`, null when it finished) and what the window
+ * walk left (`windowOwed`, null when it finished). Pure.
+ *
+ * ⚠️ THE OWED START NEVER MOVES BACKWARDS. Everything before an owed start has
+ * been read; a window walk that got no time owes the whole 6 h window, and
+ * merging that naively (min of the starts) would re-owe time just read
+ * oldest-first — the 68804 loop of 2026-10-06 in another shape. So the window
+ * may only push the owed END later:
+ *   · owed range still open ⇒ [its new start, max(its end, window's end)]
+ *   · owed range finished this run ⇒ the window's leftover, clipped so it starts
+ *     no earlier than the end just read
+ *   · no owed range before ⇒ the window's leftover as is (first cut-short run)
+ */
+export function txrMergeOwed(
+  prior: TxrRange | null,
+  gapAfter: TxrRange | null,
+  windowOwed: TxrRange | null,
+): TxrRange | null {
+  if (gapAfter) {
+    const to = windowOwed && windowOwed.to > gapAfter.to ? windowOwed.to : gapAfter.to;
+    return { from: gapAfter.from, to };
+  }
+  if (!windowOwed) return null;
+  const from = prior && prior.to > windowOwed.from ? prior.to : windowOwed.from;
+  return from < windowOwed.to ? { from, to: windowOwed.to } : null;
 }
 
 /**
@@ -544,20 +578,28 @@ export async function pollTxrMessages(
   const breakerTrips: { campaignId: number; result: OptOutRateCheckResult }[] = [];
   const dashboardsSeen = new Set<string>();
 
-  // One walk of one (dashboard, direction) over [w.start_date, w.end_date],
-  // newest-first. Returns whether everything was read and, if not, the oldest
-  // row it did read (txrUnreadRange turns that into the owed range).
+  // One walk of one (dashboard, direction) over [w.start_date, w.end_date].
+  //   kind "window" — the rolling 6 h window, NEWEST-first (fresh receipts and
+  //                   STOPs land first); a cut-short walk owes everything older
+  //                   than the oldest row it read.
+  //   kind "gap"    — an owed range, OLDEST-first (sort=asc), so every run moves
+  //                   the owed start forward and never re-reads the same newest
+  //                   pages (2026-10-06, dashboard 68804: a newest-first owed
+  //                   walk re-read its newest ~8 pages every run and never
+  //                   reached 09:49). A cut-short walk owes everything newer
+  //                   than the newest row it read.
   const walk = async (
     t: TxrPollTarget,
     direction: "R" | "S",
     w: TxrMessagesWindow,
     kind: "window" | "gap",
     budgetEnd: number | null,
-  ): Promise<{ complete: boolean; oldestRead: Date | null }> => {
+  ): Promise<{ complete: boolean; oldestRead: Date | null; newestRead: Date | null }> => {
     if (!dashboardsSeen.has(t.dashboard_id)) {
       dashboardsSeen.add(t.dashboard_id);
       res.dashboards_polled++;
     }
+    const ascending = kind === "gap";
     const report: TxrPollWalkReport = {
       dashboard_id: t.dashboard_id,
       direction,
@@ -571,24 +613,27 @@ export async function pollTxrMessages(
     res.walks.push(report);
     const outOfTime = () => budgetEnd !== null && clock() >= budgetEnd;
     let oldestRead: Date | null = null;
-    if (outOfTime()) {
-      report.stopped = "budget";
-      return { complete: false, oldestRead };
-    }
+    let newestRead: Date | null = null;
+    const stop = (why: TxrPollWalkReport["stopped"]) => {
+      report.stopped = why;
+      return { complete: false, oldestRead, newestRead };
+    };
+    if (outOfTime()) return stop("budget");
 
     const label = direction === "S" ? "outbound" : "inbound";
     const req = { apiKey: t.api_key, dashboardId: t.dashboard_id, window: w, pageSize, direction };
 
-    // Ask for newest-first explicitly instead of relying on TR's default order,
-    // so page 0 is the newest page whatever meta.total_items says. Page 0
+    // Ask for the order explicitly instead of relying on TR's default, so page 0
+    // is the first page of the walk whatever meta.total_items says. Page 0
     // doubles as the head request that sizes the walk.
-    let sort: "desc" | undefined = "desc";
+    let sort: "desc" | "asc" | undefined = ascending ? "asc" : "desc";
     let head = await fetchMessages({ ...req, page: 0, sort });
     if (!head.ok) {
       // `sort` is undocumented. If TR ever rejects it (it 400s an unrecognized
-      // value) degrade to the documented oldest-first order and the backwards
-      // walk rather than letting a compliance backstop go dark. Counted, so a
-      // permanent silent downgrade is still visible in the cron response.
+      // value) degrade to the documented oldest-first default rather than
+      // letting a compliance backstop go dark: a window walk then reads
+      // backwards (planTxrPageWalk); an owed-range walk wants oldest-first
+      // anyway. Counted, so a permanent silent downgrade is still visible.
       const unsorted = await fetchMessages({ ...req, page: 0 });
       if (unsorted.ok) {
         res.sort_fallbacks++;
@@ -598,54 +643,52 @@ export async function pollTxrMessages(
     }
     if (!head.ok) {
       res.error = head.error;
-      report.stopped = "fetch_error";
       await notifyTelegram(
         `⚠️ Text Request messages poll FAILED (DLR reconcile backstop down)\n` +
           `error: ${head.error}\ncredential ${t.credential_id} · dashboard ${t.dashboard_id} (${label})`,
       ).catch(() => {});
-      return { complete: false, oldestRead };
+      return stop("fetch_error");
     }
 
-    const plan = sort
+    // Forward pages when the API hands them in walk order (sorted, or an
+    // owed-range walk on the oldest-first default); backwards otherwise.
+    const forward = sort !== undefined || ascending;
+    const plan = forward
       ? planTxrSortedWalk(head.totalItems, pageSize, maxPages)
       : planTxrPageWalk(head.totalItems, pageSize, maxPages);
     if (plan.truncated) {
       res.truncated = true;
       // Never a silent cap: say exactly what was skipped and why.
       const pagesTotal = Math.ceil(head.totalItems / pageSize);
+      const which = ascending ? "Oldest pages were read; the newest" : "Newest pages were read; the oldest";
       const fate = stateful
-        ? "Oldest pages are recorded as owed and read first on the next run."
-        : "Oldest pages skipped by this manual run (the cron run reads them).";
+        ? `${which} are owed and read on the next run.`
+        : `${which} are left to the cron run (manual run).`;
       console.warn(
         `[textrequest-messages-poll] page cap hit — dashboard ${t.dashboard_id} (${label}, ${kind}): ` +
-          `${head.totalItems} messages across ${pagesTotal} pages, reading the newest ${maxPages}. ${fate}`,
+          `${head.totalItems} messages across ${pagesTotal} pages, reading ${maxPages}. ${fate}`,
       );
       await notifyTelegram(
         `⚠️ Text Request messages poll hit its page cap\n` +
           `dashboard ${t.dashboard_id} (${label}, ${kind}): ${head.totalItems} messages ` +
-          `(${pagesTotal} pages, cap ${maxPages}).\nNewest pages were read. ${fate}`,
+          `(${pagesTotal} pages, cap ${maxPages}).\n${fate}`,
       ).catch(() => {});
     }
 
     for (const page of plan.pages) {
-      // Page 0's rows are already in hand from the head request — under
-      // sort=desc it is the first page of the walk, so it is always reusable.
-      const reuseHead = page === 0 && (sort || plan.pages.length === 1);
-      if (!reuseHead && outOfTime()) {
-        report.stopped = "budget";
-        return { complete: false, oldestRead };
-      }
+      // Page 0's rows are already in hand from the head request — it is the
+      // first page of any forward walk, and the only page of a one-page walk.
+      const reuseHead = page === 0 && (forward || plan.pages.length === 1);
+      if (!reuseHead && outOfTime()) return stop("budget");
       const pageRes = reuseHead ? head : await fetchMessages({ ...req, page, sort });
       if (!pageRes.ok) {
-        // Stop the walk rather than skip the page: the walk reads newest-first,
-        // and "everything older than the oldest row read is owed" only holds if
-        // no page in between was skipped.
+        // Stop the walk rather than skip the page: "everything past the last
+        // row read is owed" only holds if no page in between was skipped.
         res.error = pageRes.error;
-        report.stopped = "fetch_error";
         console.warn(
           `[textrequest-messages-poll] page ${page} failed for dashboard ${t.dashboard_id}: ${pageRes.error}`,
         );
-        return { complete: false, oldestRead };
+        return stop("fetch_error");
       }
       res.fetched += pageRes.items.length;
 
@@ -686,8 +729,7 @@ export async function pollTxrMessages(
         } catch (e) {
           // Not counted as read: the page's range stays owed and is retried.
           console.error("[textrequest-messages-poll] inbound row failed, will retry next run:", e);
-          report.stopped = "write_error";
-          return { complete: false, oldestRead };
+          return stop("write_error");
         }
       }
 
@@ -729,22 +771,20 @@ export async function pollTxrMessages(
           // The page is NOT counted as read, so its range stays owed and is
           // retried — a failed write must not advance the walk past it.
           console.error("[textrequest-messages-poll] page write failed, will retry next run:", e);
-          report.stopped = "write_error";
-          return { complete: false, oldestRead };
+          return stop("write_error");
         }
       }
       for (const m of pageRes.items) {
         const ts = parseTxrUtcTimestamp(m.message_timestamp_utc);
-        if (ts && (!oldestRead || ts < oldestRead)) oldestRead = ts;
+        if (!ts) continue;
+        if (!oldestRead || ts < oldestRead) oldestRead = ts;
+        if (!newestRead || ts > newestRead) newestRead = ts;
       }
       report.pages_read++;
     }
-    if (plan.truncated) {
-      report.stopped = "page_cap";
-      return { complete: false, oldestRead };
-    }
+    if (plan.truncated) return stop("page_cap");
     report.complete = true;
-    return { complete: true, oldestRead };
+    return { complete: true, oldestRead, newestRead };
   };
 
   // Inbound (the compliance side) before outbound when both are asked for.
@@ -757,34 +797,70 @@ export async function pollTxrMessages(
         ])
       : new Map<string, Date>();
     const order = stateful ? txrWalkOrder(targets, state, direction) : targets;
-    for (let i = 0; i < order.length; i++) {
-      const t = order[i];
-      const budgetEnd =
-        opts?.deadlineAt === undefined ? null : txrBudgetEnd(clock(), opts.deadlineAt, order.length - i);
-      const owed: TxrRange[] = [];
-      const gFrom = state.get(gapFromKey(t.dashboard_id, direction));
-      const gTo = state.get(gapToKey(t.dashboard_id, direction));
-      if (gFrom && gTo) {
-        const gw = { start_date: gFrom.toISOString(), end_date: gTo.toISOString() };
-        const g = await walk(t, direction, gw, "gap", budgetEnd);
-        if (!g.complete) owed.push(txrUnreadRange(gFrom, gTo, g.oldestRead));
-      }
-      const r = await walk(t, direction, window, "window", budgetEnd);
-      if (!r.complete) {
-        owed.push(txrUnreadRange(new Date(window.start_date), new Date(window.end_date), r.oldestRead));
-      }
-      const gap = txrMergeRanges(owed);
-      if (gap) {
-        res.owed.push({ dashboard_id: t.dashboard_id, direction, from: gap.from.toISOString(), to: gap.to.toISOString() });
-      }
-      if (!stateful) continue;
-      if (gap) {
-        await writeStamp(database, gapFromKey(t.dashboard_id, direction), gap.from);
-        await writeStamp(database, gapToKey(t.dashboard_id, direction), gap.to);
+    const budgetFor = (left: number) =>
+      opts?.deadlineAt === undefined ? null : txrBudgetEnd(clock(), opts.deadlineAt, left);
+
+    // What each dashboard owes after this run. Saved as it changes, so a run
+    // killed later still keeps the progress already made.
+    const owedNow = new Map<string, TxrRange | null>();
+    const save = async (t: TxrPollTarget, owed: TxrRange | null) => {
+      owedNow.set(t.dashboard_id, owed);
+      if (!stateful) return;
+      if (owed) {
+        await writeStamp(database, gapFromKey(t.dashboard_id, direction), owed.from);
+        await writeStamp(database, gapToKey(t.dashboard_id, direction), owed.to);
       } else {
         await deleteStamps(database, [gapFromKey(t.dashboard_id, direction), gapToKey(t.dashboard_id, direction)]);
         await writeStamp(database, txrPassKey(t.dashboard_id, direction), new Date());
       }
+    };
+
+    // Pass 1: every dashboard, oldest complete pass first — its owed range
+    // (oldest-first), then its window (newest-first), on an equal share of the
+    // time left.
+    for (let i = 0; i < order.length; i++) {
+      const t = order[i];
+      const budgetEnd = budgetFor(order.length - i);
+      const gFrom = state.get(gapFromKey(t.dashboard_id, direction));
+      const gTo = state.get(gapToKey(t.dashboard_id, direction));
+      const prior = gFrom && gTo ? { from: gFrom, to: gTo } : null;
+      let gapAfter: TxrRange | null = null;
+      if (prior) {
+        const g = await walk(t, direction, { start_date: prior.from.toISOString(), end_date: prior.to.toISOString() }, "gap", budgetEnd);
+        gapAfter = g.complete ? null : txrOwedAfterAscending(prior, g.newestRead);
+      }
+      const r = await walk(t, direction, window, "window", budgetEnd);
+      const windowOwed = r.complete
+        ? null
+        : txrUnreadRange(new Date(window.start_date), new Date(window.end_date), r.oldestRead);
+      await save(t, txrMergeOwed(prior, gapAfter, windowOwed));
+    }
+
+    // Pass 2+: time left before the deadline goes back to the dashboards that
+    // still owe something (a dashboard that finished early used to hand its time
+    // only to the dashboards AFTER it). Oldest-first again, so every pass moves
+    // an owed start forward; stop when nothing is owed, time is up, or a pass
+    // makes no progress.
+    if (opts?.deadlineAt !== undefined) {
+      for (let pass = 0; pass < 5; pass++) {
+        const owing = order.filter((t) => owedNow.get(t.dashboard_id));
+        if (owing.length === 0 || clock() >= opts.deadlineAt) break;
+        let progressed = false;
+        for (let i = 0; i < owing.length; i++) {
+          const t = owing[i];
+          const owed = owedNow.get(t.dashboard_id)!;
+          const g = await walk(t, direction, { start_date: owed.from.toISOString(), end_date: owed.to.toISOString() }, "gap", budgetFor(owing.length - i));
+          const after = g.complete ? null : txrOwedAfterAscending(owed, g.newestRead);
+          if (!after || after.from > owed.from) progressed = true;
+          await save(t, after);
+        }
+        if (!progressed) break;
+      }
+    }
+
+    for (const t of order) {
+      const owed = owedNow.get(t.dashboard_id);
+      if (owed) res.owed.push({ dashboard_id: t.dashboard_id, direction, from: owed.from.toISOString(), to: owed.to.toISOString() });
     }
   }
 

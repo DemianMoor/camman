@@ -51,7 +51,7 @@ async function fetchPage(opts: {
   page: number;
   pageSize: number;
   direction?: "S" | "R";
-  sort?: "desc";
+  sort?: "desc" | "asc";
 }): Promise<TxrMessagesPage> {
   try {
     const u = new URL(`${textrequestBaseUrl()}/dashboards/${encodeURIComponent(opts.dashboardId)}/messages`);

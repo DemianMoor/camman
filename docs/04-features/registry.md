@@ -1,6 +1,6 @@
 # Feature — Registry (brands, offers, networks, providers, …)
 
-_Last updated: 2026-09-29_
+_Last updated: 2026-10-06_
 
 ## 1. Purpose
 The registry is the set of lookup/reference entities a campaign is composed from: who the campaign is for (brand/offer/network), how it's sent (provider/phone), and how it's classified (routing type, traffic type, UTM tags). They share one CRUD pattern, cloned from the original **Brands** implementation (CLAUDE.md §11).
@@ -10,7 +10,7 @@ The registry is the set of lookup/reference entities a campaign is composed from
 |--------|-------|----------------|-------------------|
 | Brands | `brands` | `brand_id` (text uniq), `website`, `color`, `avatar_url` | `brands` |
 | Offers | `offers` | `offer_id`, `network_id` (NOT NULL, restrict), `payout_model` cpa/revshare, `payout_cpa` (**current-rate cache only** — not used for historical revenue), `payout_revshare`, `sales_pages[]` | `offers` |
-| Affiliate networks | `affiliate_networks` | `network_id`, `url` | `networks` |
+| Affiliate networks | `affiliate_networks` | `network_id`, `url`; conversion mapping rules (`conversion_event_mappings`, network level) via the row ⋯ menu, defaults pre-filled on create — see [conversion-events.md](conversion-events.md#managing-network-rules-affiliate-networks-page) | `networks` |
 | SMS providers | `sms_providers` | `supports_api_send` (**not editable via the provider form** — dedicated audited endpoint, see below), send-window cols, circuit-breaker cols | `providers` |
 | Provider phones | `provider_phones` | `provider_id`, `brand_id`, `phone_number`, `number_type` (10dlc/toll_free/short_code), `cost_per_sms` | (under providers) |
 | Routing types | `routing_types` | `routing_type_id`, `name` | `routing_types` |

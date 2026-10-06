@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { mappingRuleListSchema } from "./conversion-mappings";
+
 export { nullIfEmpty } from "./_helpers";
 
 // Affiliate Network validators.
@@ -43,6 +45,13 @@ export const networkUpdateSchema = networkCreateSchema
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided",
   });
+
+// POST /api/networks only: the network plus its initial conversion mapping
+// rules. Kept off networkCreateSchema so networkUpdateSchema (derived from it)
+// never accepts `mappings` — rules are edited through their own endpoints.
+export const networkCreateWithMappingsSchema = networkCreateSchema.extend({
+  mappings: mappingRuleListSchema.optional(),
+});
 
 export type NetworkCreateInput = z.infer<typeof networkCreateSchema>;
 export type NetworkUpdateInput = z.infer<typeof networkUpdateSchema>;

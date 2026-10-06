@@ -76,6 +76,16 @@ export async function GET(req: NextRequest) {
         archived_at: affiliate_networks.archived_at,
         created_at: affiliate_networks.created_at,
         offer_count: drizzleSql<number>`count(${offers.id})::int`,
+        // Active network-level conversion mapping rules. Zero ⇒ every
+        // conversion from this network lands unmapped (the page badges it).
+        // Columns written literally: ${table.col} in a correlated subquery
+        // can bind to the inner table.
+        active_rule_count: drizzleSql<number>`(
+          SELECT count(*)::int FROM conversion_event_mappings m
+          WHERE m.affiliate_network_id = "affiliate_networks"."id"
+            AND m.org_id = "affiliate_networks"."org_id"
+            AND m.status = 'active'
+        )`,
       })
       .from(affiliate_networks)
       .leftJoin(

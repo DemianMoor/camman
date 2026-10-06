@@ -4,14 +4,7 @@ import { db } from "@/db/client";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { can } from "@/lib/permissions";
-import { pollTxrOptedOutContacts } from "@/lib/sends/textrequest-contacts-poll";
-import { checkTxrWebhookHealth } from "@/lib/sends/textrequest-hooks";
-import { pollTxrMessages } from "@/lib/sends/textrequest-messages-poll";
-import {
-  beginTxrPollRun,
-  checkTxrPassAges,
-  finishTxrPollRun,
-} from "@/lib/sends/textrequest-poll-health";
+import { defaultTxrPollSteps, runTxrPollTick } from "@/lib/sends/textrequest-poll-run";
 
 // Text Request poll tick (Phases 3b + 4) — three jobs behind one cron entry:
 //   1. messages poll: DLR reconciliation backstop for the per-message
@@ -45,47 +38,11 @@ export const maxDuration = 60;
 /** Outbound pages are not started past this many ms into the request (of 60 s). */
 const OUTBOUND_DEADLINE_MS = 45_000;
 
-async function step<T>(name: string, fn: () => Promise<T>): Promise<{ ok: true; result: T } | { ok: false; error: string }> {
-  try {
-    return { ok: true, result: await fn() };
-  } catch (e) {
-    console.error(`[textrequest-poll] step ${name} threw:`, e);
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-async function run(startedAt: number, orgId: string | undefined, cron: boolean) {
-  const runStart = cron ? await beginTxrPollRun(db) : null;
-  const inbound = await step("inbound", () => pollTxrMessages(db, { orgId, directions: ["R"] }));
-  const contacts = await step("contacts", () => pollTxrOptedOutContacts(db, { orgId }));
-  const health = await step("health", () => checkTxrWebhookHealth(db, { orgId }));
-  const outbound = await step("outbound", () =>
-    pollTxrMessages(db, { orgId, directions: ["S"], deadlineAt: startedAt + OUTBOUND_DEADLINE_MS }),
-  );
-  const dashboards = [
-    ...new Set(
-      [inbound, outbound].flatMap((r) => (r.ok ? r.result.walks.map((w) => w.dashboard_id) : [])),
-    ),
-  ];
-  const passes = cron ? await step("pass-check", () => checkTxrPassAges(db, dashboards)) : null;
-  const finish = cron ? await finishTxrPollRun(db) : null;
-  // ONE line per run, so the run history is countable from the request logs
-  // (the 24 h verification counts these: every step must say ok).
-  console.log(
-    JSON.stringify({
-      txr_poll_run: {
-        ms: Date.now() - startedAt,
-        inbound: inbound.ok,
-        contacts: contacts.ok,
-        health: health.ok,
-        outbound: outbound.ok,
-        outbound_complete: outbound.ok ? outbound.result.outbound_gaps.length === 0 : false,
-        gaps: outbound.ok ? outbound.result.outbound_gaps.length : null,
-        captured: outbound.ok ? outbound.result.captured : null,
-      },
-    }),
-  );
-  return { run: runStart, inbound, contacts, health, outbound, passes, finish };
+function run(startedAt: number, orgId: string | undefined, cron: boolean) {
+  return runTxrPollTick(defaultTxrPollSteps(db, { orgId, deadlineAt: startedAt + OUTBOUND_DEADLINE_MS }), {
+    cron,
+    startedAt,
+  });
 }
 
 async function handle(req: NextRequest): Promise<NextResponse> {

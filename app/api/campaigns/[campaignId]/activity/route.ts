@@ -6,6 +6,12 @@ import { campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
+import {
+  countCampaignOptOuts,
+  getCampaignDeliveryRows,
+  summarizeCampaignDelivery,
+} from "@/lib/reporting/campaign-activity";
+import { getPhoneDirectory } from "@/lib/reporting/delivery";
 
 export const dynamic = "force-dynamic";
 
@@ -16,8 +22,9 @@ function parseId(idParam: string) {
 }
 
 // Campaign Activity tab — read-only. Returns:
-//   • summary: send-status rollup across this campaign's stage_sends (+ replies
-//     matched from TextHub inbound events + last send time + per-stage rows).
+//   • summary: send-status rollup across this campaign's stage_sends, opt-outs
+//     (STOP replies linked to a send, every provider), last send time, per-stage
+//     rows, and the delivery cards (lib/reporting/campaign-activity.ts).
 //   • events: the campaign_events audit timeline, newest first, paginated, with
 //     the actor's display name resolved from auth.users (NULL actor = System).
 // The per-recipient message drill-down lives in ./activity/messages.
@@ -43,7 +50,17 @@ export async function GET(
   }
 
   const owns = await db
-    .select({ id: campaigns.id })
+    .select({
+      id: campaigns.id,
+      // The delivery cards are scoped by stage (the rollup and the live query
+      // both narrow on stage_id), so the ids ride along with the 404 gate.
+      // ⚠️ Literal qualified names: in a single-table select drizzle renders
+      // ${table.col} unqualified, which would bind to the inner table here.
+      stage_ids: drizzleSql<number[]>`coalesce((
+        SELECT array_agg(cs.id) FROM campaign_stages cs
+        WHERE cs.campaign_id = "campaigns"."id" AND cs.org_id = ${orgId}
+      ), '{}')`,
+    })
     .from(campaigns)
     .where(and(eq(campaigns.id, campaignId), eq(campaigns.org_id, orgId)))
     .limit(1);
@@ -61,10 +78,16 @@ export async function GET(
   );
   const offset = (page - 1) * pageSize;
 
-  // These five are independent — run them in one round-trip, not six serial
-  // ones (the ownership check above already gated the 404). On the transaction
-  // pooler each await is a separate RTT, so serial was ~6× the latency.
-  const [totals, replyRows, byStage, eventRows, countRows] = (await Promise.all([
+  const stageIds = owns[0].stage_ids.map(Number);
+
+  // These are independent — run them in one round-trip, not serially (the
+  // ownership check above already gated the 404). On the transaction pooler
+  // each await is a separate RTT, so serial was ~6× the latency.
+  const deliveryPromise = Promise.all([
+    getCampaignDeliveryRows(orgId, stageIds),
+    getPhoneDirectory(orgId),
+  ]);
+  const [totals, optOuts, byStage, eventRows, countRows] = (await Promise.all([
     // ---- Send-status rollup (campaign-wide).
     db.execute(drizzleSql`
       SELECT
@@ -73,6 +96,8 @@ export async function GET(
         count(*) FILTER (WHERE status = 'rejected')::int  AS rejected,
         count(*) FILTER (WHERE status = 'filtered')::int  AS filtered,
         count(*) FILTER (WHERE status = 'skipped_duplicate')::int AS skipped_duplicate,
+        count(*) FILTER (WHERE status = 'skipped_opted_out')::int AS skipped_opted_out,
+        count(*) FILTER (WHERE status = 'skipped_ineligible')::int AS skipped_ineligible,
         count(*) FILTER (WHERE status = 'pending')::int   AS pending,
         count(*) FILTER (WHERE status = 'sending')::int   AS sending,
         count(*)::int                                     AS total,
@@ -80,17 +105,8 @@ export async function GET(
       FROM stage_sends
       WHERE org_id = ${orgId} AND campaign_id = ${campaignId}
     `),
-    // ---- Replies: TextHub inbound events matched to this campaign's sends.
-    db.execute(drizzleSql`
-      SELECT count(DISTINCT ie.id)::int AS replies
-      FROM texthub_inbound_events ie
-      JOIN stage_sends ss
-        ON ss.texthub_message_id = ie.provider_message_id
-       AND ss.org_id = ie.org_id
-      WHERE ie.org_id = ${orgId}
-        AND ss.campaign_id = ${campaignId}
-        AND ie.provider_message_id IS NOT NULL
-    `),
+    // ---- Opt-outs: STOP replies linked to this campaign's sends, every provider.
+    countCampaignOptOuts(db, orgId, campaignId),
     // ---- Per-stage send breakdown.
     db.execute(drizzleSql`
       SELECT
@@ -140,12 +156,14 @@ export async function GET(
       rejected: number;
       filtered: number;
       skipped_duplicate: number;
+      skipped_opted_out: number;
+      skipped_ineligible: number;
       pending: number;
       sending: number;
       total: number;
       last_sent_at: string | null;
     }[],
-    { replies: number }[],
+    number,
     {
       stage_id: number;
       stage_number: number;
@@ -170,20 +188,34 @@ export async function GET(
     { n: number }[],
   ];
 
+  const [deliveryRows, phones] = await deliveryPromise;
+  const delivery = summarizeCampaignDelivery(
+    deliveryRows.matured,
+    deliveryRows.pending,
+    phones,
+  );
+
   const t = totals[0];
   return NextResponse.json({
     summary: {
-      sent: t?.sent ?? 0,
+      // Messages Sent IS the delivery base (rollup + live), so the cards below
+      // it can never be computed over a different number of sends.
+      // scripts/verify-delivery-grains.ts asserts it equals the direct
+      // status='sent' count.
+      sent: delivery.sent,
       failed: t?.failed ?? 0,
       rejected: t?.rejected ?? 0,
       filtered: t?.filtered ?? 0,
       skipped_duplicate: t?.skipped_duplicate ?? 0,
+      skipped_opted_out: t?.skipped_opted_out ?? 0,
+      skipped_ineligible: t?.skipped_ineligible ?? 0,
       pending: t?.pending ?? 0,
       sending: t?.sending ?? 0,
       total: t?.total ?? 0,
-      replies: replyRows[0]?.replies ?? 0,
+      opt_outs: optOuts,
       last_sent_at: t?.last_sent_at ?? null,
       by_stage: byStage,
+      delivery,
     },
     events: {
       data: eventRows,

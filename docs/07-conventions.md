@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-05_
+_Last updated: 2026-10-06_
 
 ## A cost you cannot attribute is one to move, not tune (2026-09-28)
 
@@ -4546,3 +4546,16 @@ campaign config panel, and the stage window fields reused them, so each
 `<label htmlFor>` resolved to the first match — clicking the stage window's
 label focused the campaign's date picker. The stage fields are now
 `drip-window-start` / `drip-window-end`.
+
+## Delivery "matured" has two thresholds, on purpose (2026-10-06, card 869fchavb)
+
+The undelivered tripwire matures a send at **10 min** (`DLR_MATURITY_MINUTES`, lib/sends/tells-monitors.ts); the campaign Activity cards at **60 min** (`ACTIVITY_DLR_MATURITY_MINUTES`, lib/reporting/campaign-activity.ts). The tripwire wants an early alarm; a card that an operator reads as a count wants the bucket to be right — at 10 min ~8% of tls receipts have not landed yet and would show as No status. Measured share of first final receipts within 1 h: tls 98.7%, txr 97.1%, ahi 99.2%. Don't "unify" them. txr's reconcile-poll tail (p99 ≈ 29 h) is not covered by either: No status on a txr campaign keeps shrinking for a day or more.
+
+## `queryDeliveryByStage` with ONE stage misplans to a nested loop (2026-10-06)
+
+With `stageIds` of a single stage, the sends side's BitmapAnd estimates ~7 rows (4,491 actual on campaign 1595) and the planner nested-loops them over every receipt group in the window: 131M join-filter comparisons, 8–12 s. Two stages estimate higher and hash-join in 0.25 s. The Activity route runs it inside a transaction with `SET LOCAL enable_nestloop = off` (~0.35 s, identical rows — `scripts/verify-delivery-grains.ts` re-proves the equality). Any NEW per-stage caller needs the same; the undelivered tripwire still runs the default plan.
+
+## `stage_sends.status = 'rejected'` is not a provider rejection
+
+It is an operator-canceled / recalled send kept for audit (`…/send/abort`). A send that errored at the provider is `failed`. Card and column names must not call `failed` "rejected".
+

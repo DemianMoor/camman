@@ -38,7 +38,7 @@ async function main() {
       // IS NOT DISTINCT FROM: a NULL tag must match NULL-tagged events.
       const rows = (await tx.execute(sql`
         INSERT INTO contact_contact_groups (contact_id, contact_group_id, org_id)
-        SELECT DISTINCT e.contact_id, ${groupId}, e.org_id
+        SELECT DISTINCT e.contact_id, ${groupId}::int, e.org_id
         FROM lead_events e
         WHERE e.org_id = ${c.org_id}::uuid AND e.sandbox = false
           AND e.partner_slug = ${c.partner_slug}

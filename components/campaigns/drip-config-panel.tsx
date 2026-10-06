@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Save } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, Loader2, Save } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,7 @@ import { JourneyFunnel } from "@/components/drip/journey-funnel";
 import { SearchableSelect } from "@/components/searchable-select";
 import { toastApiError } from "@/lib/api/toast-error";
 import type { DripFunnel } from "@/lib/drip/funnel";
-import { CAMPAIGN_TIMEZONE_LABEL, formatCampaignDateTime, utcToCampaignLocalInput, campaignLocalInputToUtcIso }
+import { CAMPAIGN_TIMEZONE_LABEL, utcToCampaignLocalInput, campaignLocalInputToUtcIso }
   from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
@@ -71,24 +71,16 @@ type DripNumber = {
   provider_status?: string | null;
 };
 
-type Journey = {
-  id: string;
-  state: string;
-  routed_at: string;
-  campaign_id: number | null;
-  phone_number: string | null;
-  reason: Record<string, unknown>;
-};
-
 export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; canEdit: boolean }) {
   const cfgApi = useApiCall<Config>();
   const saveApi = useApiCall<unknown>();
-  const journeysApi = useApiCall<{ data: Journey[]; funnel: DripFunnel }>();
+  const journeysApi = useApiCall<{ funnel: DripFunnel }>();
   const numbersApi = useApiCall<{ selected: DripNumber[]; available: DripNumber[] }>();
   const saveNumbersApi = useApiCall<unknown>();
 
   const [cfg, setCfg] = useState<Config | null>(null);
-  const [journeys, setJourneys] = useState<Journey[]>([]);
+  // Collapsed by default: the full list lives in the CSV export, not the page.
+  const [routedOpen, setRoutedOpen] = useState(false);
   const [funnel, setFunnel] = useState<DripFunnel | null>(null);
   const [behavioralOn, setBehavioralOn] = useState(false);
   const [followupParents, setFollowupParents] = useState<FollowupParent[]>([]);
@@ -129,7 +121,6 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
     (async () => {
       const r = await loadJ(`/api/campaigns/${campaignId}/drip-journeys`);
       if (r.ok) {
-        setJourneys(r.data.data);
         setFunnel(r.data.funnel);
       }
     })();
@@ -527,35 +518,47 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
       )}
 
       <div>
-        <div className="mb-2 flex items-center gap-2">
+        <button
+          type="button"
+          className="mb-2 flex items-center gap-2"
+          onClick={() => setRoutedOpen((o) => !o)}
+          aria-expanded={routedOpen}
+        >
+          {routedOpen ? (
+            <ChevronDown className="size-4" aria-hidden />
+          ) : (
+            <ChevronRight className="size-4" aria-hidden />
+          )}
           <h3 className="text-sm font-medium">Routed leads</h3>
           <Badge variant="secondary">{cfg?.journeys_total ?? 0}</Badge>
-        </div>
-        {journeys.length === 0 ? (
-          <p className="text-muted-foreground text-sm">
-            Nothing routed yet. Leads are matched by the 1-minute routing worker once drip is
-            switched on for the organization.
-          </p>
-        ) : (
-          <ul className="divide-y rounded-md border text-sm">
-            {journeys.map((j) => (
-              <li key={j.id} className="space-y-1 px-3 py-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-xs">{j.phone_number ?? "—"}</span>
-                  <Badge variant={j.state === "unroutable" ? "outline" : "secondary"}>{j.state}</Badge>
-                  <span className="text-muted-foreground text-xs">
-                    {formatCampaignDateTime(j.routed_at)}
-                  </span>
-                </div>
-                {/* The stored reason, verbatim. It is the record of what was true
-                    at routing time, which is often different from now. */}
-                <pre className="text-muted-foreground overflow-x-auto rounded bg-muted p-2 text-[11px]">
-                  {JSON.stringify(j.reason, null, 2)}
-                </pre>
-              </li>
-            ))}
-          </ul>
-        )}
+        </button>
+        {routedOpen &&
+          ((cfg?.journeys_total ?? 0) === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              Nothing routed yet. Leads are matched by the 1-minute routing worker once drip is
+              switched on for the organization.
+            </p>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  window.open(
+                    `/api/campaigns/${campaignId}/drip-journeys/export`,
+                    "_blank",
+                    "noopener",
+                  )
+                }
+              >
+                <Download className="size-4" aria-hidden /> Export CSV
+              </Button>
+              <span className="text-muted-foreground text-xs">
+                Every routed lead: phone, status, routed / first-sent times (ET), partner, tag,
+                line type and state.
+              </span>
+            </div>
+          ))}
       </div>
     </div>
   );

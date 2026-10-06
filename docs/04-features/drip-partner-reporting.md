@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-09-18 (Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note)_
+_Last updated: 2026-10-06 (Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -191,7 +191,8 @@ decoration.
 ## 5. The journey funnel (ruling R4)
 
 `lib/drip/funnel.ts` → `getDripFunnel(orgId, campaignId)`, surfaced on the drip
-campaign detail page via `/api/campaigns/[campaignId]/drip-journeys`.
+campaign detail page via `/api/campaigns/[campaignId]/drip-journeys` (which returns only
+`{ funnel }` since 2026-10-06 — the per-journey list moved to the CSV export at `./export`).
 
 ### ⚠️ Two shapes that do not add up to each other
 

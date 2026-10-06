@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-10-06_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -176,6 +176,12 @@ re-eligible as a "new" arrival exactly when that rule would have re-qualified it
 **⚠️ An `unroutable` row has `campaign_id = NULL`** (migration 0163). It matched nothing, so naming
 a campaign would inflate that campaign's journey count and mislead the debugging tool. A CHECK keeps
 `campaign_id` mandatory for every other state.
+
+**⚠️ An `unroutable` row also needs `closed_at`** — `drip_journeys_closed_at_check` requires it on every
+state other than `routed`/`active`. The insert in [lib/drip/routing.ts](../../lib/drip/routing.ts)
+omitted it until 2026-10-06, so the first aged-out lead failed with 23514 and threw out of the batch.
+Candidates are oldest-first, so that one lead headed every batch and **stopped all routing** — found
+the moment drip posture was first switched on, by an Aug-24 internal-test lead.
 
 ## "Why not routed"
 

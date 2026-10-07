@@ -165,7 +165,9 @@ lead's reason (stored in `drip_journeys.reason` with the rest of the candidate d
 `lead state=TX is in the excluded list [...] (exclude mode; a lead with no state would have
 passed)`; the form shows the same rule as a helper line under the field, prefixed with the input format
 (2-letter codes, comma-separated, any case, e.g. `TX, FL`); with an empty list the line reads
-"Empty = any state" instead of the mode rule. State/country values are
+"Empty = any state" instead of the mode rule. The input keeps its own raw text (`ListTextInput` in
+[components/campaigns/drip-audience-fields.tsx](../../components/campaigns/drip-audience-fields.tsx)) — deriving the
+shown value from the parsed list round-trips every keystroke and eats a trailing comma. State/country values are
 compared **case-insensitively** (both modes) because the field is free text — a typed `tx` must still
 exclude `TX`. Tested by `scripts/test-drip-geo-exclude-mode.ts` (preview DB, rolled back).
 

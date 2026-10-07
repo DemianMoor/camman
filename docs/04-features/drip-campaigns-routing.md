@@ -163,7 +163,9 @@ the literal `"exclude"`; missing, null or any other value is include.
 Exclude mode inverts the missing rule on purpose: it removes *known* matches only. An excluded
 lead's reason (stored in `drip_journeys.reason` with the rest of the candidate detail) reads
 `lead state=TX is in the excluded list [...] (exclude mode; a lead with no state would have
-passed)`; the form shows the same rule as a helper line under the field. State/country values are
+passed)`; the form shows the same rule as a helper line under the field, prefixed with the input format
+(2-letter codes, comma-separated, any case, e.g. `TX, FL`); with an empty list the line reads
+"Empty = any state" instead of the mode rule. State/country values are
 compared **case-insensitively** (both modes) because the field is free text — a typed `tx` must still
 exclude `TX`. Tested by `scripts/test-drip-geo-exclude-mode.ts` (preview DB, rolled back).
 

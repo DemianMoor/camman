@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
-import { DEMOGRAPHIC_FILTERS } from "@/lib/drip/routing-eval";
+import { DEMOGRAPHIC_FILTERS, GEO_FILTER_MODES } from "@/lib/drip/routing-eval";
 // Shared with the campaign editor so the dropdown can never offer a value the
 // validator rejects (or omit one it accepts).
 import { AGE_BANDS, GENDERS, INCOME_BANDS } from "@/lib/drip/demographics";
@@ -25,6 +25,11 @@ const filtersSchema = z
     age_band: z.array(z.enum(AGE_BANDS)).min(1).optional(),
     state: z.array(z.string().trim().min(1).max(64)).min(1).optional(),
     country: z.array(z.string().trim().min(1).max(64)).min(1).optional(),
+    // Include ("only these", the default when absent) or exclude ("all except
+    // these"). Absent = include, so configs saved before the mode existed are
+    // unchanged. See GEO_MODE_FILTERS in routing-eval.
+    state_mode: z.enum(GEO_FILTER_MODES).optional(),
+    country_mode: z.enum(GEO_FILTER_MODES).optional(),
     income_band: z.array(z.enum(INCOME_BANDS)).min(1).optional(),
     kids: z.boolean().optional(),
     married: z.boolean().optional(),

@@ -90,6 +90,58 @@ export function DripAudienceFields({
 
   const arr = (k: string) => (Array.isArray(value.filters[k]) ? (value.filters[k] as string[]) : []);
 
+  // State / country: a list plus an include ("only these", default) or
+  // exclude ("all except these") mode. Include is stored as NO mode key, so a
+  // config saved before the toggle existed reads identically.
+  const geoField = (k: "state" | "country", label: string, example: string) => {
+    const exclude = value.filters[`${k}_mode`] === "exclude";
+    const noun = k === "state" ? "state" : "country";
+    return (
+      <div className="min-w-0">
+        <Label htmlFor={`drip-f-${k}`} className="text-xs">
+          {label}
+        </Label>
+        <div className="flex min-w-0 gap-2">
+          <Select
+            value={exclude ? "exclude" : "include"}
+            onValueChange={(m) => setFilter(`${k}_mode`, m === "exclude" ? "exclude" : undefined)}
+            disabled={disabled}
+          >
+            <SelectTrigger className="w-36 shrink-0" aria-label={`${label} mode`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="include">Only these</SelectItem>
+              <SelectItem value="exclude">All except these</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            id={`drip-f-${k}`}
+            value={arr(k).join(", ")}
+            onChange={(e) =>
+              setFilter(
+                k,
+                e.target.value
+                  .split(",")
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+              )
+            }
+            placeholder={`Any — e.g. ${example}`}
+            disabled={disabled}
+          />
+        </div>
+        {arr(k).length > 0 && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            {exclude
+              ? `Leads with no ${noun} pass — only known matches are excluded.`
+              : `Leads with no ${noun} are skipped.`}
+          </p>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="grid gap-3">
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
@@ -265,46 +317,6 @@ export function DripAudienceFields({
               disabled={disabled}
             />
           </div>
-          <div className="min-w-0">
-            <Label htmlFor="drip-f-state" className="text-xs">
-              States
-            </Label>
-            <Input
-              id="drip-f-state"
-              value={arr("state").join(", ")}
-              onChange={(e) =>
-                setFilter(
-                  "state",
-                  e.target.value
-                    .split(",")
-                    .map((x) => x.trim())
-                    .filter(Boolean),
-                )
-              }
-              placeholder="Any — e.g. TX, FL"
-              disabled={disabled}
-            />
-          </div>
-          <div className="min-w-0">
-            <Label htmlFor="drip-f-country" className="text-xs">
-              Countries
-            </Label>
-            <Input
-              id="drip-f-country"
-              value={arr("country").join(", ")}
-              onChange={(e) =>
-                setFilter(
-                  "country",
-                  e.target.value
-                    .split(",")
-                    .map((x) => x.trim())
-                    .filter(Boolean),
-                )
-              }
-              placeholder="Any — e.g. US"
-              disabled={disabled}
-            />
-          </div>
           <div className="grid min-w-0 content-start gap-2 pt-5">
             {(["kids", "married"] as const).map((k) => (
               <label key={k} className="flex items-center gap-2 text-xs">
@@ -317,6 +329,10 @@ export function DripAudienceFields({
               </label>
             ))}
           </div>
+        </div>
+        <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+          {geoField("state", "States", "TX, FL")}
+          {geoField("country", "Countries", "US")}
         </div>
       </div>
     </div>

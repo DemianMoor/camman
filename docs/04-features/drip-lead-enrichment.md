@@ -124,6 +124,51 @@ healthy-looking inbox.
 The backlog alert ships **here, with its consumer** — in Phase 2 nothing drained the inbox by design,
 so it would have fired on the first lead and stayed firing forever.
 
+## Hourly partner-intake digest
+
+_Added 2026-10-07 (migration 0199)._ Drip-intake lookup batches **no longer post per-batch
+Telegram messages**. `finalizeCompletedBatches` ([lib/telnyx/worker.ts](../../lib/telnyx/worker.ts))
+skips the "📇 Lookup batch complete" summary when `trigger = 'drip_intake'`; `upload`, `backfill` and
+`csv_update` batches keep theirs, and the balance-floor / cap / backlog alerts are unchanged.
+
+Instead, every tick of `/api/cron/telegram-report` (`0 * * * *`, after the performance report)
+sends one **digest of the hour that just ended**, built by `buildIntakeDigest`
+([lib/drip/intake-digest.ts](../../lib/drip/intake-digest.ts)) and rendered by the pure
+`formatIntakeDigest` ([lib/drip/intake-digest-format.ts](../../lib/drip/intake-digest-format.ts)):
+
+- **Source:** `lead_intake_hourly` — written by `bumpIntakeCounters` in the same statement as
+  `lead_intake_daily`. The hour is the **processing** hour (when enrichment counted the lead), the
+  same clock as the daily row, not the partner's `received_at`.
+- **Per partner key (`partner_slug`) × resolved tag:** leads (`received`), mobile, voip / unknown /
+  landline, lookups (`lookups_spent`), cost. Sandbox-only rows are not shown.
+- **Cost** = lookups × the partner report's calibrated rate (`getCalibratedLookupRate`, 90-day ledger,
+  flat-rate fallback) — **never** the per-batch balance delta, which reads $0.00 on 1–2-lookup drip
+  batches. The footer states the rate (`describeRate`). Sub-dollar costs print 4 decimals.
+- **Format:** one partner × tag → compact lines; several → a `<pre>` table
+  `Partner | Tag | Leads | Mobile | Lookups | Cost` with a TOTAL row, plus one compact
+  voip/unknown/landline line per row. Over 3,500 chars it splits **by partner** across numbered
+  messages (a partner is split only if it alone doesn't fit); totals and footer go on the last part.
+- **Footer:** the rate used, the Telnyx balance (once), and on the first-ever digest a note that
+  hourly tracking began mid-hour — that partial hour is never digested on schedule.
+- **No message for an hour with no intake.** It is a digest, not an alert: no `alert_state`, no
+  transition gating.
+- **Self-check:** each digest re-verifies `SUM(hourly) = daily` for the digested hour's ET day,
+  every counter column, per partner × tag (`checkDaySumInvariant`), and appends a
+  `⚠️ Day-sum check FAILED` line naming the breaks instead of failing silently. A day that began
+  before tracking did (the deploy day) is skipped. On demand, read-only:
+  `npx tsx --conditions=react-server scripts/check-intake-hourly-invariant.ts [fromDay] [toDay]`.
+- **Isolation:** the digest build is time-boxed (10 s) and wrapped in its own try/catch; a failure
+  logs and posts one plain-text line, and never breaks the report or the watches.
+- **Manual re-run:** `GET /api/cron/telegram-report?digestHour=<ISO instant>` (CRON_SECRET) re-sends
+  the digest for that hour, marked "(manual re-run)", without touching the performance report.
+- **Known edge:** a batch that started before :00 and commits a few seconds after is counted in the
+  earlier hour, after that hour's digest may already have been built — it stays in the table and the
+  daily report, it is just not in that digest.
+
+Tests: [scripts/test-intake-digest-format.ts](../../scripts/test-intake-digest-format.ts) (pure) and
+[scripts/test-intake-hourly-db.ts](../../scripts/test-intake-hourly-db.ts) (preview DB, rolled back:
+dual write, one-statement atomicity, invariant, digest).
+
 ## Idempotency
 
 The sweeper is crash-safe by construction: the batch is claimed `FOR UPDATE SKIP LOCKED` in one

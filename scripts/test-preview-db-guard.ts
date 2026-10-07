@@ -162,6 +162,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production backfill; writes only behind --apply",
   },
   {
+    file: "backfill-partner-tag-groups.ts",
+    why: "one-shot production backfill of partner x tag contact groups (e.g. pml-aca, #311); dry-run default, writes only behind --apply, idempotent (ON CONFLICT DO NOTHING); applied 2026-10-06",
+  },
+  {
     file: "backfill-provider-credentials-encryption.ts",
     why: "one-shot production backfill; writes only behind --apply",
   },

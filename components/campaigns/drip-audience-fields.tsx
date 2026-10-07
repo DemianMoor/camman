@@ -115,18 +115,10 @@ export function DripAudienceFields({
               <SelectItem value="exclude">All except these</SelectItem>
             </SelectContent>
           </Select>
-          <Input
+          <ListTextInput
             id={`drip-f-${k}`}
-            value={arr(k).join(", ")}
-            onChange={(e) =>
-              setFilter(
-                k,
-                e.target.value
-                  .split(",")
-                  .map((x) => x.trim())
-                  .filter(Boolean),
-              )
-            }
+            value={arr(k)}
+            onChange={(v) => setFilter(k, v)}
             placeholder={`Any — e.g. ${example}`}
             disabled={disabled}
           />
@@ -338,5 +330,51 @@ export function DripAudienceFields({
         </div>
       </div>
     </div>
+  );
+}
+
+const parseList = (s: string) =>
+  s
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+// A comma-separated list typed as free text. ⚠️ The input keeps its OWN raw
+// text: deriving the value from the parsed list (list.join(", ")) round-trips
+// every keystroke, so a trailing "TX," parses to ["TX"], re-renders as "TX",
+// and the comma is eaten — typing "TX, FL" produced "TXFL". The list is pushed
+// up on every change; the text is only replaced when the list changes from
+// OUTSIDE (e.g. a saved config loading), never by our own edits.
+function ListTextInput({
+  id,
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: {
+  id: string;
+  value: string[];
+  onChange: (v: string[]) => void;
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  const key = value.join(",");
+  const [text, setText] = useState(value.join(", "));
+  const [prevKey, setPrevKey] = useState(key);
+  if (key !== prevKey) {
+    setPrevKey(key);
+    if (parseList(text).join(",") !== key) setText(value.join(", "));
+  }
+  return (
+    <Input
+      id={id}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        onChange(parseList(e.target.value));
+      }}
+      placeholder={placeholder}
+      disabled={disabled}
+    />
   );
 }

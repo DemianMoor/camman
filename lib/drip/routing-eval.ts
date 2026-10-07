@@ -37,6 +37,23 @@ export const DEMOGRAPHIC_FILTERS = [
 
 export type DemographicFilter = (typeof DEMOGRAPHIC_FILTERS)[number];
 
+// ⭐ INCLUDE / EXCLUDE MODE for the two geo filters. Stored as `<filter>_mode`
+// beside the list in the same `filters` JSONB. A config saved before the mode
+// existed has no key and reads as include — so the read is POSITIVE: only the
+// literal "exclude" flips it, and anything else (missing, null, a typo) keeps
+// today's behaviour.
+//
+// ⚠️ EXCLUDE INVERTS THE MISSING RULE. Include mode skips a lead with no value
+// (it cannot prove the lead is in the list). Exclude mode PASSES it: we exclude
+// known matches, and unknown is not a known match.
+export const GEO_MODE_FILTERS = ["state", "country"] as const;
+export const GEO_FILTER_MODES = ["include", "exclude"] as const;
+export type GeoFilterMode = (typeof GEO_FILTER_MODES)[number];
+
+export function geoFilterMode(filters: Record<string, unknown>, f: string): GeoFilterMode {
+  return filters[`${f}_mode`] === "exclude" ? "exclude" : "include";
+}
+
 export type RuleVerdict = "pass" | "mismatch" | "missing" | "blocked";
 
 export interface CandidateVerdict {
@@ -284,6 +301,32 @@ export async function evaluateLeadRouting(
         continue; // filter not set — nothing to check
       }
       const have = attrValue[f];
+      if ((GEO_MODE_FILTERS as readonly string[]).includes(f) && Array.isArray(want)) {
+        // State/country are free-text in the form, so compare case-insensitively:
+        // in exclude mode a typed "tx" silently failing to exclude TX is a leak.
+        const list = (want as unknown[]).map((x) => String(x).trim().toUpperCase());
+        const val = have == null ? null : String(have).trim().toUpperCase();
+        if (geoFilterMode(filters, f) === "exclude") {
+          if (val !== null && list.includes(val)) {
+            rules[`filter_${f}`] = "mismatch";
+            detail[`filter_${f}`] =
+              `lead ${f}=${String(have)} is in the excluded list ${JSON.stringify(want)} ` +
+              `(exclude mode; a lead with no ${f} would have passed)`;
+          } else {
+            rules[`filter_${f}`] = "pass";
+          }
+          continue;
+        }
+        if (val === null) {
+          rules[`filter_${f}`] = "missing";
+          detail[`filter_${f}`] = `campaign filters on ${f} but the lead has no value`;
+          continue;
+        }
+        const ok = list.includes(val);
+        rules[`filter_${f}`] = ok ? "pass" : "mismatch";
+        if (!ok) detail[`filter_${f}`] = `lead ${f}=${String(have)} not in ${JSON.stringify(want)}`;
+        continue;
+      }
       if (have === null || have === undefined) {
         // ⚠️ MISSING, not mismatch. The campaign asked for a value the lead does
         // not have, so the lead is skipped — but the fix is the partner sending

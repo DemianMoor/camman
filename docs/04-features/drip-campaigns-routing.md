@@ -138,7 +138,7 @@ campaign; the rest are per candidate.
 | interest tag | exact match, required |
 | partner key | optional narrowing |
 | window | `received_at ∈ [start_at, end_at)` |
-| demographics | gender / age_band / state / country / income_band / kids / married — **skip-if-missing** |
+| demographics | gender / age_band / state / country / income_band / kids / married — **skip-if-missing** (state/country: only in include mode, see below) |
 | carrier | reuses `campaigns.audience_filters.carrier_filter` |
 | same offer | offer half only — **the creative half is `deferred_p5`** |
 | caps | `campaign_cap` and `routing_daily_admission_cap` |
@@ -147,6 +147,25 @@ Winner: **priority ASC, tie → newest campaign.**
 
 **⚠️ skip-if-missing is reported as `missing`, not `mismatch`.** They need different fixes: one is a
 partner sending incomplete data, the other is targeting working correctly.
+
+**State / country include–exclude mode.** Each geo filter carries an optional mode beside its list
+in the same `drip_campaign_configs.filters` JSONB: `state_mode` / `country_mode` = `"include"`
+("Only these", the default) or `"exclude"` ("All except these"). No migration: a config without the
+key reads as include, so existing campaigns are unchanged. The read is **positive** —
+`geoFilterMode()` in [lib/drip/routing-eval.ts](../../lib/drip/routing-eval.ts) returns exclude only for
+the literal `"exclude"`; missing, null or any other value is include.
+
+| mode | lead value in list | lead value not in list | lead has no value |
+|---|---|---|---|
+| include | pass | `mismatch` | `missing` (skipped) |
+| exclude | `mismatch` (skipped) | pass | **pass** — unknown ≠ excluded |
+
+Exclude mode inverts the missing rule on purpose: it removes *known* matches only. An excluded
+lead's reason (stored in `drip_journeys.reason` with the rest of the candidate detail) reads
+`lead state=TX is in the excluded list [...] (exclude mode; a lead with no state would have
+passed)`; the form shows the same rule as a helper line under the field. State/country values are
+compared **case-insensitively** (both modes) because the field is free text — a typed `tx` must still
+exclude `TX`. Tested by `scripts/test-drip-geo-exclude-mode.ts` (preview DB, rolled back).
 
 **⚠️ The same-offer rule is half-implemented on purpose.** Drip stages are Phase 5, so "would
 receive the same creative" has no operand. The journey `reason` records

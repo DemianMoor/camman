@@ -28,6 +28,7 @@
 //   npx tsx scripts/apply-offer-cooldown-covering-index-concurrent.ts            # dry run
 //   npx tsx scripts/apply-offer-cooldown-covering-index-concurrent.ts --apply    # build (05:00–05:50 UTC only, any target)
 //   npx tsx scripts/apply-offer-cooldown-covering-index-concurrent.ts --verify   # plan check, read-only
+//   … --apply --off-window   # owner-approved build OUTSIDE the window (monitor drain/drip while it runs)
 import { config } from "dotenv";
 import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
@@ -55,7 +56,14 @@ async function main() {
   // Every --apply is window-only, whatever the target: the script carries no
   // project-ref literal (scripts/test-preview-db-guard.ts), so it cannot tell
   // production from preview — and does not need to.
-  if (APPLY && (minutes < 5 * 60 || minutes >= 5 * 60 + 50)) {
+  // --off-window: the owner's explicit approval to build outside the window
+  // (first used 2026-10-07 to release migration 0199, under a monitored build).
+  // Logged so the run says what it was.
+  const OFF_WINDOW = process.argv.includes("--off-window");
+  if (APPLY && OFF_WINDOW) {
+    console.log(`⚠ --off-window: owner-approved build outside 05:00–05:50 UTC at ${now.toISOString()}`);
+  }
+  if (APPLY && !OFF_WINDOW && (minutes < 5 * 60 || minutes >= 5 * 60 + 50)) {
     console.error(`REFUSING — --apply runs only in the quiet window (start 05:00–05:50 UTC); now ${now.toISOString()}`);
     process.exit(1);
   }

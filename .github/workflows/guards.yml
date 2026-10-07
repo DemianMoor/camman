@@ -1,0 +1,27 @@
+# Source-scan guards (npm run check:guards) on every PR into main.
+#
+# Here, NOT in vercel-build: a scan false positive must never block a
+# production deploy (docs/07-conventions.md). This gates the MERGE instead —
+# the "guards" check is a required status check on main, so a red scan
+# can't merge, while deploys of already-merged code never depend on it.
+# The scan reads only the checked-out scripts/: no secrets, no database.
+name: guards
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check:guards

@@ -115,7 +115,7 @@ async function main() {
       check("table: untagged row 1 lead, sandbox not counted", /zztest +\(untagged\) +1 +0 +0 /.test(msg), msg);
       check("TOTAL row", /TOTAL +3 +1 +2 /.test(msg), msg);
       check("first-digest note names the 13:00 hour", msg.includes("First hourly digest") && msg.includes("13:00 ET hour on Wed 14 Jan"), msg);
-      check("footer states rate + balance", msg.includes("2 lookups × $") && msg.includes("Telnyx balance:"), msg);
+      check("footer: balance, no rate-derivation line", msg.includes("Telnyx balance:") && !msg.includes("Cost ="), msg);
       check("invariant not checked (tracking began mid-day) → no warning", !msg.includes("Day-sum"));
       console.log("\n--- rendered 14:00 digest ---\n" + msg + "\n---");
 

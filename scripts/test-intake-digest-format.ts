@@ -29,7 +29,6 @@ const base = (rows: DigestRow[], over: Partial<DigestInput> = {}): DigestInput =
   windowLabel: "13:00–14:00 ET · Tue 7 Oct",
   rows,
   rate: RATE,
-  rateNote: "$0.001635 per lookup, calibrated from $1002.84 of metered balance",
   balanceUsd: 123.4567,
   invariant: { day: "2026-10-07", breaks: [] },
   firstDigestNote: null,
@@ -48,7 +47,7 @@ check("no rows → no message", formatIntakeDigest(base([])).length === 0);
   check("single → leads + mobile line", m[0].includes("<b>pml / aca</b>: 412 leads · 409 mobile"), m[0]);
   check("single → voip/unknown/landline compact", m[0].includes("voip 1 · unknown 1 · landline 1"));
   check("single → lookups + cost at rate", m[0].includes(`Lookups: 411 · cost ${formatUsd(411 * RATE)}`), m[0]);
-  check("footer states the rate used", m[0].includes("411 lookups × $0.001635 per lookup"), m[0]);
+  check("no rate-derivation line (dropped 2026-10-07)", !m[0].includes("Cost =") && !m[0].includes("calibrated"), m[0]);
   check("footer has Telnyx balance once", m[0].split("Telnyx balance").length === 2 && m[0].includes("$123.46"));
   check("no warning when invariant holds", !m[0].includes("Day-sum"));
 }

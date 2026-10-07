@@ -143,12 +143,12 @@ sends one **digest of the hour that just ended**, built by `buildIntakeDigest`
   landline, lookups (`lookups_spent`), cost. Sandbox-only rows are not shown.
 - **Cost** = lookups × the partner report's calibrated rate (`getCalibratedLookupRate`, 90-day ledger,
   flat-rate fallback) — **never** the per-batch balance delta, which reads $0.00 on 1–2-lookup drip
-  batches. The footer states the rate (`describeRate`). Sub-dollar costs print 4 decimals.
+  batches. The footer no longer spells out the rate derivation (dropped by the owner, 2026-10-07). Sub-dollar costs print 4 decimals.
 - **Format:** one partner × tag → compact lines; several → a `<pre>` table
   `Partner | Tag | Leads | Mobile | Lookups | Cost` with a TOTAL row, plus one compact
   voip/unknown/landline line per row. Over 3,500 chars it splits **by partner** across numbered
   messages (a partner is split only if it alone doesn't fit); totals and footer go on the last part.
-- **Footer:** the rate used, the Telnyx balance (once), and on the first-ever digest a note that
+- **Footer:** the Telnyx balance (once), and on the first-ever digest a note that
   hourly tracking began mid-hour — that partial hour is never digested on schedule.
 - **No message for an hour with no intake.** It is a digest, not an alert: no `alert_state`, no
   transition gating.

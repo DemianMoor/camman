@@ -34,8 +34,6 @@ export interface DigestInput {
   rows: DigestRow[];
   /** USD per lookup — the partner report's calibrated rate. */
   rate: number;
-  /** One sentence naming where the rate came from (describeRate). */
-  rateNote: string;
   /** Telnyx available credit, null when the balance call failed. */
   balanceUsd: number | null;
   /** ET day the invariant covered, and what it found (null = not checked). */
@@ -66,7 +64,7 @@ function otherLine(r: DigestRow): string {
   return `voip ${r.voip} · unknown ${r.unknown} · landline ${r.landline}`;
 }
 
-function footer(i: DigestInput, totalLookups: number): string[] {
+function footer(i: DigestInput): string[] {
   const lines: string[] = [];
   if (i.invariant && i.invariant.breaks.length > 0) {
     const shown = i.invariant.breaks.slice(0, 3).map(
@@ -81,9 +79,8 @@ function footer(i: DigestInput, totalLookups: number): string[] {
         ". Hourly numbers above may be wrong; daily partner report is the reference.",
     );
   }
-  lines.push(
-    `Cost = ${totalLookups.toLocaleString("en-US")} lookups × ${escapeHtml(i.rateNote)}`,
-  );
+  // No rate-derivation line: the owner dropped it (2026-10-07) as noise. Cost
+  // is still lookups × the calibrated rate — see lib/drip/intake-digest.ts.
   lines.push(
     `Telnyx balance: ${i.balanceUsd == null ? "n/a (balance check failed)" : formatUsd(i.balanceUsd)}`,
   );
@@ -158,7 +155,7 @@ export function formatIntakeDigest(input: DigestInput): string[] {
         otherLine(r),
         `Lookups: ${r.lookups} · cost ${formatUsd(r.lookups * input.rate)}`,
         "",
-        ...footer(input, totalLookups),
+        ...footer(input),
       ].join("\n"),
     ];
   }
@@ -168,7 +165,7 @@ export function formatIntakeDigest(input: DigestInput): string[] {
     table(rows, input.rate, true),
     ...otherLines(rows),
     "",
-    ...footer(input, totalLookups),
+    ...footer(input),
   ].join("\n");
   if (whole.length <= MAX_DIGEST_CHARS) return [whole];
 
@@ -178,7 +175,7 @@ export function formatIntakeDigest(input: DigestInput): string[] {
   // the limit once its shell is added.
   const shellCost =
     header(input, " (part 99/99)").length +
-    footer(input, totalLookups).join("\n").length +
+    footer(input).join("\n").length +
     200; // table header/separator/total row + newlines
   const budget = MAX_DIGEST_CHARS - shellCost;
   const rowCost = (r: DigestRow) =>
@@ -226,7 +223,7 @@ export function formatIntakeDigest(input: DigestInput): string[] {
       `<b>TOTAL (all parts)</b>: ${totalReceived} leads · ${totalMobile} mobile · ` +
         `${totalLookups} lookups · ${formatUsd(totalLookups * input.rate)}`,
       "",
-      ...footer(input, totalLookups),
+      ...footer(input),
     ].join("\n");
   });
 }

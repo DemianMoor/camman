@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { formatInTimeZone } from "date-fns-tz";
 
 import { CAMPAIGN_TIMEZONE, campaignDayBoundsUtc } from "@/lib/campaign-timezone";
-import { describeRate, getCalibratedLookupRate } from "@/lib/reporting/lookup-rate";
+import { getCalibratedLookupRate } from "@/lib/reporting/lookup-rate";
 import { telnyxBalance } from "@/lib/telnyx/client";
 
 import { hourStart } from "./counters";
@@ -25,7 +25,8 @@ import {
 //
 // COST: lookups x the partner report's calibrated rate (lib/reporting/
 // lookup-rate.ts) — never the per-batch Telnyx balance delta, which reads $0.00
-// on the 1-2-lookup drip batches. The footer states the rate used.
+// on the 1-2-lookup drip batches. (The footer used to spell out the rate
+// derivation; the owner dropped that line on 2026-10-07.)
 //
 // It's a DIGEST, not an alert: no alert_state, no transition gating. An hour
 // with no intake sends nothing.
@@ -209,7 +210,6 @@ export async function buildIntakeDigest(opts: {
       windowLabel: orgs.length > 1 ? `${windowLabel(hour)} · ${org.name}` : windowLabel(hour),
       rows,
       rate: rate.rate,
-      rateNote: describeRate(rate),
       balanceUsd,
       invariant,
       firstDigestNote: opts.manual ? null : await firstDigestNote(dbc, org.org_id, hour, firstHour),

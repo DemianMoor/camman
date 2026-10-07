@@ -151,6 +151,9 @@ export async function GET(req: NextRequest) {
   const sortBy =
     SORTABLE.has(sortRaw) || eventSortColumn(sortRaw) !== null ? sortRaw : "revenue";
   const sortDir = sp.get("sortDir") === "asc" ? "asc" : "desc";
+  // "Show Drip Campaigns" toggle. Absent / anything but "0" = today's behaviour
+  // (all campaigns); "0" excludes drip campaigns from the rows AND every total.
+  const excludeDrip = sp.get("includeDrip") === "0";
 
   // The registry rides ALONGSIDE the funnel read, not after it. It is one
   // grouped read of a 2-rows-per-org table and depends on nothing the funnel
@@ -163,7 +166,7 @@ export async function GET(req: NextRequest) {
   const deliveryAvailable = spanDays <= DELIVERY_MAX_RANGE_DAYS;
   const [{ stages, grand, grandOptOuts, grandTotalSent, clickers }, eventTypes, delivery] =
     await Promise.all([
-      getStageMetricsInRange(auth.orgId, from, to),
+      getStageMetricsInRange(auth.orgId, from, to, { excludeDrip }),
       loadEventTypes(db, auth.orgId),
       deliveryAvailable
         ? Promise.all([

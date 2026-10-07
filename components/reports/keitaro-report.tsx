@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   CAMPAIGN_TIMEZONE_LABEL,
   formatCampaignDateTime,
@@ -248,6 +249,12 @@ type Filters = {
   // Per-browser, off by default. It governs ONLY the per-event money columns
   // (tier B), each of which duplicates an aggregate column already on screen.
   showEvents: boolean;
+  // "Show Drip Campaigns". ON = every campaign (the behaviour before the toggle
+  // existed). OFF = the SERVER drops drip campaigns from the rows and from every
+  // total — not a client-side hide — so the stat cards add up to the table.
+  // Persisted per browser with the other filters; a stored object from before
+  // this field existed merges over DEFAULT_FILTERS and so reads as ON.
+  showDrip: boolean;
 };
 
 function etDate(offsetDays: number): string {
@@ -270,6 +277,7 @@ const DEFAULT_FILTERS: Filters = {
   sortBy: "revenue",
   sortDir: "desc",
   showEvents: false,
+  showDrip: true,
 };
 
 // ⭐ A PERSISTED SORT CAN NAME A COLUMN THIS TABLE NO LONGER HAS. `Human clicks`
@@ -461,6 +469,7 @@ export function KeitaroReport() {
       sortDir: sortDirection,
     });
     if (filters.search) params.set("search", filters.search);
+    if (!filters.showDrip) params.set("includeDrip", "0");
 
     (async () => {
       const result = await listApi.execute(
@@ -499,6 +508,7 @@ export function KeitaroReport() {
     filters.groupBy,
     filters.page,
     filters.pageSize,
+    filters.showDrip,
     sortById,
     sortDirection,
     refreshTick,
@@ -895,6 +905,16 @@ export function KeitaroReport() {
               </button>
             ))}
           </div>
+        </div>
+        <div className="flex h-9 items-center gap-2">
+          <Switch
+            id="show-drip"
+            checked={filters.showDrip}
+            onCheckedChange={(v) => updateFilters({ showDrip: v, page: 0 })}
+          />
+          <Label htmlFor="show-drip" className="font-normal">
+            Show Drip Campaigns
+          </Label>
         </div>
         <Input
           value={searchInput}

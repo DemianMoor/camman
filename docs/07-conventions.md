@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-06_
+_Last updated: 2026-10-07_
 
 ## A network with no conversion rules counts nothing — new networks get defaults (2026-10-06)
 
@@ -1786,6 +1786,10 @@ Every one of them goes through `entityTitle()` in [lib/entity-title.ts](../lib/e
 - **No status filter on offers or groups anywhere in the Audience Stats read
   path.** Showing archived offers (and archived groups with data) is the
   report's stated requirement, not an oversight.
+
+## Excluding drip from a report is a QUERY filter, never a row hide (2026-10-07)
+
+The Overview "Show Drip Campaigns" toggle drops drip campaigns inside `getStageMetricsInRange(…, { excludeDrip: true })`. It does not filter the response. The grand totals are accumulated from the stage rows, and counted clickers are deduplicated per (campaign, contact) and not additive, so deleting drip rows after the fact would leave the stat cards counting drip. Every query that feeds a total takes the filter: both stage queries, period and lifetime counted clickers, and lifetime revenue. Match drip **positively** (`type = 'drip'`, via `dripCampaignFilter` or `ne(campaigns.type, 'drip')`). The column is `NOT NULL DEFAULT 'regular'`, so anything that is not positively drip stays in. If you extend this to another tab, check its non-`getStageMetricsInRange` reads too: Hourly reads the per-event tables directly.
 
 ## Reports rollup (migration 0112, see [04-features/reports-rollup.md](04-features/reports-rollup.md))
 - **Bucketed by the SEND hour in ET, not the event hour.** Every metric (opt-outs, clicks, redirects, sales, cost) is attributed to the hour the message was SENT, so each rate is a batch rate ("of messages sent in hour H, X% opted out"). `date_trunc('hour', sent_at AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'` → the stored `bucket_start_utc`. Only ever done inside the bounded rolling-window build, never in a hot read.

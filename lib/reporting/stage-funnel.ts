@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
@@ -18,6 +18,7 @@ import {
   manualSalesByStageInRange,
 } from "@/lib/reporting/attribution";
 import {
+  dripCampaignFilter,
   getCountedClickers,
   getTotalCountedClickers,
   type CountedClickerBounds,
@@ -118,13 +119,19 @@ export async function getStageMetricsInRange(
   orgId: string,
   from: string,
   to: string,
-  opts: { attribution?: AttributionBasis } = {},
+  opts: { attribution?: AttributionBasis; excludeDrip?: boolean } = {},
 ): Promise<StageMetricsResult> {
   // conversion_date (the default, and the only basis before 2026-09-14) = each
   // metric on its own event day within the range. send_date = the COHORT of
   // stages sent in range, with everything they have produced to date: every
   // stat_date, every attribution, every reach, lifetime clickers.
   const sendDate = opts.attribution === "send_date";
+  // Overview's "Show Drip Campaigns" OFF: drip campaigns are dropped from BOTH
+  // stage queries and from every clicker / lifetime-revenue total below, so the
+  // grand totals are computed without them rather than having rows hidden.
+  // Matched positively on type = 'drip' (NOT NULL DEFAULT 'regular', 0159).
+  const excludeDrip = opts.excludeDrip === true;
+  const notDrip = excludeDrip ? [ne(campaigns.type, "drip")] : [];
   const byStage = new Map<number, StageMetrics>();
   const grand = emptyFunnel();
 
@@ -162,6 +169,7 @@ export async function getStageMetricsInRange(
         isNull(campaign_stages.archived_at),
         gte(campaign_stages.sent_at, fromUtc),
         lt(campaign_stages.sent_at, toExclusiveUtc),
+        ...notDrip,
       ),
     );
   const cohortIds = sentStageRows.map((r) => r.stage_id);
@@ -213,6 +221,7 @@ export async function getStageMetricsInRange(
                     gte(keitaro_stage_results.stat_date, from),
                     lte(keitaro_stage_results.stat_date, to),
                   ]),
+              ...notDrip,
             ),
           );
 
@@ -406,7 +415,7 @@ export async function getStageMetricsInRange(
 
   const clickers = await getClickerDenominators(
     orgId,
-    sendDate ? { stageIds: cohortIds } : { fromUtc, toExclusiveUtc },
+    sendDate ? { stageIds: cohortIds, excludeDrip } : { fromUtc, toExclusiveUtc, excludeDrip },
   );
 
   return { stages: [...byStage.values()], grand, grandOptOuts, grandTotalSent, clickers };
@@ -431,12 +440,13 @@ async function getClickerDenominators(
     getCountedClickers(db, orgId, "campaign", period),
     getCountedClickers(db, orgId, "stage", period),
     getTotalCountedClickers(db, orgId, period),
-    getCountedClickers(db, orgId, "campaign"),
-    getCountedClickers(db, orgId, "stage"),
-    getTotalCountedClickers(db, orgId),
+    getCountedClickers(db, orgId, "campaign", { excludeDrip: period.excludeDrip }),
+    getCountedClickers(db, orgId, "stage", { excludeDrip: period.excludeDrip }),
+    getTotalCountedClickers(db, orgId, { excludeDrip: period.excludeDrip }),
     db.execute(sql`
       SELECT campaign_id, stage_id, sum(revenue)::float8 AS revenue
       FROM keitaro_stage_results WHERE org_id = ${orgId}::uuid
+        ${dripCampaignFilter(orgId, "campaign_id", period.excludeDrip)}
       GROUP BY 1, 2
     `) as unknown as Promise<{ campaign_id: number; stage_id: number; revenue: number }[]>,
   ]);

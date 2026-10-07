@@ -294,6 +294,9 @@ export interface CountedClickerBounds {
   // Restrict to these stages — the send-date cohort (operator API). An EMPTY
   // array means "no stages" and returns nothing; it must never widen to "all".
   stageIds?: number[];
+  // Drop drip campaigns' clickers (Overview "Show Drip Campaigns" OFF). Drip is
+  // matched POSITIVELY on type = 'drip' — anything else stays in.
+  excludeDrip?: boolean;
 }
 
 function stageIdFilter(b: CountedClickerBounds, column: string): SQL {
@@ -303,6 +306,12 @@ function stageIdFilter(b: CountedClickerBounds, column: string): SQL {
     b.stageIds.map((id) => sql`${id}`),
     sql`, `,
   )})`;
+}
+
+export function dripCampaignFilter(orgId: string, column: string, exclude?: boolean): SQL {
+  if (!exclude) return sql``;
+  return sql`AND ${sql.raw(column)} NOT IN (
+    SELECT id FROM campaigns WHERE org_id = ${orgId}::uuid AND type = 'drip')`;
 }
 
 // Counted clickers per grain id. Returns a Map<grainId, count>.
@@ -329,7 +338,7 @@ export async function getCountedClickers(
     SELECT ${col} AS grain_id, ${counter} AS n
     FROM counted_clickers
     WHERE org_id = ${orgId}::uuid AND ${col} IS NOT NULL ${dateFilter} ${campaignFilter}
-      ${stageIdFilter(b, "stage_id")}
+      ${stageIdFilter(b, "stage_id")} ${dripCampaignFilter(orgId, "campaign_id", b.excludeDrip)}
     GROUP BY 1
   `)) as unknown as { grain_id: number; n: number }[];
 
@@ -359,6 +368,7 @@ export async function getTotalCountedClickers(
     SELECT count(DISTINCT (cc.campaign_id::text || ':' || cc.contact_id::text))::int AS n
     FROM counted_clickers cc ${providerJoin}
     WHERE cc.org_id = ${orgId}::uuid ${dateFilter} ${stageIdFilter(b, "cc.stage_id")}
+      ${dripCampaignFilter(orgId, "cc.campaign_id", b.excludeDrip)}
   `)) as unknown as { n: number }[];
   return Number(rows[0]?.n ?? 0);
 }

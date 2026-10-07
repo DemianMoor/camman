@@ -29,6 +29,12 @@
 SET LOCAL lock_timeout = '5s';
 --> statement-breakpoint
 
+-- Re-runnable: the PK order was amended after the preview apply (see below), and
+-- a journal `when` bump only re-applies a file that can run twice. On a database
+-- that never had 0199 this is a no-op.
+DROP TABLE IF EXISTS public.lead_intake_hourly;
+--> statement-breakpoint
+
 CREATE TABLE public.lead_intake_hourly (
   org_id         uuid NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
   partner_key_id integer NOT NULL REFERENCES public.partner_keys(id) ON DELETE CASCADE,
@@ -45,13 +51,18 @@ CREATE TABLE public.lead_intake_hourly (
   sandbox        integer NOT NULL DEFAULT 0,
   lookups_spent  integer NOT NULL DEFAULT 0,
 
+  -- partner_key_id LEADS so the PK also covers the partner_keys FK (Supabase's
+  -- unindexed_foreign_keys advisor) — no extra index. The digest's org x hour
+  -- scan uses lead_intake_hourly_org_hour_idx below.
   CONSTRAINT lead_intake_hourly_pkey
-    PRIMARY KEY (org_id, partner_key_id, hour_et, interest_tag),
+    PRIMARY KEY (partner_key_id, org_id, hour_et, interest_tag),
 
   -- An hour start is always on the hour. A mid-hour value would silently land
-  -- in no digest window.
+  -- in no digest window. Truncated in UTC explicitly: the 2-arg form uses the
+  -- SESSION TimeZone, which would reject valid rows under a half-hour-offset
+  -- zone. UTC hour = ET hour (whole-hour offset).
   CONSTRAINT lead_intake_hourly_on_the_hour_check
-    CHECK (date_trunc('hour', hour_et) = hour_et),
+    CHECK (date_trunc('hour', hour_et, 'UTC') = hour_et),
 
   CONSTRAINT lead_intake_hourly_nonneg_check CHECK (
     received >= 0 AND mobile >= 0 AND voip >= 0 AND unknown >= 0 AND landline >= 0

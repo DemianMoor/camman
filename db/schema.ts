@@ -5292,9 +5292,10 @@ export const lead_intake_hourly = pgTable(
   (table) => [
     primaryKey({
       name: "lead_intake_hourly_pkey",
+      // partner_key_id leads so the PK also covers the partner_keys FK.
       columns: [
-        table.org_id,
         table.partner_key_id,
+        table.org_id,
         table.hour_et,
         table.interest_tag,
       ],
@@ -5305,7 +5306,7 @@ export const lead_intake_hourly = pgTable(
     ),
     check(
       "lead_intake_hourly_on_the_hour_check",
-      sql`date_trunc('hour', ${table.hour_et}) = ${table.hour_et}`,
+      sql`date_trunc('hour', ${table.hour_et}, 'UTC') = ${table.hour_et}`,
     ),
     check(
       "lead_intake_hourly_nonneg_check",

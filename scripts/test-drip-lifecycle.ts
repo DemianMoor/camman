@@ -19,6 +19,7 @@ import {
   closeJourneysOnArchive,
   closeJourneysOnPurchase,
   expireJourneysPastEndDate,
+  reclassifyCompletedJourneysOnPurchase,
 } from "@/lib/drip/lifecycle";
 
 import { seedConversionEvent } from "./_conversion-fixture";
@@ -316,6 +317,95 @@ async function main() {
       check("⭐ a LEGACY-ONLY row (sale_status 'lead', no ledger) does NOT close it",
             (await closeJourneysOnPurchase(tx, { orgId, campaignId: campId })).closed, 0);
       check("...that journey is still live", (await state(iLegacy.jid)).state, "active");
+
+      // ── 2c. ⭐ purchase detected AFTER the journey completed ⇒ reclassified ──
+      // The network reports hours late, so the sequence often finishes first.
+      // closeJourneysOnPurchase cannot see a closed journey; this pass can.
+      console.log("\n2c. ⭐ late purchase on a completed journey ⇒ reclassified to converted:");
+      const closeAs = async (jid: string, st: string, reason: string, routedAgo: string) => {
+        await tx.execute(sql`
+          UPDATE drip_journeys
+          SET state = ${st}, close_reason = ${reason},
+              routed_at = now() - ${routedAgo}::interval,
+              closed_at = now() - interval '1 hour'
+          WHERE id = ${jid}::uuid`);
+      };
+      const buy = (cid: string, occurredAt?: Date) =>
+        seedConversionEvent(tx, {
+          orgId, contactId: cid, campaignId: campId, stageId: parentId,
+          eventKey: "purchase", status: "approved", revenue: 50, occurredAt,
+        });
+      const full = async (jid: string) =>
+        ((await tx.execute(sql`
+          SELECT state, close_reason, closed_at::text AS closed_at, reason
+          FROM drip_journeys WHERE id = ${jid}::uuid`)) as unknown as {
+          state: string; close_reason: string; closed_at: string;
+          reason: { reclassified?: Record<string, unknown> };
+        }[])[0];
+
+      // k: completed / all_stages_sent, then bought ⇒ reclassified
+      const k = await newJourney("+19960" + sfx);
+      await closeAs(k.jid, "completed", "all_stages_sent", "2 days");
+      const kBefore = await full(k.jid);
+      await buy(k.cid);
+      // u: completed / unengaged (Ignored lane gave up), then bought ⇒ reclassified
+      const u = await newJourney("+19961" + sfx);
+      await closeAs(u.jid, "completed", "unengaged", "2 days");
+      await buy(u.cid);
+      // o: opted out, then bought ⇒ NOT reclassified (opt-out is stronger)
+      const o = await newJourney("+19962" + sfx);
+      await closeAs(o.jid, "opted_out", "stop_received", "2 days");
+      await buy(o.cid);
+      // p: completed, a purchase that happened BEFORE the journey was routed ⇒ not this journey's
+      const pj = await newJourney("+19963" + sfx);
+      await closeAs(pj.jid, "completed", "all_stages_sent", "2 days");
+      await buy(pj.cid, new Date(Date.now() - 5 * 86400_000));
+      // n: completed, no purchase at all ⇒ untouched
+      const nj = await newJourney("+19964" + sfx);
+      await closeAs(nj.jid, "completed", "all_stages_sent", "2 days");
+
+      const r2c = await reclassifyCompletedJourneysOnPurchase(tx, { orgId, campaignId: campId });
+      check("⭐ exactly the two completed buyers are reclassified", r2c.reclassified, 2);
+      const kAfter = await full(k.jid);
+      check("all_stages_sent buyer ⇒ converted / purchased",
+            [kAfter.state, kAfter.close_reason], ["converted", "purchased"]);
+      check("⭐ closed_at is KEPT (the journey ended when it ended)",
+            kAfter.closed_at, kBefore.closed_at);
+      check("⭐ the reclassification is recorded with what it was",
+            [kAfter.reason.reclassified?.from_state, kAfter.reason.reclassified?.from_close_reason,
+             kAfter.reason.reclassified?.trigger],
+            ["completed", "all_stages_sent", "purchase_detected_after_close"]);
+      check("unengaged buyer ⇒ converted", (await state(u.jid)).state, "converted");
+      check("⭐ an OPTED-OUT buyer stays opted_out", (await state(o.jid)).state, "opted_out");
+      check("a purchase from BEFORE routing does not reclassify", (await state(pj.jid)).state, "completed");
+      check("no purchase ⇒ untouched", (await state(nj.jid)).state, "completed");
+      check("⭐ idempotent — a second pass does nothing",
+            (await reclassifyCompletedJourneysOnPurchase(tx, { orgId, campaignId: campId })).reclassified, 0);
+
+      // m: ⭐ two journeys for one contact. Bought during journey 1, re-entered
+      // later; journey 2 completes. Only journey 1 is the buyer's.
+      const m1 = await newJourney("+19965" + sfx);
+      await closeAs(m1.jid, "completed", "all_stages_sent", "10 days");
+      const m2le = (
+        (await tx.execute(sql`
+          INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, received_at)
+          SELECT org_id, contact_id, partner_key_id, partner_slug, now()
+          FROM lead_events WHERE id = (SELECT lead_event_id FROM drip_journeys WHERE id = ${m1.jid}::uuid)
+          RETURNING id`)) as unknown as { id: string }[]
+      )[0].id;
+      const m2 = (
+        (await tx.execute(sql`
+          INSERT INTO drip_journeys (org_id, campaign_id, contact_id, lead_event_id, state,
+                                     close_reason, closed_at, routed_at, first_send_at, first_stage_id)
+          VALUES (${orgId}, ${campId}, ${m1.cid}, ${m2le}, 'completed', 'all_stages_sent',
+                  now() - interval '1 hour', now() - interval '1 day', now() - interval '1 day', ${parentId})
+          RETURNING id`)) as unknown as { id: string }[]
+      )[0].id;
+      await buy(m1.cid, new Date(Date.now() - 9 * 86400_000));
+      check("⭐ re-entry: only the journey the purchase belongs to is reclassified",
+            (await reclassifyCompletedJourneysOnPurchase(tx, { orgId, campaignId: campId })).reclassified, 1);
+      check("...journey 1 (bought during it) ⇒ converted", (await state(m1.jid)).state, "converted");
+      check("...journey 2 (routed after the purchase) stays completed", (await state(m2)).state, "completed");
 
       // ── 3. completed ──────────────────────────────────────────────────────
       console.log("\n3. all enabled children sent ⇒ completed:");

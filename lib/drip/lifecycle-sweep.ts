@@ -7,6 +7,7 @@ import {
   closeCompletedJourneys,
   closeJourneysOnPurchase,
   expireJourneysPastEndDate,
+  reclassifyCompletedJourneysOnPurchase,
 } from "./lifecycle";
 import { isDripPostureOn } from "./in-use";
 
@@ -47,19 +48,33 @@ import { isDripPostureOn } from "./in-use";
 // UPDATEs — not a trade worth making for a label. Not redesigned here; recorded
 // so the next reader of a funnel that under-counts `converted` knows where to
 // look first.
+//
+// ⚠️ THAT RACE, AND THE MUCH LARGER CASE OF A PURCHASE DETECTED HOURS AFTER THE
+// SEQUENCE FINISHED, ARE NOW REPAIRED BY A FOURTH PASS:
+// reclassifyCompletedJourneysOnPurchase relabels a `completed` journey whose
+// lead bought as `converted` (closed_at kept, change recorded in
+// reason.reclassified). It runs per ORG, after the campaign passes, and it is why
+// the org list below includes `completed`: a campaign whose last journey has
+// already closed has no live journeys, so the per-campaign loop never visits it,
+// and its late purchases would otherwise never be seen. Opted-out journeys are
+// never reclassified (see the function).
 
 export interface SweepResult {
   campaigns: number;
   converted: number;
   completed: number;
   expired: number;
+  reclassified: number;
 }
 
 export async function sweepJourneyLifecycle(): Promise<SweepResult> {
-  const res: SweepResult = { campaigns: 0, converted: 0, completed: 0, expired: 0 };
+  const res: SweepResult = {
+    campaigns: 0, converted: 0, completed: 0, expired: 0, reclassified: 0,
+  };
 
   const orgs = (await db.execute(sql`
-    SELECT DISTINCT org_id FROM drip_journeys WHERE state IN ('routed', 'active')
+    SELECT DISTINCT org_id FROM drip_journeys
+    WHERE state IN ('routed', 'active', 'completed')
   `)) as unknown as { org_id: string }[];
 
   for (const { org_id: orgId } of orgs) {
@@ -80,6 +95,10 @@ export async function sweepJourneyLifecycle(): Promise<SweepResult> {
       res.completed += (await closeCompletedJourneys(db, { orgId, campaignId })).closed;
       res.expired += (await expireJourneysPastEndDate(db, { orgId, campaignId })).closed;
     }
+
+    // AFTER the campaign passes, so a buyer the completed pass just closed in
+    // this same sweep (the race above) is repaired before the sweep ends.
+    res.reclassified += (await reclassifyCompletedJourneysOnPurchase(db, { orgId })).reclassified;
   }
   return res;
 }

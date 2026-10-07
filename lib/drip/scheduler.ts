@@ -328,10 +328,15 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
             const ins = (await tx.execute(sql`
               INSERT INTO stage_sends
                 (id, org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
-                 link_id, rendered_text, status, created_at)
+                 link_id, rendered_text, status, created_at, cost_per_sms)
               VALUES (${sendToken}::uuid, ${orgId}::uuid, ${campaignId}, ${stage.stage_id},
                       ${lead.contact_id}::uuid, ${lead.phone}, ${number.provider_phone_id},
-                      ${r.linkId}, ${body}, 'pending', now())
+                      ${r.linkId}, ${body}, 'pending', now(),
+                      -- Snapshot the number's rate at send time (0112), as
+                      -- kickoff does: the partner report's Send Cost must not
+                      -- move when the number's rate is edited later.
+                      (SELECT pp.cost_per_sms FROM provider_phones pp
+                       WHERE pp.id = ${number.provider_phone_id}))
               RETURNING id
             `)) as unknown as { id: string }[];
 

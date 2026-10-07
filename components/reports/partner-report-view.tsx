@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 
+import { profitAndRoi } from "@/lib/reporting/partner-profit";
 import type { PartnerReportResult, PartnerReportRow } from "@/lib/reporting/partner-report";
 
 // The PARTNER-facing report (Drip Phase 7). Rendered on the signed link, with no
@@ -13,7 +14,9 @@ import type { PartnerReportResult, PartnerReportRow } from "@/lib/reporting/part
 // would still ship it in the payload.
 //
 // ⚠️ REVENUE IS OFF UNLESS THE KEY SAYS OTHERWISE (ruling R2) — it is our
-// margin, not the partner's number.
+// margin, not the partner's number. Send Cost, NET Profit and ROI ride the SAME
+// switch: the last two are revenue arithmetic, and Send Cost is derivable from
+// them (see stripRevenueForPartner, which zeroes all four on the server).
 //
 // ⚠️ NULL IS NOT ZERO. Delivered % is null when the provider reports no receipts
 // at all, and CTR is null over zero sends. Both render as "—", because printing
@@ -23,7 +26,8 @@ function pct(v: number | null): string {
   return v == null ? "—" : `${(v * 100).toFixed(1)}%`;
 }
 function usd(v: number): string {
-  return `$${v.toFixed(2)}`;
+  // NET Profit can be negative: "-$1.23", not "$-1.23".
+  return `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(2)}`;
 }
 function tagLabel(t: string): string {
   return t === "" ? "(untagged)" : t;
@@ -32,8 +36,9 @@ function tagLabel(t: string): string {
 function toCsv(rows: PartnerReportRow[], showRevenue: boolean): string {
   const head = [
     "interest_tag", "leads_received", "mobile", "voip", "unknown", "landline",
-    "sent", "delivered_pct", "clicks", "ctr", "opt_outs", "sales", "lookup_cost_usd",
-    ...(showRevenue ? ["revenue_usd"] : []),
+    "sent", ...(showRevenue ? ["send_cost_usd"] : []),
+    "delivered_pct", "clicks", "ctr", "opt_outs", "sales", "lookup_cost_usd",
+    ...(showRevenue ? ["revenue_usd", "net_profit_usd", "roi"] : []),
   ];
   // ⚠️ An empty cell for a null, never "0" — the CSV carries the same
   // not-measured/measured-zero distinction the table does, or a spreadsheet
@@ -48,9 +53,12 @@ function toCsv(rows: PartnerReportRow[], showRevenue: boolean): string {
     lines.push(
       [
         tagLabel(r.interest_tag), r.leads_received, r.mobile, r.voip, r.unknown, r.landline,
-        r.sent, r.delivered_pct, r.clicks, r.ctr, r.opt_outs, r.sales,
+        r.sent, ...(showRevenue ? [r.send_cost_usd.toFixed(4)] : []),
+        r.delivered_pct, r.clicks, r.ctr, r.opt_outs, r.sales,
         r.lookup_cost_usd.toFixed(4),
-        ...(showRevenue ? [r.revenue_usd.toFixed(2)] : []),
+        ...(showRevenue
+          ? [r.revenue_usd.toFixed(2), r.net_profit_usd.toFixed(4), r.roi]
+          : []),
       ].map(cell).join(","),
     );
   }
@@ -90,11 +98,17 @@ export function PartnerReportView({
         optOuts: a.optOuts + r.opt_outs,
         sales: a.sales + r.sales,
         cost: a.cost + r.lookup_cost_usd,
+        sendCost: a.sendCost + r.send_cost_usd,
         revenue: a.revenue + r.revenue_usd,
       }),
-      { leads: 0, landline: 0, sent: 0, clicks: 0, optOuts: 0, sales: 0, cost: 0, revenue: 0 },
+      {
+        leads: 0, landline: 0, sent: 0, clicks: 0, optOuts: 0, sales: 0,
+        cost: 0, sendCost: 0, revenue: 0,
+      },
     );
-    return { ...t, ctr: t.sent > 0 ? t.clicks / t.sent : null };
+    // ROI is recomputed from the summed money, never averaged across rows.
+    const { net_profit_usd, roi } = profitAndRoi(t.revenue, t.sendCost, t.cost);
+    return { ...t, ctr: t.sent > 0 ? t.clicks / t.sent : null, net: net_profit_usd, roi };
   }, [report.rows]);
 
   function downloadCsv() {
@@ -163,19 +177,26 @@ export function PartnerReportView({
               <th className="p-2 text-right">Unknown</th>
               <th className="p-2 text-right">Landline</th>
               <th className="p-2 text-right">Sent</th>
+              {showRevenue && <th className="p-2 text-right">Send cost</th>}
               <th className="p-2 text-right">Delivered</th>
               <th className="p-2 text-right">Clicks</th>
               <th className="p-2 text-right">CTR</th>
               <th className="p-2 text-right">Opt-outs</th>
               <th className="p-2 text-right">Sales</th>
               <th className="p-2 text-right">Lookup cost</th>
-              {showRevenue && <th className="p-2 text-right">Revenue</th>}
+              {showRevenue && (
+                <>
+                  <th className="p-2 text-right">Revenue</th>
+                  <th className="p-2 text-right">NET profit</th>
+                  <th className="p-2 text-right">ROI</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
             {report.rows.length === 0 && (
               <tr>
-                <td colSpan={showRevenue ? 14 : 13} className="p-4 text-center text-muted-foreground">
+                <td colSpan={showRevenue ? 17 : 13} className="p-4 text-center text-muted-foreground">
                   No leads in this period.
                 </td>
               </tr>
@@ -189,13 +210,20 @@ export function PartnerReportView({
                 <td className="p-2 text-right">{r.unknown.toLocaleString()}</td>
                 <td className="p-2 text-right">{r.landline.toLocaleString()}</td>
                 <td className="p-2 text-right">{r.sent.toLocaleString()}</td>
+                {showRevenue && <td className="p-2 text-right">{usd(r.send_cost_usd)}</td>}
                 <td className="p-2 text-right">{pct(r.delivered_pct)}</td>
                 <td className="p-2 text-right">{r.clicks.toLocaleString()}</td>
                 <td className="p-2 text-right">{pct(r.ctr)}</td>
                 <td className="p-2 text-right">{r.opt_outs.toLocaleString()}</td>
                 <td className="p-2 text-right">{r.sales.toLocaleString()}</td>
                 <td className="p-2 text-right">{usd(r.lookup_cost_usd)}</td>
-                {showRevenue && <td className="p-2 text-right">{usd(r.revenue_usd)}</td>}
+                {showRevenue && (
+                  <>
+                    <td className="p-2 text-right">{usd(r.revenue_usd)}</td>
+                    <td className="p-2 text-right">{usd(r.net_profit_usd)}</td>
+                    <td className="p-2 text-right">{pct(r.roi)}</td>
+                  </>
+                )}
               </tr>
             ))}
           </tbody>
@@ -207,13 +235,20 @@ export function PartnerReportView({
                 <td className="p-2 text-right" colSpan={3} />
                 <td className="p-2 text-right">{totals.landline.toLocaleString()}</td>
                 <td className="p-2 text-right">{totals.sent.toLocaleString()}</td>
+                {showRevenue && <td className="p-2 text-right">{usd(totals.sendCost)}</td>}
                 <td className="p-2 text-right">—</td>
                 <td className="p-2 text-right">{totals.clicks.toLocaleString()}</td>
                 <td className="p-2 text-right">{pct(totals.ctr)}</td>
                 <td className="p-2 text-right">{totals.optOuts.toLocaleString()}</td>
                 <td className="p-2 text-right">{totals.sales.toLocaleString()}</td>
                 <td className="p-2 text-right">{usd(totals.cost)}</td>
-                {showRevenue && <td className="p-2 text-right">{usd(totals.revenue)}</td>}
+                {showRevenue && (
+                  <>
+                    <td className="p-2 text-right">{usd(totals.revenue)}</td>
+                    <td className="p-2 text-right">{usd(totals.net)}</td>
+                    <td className="p-2 text-right">{pct(totals.roi)}</td>
+                  </>
+                )}
               </tr>
             </tfoot>
           )}
@@ -227,6 +262,10 @@ export function PartnerReportView({
         {report.rate.source === "ledger"
           ? `, the metered average over ${report.rate.from} to ${report.rate.to}.`
           : " (standard rate)."}
+        {showRevenue &&
+          " Send cost is each message at its number's per-SMS rate, plus each" +
+            " opt-out reply at the same rate. NET profit = revenue − (send cost +" +
+            " lookup cost); ROI = NET profit ÷ (send cost + lookup cost)."}
       </p>
     </main>
   );

@@ -131,13 +131,15 @@ export function DripAudienceFields({
             disabled={disabled}
           />
         </div>
-        {arr(k).length > 0 && (
-          <p className="mt-1 text-xs text-muted-foreground">
-            {exclude
-              ? `Leads with no ${noun} pass — only known matches are excluded.`
-              : `Leads with no ${noun} are skipped.`}
-          </p>
-        )}
+        <p className="mt-1 text-xs text-muted-foreground">
+          {k === "state" ? "2-letter state codes" : "2-letter country codes"}, comma-separated,
+          any case (e.g. {example}).{" "}
+          {arr(k).length === 0
+            ? `Empty = any ${noun}.`
+            : exclude
+              ? `Listed ${noun === "state" ? "states" : "countries"} are skipped. Leads with no ${noun} pass — only known matches are excluded.`
+              : `Only listed ${noun === "state" ? "states" : "countries"} are routed. Leads with no ${noun} are skipped.`}
+        </p>
       </div>
     );
   };
@@ -332,7 +334,7 @@ export function DripAudienceFields({
         </div>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
           {geoField("state", "States", "TX, FL")}
-          {geoField("country", "Countries", "US")}
+          {geoField("country", "Countries", "US, CA")}
         </div>
       </div>
     </div>

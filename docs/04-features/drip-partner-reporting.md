@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-06 (Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-07 (Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -60,12 +60,44 @@ be flipped out of sandbox after leads have arrived under it). A sandbox key is
 | Leads received | **includes landlines** |
 | Mobile / VoIP / Unknown / Landline | the line-type split; sums to leads received |
 | Sent | `stage_sends.status = 'sent'` — the project-wide definition of "was messaged" |
+| Send cost | **revenue-gated** (see §2a). Each sent message at its rate **plus each opt-out reply at the rate of the send it answered** — the stage cost model `rate × (sends + opt-outs)` from [lib/stages/total-cost.ts](../../lib/stages/total-cost.ts), at send grain |
 | Delivered % | **`null`** when the provider reports no delivery receipts — see below |
 | Clicks, CTR | clean clicks only (not bot/prefetch/suspect); CTR is `null` over zero sends |
 | Opt-outs | via `opt_out_attributions` |
 | Sales | counted PURCHASE events in `conversion_events` for the row's recipients — `purchasesBySendSelect()` in [lib/sale-attribution.ts](../../lib/sale-attribution.ts), i.e. `is_purchase` event types in status `pending`/`approved`. A recipient with two conversions is **two** sales (the old `sale_status IN ('lead','sale')` column kept only the latest); a rejected or unmapped conversion is **not** a sale |
 | Lookup cost | see §3 |
 | Revenue | **off by default**, per-key toggle `partner_keys.report_show_revenue`. **APPROVED conversions only** — a held (`pending`) payout is not partner revenue, and a rejected one was taken back |
+| NET profit | **revenue-gated**. Revenue − (send cost + lookup cost); may be negative |
+| ROI | **revenue-gated**, last column. NET profit ÷ (send cost + lookup cost), as %; **`null` (`—`) when that cost is 0**. The totals line recomputes it from the summed money (`profitAndRoi()` in [lib/reporting/partner-profit.ts](../../lib/reporting/partner-profit.ts)), never averages rows |
+
+### 2a. Send cost, NET profit and ROI (added 2026-10-07)
+
+**Visibility.** Internal `/reports/partners` always shows all three. On the signed
+link they appear **only when the key's revenue toggle is on**, and are zeroed /
+nulled **on the server** by `stripRevenueForPartner()` otherwise (§9). NET profit
+and ROI are revenue arithmetic, so they would leak revenue. Send cost is our SMS
+rate. A partner who sees revenue, NET profit and lookup cost can work it out as
+revenue − NET − lookup cost anyway, so the owner tied it to the same toggle rather
+than hiding a column that adds no privacy. The CSV export follows the same rules.
+
+**Opt-out replies are in send cost.** Recon (2026-10-07): inbound STOP replies
+*are* cost-tracked. The stage cost model bills each reply at the send's rate
+(`campaign_stages.total_cost`, the reports rollup, the lifecycle report). The
+partner report prices the **same distinct opt-out set its Opt-outs column
+counts**. So with a single rate, send cost = rate × (Sent + Opt-outs), and you can
+check a row by hand from its own columns.
+
+**Rate.** `COALESCE(stage_sends.cost_per_sms, the number's current
+provider_phones.cost_per_sms, 0)`. ⚠️ **Drip sends before 2026-10-07 have no
+snapshot.** The drip inserts ([lib/drip/scheduler.ts](../../lib/drip/scheduler.ts),
+[lib/drip/send-one.ts](../../lib/drip/send-one.ts)) wrote `provider_phone_id` but
+not the `cost_per_sms` that `kickoff.ts` snapshots (0 of 8,169 prod drip rows had
+one). They now snapshot it at insert. Older rows use **today's** rate. That is exact
+where the rate never changed: campaign 1606 → pml/aca $84.88 = its stage
+`total_cost`. It is wrong where the rate did change: campaign 994's stage 3060
+implies $0.011, but phone 114 is now $0.0100, so 994 reads ~$0.005 low. There is
+no rate-edit history to recover the old rate from, and the owner chose not to
+backfill.
 
 ### ⚠️ null is not zero
 
@@ -284,6 +316,7 @@ When the tier-0 (Ignored) lane fires for a journey, the journey transitions to
 | `scripts/test-public-route-scope.ts` | the matcher differential + that it can go red |
 | `scripts/test-drip-unengaged-close.ts` | **camman-v2 preview only**, fully rolled back — the close is atomic with the send, idempotent, never overrides another terminal state, cross-org safe, and keeps the two `completed` reasons apart |
 | `scripts/drip-p7-proof.ts` | production, read-only except the token lifecycle on `internal-test` (issued → resolved → revoked). Every reported number is checked against a **separate hand-written query**, not against itself. |
+| `scripts/partner-report-cost-proof.ts` | production, **read-only**. Send cost hand-checked against campaign 994's history (5 sent + 1 opt-out on phone 114 → $0.06), and every partner/tag checked against an independent counter-query. Also checks the NET/ROI arithmetic, and that the strip zeroes revenue, send cost and NET and nulls ROI on a **synthetic non-zero** row. 12/12 on 2026-10-07 |
 
 ---
 
@@ -306,7 +339,8 @@ Both ship **inert**: 0 links issued, revenue off on every key.
 ## 9. ⚠️ Revenue is stripped on the SERVER, not hidden by the component
 
 `stripRevenueForPartner()` runs in `app/partner-report/[token]/page.tsx` before
-the report reaches the view.
+the report reaches the view. Since 2026-10-07 it also zeroes `send_cost_usd` and
+`net_profit_usd` and nulls `roi` (§2a).
 
 `showRevenue: false` only stops the column being **rendered**. The value still
 travels in the RSC payload and is readable from view-source. This was found in

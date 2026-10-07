@@ -127,10 +127,13 @@ export async function dispatchDripSend(
   const ins = (await tx.execute(sql`
     INSERT INTO stage_sends
       (id, org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
-       link_id, rendered_text, status, created_at)
+       link_id, rendered_text, status, created_at, cost_per_sms)
     VALUES (${sendToken}::uuid, ${input.orgId}::uuid, ${input.campaignId}, ${input.stageId},
             ${input.contactId}::uuid, ${input.phone}, ${input.providerPhoneId},
-            ${minted.linkId}, ${body}, 'pending', now())
+            ${minted.linkId}, ${body}, 'pending', now(),
+            -- Rate snapshot at send time (0112) — see lib/drip/scheduler.ts.
+            (SELECT pp.cost_per_sms FROM provider_phones pp
+             WHERE pp.id = ${input.providerPhoneId}))
     RETURNING id
   `)) as unknown as { id: string }[];
 

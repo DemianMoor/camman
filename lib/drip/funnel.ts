@@ -3,7 +3,9 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { EXIT_TIER, campaignTierExpr, tierLiteral } from "@/lib/campaign-tier";
+import { purchasedClause } from "@/lib/sale-attribution";
 
 // The journey funnel for one drip campaign (Drip Phase 7, ruling R4).
 //
@@ -24,6 +26,15 @@ import { EXIT_TIER, campaignTierExpr, tierLiteral } from "@/lib/campaign-tier";
 // listening). Collapsing them to one "completed" bar throws away the single
 // number that says whether the campaign is talking to anyone.
 //
+// ⚠️ "TODAY" IS EVENTS, NOT A COHORT. The today column counts things that
+// HAPPENED during the current ET day — a click today may belong to a journey
+// routed last week — so it is not nested, and no % is computed against today's
+// routed (the UI shows counts only). Reach and conversion are dated by DETECTION
+// (offer_reached_detected_at, the ledger row's created_at), not by the network's
+// event time, which lags by hours and would move yesterday's numbers after the
+// day closed. The day is an ET-DAY-AS-TIMESTAMPTZ RANGE, never a functional
+// predicate on a timestamp column (same rule as lib/drip/numbers.ts).
+//
 // ⚠️ THE TIER COMES FROM campaignTierExpr, not a local re-derivation. The lanes,
 // the click report and this funnel therefore cannot disagree about what "clicked"
 // means — which is the failure mode this project has already paid for twice.
@@ -42,6 +53,9 @@ export interface FunnelOutcome {
   /** Human label for the (state, close_reason) pair. */
   label: string;
   count: number;
+  /** Journeys that ENTERED this outcome today (closed_at in the ET day).
+   *  null for a live state (routed/active) — those are a snapshot, not an event. */
+  today_count: number | null;
 }
 
 export interface FunnelStageRow {
@@ -57,6 +71,8 @@ export interface FunnelStageRow {
 
 export interface DripFunnel {
   progression: FunnelProgression;
+  /** Events during the current ET day, any journey. NOT nested — see above. */
+  today: FunnelProgression;
   outcomes: FunnelOutcome[];
   stages: FunnelStageRow[];
 }
@@ -71,6 +87,8 @@ const OUTCOME_LABELS: Record<string, string> = {
   "expired|campaign_ended": "Expired — campaign ended",
   "exited|campaign_archived": "Exited — campaign archived",
 };
+
+const LIVE_STATES = new Set(["routed", "active"]);
 
 function outcomeLabel(state: string, reason: string | null): string {
   return (
@@ -114,14 +132,46 @@ export async function getDripFunnel(
     WHERE j.org_id = ${orgId}::uuid AND j.campaign_id = ${campaignId}
   `)) as unknown as Record<string, number>[];
 
+  // ── today: events in the current ET day, any journey ─────────────────────
+  const { start, end } = campaignDayBoundsUtc();
+  const dayStart = sql`${start.toISOString()}::timestamptz`;
+  const dayEnd = sql`${end.toISOString()}::timestamptz`;
+  const today = (await db.execute(sql`
+    SELECT
+      (SELECT count(*)::int FROM drip_journeys j
+        WHERE j.org_id = ${orgId}::uuid AND j.campaign_id = ${campaignId}
+          AND j.routed_at >= ${dayStart} AND j.routed_at < ${dayEnd})             AS routed,
+      (SELECT count(*)::int FROM drip_journeys j
+        WHERE j.org_id = ${orgId}::uuid AND j.campaign_id = ${campaignId}
+          AND j.first_send_at >= ${dayStart} AND j.first_send_at < ${dayEnd})     AS sent,
+      -- same clean-click definition as campaignTierExpr's tier-1 branch
+      (SELECT count(DISTINCT l.contact_id)::int FROM links l
+        JOIN clicks ck ON ck.link_id = l.id
+         AND ck.classification NOT IN ('bot','prefetch','suspect')
+        WHERE l.org_id = ${orgId}::uuid AND l.campaign_id = ${campaignId}
+          AND ck.clicked_at >= ${dayStart} AND ck.clicked_at < ${dayEnd})          AS clicked,
+      (SELECT count(DISTINCT ss.contact_id)::int FROM stage_sends ss
+        WHERE ss.org_id = ${orgId}::uuid AND ss.campaign_id = ${campaignId}
+          AND ss.offer_reached_detected_at >= ${dayStart}
+          AND ss.offer_reached_detected_at < ${dayEnd})                     AS reached_offer,
+      (SELECT count(DISTINCT ce.contact_id)::int FROM conversion_events ce
+        WHERE ce.org_id = ${orgId}::uuid AND ce.campaign_id = ${campaignId}
+          AND ce.contact_id IS NOT NULL AND ${purchasedClause()}
+          AND ce.created_at >= ${dayStart} AND ce.created_at < ${dayEnd})          AS converted
+  `)) as unknown as Record<string, number>[];
+
   // ── outcomes: disjoint, one row per journey ──────────────────────────────
   const outcomes = (await db.execute(sql`
-    SELECT j.state, j.close_reason, count(*)::int AS count
+    SELECT j.state, j.close_reason, count(*)::int AS count,
+           count(*) FILTER (WHERE j.closed_at >= ${dayStart} AND j.closed_at < ${dayEnd})::int
+             AS today_count
     FROM drip_journeys j
     WHERE j.org_id = ${orgId}::uuid AND j.campaign_id = ${campaignId}
     GROUP BY 1, 2
     ORDER BY count(*) DESC
-  `)) as unknown as { state: string; close_reason: string | null; count: number }[];
+  `)) as unknown as {
+    state: string; close_reason: string | null; count: number; today_count: number;
+  }[];
 
   // ── per stage ────────────────────────────────────────────────────────────
   // ⚠️ Counted from stage_sends, NOT from journeys: a stage's sends are the
@@ -153,20 +203,24 @@ export async function getDripFunnel(
     ORDER BY s.behavioral_tier NULLS FIRST, s.stage_number
   `)) as unknown as Record<string, number | null>[];
 
-  const p = prog[0] ?? {};
+  const toProgression = (p: Record<string, number> = {}): FunnelProgression => ({
+    routed: Number(p.routed ?? 0),
+    sent: Number(p.sent ?? 0),
+    clicked: Number(p.clicked ?? 0),
+    reached_offer: Number(p.reached_offer ?? 0),
+    converted: Number(p.converted ?? 0),
+  });
   return {
-    progression: {
-      routed: Number(p.routed ?? 0),
-      sent: Number(p.sent ?? 0),
-      clicked: Number(p.clicked ?? 0),
-      reached_offer: Number(p.reached_offer ?? 0),
-      converted: Number(p.converted ?? 0),
-    },
+    progression: toProgression(prog[0]),
+    today: toProgression(today[0]),
     outcomes: outcomes.map((o) => ({
       state: o.state,
       close_reason: o.close_reason,
       label: outcomeLabel(o.state, o.close_reason),
       count: Number(o.count),
+      // routed/active are live: closed_at is NULL by CHECK, so a "today" count
+      // would always read 0 and look like news. The UI shows the snapshot.
+      today_count: LIVE_STATES.has(o.state) ? null : Number(o.today_count),
     })),
     stages: stages.map((s) => ({
       stage_id: Number(s.stage_id),

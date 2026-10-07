@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-07 (journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-07 (late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -262,7 +262,33 @@ journey as `completed` / `all_stages_sent` instead of `converted` / `purchased`.
 Sub-second per campaign, costs a funnel bucket and never a contact — the journey
 closes either way and no message differs. Phase 4 widened the window (before tier
 4, a buyer with unsent children could not be closed by the completed pass at
-all). Documented at the sweeper; not redesigned.
+all). **Repaired since 2026-10-07 by the reclassification pass below.**
+
+### Late purchases reclassify `completed` → `converted` (2026-10-07)
+
+The network reports a purchase hours after it happens, so a sequence often finishes
+first: on campaign 1606, 18 of 19 buyers read `completed / all_stages_sent` and
+"How they ended · Converted" read 1. `reclassifyCompletedJourneysOnPurchase`
+([`lib/drip/lifecycle.ts`](../../lib/drip/lifecycle.ts)) now runs as the last pass
+of every lifecycle sweep, per org:
+
+- a `completed` journey (either close reason) whose lead has a counted purchase
+  (`purchasedClause()`) becomes `converted / purchased`;
+- **`closed_at` is kept**: the journey ended when it ended. The change is recorded
+  in `reason.reclassified` = `{from_state, from_close_reason, at, trigger:
+  "purchase_detected_after_close"}`;
+- ⚠️ **`opted_out` is never reclassified**, even if a purchase lands later. Opt-out
+  is the stronger terminal state, and relabelling would hide a STOP behind a sale.
+  `expired` / `exited` are not touched either;
+- the purchase must belong to the journey: `occurred_at >= routed_at`, and before
+  the contact's next journey on the same campaign was routed (re-entry case);
+- the sweep's org list includes `completed`, so a campaign with no live journeys
+  left still gets its late purchases reclassified.
+
+Result: "How they ended · Converted" tracks the buyer count as detections land.
+The two can still differ for buyers who opted out, and briefly for a buyer whose
+journey is still live until the next sweep closes it. Measured on prod: 5.9 ms per
+org (hash semi-join).
 
 ### ⚠️ Grouped on `(state, close_reason)`, not `state` alone
 

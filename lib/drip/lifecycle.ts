@@ -119,6 +119,75 @@ export async function closeJourneysOnPurchase(
 }
 
 /**
+ * Purchase detected AFTER the journey already closed as `completed` ⇒
+ * reclassify it to `converted` / `purchased`.
+ *
+ * ⚠️ WHY THIS EXISTS. The network reports a purchase hours after it happens
+ * (conversion p50 ~219 min), and a drip sequence often runs out before that. By
+ * the time the ledger row lands, closeJourneysOnPurchase can no longer see the
+ * journey (it only touches live states), so the buyer stays `completed` for good.
+ * On campaign 1606 that was 18 of 19 buyers: "How they ended · Converted" read 1.
+ *
+ * ⚠️ closed_at IS KEPT. The journey ended when it ended; only the label changes.
+ * The change is recorded in `reason.reclassified` (previous state + close_reason,
+ * when, why), so a reclassified journey stays distinguishable from one closed as
+ * converted while live.
+ *
+ * ⚠️ ONLY `completed` IS RECLASSIFIED, both close reasons (all_stages_sent and
+ * unengaged: someone the Ignored lane gave up on who then bought is a buyer).
+ * `opted_out` IS NEVER RECLASSIFIED, even when a purchase lands later. Opt-out is
+ * the stronger terminal state: it is a compliance fact about the contact, and
+ * converting the label would hide a STOP behind a sale in every report that
+ * reads journey state. `expired` and `exited` are out of scope too.
+ *
+ * ⚠️ THE PURCHASE MUST BELONG TO THIS JOURNEY: it happened at or after this
+ * journey was routed, and before the contact's NEXT journey on the same campaign
+ * (if any) was routed. Without that anchor, a contact who bought during journey 1
+ * and re-entered a week later would have journey 2 relabelled converted as soon
+ * as it completed.
+ *
+ * Idempotent: a reclassified row is `converted`, so it never matches again. No
+ * slot is freed or taken, because both states are terminal.
+ */
+export async function reclassifyCompletedJourneysOnPurchase(
+  tx: DripTx,
+  { orgId, campaignId }: { orgId: string; campaignId?: number },
+): Promise<{ reclassified: number }> {
+  const scope = campaignId != null ? sql`AND j.campaign_id = ${campaignId}` : sql``;
+  const rows = (await tx.execute(sql`
+    UPDATE drip_journeys j
+    SET state = 'converted',
+        close_reason = 'purchased',
+        -- SET expressions read the OLD row, so this records what it was.
+        reason = j.reason || jsonb_build_object('reclassified', jsonb_build_object(
+          'from_state', j.state,
+          'from_close_reason', j.close_reason,
+          'at', now(),
+          'trigger', 'purchase_detected_after_close'))
+    WHERE j.org_id = ${orgId}::uuid ${scope}
+      AND j.state = 'completed'
+      AND EXISTS (
+        SELECT 1 FROM conversion_events ce
+        WHERE ce.org_id = j.org_id
+          AND ce.campaign_id = j.campaign_id
+          AND ce.contact_id = j.contact_id
+          AND ${purchasedClause()}
+          AND ce.occurred_at >= j.routed_at
+          AND NOT EXISTS (
+            SELECT 1 FROM drip_journeys nxt
+            WHERE nxt.org_id = j.org_id
+              AND nxt.campaign_id = j.campaign_id
+              AND nxt.contact_id = j.contact_id
+              AND nxt.routed_at > j.routed_at
+              AND nxt.routed_at <= ce.occurred_at
+          )
+      )
+    RETURNING j.id
+  `)) as unknown as { id: string }[];
+  return { reclassified: rows.length };
+}
+
+/**
  * Campaign archived ⇒ close every live journey on it.
  *
  * ⚠️ ARCHIVE, NOT DELETE (ruling D3). drip_journeys.campaign_id is ON DELETE

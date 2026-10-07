@@ -10,6 +10,7 @@ import {
   type TelegramReportOutcome,
 } from "@/lib/alerts/telegram";
 import { carrierTriageSummary } from "@/lib/carrier/queue-stats";
+import { buildIntakeDigest } from "@/lib/drip/intake-digest";
 import { findStalledStages, formatStallAlert, trulyStalled } from "@/lib/sends/stall-detector";
 import { reportMissedStages } from "@/lib/sends/missed-stages";
 import {
@@ -49,8 +50,16 @@ import { sql } from "drizzle-orm";
 // Auth: Authorization: Bearer ${CRON_SECRET} (or x-cron-secret). ?test=1 forces
 // an immediate send regardless of time (still secret-protected) — hourly format
 // if the current Warsaw hour is inside an hourly window shape, else daily.
+//
+// Every tick ALSO sends the hourly partner-intake digest for the hour that just
+// ended (lib/drip/intake-digest.ts) — after the report, isolated in its own
+// try/catch + build timeout, independent of the report window and settings.
+// ?digestHour=<ISO instant> re-runs the digest for that hour (manual re-run,
+// still secret-protected) without touching the report.
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// 120, not 60: the report's worst case (30s build + 25s send + 4s alert) already
+// used the old 60s, and the digest (10s build + its own send) runs after it.
+export const maxDuration = 120;
 
 const WARSAW = "Europe/Warsaw";
 
@@ -265,6 +274,30 @@ async function runWatches(now: Date, s: NotifSettings): Promise<void> {
   }
 }
 
+// Cap on the digest BUILD (queries + Telnyx balance). The send is not wrapped,
+// for the same reason as the report's: a guard firing mid-POST would misreport
+// a message Telegram may already have delivered.
+const DIGEST_BUILD_TIMEOUT_MS = 10000;
+
+// Hourly partner-intake digest. Never throws: a digest failure is logged and
+// announced in one plain-text line, and can never break the report or the
+// watches. Built first (time-boxed), sent afterwards.
+async function runDigest(now: Date, hour: Date | undefined): Promise<void> {
+  try {
+    const built = await withTimeout(
+      buildIntakeDigest({ dbc: db, now, hour, manual: hour != null }),
+      DIGEST_BUILD_TIMEOUT_MS,
+      "intake digest build",
+    );
+    for (const m of built.messages) await sendTelegramReport(m);
+  } catch (err) {
+    console.error("[telegram-report] intake digest failed:", err);
+    await notifyTelegram(
+      `⚠️ Partner-intake digest failed: ${err instanceof Error ? err.message : "unknown error"}`,
+    );
+  }
+}
+
 // ── handler ─────────────────────────────────────────────────────────────────
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
@@ -278,6 +311,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const warsawHour = Number(formatInTimeZone(now, WARSAW, "H"));
   const warsawIsoDow = Number(formatInTimeZone(now, WARSAW, "i")); // 1=Mon..7=Sun
   const test = req.nextUrl.searchParams.get("test") === "1";
+  const digestHourParam = req.nextUrl.searchParams.get("digestHour");
+  if (digestHourParam != null) {
+    const hour = new Date(digestHourParam);
+    if (Number.isNaN(hour.getTime())) {
+      return NextResponse.json({ error: "digestHour must be an ISO instant" }, { status: 400 });
+    }
+    await runDigest(now, hour);
+    return NextResponse.json({ digest: true, hour: hour.toISOString() });
+  }
 
   // Load notification preferences (best-effort; falls back to defaults).
   const notifSettings = await loadNotifSettings();
@@ -285,6 +327,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // The report is the JOB. It goes first and gets the whole budget; the watches
   // run afterwards on whatever is left (see runWatches).
   const response = await runReport(now, warsawHour, warsawIsoDow, test, notifSettings);
+  if (!test) await runDigest(now, undefined);
   await runWatches(now, notifSettings);
   return response;
 }

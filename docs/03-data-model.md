@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-05_
+_Last updated: 2026-10-07_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -213,6 +213,9 @@ erDiagram
   offers ||--o{ offer_exposures : "offer_id"
   campaigns ||--o{ offer_exposures : "first sender"
   offers ||--|| offer_exposure_counts : "precomputed distinct-lead count"
+  organizations ||--o{ partner_keys : "drip partner intake keys"
+  partner_keys ||--o{ lead_intake_daily : "per ET-day counters"
+  partner_keys ||--o{ lead_intake_hourly : "per-hour counters (0199)"
 ```
 
 > **Per-recipient sale attribution** (migration 0067): the Keitaro conversions poll
@@ -498,6 +501,7 @@ The consumer side of [partner intake](#partner-lead-intake-migrations-01520154-d
 |---|---|---|
 | `lead_events` | PK(`id`), partial UNIQUE(`inbox_id`) `WHERE inbox_id IS NOT NULL` | One row per lead that became a contact — WHEN it arrived, FROM WHOM, under WHICH tag. Backs the ">1 week in the system re-qualifies" rule and Phase 7 reporting. **`inbox_id` is `ON DELETE SET NULL`, not cascade**: landline leads are deleted from `lead_inbox` and a cascade would destroy the evidence. The partial UNIQUE makes the sweeper crash-safe |
 | `lead_intake_daily` | PK(`org_id`, `partner_key_id`, `day_et`, `interest_tag`) *(widened, 0171)* | Per-partner, per-**tag**, per-**ET**-day outcome counters: `received`, `mobile`, `voip`, `unknown`, `landline`, `rejected`, `duplicate`, `sandbox`, `lookups_spent`. Exists because **the rows do not survive** — written in the same transaction as the delete. `sandbox` is **exclusive** of every other column; `lookups_spent` counts Telnyx **calls**, not leads. ⚠️ `interest_tag` is `NOT NULL DEFAULT ''` — rows written before 0171 sit under `''` even where their sends carry a real tag, which is why the partner report keys off a UNION of both sources rather than coalescing one onto the other |
+| `lead_intake_hourly` | PK(`partner_key_id`, `org_id`, `hour_et`, `interest_tag`) *(0199)*; index (`org_id`, `hour_et` DESC) | The **hourly** twin of `lead_intake_daily` — same nine counter columns, keyed by `hour_et` = the **start of the processing hour** as a `timestamptz` (CHECK: on the hour, truncated in UTC; ET's whole-hour offset makes that the ET hour, and the two DST fall-back 01:00s stay distinct rows). Written by `bumpIntakeCounters` ([lib/drip/counters.ts](../lib/drip/counters.ts)) in **one statement** with the daily row (data-modifying CTE), so for every ET day `SUM(hourly rows in the day) = daily row` per org × partner × tag; the hourly digest re-checks this and warns when it breaks. PK leads with `partner_key_id` so it covers that FK. RLS: enabled, SELECT-only, org-scoped (same as daily). **No backfill** — rows start at the first hour after 0199 shipped. Feeds the hourly partner-intake Telegram digest ([04-features/drip-lead-enrichment.md](04-features/drip-lead-enrichment.md#hourly-partner-intake-digest)) |
 
 Also: `lead_inbox.status` gains `awaiting_lookup`; `lookup_batches.trigger` gains `drip_intake`; `lookup_settings` gains `drip_daily_cap` (ET day) + `balance_floor_usd`; `lookup_queue` gains `priority` (default 0 = today's ordering).
 

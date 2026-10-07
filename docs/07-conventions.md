@@ -2,6 +2,19 @@
 
 _Last updated: 2026-10-07_
 
+## Intake counters are written at TWO grains in ONE statement (2026-10-07)
+
+`bumpIntakeCounters` ([lib/drip/counters.ts](../lib/drip/counters.ts)) upserts `lead_intake_daily`
+and `lead_intake_hourly` (0199) in a single data-modifying CTE, with day and hour both derived from
+the same `at: Date` (required — the old `day` string parameter is gone). Keep it one statement: the
+`lookups_spent` call site passes the bare `db`, not a transaction, and two statements there could
+bump the daily row without the hourly one. The invariant `SUM(hourly in an ET day) = daily row`
+(per org × partner × tag, all nine columns) is re-checked by every hourly digest, which **warns in
+the message** rather than failing silently, and by `scripts/check-intake-hourly-invariant.ts`.
+Never write either table anywhere else. `hour_et` is truncated in **UTC** (`hourStart`, and the
+CHECK uses `date_trunc('hour', hour_et, 'UTC')`) — the 2-arg `date_trunc` on a `timestamptz` follows
+the session TimeZone.
+
 ## A network with no conversion rules counts nothing — new networks get defaults (2026-10-06)
 
 `resolveMapping()` ([lib/conversions/build-rows.ts](../lib/conversions/build-rows.ts)) matches a conversion on (offer, Keitaro type), then (the offer's network, Keitaro type). No match ⇒ stored with NULL event type and status: **unmapped**, in no sale, revenue or EPC. Attribution can be perfect and the conversion still counts as nothing — Digistore24's first three did exactly that.

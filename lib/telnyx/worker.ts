@@ -308,6 +308,13 @@ async function finalizeCompletedBatches(
     `);
     completed++;
 
+    // drip_intake batches are 1-2 lookups each and arrive every minute while a
+    // partner feed is live; they are reported by the hourly partner-intake
+    // digest instead (lib/drip/intake-digest.ts). Bulk/manual triggers
+    // (upload / backfill / csv_update) keep their per-batch summary. The
+    // balance-floor, cap and backlog alerts above are untouched.
+    if (b.trigger === "drip_intake") continue;
+
     await notifyTelegram(
       formatBatchSummary({
         trigger: b.trigger,

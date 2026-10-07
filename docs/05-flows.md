@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-06_
+_Last updated: 2026-10-07_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -543,6 +543,38 @@ sequenceDiagram
       Route->>TG: message (periods, deltas, example ids / gap stages / "may switch")
     end
   end
+```
+
+## L2. Hourly partner-intake digest (0199, `0 * * * *`)
+
+Replaces the per-batch "Lookup batch complete (drip_intake …)" messages. See
+[04-features/drip-lead-enrichment.md](04-features/drip-lead-enrichment.md#hourly-partner-intake-digest).
+
+```mermaid
+sequenceDiagram
+  participant E as lead-enrichment cron (every min)
+  participant DB as Postgres
+  participant W as lookup-worker cron (*/2)
+  participant R as telegram-report cron (hourly)
+  participant T as Telnyx
+  participant TG as Telegram
+
+  E->>DB: bumpIntakeCounters(at) — ONE statement upserts<br/>lead_intake_daily (day) + lead_intake_hourly (hour)
+  E->>DB: enqueue misses (trigger drip_intake) + bump lookups_spent
+  W->>T: number lookups
+  W->>DB: finalize batch
+  Note over W,TG: drip_intake batches: NO per-batch message<br/>(upload/backfill/csv_update still notify)
+  R->>TG: performance report (unchanged)
+  R->>DB: lead_intake_hourly rows for the hour that ended
+  alt no intake that hour
+    R-->>R: send nothing
+  else intake
+    R->>DB: calibrated rate (lookup_batches ledger, 90d)
+    R->>T: GET /v2/balance
+    R->>DB: day-sum invariant: SUM(hourly) vs daily
+    R->>TG: digest (compact or table; split by partner if long)<br/>+ warning line if the invariant broke
+  end
+  R->>DB: watches (stall / unjoinable / missed)
 ```
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)

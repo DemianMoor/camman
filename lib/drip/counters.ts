@@ -33,7 +33,27 @@ export function etDay(at: Date = new Date()): string {
 }
 
 /**
- * Add to one or more counters for (partner_key, ET day).
+ * Start of the hour containing `at` — the hourly counter's grain.
+ *
+ * Truncating in UTC is correct for ET: its offset (−4/−5) is a whole number of
+ * hours, so the ET hour boundary IS the UTC hour boundary, and on the DST
+ * fall-back day the two 01:00 ET hours stay two distinct instants.
+ */
+export function hourStart(at: Date): Date {
+  return new Date(Math.floor(at.getTime() / 3_600_000) * 3_600_000);
+}
+
+/**
+ * Add to one or more counters for (partner_key, tag) at BOTH grains: the ET-day
+ * row in lead_intake_daily and the hour row in lead_intake_hourly (0199).
+ *
+ * ⚠️ ONE STATEMENT, BOTH TABLES. The two upserts are a single data-modifying
+ * CTE, so they commit or fail together even for a caller passing the bare `db`
+ * (the lookups_spent bump in enrichment.ts does). Two statements on a pool
+ * could leave the daily row bumped and the hourly one not, and the hourly
+ * digest's day-sum invariant would report a divergence nobody could explain.
+ * Day and hour both derive from the same `at`, so they can never straddle
+ * midnight differently.
  *
  * ⚠️ Column names are interpolated with sql.raw, so they are checked against an
  * allowlist first. `deltas` keys come from application code today, but an
@@ -46,13 +66,14 @@ export async function bumpIntakeCounters(
   {
     orgId,
     partnerKeyId,
-    day,
+    at,
     interestTag,
     deltas,
   }: {
     orgId: string;
     partnerKeyId: number;
-    day: string;
+    /** When the outcome was counted (processing time). Sets day AND hour. */
+    at: Date;
     /**
      * The RESOLVED tag (Drip P7) — what routing will actually match on, not what
      * the payload supplied. `null`/absent becomes '' ("untagged"), which is a
@@ -75,16 +96,26 @@ export async function bumpIntakeCounters(
 
   const cols = entries.map(([c]) => sql.raw(c));
   const vals = entries.map(([, n]) => sql`${n}`);
-  const sets = entries.map(
-    ([c, n]) => sql`${sql.raw(c)} = lead_intake_daily.${sql.raw(c)} + ${n}`,
-  );
+  const setsFor = (table: string) =>
+    entries.map(
+      ([c, n]) => sql`${sql.raw(c)} = ${sql.raw(table)}.${sql.raw(c)} + ${n}`,
+    );
+  const tag = (interestTag ?? "").trim();
+  const colList = sql.join(cols, sql`, `);
+  const valList = sql.join(vals, sql`, `);
 
   await dbc.execute(sql`
-    INSERT INTO lead_intake_daily (org_id, partner_key_id, day_et, interest_tag, ${sql.join(cols, sql`, `)})
-    VALUES (${orgId}::uuid, ${partnerKeyId}, ${day}::date, ${(interestTag ?? "").trim()},
-            ${sql.join(vals, sql`, `)})
-    ON CONFLICT (org_id, partner_key_id, day_et, interest_tag)
-    DO UPDATE SET ${sql.join(sets, sql`, `)}
+    WITH daily AS (
+      INSERT INTO lead_intake_daily (org_id, partner_key_id, day_et, interest_tag, ${colList})
+      VALUES (${orgId}::uuid, ${partnerKeyId}, ${etDay(at)}::date, ${tag}, ${valList})
+      ON CONFLICT (org_id, partner_key_id, day_et, interest_tag)
+      DO UPDATE SET ${sql.join(setsFor("lead_intake_daily"), sql`, `)}
+      RETURNING 1
+    )
+    INSERT INTO lead_intake_hourly (org_id, partner_key_id, hour_et, interest_tag, ${colList})
+    VALUES (${orgId}::uuid, ${partnerKeyId}, ${hourStart(at).toISOString()}::timestamptz, ${tag}, ${valList})
+    ON CONFLICT (org_id, partner_key_id, hour_et, interest_tag)
+    DO UPDATE SET ${sql.join(setsFor("lead_intake_hourly"), sql`, `)}
   `);
 }
 

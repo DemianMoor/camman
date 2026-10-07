@@ -5258,8 +5258,68 @@ export const lead_intake_daily = pgTable(
   ],
 );
 
+// The HOURLY twin of lead_intake_daily (migration 0199) — feeds the hourly
+// partner-intake Telegram digest. Same columns, keyed by hour instead of day.
+//
+// ⚠️ Written by bumpIntakeCounters in the SAME statement path as the daily row,
+// with the same deltas, so SUM(hourly rows inside an ET day) = the daily row.
+// The digest re-checks that every hour (lib/drip/intake-digest.ts).
+//
+// hour_et = START of the processing hour, as an instant. ET's offset is whole
+// hours, so the ET hour boundary is the UTC one. No backfill: rows begin at the
+// first hour after 0199 shipped.
+export const lead_intake_hourly = pgTable(
+  "lead_intake_hourly",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    partner_key_id: integer("partner_key_id")
+      .notNull()
+      .references(() => partner_keys.id, { onDelete: "cascade" }),
+    hour_et: timestamp("hour_et", { withTimezone: true }).notNull(),
+    interest_tag: text("interest_tag").notNull().default(""),
+    received: integer("received").notNull().default(0),
+    mobile: integer("mobile").notNull().default(0),
+    voip: integer("voip").notNull().default(0),
+    unknown: integer("unknown").notNull().default(0),
+    landline: integer("landline").notNull().default(0),
+    rejected: integer("rejected").notNull().default(0),
+    duplicate: integer("duplicate").notNull().default(0),
+    sandbox: integer("sandbox").notNull().default(0),
+    lookups_spent: integer("lookups_spent").notNull().default(0),
+  },
+  (table) => [
+    primaryKey({
+      name: "lead_intake_hourly_pkey",
+      // partner_key_id leads so the PK also covers the partner_keys FK.
+      columns: [
+        table.partner_key_id,
+        table.org_id,
+        table.hour_et,
+        table.interest_tag,
+      ],
+    }),
+    index("lead_intake_hourly_org_hour_idx").on(
+      table.org_id,
+      table.hour_et.desc(),
+    ),
+    check(
+      "lead_intake_hourly_on_the_hour_check",
+      sql`date_trunc('hour', ${table.hour_et}, 'UTC') = ${table.hour_et}`,
+    ),
+    check(
+      "lead_intake_hourly_nonneg_check",
+      sql`${table.received} >= 0 AND ${table.mobile} >= 0 AND ${table.voip} >= 0
+          AND ${table.unknown} >= 0 AND ${table.landline} >= 0 AND ${table.rejected} >= 0
+          AND ${table.duplicate} >= 0 AND ${table.sandbox} >= 0 AND ${table.lookups_spent} >= 0`,
+    ),
+  ],
+);
+
 export type LeadEvent = typeof lead_events.$inferSelect;
 export type LeadIntakeDaily = typeof lead_intake_daily.$inferSelect;
+export type LeadIntakeHourly = typeof lead_intake_hourly.$inferSelect;
 
 // ===========================================================================
 // Drip Phase 4 — campaigns + routing (migrations 0159-0162)

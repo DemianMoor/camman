@@ -12,7 +12,7 @@ import {
 } from "@/lib/contact-attributes";
 import { extractLeadFields } from "@/lib/intake/fields";
 import { enqueueNormalized } from "@/lib/telnyx/enqueue";
-import { bumpIntakeCounters, counterForLineType, etDay } from "./counters";
+import { bumpIntakeCounters, counterForLineType } from "./counters";
 import {
   addContactsToGroup,
   ensureDripGroup,
@@ -158,7 +158,6 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
 
     const orgId = rows[0].org_id;
     toEnqueue.orgId = orgId;
-    const day = etDay(now);
 
     // Group ids resolved once per batch, not per lead.
     const realGroup = await ensureDripGroup(tx, { orgId, sandbox: false });
@@ -186,7 +185,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
                  processed_at=now(), normalized=${JSON.stringify(normalized)}::jsonb
           WHERE id = ${row.id}`);
         await bumpIntakeCounters(tx, {
-          orgId, partnerKeyId: row.partner_key_id, day,
+          orgId, partnerKeyId: row.partner_key_id, at: now,
           interestTag: row.interest_tag,
           deltas: row.sandbox ? { sandbox: 1 } : { received: 1, rejected: 1 },
         });
@@ -241,7 +240,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
       // we're unsure about" — and stamped so Phase 4 can filter per campaign.
       if (lineType === "landline") {
         await bumpIntakeCounters(tx, {
-          orgId, partnerKeyId: row.partner_key_id, day,
+          orgId, partnerKeyId: row.partner_key_id, at: now,
           interestTag: row.interest_tag,
           deltas: { received: 1, landline: 1 },
         });
@@ -327,7 +326,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
         WHERE id = ${row.id}`);
 
       await bumpIntakeCounters(tx, {
-        orgId, partnerKeyId: row.partner_key_id, day,
+        orgId, partnerKeyId: row.partner_key_id, at: now,
         interestTag: row.interest_tag,
         deltas: row.sandbox
           ? { sandbox: 1 }
@@ -354,12 +353,11 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
 
     // Telnyx calls actually made, attributed to the partner that caused them.
     // Cache hits never reach here, which is why this counts calls and not leads.
-    const day = etDay(now);
     for (const b of toEnqueue.byKey.values()) {
       await bumpIntakeCounters(db, {
         orgId: toEnqueue.orgId,
         partnerKeyId: b.partnerKeyId,
-        day,
+        at: now,
         interestTag: b.tag,
         deltas: { lookups_spent: b.phones.length },
       });

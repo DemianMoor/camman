@@ -1394,6 +1394,13 @@
       "when": 1793664000000,
       "tag": "0198_contact_offer_campaigns_covering_index",
       "breakpoints": true
+    },
+    {
+      "idx": 199,
+      "version": "7",
+      "when": 1793836800000,
+      "tag": "0199_lead_intake_hourly",
+      "breakpoints": true
     }
   ]
 }

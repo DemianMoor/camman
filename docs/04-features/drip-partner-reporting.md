@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-07 (late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-07 (journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -249,6 +249,18 @@ new row**; what moved is one threshold, in
 | `clicked` | `COALESCE(t.tier, 0) >= 1` | unchanged |
 | `reached offer` | `COALESCE(t.tier, 0) >= 2` | **unchanged on purpose** — a registrant (3) and a buyer (4) *did* reach the offer, and that is what a cumulative high-water funnel means |
 | `converted` | `COALESCE(t.tier, 0) >= EXIT_TIER` (**4**, was 3) | a $0 REGISTRATION is no longer counted as a conversion |
+
+⭐ **Since 2026-10-07 `converted` counts SALES, not buyers** (owner request). Both
+the Total and Today columns are `count(*)` of purchase events
+(`purchasedClause`) on `conversion_events` for the campaign; Today is dated by
+`occurred_at` in the ET day. That is the same count and the same day as the
+Overview **Sales** column (`keitaro_stage_results.sales`, written by
+[`lib/keitaro/stage-day-conversions.ts`](../../lib/keitaro/stage-day-conversions.ts)),
+so the two screens show one number. Verified on campaign 1606: Today 34 = 34,
+Total 46 = 46 (40 distinct buyers). Consequence: `converted` is no longer nested
+inside `reached offer` — a lead who buys twice adds 2 to converted and 1 to
+reached offer. The tier threshold above still decides the lanes; it no longer
+feeds this row.
 
 So a registrant shows up under **reached offer** and not under **converted**,
 which is the truth about them. The per-lane breakdown *does* name the new lane:

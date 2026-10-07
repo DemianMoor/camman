@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
-import { EXIT_TIER, campaignTierExpr, tierLiteral } from "@/lib/campaign-tier";
+import { campaignTierExpr } from "@/lib/campaign-tier";
 import { purchasedClause } from "@/lib/sale-attribution";
 
 // The journey funnel for one drip campaign (Drip Phase 7, ruling R4).
@@ -30,9 +30,12 @@ import { purchasedClause } from "@/lib/sale-attribution";
 // HAPPENED during the current ET day — a click today may belong to a journey
 // routed last week — so it is not nested, and no % is computed against today's
 // routed (the UI shows counts only). Reach and conversion are dated by DETECTION
-// (offer_reached_detected_at, the ledger row's created_at), not by the network's
-// event time, which lags by hours and would move yesterday's numbers after the
-// day closed. The day is an ET-DAY-AS-TIMESTAMPTZ RANGE, never a functional
+// (offer_reached_detected_at), not by the network's event time, which lags by
+// hours and would move yesterday's numbers after the day closed. CONVERTED is
+// the exception: it counts SALES (purchase events, not buyers) dated by the
+// conversion's occurred_at, so both columns equal the Overview Sales column
+// (owner, 2026-10-07). It is therefore not nested — a lead who buys twice
+// contributes 2 to converted and 1 to reached_offer. The day is an ET-DAY-AS-TIMESTAMPTZ RANGE, never a functional
 // predicate on a timestamp column (same rule as lib/drip/numbers.ts).
 //
 // ⚠️ THE TIER COMES FROM campaignTierExpr, not a local re-derivation. The lanes,
@@ -123,9 +126,13 @@ export async function getDripFunnel(
       -- buyer (tier 4) still count as having reached the offer — that is what a
       -- cumulative high-water funnel means.
       count(*) FILTER (WHERE COALESCE(t.tier, 0) >= 2)::int       AS reached_offer,
-      -- converted is the EXIT tier, 4 since Phase 4. At >= 3 it would count
-      -- every $0 registration as a conversion.
-      count(*) FILTER (WHERE COALESCE(t.tier, 0) >= ${tierLiteral(EXIT_TIER)})::int AS converted
+      -- converted counts SALES (purchase events), not buyers — owner, 2026-10-07:
+      -- a lead who buys twice is two sales, the same number the Overview Sales
+      -- column shows. Same purchasedClause, so a $0 registration or a rejected
+      -- (refunded) conversion is still not a sale.
+      (SELECT count(*)::int FROM conversion_events ce
+        WHERE ce.org_id = ${orgId}::uuid AND ce.campaign_id = ${campaignId}
+          AND ${purchasedClause()})                                AS converted
     FROM drip_journeys j
     LEFT JOIN (${campaignTierExpr(campaignId, orgId)}) t
            ON t.contact_id = j.contact_id
@@ -154,10 +161,12 @@ export async function getDripFunnel(
         WHERE ss.org_id = ${orgId}::uuid AND ss.campaign_id = ${campaignId}
           AND ss.offer_reached_detected_at >= ${dayStart}
           AND ss.offer_reached_detected_at < ${dayEnd})                     AS reached_offer,
-      (SELECT count(DISTINCT ce.contact_id)::int FROM conversion_events ce
+      -- sales, not buyers, dated by occurred_at in the ET day — the same count
+      -- and the same day the Overview Sales column uses (stage-day-conversions)
+      (SELECT count(*)::int FROM conversion_events ce
         WHERE ce.org_id = ${orgId}::uuid AND ce.campaign_id = ${campaignId}
-          AND ce.contact_id IS NOT NULL AND ${purchasedClause()}
-          AND ce.created_at >= ${dayStart} AND ce.created_at < ${dayEnd})          AS converted
+          AND ${purchasedClause()}
+          AND ce.occurred_at >= ${dayStart} AND ce.occurred_at < ${dayEnd})        AS converted
   `)) as unknown as Record<string, number>[];
 
   // ── outcomes: disjoint, one row per journey ──────────────────────────────

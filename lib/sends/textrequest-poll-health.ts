@@ -9,9 +9,10 @@ import { txrPassKey } from "@/lib/sends/textrequest-messages-poll";
 //
 // Two failures went unalerted on 2026-10-05: every poll run from 23:04 to 05:04
 // UTC was killed at Vercel's 60 s limit (25 in a row), and dashboard 68804 was
-// never walked. The poll's own Telegram alerts fire on a failed API call or a
-// page cap — a run that is KILLED cannot report itself, and a dashboard that is
-// simply never reached raises nothing.
+// never walked. The poll's own Telegram alert fires on a failed API call — a
+// run that is KILLED cannot report itself, and a dashboard that is simply never
+// reached raises nothing. (A page cap is a log line only since 2026-10-07: the
+// capped range is owed and caught up, and check 2 below alerts if it isn't.)
 //
 //   1. "Did not finish": each cron run stamps `started` first and `finished`
 //      last. A run that finds started > finished knows the previous one died.

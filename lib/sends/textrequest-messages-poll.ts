@@ -41,8 +41,11 @@ const PAGE_SIZE = 1000;
 // sent 10,000 messages in 46 minutes and overflowed the shared 10K budget at 21
 // pages; under one budget a big campaign can push STOP replies out of the read.
 // Also a backstop against an unbounded loop if `meta.total_items` ever
-// misbehaves. Hitting it is reported (result.truncated + a Telegram alert),
-// never silent.
+// misbehaves. Hitting it is reported (result.truncated + a warn log line),
+// never silent. Not a Telegram alert: a capped walk keeps its owed range and
+// catches up on the next runs, so the alert paged the channel for routine
+// catch-up. Actually falling behind is alerted by textrequest-poll-health.ts
+// (no complete pass in N runs).
 const MAX_PAGES = 20;
 
 // TR emits UTC timestamps with NO timezone designator ("2026-07-25T09:39:35.227").
@@ -668,11 +671,6 @@ export async function pollTxrMessages(
         `[textrequest-messages-poll] page cap hit — dashboard ${t.dashboard_id} (${label}, ${kind}): ` +
           `${head.totalItems} messages across ${pagesTotal} pages, reading ${maxPages}. ${fate}`,
       );
-      await notifyTelegram(
-        `⚠️ Text Request messages poll hit its page cap\n` +
-          `dashboard ${t.dashboard_id} (${label}, ${kind}): ${head.totalItems} messages ` +
-          `(${pagesTotal} pages, cap ${maxPages}).\n${fate}`,
-      ).catch(() => {});
     }
 
     for (const page of plan.pages) {

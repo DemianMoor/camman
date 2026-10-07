@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-07 (Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-07 (journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -280,6 +280,31 @@ talking to anyone.
 
 Not a local re-derivation. The lanes, the click report and this funnel therefore
 cannot disagree about what "clicked" means.
+
+### Total vs Today columns (2026-10-07)
+
+The funnel renders two aligned columns: **Total** (all-time, everything above,
+unchanged) and **Today** (the current ET day, resets at midnight ET). `getDripFunnel`
+returns `today` (same five keys as `progression`) and `today_count` on each outcome.
+
+| Today row | counts | dated by |
+|---|---|---|
+| Routed | journeys | `drip_journeys.routed_at` |
+| Sent | journeys whose **first** send was today | `drip_journeys.first_send_at` |
+| Clicked | distinct contacts with a clean click (same classification filter as `campaignTierExpr`) | `clicks.clicked_at` |
+| Reached offer | distinct contacts | `stage_sends.offer_reached_detected_at` (**detection**, not Keitaro's event time) |
+| Converted | distinct contacts with a counted purchase (`purchasedClause`) | `conversion_events.created_at` (**detection**, not `occurred_at`) |
+| each ending | journeys that entered it today | `drip_journeys.closed_at` |
+
+- ⚠️ **Today is events, not a cohort.** A click today may belong to a journey routed
+  last week, so the Today rows are not nested and **no %** is shown for them.
+- ⚠️ **Detection time, not event time,** for reach and conversion: the network's
+  lag is hours, so event time would keep changing a day's number after the day
+  closed.
+- **Live states (`routed`, `active`) are a snapshot.** `today_count` is `null` for
+  them and the UI shows the count once, spanning both columns, marked `now`.
+- Every bound is an ET-day **range** from `campaignDayBoundsUtc()`, never a
+  functional predicate on the timestamp (same rule as the drip monitor).
 
 ---
 

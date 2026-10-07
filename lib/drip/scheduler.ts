@@ -170,6 +170,11 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
         WHERE s.campaign_id = ${campaignId}
           AND s.drip_active IS TRUE
           AND s.archived_at IS NULL
+          -- ⚠️ FIRST-SEND STAGES ONLY. A behavioural lane (parent_stage_id set)
+          -- fires off its parent's send via lib/drip/followups.ts and must never
+          -- be picked as a lead's FIRST message — which pickStage would do the
+          -- moment a lane carried a window.
+          AND s.parent_stage_id IS NULL
         ORDER BY s.window_start_min
       `)) as unknown as (StageWindow & {
         stage_id: number; creative_id: number | null; stop_text: string | null;

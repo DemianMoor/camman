@@ -61,6 +61,18 @@ export async function checkDripStageWindow(
     };
   }
 
+  // ⚠️ A behavioural LANE is not a first-send stage. It fires off its parent's
+  // send after a timer (lib/drip/followups.ts) and the scheduler never picks it,
+  // so it takes no part in the one-first-send-per-minute rule — neither as the
+  // stage being saved nor as a sibling.
+  if (excludeStageId != null) {
+    const lane = (await dbc.execute(sql`
+      SELECT 1 FROM campaign_stages
+      WHERE id = ${excludeStageId} AND org_id = ${orgId}::uuid AND parent_stage_id IS NOT NULL
+    `)) as unknown as unknown[];
+    if (lane.length > 0) return null;
+  }
+
   const siblings = (await dbc.execute(sql`
     SELECT id AS stage_id, window_start_min, window_end_min
     FROM campaign_stages
@@ -68,6 +80,7 @@ export async function checkDripStageWindow(
       AND org_id = ${orgId}::uuid
       AND archived_at IS NULL
       AND drip_active IS TRUE
+      AND parent_stage_id IS NULL
       AND window_start_min IS NOT NULL
       AND window_end_min IS NOT NULL
       ${excludeStageId != null ? sql`AND id <> ${excludeStageId}` : sql``}

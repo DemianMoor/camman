@@ -1288,7 +1288,18 @@ export function StageForm({
             <div className="grid items-start gap-4 sm:grid-cols-2">
               {/* Drip P5: the daily window. Rendered only for a drip campaign,
                   so the regular stage form is byte-for-byte what it was. */}
-              {campaignType === "drip" ? (
+              {/* A behavioural lane has no window: it sends its timer after the
+                  parent's signal, inside the provider's send hours. Its timer
+                  and on/off live in the Behavioural follow-ups panel. */}
+              {campaignType === "drip" && behavioralTier != null ? (
+                <div className="space-y-1 rounded-md border p-3">
+                  <p className="text-sm font-medium">Behavioural follow-up</p>
+                  <p className="text-muted-foreground text-xs">
+                    Sends after its timer, counted from the parent stage&apos;s signal. Set the timer
+                    and switch it on in <span className="font-medium">Behavioural follow-ups</span>.
+                  </p>
+                </div>
+              ) : campaignType === "drip" ? (
                 <DripStageWindowFields
                   startMin={form.watch("window_start_min")}
                   endMin={form.watch("window_end_min")}

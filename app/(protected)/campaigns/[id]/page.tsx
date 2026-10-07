@@ -1327,6 +1327,24 @@ export default function CampaignDetailPage() {
           // materialized or approved. Showing that dropdown told the operator
           // the stage would not send when the only thing that decides is
           // dripStageReadiness(). One definition, shared with the scheduler.
+          // A behavioural lane is not a first-send stage, so it has no window
+          // and dripStageReadiness (which mirrors the first-send scheduler)
+          // would wrongly call it "No window". Its own state: on/off + creative.
+          if (isDrip && s.parent_stage_id != null) {
+            const laneOn = s.drip_active === true && s.creative_id != null;
+            return (
+              <div className="flex flex-col gap-1">
+                <span className="text-muted-foreground text-xs">follow-up lane</span>
+                <Badge
+                  variant={laneOn ? "default" : "outline"}
+                  className="w-fit text-[10px]"
+                  title="Timer and on/off are set in Behavioural follow-ups."
+                >
+                  {s.creative_id == null ? "Needs a creative" : laneOn ? "Lane on" : "Lane off"}
+                </Badge>
+              </div>
+            );
+          }
           if (isDrip) {
             const r = dripStageReadiness({
               postureEnabled: campaign?.drip_posture?.drip_enabled === true,
@@ -2436,6 +2454,7 @@ export default function CampaignDetailPage() {
                 .filter(
                   (s) =>
                     s.drip_active === true &&
+                    s.parent_stage_id == null &&
                     s.window_start_min != null &&
                     s.window_end_min != null &&
                     s.id !== editingStage?.id,

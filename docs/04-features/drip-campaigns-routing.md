@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-06_
+_Last updated: 2026-10-07_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -182,6 +182,26 @@ state other than `routed`/`active`. The insert in [lib/drip/routing.ts](../../li
 omitted it until 2026-10-06, so the first aged-out lead failed with 23514 and threw out of the batch.
 Candidates are oldest-first, so that one lead headed every batch and **stopped all routing** — found
 the moment drip posture was first switched on, by an Aug-24 internal-test lead.
+
+## First-send stages vs. behavioural lanes
+
+A **first-send stage** is a drip stage with `parent_stage_id IS NULL`; its daily window decides which
+stage a newly routed lead gets first, so active first-send windows may not overlap or touch. A
+**behavioural lane** (`parent_stage_id` set — Ignored / Clicked / Offer) is NOT a first-send stage: it
+sends its `drip_followup_minutes` timer after its parent's signal (`lib/drip/followups.ts`), inside the
+provider's send hours, and has no window of its own.
+
+**⚠️ Every first-send selector must filter `parent_stage_id IS NULL`.** Until 2026-10-07 the scheduler's
+stage query ([lib/drip/scheduler.ts](../../lib/drip/scheduler.ts)) and the window guard
+([lib/api/drip-stage-window-guard.ts](../../lib/api/drip-stage-window-guard.ts)) did not. No lane had
+a window, so `pickStage` dropped them — but the stage editor showed lanes the window fields, and the
+first operator to set a creative on a lane hit "Windows overlap" against the parent. Had the window
+saved, the lane would have become a first-send candidate and new leads could have got the Clicked
+message as their FIRST SMS. Now: the scheduler excludes lanes, the guard skips a lane being saved and
+leaves lanes out of the sibling set, the editor shows a lane a note instead of window fields (so a
+lane's creative is set from its Stages-table row with no window involved), and the Stages table shows
+a lane's own state (`Needs a creative` / `Lane on` / `Lane off`) instead of the first-send readiness
+badge, which would call every lane "No window".
 
 ## Routed leads (campaign page)
 

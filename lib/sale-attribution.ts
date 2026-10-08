@@ -215,8 +215,12 @@ export function rescueSendIds(orgId: string | null, window: SQL = sql``): SQL {
  *
  * `restrict` is an extra AND on `ce`, and it is how a caller BOUNDS the scan —
  * without it this aggregates the WHOLE ledger on every call, which is ~1.5K rows
- * today and unbounded growth later. Pass a predicate that can only drop rows the
- * caller's own join would discard anyway, so the bound cannot change a number.
+ * today and unbounded growth later. The rollup passes a predicate that can only
+ * drop rows its own join would discard anyway, so its bound cannot change a
+ * number. The partner report (since 2026-10-08) passes its DATING RULE —
+ * `ce.created_at` inside the reported ET-day range — which is MEANT to decide
+ * the number: a sale counts on the day it was detected. Say which of the two a
+ * new caller intends.
  *
  * `orgId = null` is cross-org — see purchasedSendIds.
  */

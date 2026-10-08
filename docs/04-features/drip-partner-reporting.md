@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-07 (journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -37,13 +37,43 @@ against a true 88,536.
 The query uses `JOIN LATERAL (… ORDER BY routed_at DESC LIMIT 1)` — the single
 most recent journey that had already started when the send was created.
 
-### ⚠️ The key set is a UNION of both sources
+### ⭐ Every column is dated by its own event (2026-10-08)
 
-Rows are keyed off `intake ∪ sends`, **not** one source with the other
-`COALESCE`'d onto it. A `(partner, tag)` pair that exists in only one source is
-otherwise silently dropped — which happened on real data: the pre-0171 counter
-row sits under tag `''` while its sends carry `medicare`, and every send vanished
-from the report.
+| column | dated by |
+|---|---|
+| Leads, Mobile / VoIP / Unknown / Landline, Lookup cost | `lead_intake_daily.day_et` |
+| Sent, send cost | `stage_sends.sent_at` (status `sent`) |
+| Clicks | `clicks.clicked_at` |
+| Opt-outs (+ their share of send cost) | `opt_outs.created_at` — the STOP's arrival |
+| Sales, Revenue | `conversion_events.created_at` — **detection**, not Keitaro's event time: the network lags by hours, and a day's number must not move after the day closes. A held (`pending`) payout approved later raises its *detection* day's revenue |
+
+Every event is attributed to the lead's partner × tag through its send
+(`viaLead`: send → the one journey → `lead_events`). Every bound is a half-open
+UTC range built with `fromZonedTime` from the ET day strings — sargable, never
+`(ts AT TIME ZONE …)::date = …`.
+
+**Until 2026-10-08 the send half was a cohort**: sends *created* in the range,
+plus whatever clicks, opt-outs and sales those sends ever produced. Under that
+reading a day with no intake and no sends read "No leads in this period" while
+11 sales ($34.13) were being detected on pml/aca leads sent the day before. The
+two readings sum to the same totals over a range that contains both the send and
+its outcome (30 days: 68 sales either way); they differ on which **day** an
+outcome is shown — 2026-10-07 moved from 48 (cohort) to 45 (detected that day),
+and 2026-10-08 from absent to 11.
+
+### ⚠️ The key set is a UNION of every source
+
+Rows are keyed off `intake ∪ sends ∪ clicks ∪ opt-outs ∪ sales`, **not** one
+source with the others `COALESCE`'d onto it. A `(partner, tag)` pair that exists
+in only one source is otherwise silently dropped — which happened on real data
+twice: the pre-0171 counter row sits under tag `''` while its sends carry
+`medicare`, and every send vanished; and (2026-10-08) a day whose only activity
+was sales on older leads had no row at all. A row therefore appears the moment
+**any** metric is non-zero in the range; a zero-intake row shows `0` / `$0.00` in
+the intake columns with the activity columns computed as usual. A conversion
+that is rejected or unmapped is in the ledger but is not activity (the `sales`
+CTE's `HAVING`), so it does not create a row. The empty state reads "No activity
+in this period".
 
 ### Sandbox
 
@@ -59,14 +89,14 @@ be flipped out of sandbox after leads have arrived under it). A sandbox key is
 |---|---|
 | Leads received | **includes landlines** |
 | Mobile / VoIP / Unknown / Landline | the line-type split; sums to leads received |
-| Sent | `stage_sends.status = 'sent'` — the project-wide definition of "was messaged" |
+| Sent | `stage_sends.status = 'sent'` — the project-wide definition of "was messaged" — with `sent_at` in the range |
 | Send cost | **revenue-gated** (see §2a). Each sent message at its rate **plus each opt-out reply at the rate of the send it answered** — the stage cost model `rate × (sends + opt-outs)` from [lib/stages/total-cost.ts](../../lib/stages/total-cost.ts), at send grain |
 | Delivered % | **`null`** when the provider reports no delivery receipts — see below |
-| Clicks, CTR | clean clicks only (not bot/prefetch/suspect); CTR is `null` over zero sends |
-| Opt-outs | via `opt_out_attributions` |
-| Sales | counted PURCHASE events in `conversion_events` for the row's recipients — `purchasesBySendSelect()` in [lib/sale-attribution.ts](../../lib/sale-attribution.ts), i.e. `is_purchase` event types in status `pending`/`approved`. A recipient with two conversions is **two** sales (the old `sale_status IN ('lead','sale')` column kept only the latest); a rejected or unmapped conversion is **not** a sale |
+| Clicks, CTR | clean clicks only (not bot/prefetch/suspect), `clicked_at` in the range; CTR is `null` over zero sends. A click today on a message sent last week counts today |
+| Opt-outs | via `opt_out_attributions`, dated by the STOP's arrival (`opt_outs.created_at`) |
+| Sales | counted PURCHASE events in `conversion_events` **detected in the range** (`created_at`) on the row's leads — `purchasesBySendSelect()` in [lib/sale-attribution.ts](../../lib/sale-attribution.ts), i.e. `is_purchase` event types in status `pending`/`approved`. A recipient with two conversions is **two** sales (the old `sale_status IN ('lead','sale')` column kept only the latest); a rejected or unmapped conversion is **not** a sale |
 | Lookup cost | see §3 |
-| Revenue | **off by default**, per-key toggle `partner_keys.report_show_revenue`. **APPROVED conversions only** — a held (`pending`) payout is not partner revenue, and a rejected one was taken back |
+| Revenue | **off by default**, per-key toggle `partner_keys.report_show_revenue`. Dated by detection like Sales. **APPROVED conversions only** — a held (`pending`) payout is not partner revenue, and a rejected one was taken back |
 | NET profit | **revenue-gated**. Revenue − (send cost + lookup cost); may be negative |
 | ROI | **revenue-gated**, last column. NET profit ÷ (send cost + lookup cost), as %; **`null` (`—`) when that cost is 0**. The totals line recomputes it from the summed money (`profitAndRoi()` in [lib/reporting/partner-profit.ts](../../lib/reporting/partner-profit.ts)), never averages rows |
 
@@ -379,6 +409,7 @@ When the tier-0 (Ignored) lane fires for a journey, the journey transitions to
 | `scripts/test-public-route-scope.ts` | the matcher differential + that it can go red |
 | `scripts/test-drip-unengaged-close.ts` | **camman-v2 preview only**, fully rolled back — the close is atomic with the send, idempotent, never overrides another terminal state, cross-org safe, and keeps the two `completed` reasons apart |
 | `scripts/drip-p7-proof.ts` | production, read-only except the token lifecycle on `internal-test` (issued → resolved → revoked). Every reported number is checked against a **separate hand-written query**, not against itself. |
+| `scripts/partner-report-activity-proof.ts` | production, **read-only**. One ET day (default today; `YYYY-MM-DD` as the first argument): every column recomputed by a separate hand-written query per source (bounds built in SQL, attribution as a correlated subquery), and the report must have a row for exactly the `(partner, tag)` pairs with any activity, agreeing on every number. Pinned the 2026-10-08 case: pml/aca with 0 intake, 0 sent, 19 clicks, 6 opt-outs, 11 sales, $34.13 |
 | `scripts/partner-report-cost-proof.ts` | production, **read-only**. Send cost hand-checked against campaign 994's history (5 sent + 1 opt-out on phone 114 → $0.06), and every partner/tag checked against an independent counter-query. Also checks the NET/ROI arithmetic, and that the strip zeroes revenue, send cost and NET and nulls ROI on a **synthetic non-zero** row. 12/12 on 2026-10-07 |
 
 ---

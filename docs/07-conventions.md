@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-07_
+_Last updated: 2026-10-08_
 
 ## Intake counters are written at TWO grains in ONE statement (2026-10-07)
 
@@ -1103,6 +1103,7 @@ Where a truncated value is the only thing on screen, the untruncated value belon
 - **UPDATED 2026-09-18 — Rule F's invariant WAS knowingly open until Task 6** (superseded by the next bullet; kept for the record, past tense — nothing below is a live warning). The rescue set was mapped-purchase-or-revenue and never rejected, while the EPC numerator (the stage-day projection) was still `keitaro_type IN ('lead','sale','rejected')`, so a rejected or unmapped conversion could contribute revenue while its recipient was deliberately outside `counted_clickers`. Zero rows of either class at the time. The numerator was the side that was wrong — the rescue was never widened to match it.
 - **UPDATED 2026-09-18 (Task 6) — Rule F's window is CLOSED.** The stage-day projection's `SALES_FILTER`/`REVENUE_FILTER` now read `purchasedClause()`/`approvedRevenueClause()` — the same shared definitions `rescueSendIds()` reads — so the numerator can no longer be wider than the rescue. Sales = a counted PURCHASE event (pending or approved; `rejected` is a refund, not a sale — the old aggregate poll counted it). Revenue = `approved` only; the `pending` share gets its own column, `keitaro_stage_results.pending_revenue` (migration 0182), summed through the funnel tally / performance report / stages API into a `Pending $` column and a campaign-page tile — never into revenue, EPC, sales CR, ROI or profit. Checkouts is unchanged (`keitaro_type = 'lead'`). Zero numbers moved: the corpus held 0 pending and 0 rejected conversions at cutover.
 - **UPDATED 2026-09-18 — a whole-ledger aggregate gets a bound that cannot change a number.** `purchasesBySendSelect(orgId, restrict)`: the partner report restricts to the send ids in its own `attributed` CTE, the rollup to sends inside its recompute window. Both only drop rows the caller's `LEFT JOIN` would discard. Bounding on `occurred_at` instead would be wrong: conversions trickle in for days after the send, so an upper bound at the range end silently drops real payouts from a completed range's report.
+- **UPDATED 2026-10-08 — the partner report's bound is its DATING RULE, and it is MEANT to change the number.** `getPartnerReport` no longer builds a send cohort. Every column is dated by its own event inside the reported ET-day range — sends by `stage_sends.sent_at`, clicks by `clicks.clicked_at`, opt-outs by `opt_outs.created_at` (the STOP's arrival), sales and revenue by `conversion_events.created_at` (detection) — and the `purchases` CTE's `restrict` is that detection-time range. A payout detected after the range lands on the day it was detected, not on the send's day and not nowhere; the previous bullet's "drops real payouts" held only while rows were a cohort. Rows exist for every `(partner, tag)` with ANY activity in the range (`keys` = intake ∪ sends ∪ clicks ∪ opt-outs ∪ sales), so a day with no intake still shows the sales detected on older leads. Every bound is a sargable UTC range from `fromZonedTime`, never a functional predicate. Proof: [`scripts/partner-report-activity-proof.ts`](../scripts/partner-report-activity-proof.ts). See [drip-partner-reporting.md](04-features/drip-partner-reporting.md) §1.
 - ⭐ **A fixture that writes the ledger row AND `sale_status` together cannot tell the two readers apart.** Every source-switch test seeds exactly ONE side: a ledger-only buyer (purchase row, `sale_status` NULL) must be a buyer, and a legacy-only row (`sale_status = 'lead'`, no ledger row) must NOT be. Seeding both is how a whole suite passes identically before and after a switch — see the controls in [`scripts/test-segment-purchase-rules-db.ts`](../scripts/test-segment-purchase-rules-db.ts), [`scripts/test-campaign-tier.ts`](../scripts/test-campaign-tier.ts) and [`scripts/test-drip-lifecycle.ts`](../scripts/test-drip-lifecycle.ts).
 
 The reporting surfaces already counted any conversion as a sale — [`lib/keitaro/poll.ts`](../lib/keitaro/poll.ts) used to do `agg.sales += 1` per `conversions/log` row (since Phase 3 Task 3 it folds CLICKS only; the conversion columns of `keitaro_stage_results` are the ledger's projection, written by [`lib/keitaro/stage-day-conversions.ts`](../lib/keitaro/stage-day-conversions.ts), which counts the same Keitaro types per ledger row), [`lib/reporting/rollup.ts`](../lib/reporting/rollup.ts) used `(converted_at IS NOT NULL)` (since Phase 3 Task 4 it joins a `conv_sends` CTE keyed on `stage_send_id`, same as the partner report). The targeting side did not, so **the same 854 conversions read as 887 "Sales" on every report and 2 buyers in segments**, and `Clickers excl Buyers` excluded 2 people instead of 837 — i.e. 825 known buyers were being messaged as non-buyers.
@@ -2888,6 +2889,13 @@ row sits under `interest_tag = ''` while its sends carry `medicare`.
 
 Emit a `keys` CTE that `UNION`s the key set of every source, then `LEFT JOIN` each
 source onto it.
+
+The same trap at a different grain (2026-10-08): the partner report's `keys` was
+intake ∪ sends, with clicks, opt-outs and sales joined onto the SENDS of the
+range. On a day with no intake and no sends the report read "No leads in this
+period" while eleven sales were being detected on leads sent the day before. The
+key set is now the union of all FIVE sources, each dated by its own event — a
+metric that can be non-zero on its own must be in the key set on its own.
 
 ## A signed link that must be revocable is a DB-resolved opaque token, not an HMAC
 

@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-09 (lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -143,14 +143,38 @@ The CSV export writes an **empty cell**, never `0`, for the same reason.
 `lib/reporting/lookup-rate.ts` → `getCalibratedLookupRate(days = 90)`.
 
 ```
-rate        = Σ(balance_before − balance_after) ÷ Σ(processed)   over a trailing 90 ET days
+rate        = Σ(balance_before − balance_after) ÷ Σ(processed)   over a trailing 90 ET days,
+              BULK batches only: lookup_batches.trigger IN ('upload', 'backfill')
 attribution = lead_intake_daily.lookups_spent   per partner × tag
 cost        = lookups × rate
 ```
 
-Production at time of writing: **$0.001635** per lookup, from **$1,002.84** across
-**613,494** lookups (15 batches, 2026-07-14 → 2026-08-24). Flat rate for
-comparison: $0.0015.
+Production 2026-10-09: **$0.001592** per lookup, from **$1,230.66** across
+**772,846** lookups (18 bulk batches, 2026-07-14 → 2026-09-24). Flat rate for
+comparison: $0.0015. (Until 2026-10-09 the window also counted the drip batches
+and read $0.001563 from 248 batches; on the live pml/aca report for
+2026-10-06..09 that moved lookup cost from $24.74 to $25.21.)
+
+### ⭐ Drip batches are excluded from the calibration (2026-10-09)
+
+`CALIBRATION_TRIGGERS = ['upload', 'backfill']`. The `drip_intake` batches are
+1–2 lookups each and their per-batch deltas are the §"NEVER used for billing"
+failure 200 times over: on prod **190 of 200** read ≤ 0 and the remainder sum to
+**$1.52 over 14,237 lookups** — $0.000108 per lookup, one fourteenth of the price.
+Inside a window that also holds bulk batches they only drag the rate down a
+little. The reason they are excluded outright is what happens once the bulk
+batches age past 90 days (the 18 upload batches leave the window between
+2026-10-12 and 2026-12-23): the drip deltas alone sum to a *positive* number, so
+the old rule would have kept reporting `source: "ledger"` at a 14× discount —
+exactly the "invoice everyone nothing" failure, one step removed. Found in the
+partner-attribution recon
+([2026-10-08-partner-attribution-recon.md](../superpowers/specs/2026-10-08-partner-attribution-recon.md) §6.4).
+
+A window with no qualifying bulk batch now falls to the flat rate and says so
+(`source: "flat"`). Test: `scripts/test-lookup-rate-calibration.ts` (preview DB,
+rolled back) — drip-only window → flat; upload + drip rows → the upload's rate
+with the drip rows absent from every reported figure; backfill qualifies; a
+top-up inside a bulk batch → flat.
 
 ### ⚠️ The per-batch delta is NEVER used for billing
 
@@ -175,8 +199,8 @@ It equals `est_cost_usd` in 15 of 15 rows. Nothing reads it.
 
 ### Fails toward the flat rate, never toward zero
 
-A window with no batches, no balance snapshots, or a non-positive delta (a top-up
-landing mid-window makes the balance *rise*) yields `source: "flat"`. A zero rate
+A window with no bulk batches, no balance snapshots, or a non-positive delta (a
+top-up landing mid-window makes the balance *rise*) yields `source: "flat"`. A zero rate
 would silently invoice every partner nothing — precisely the failure the
 per-batch delta already exhibits.
 

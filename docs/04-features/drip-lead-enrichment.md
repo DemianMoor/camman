@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-07_
+_Last updated: 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -141,9 +141,10 @@ sends one **digest of the hour that just ended**, built by `buildIntakeDigest`
   same clock as the daily row, not the partner's `received_at`.
 - **Per partner key (`partner_slug`) × resolved tag:** leads (`received`), mobile, voip / unknown /
   landline, lookups (`lookups_spent`), cost. Sandbox-only rows are not shown.
-- **Cost** = lookups × the partner report's calibrated rate (`getCalibratedLookupRate`, 90-day ledger,
-  flat-rate fallback) — **never** the per-batch balance delta, which reads $0.00 on 1–2-lookup drip
-  batches. The footer no longer spells out the rate derivation (dropped by the owner, 2026-10-07). Sub-dollar costs print 4 decimals.
+- **Cost** = lookups × the partner report's calibrated rate (`getCalibratedLookupRate`, 90-day ledger
+  of **upload/backfill batches only** since 2026-10-09, flat-rate fallback) — **never** the per-batch
+  balance delta, which reads $0.00 on 1–2-lookup drip batches; those batches are excluded from the
+  calibration altogether ([drip-partner-reporting.md](drip-partner-reporting.md) §3). The footer no longer spells out the rate derivation (dropped by the owner, 2026-10-07). Sub-dollar costs print 4 decimals.
 - **Format:** one partner × tag → compact lines; several → a `<pre>` table
   `Partner | Tag | Leads | Mobile | Lookups | Cost` with a TOTAL row, plus one compact
   voip/unknown/landline line per row. Over 3,500 chars it splits **by partner** across numbered

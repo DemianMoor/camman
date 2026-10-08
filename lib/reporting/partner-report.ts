@@ -1,32 +1,51 @@
 import "server-only";
 
-import { sql } from "drizzle-orm";
+import { fromZonedTime } from "date-fns-tz";
+import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { purchasesBySendSelect } from "@/lib/sale-attribution";
 import { getCalibratedLookupRate, lookupCostUsd, type LookupRate } from "./lookup-rate";
 import { profitAndRoi } from "./partner-profit";
 
 // Partner reporting (Drip Phase 7) — partner key x interest tag x ET-day range.
 //
-// ⚠️ TWO SOURCES, BECAUSE ONE CANNOT ANSWER BOTH HALVES.
+// ⭐ EVERY COLUMN IS DATED BY ITS OWN EVENT, ATTRIBUTED TO THE LEAD'S PARTNER x TAG.
 //
-//   intake half  -> lead_intake_daily (counters written in the intake txn)
-//   send half    -> stage_sends, reached through the journey
+//   leads / line types / lookups  -> lead_intake_daily.day_et       (intake)
+//   sent, send cost               -> stage_sends.sent_at            (the message went out)
+//   clicks                        -> clicks.clicked_at
+//   opt-outs (+ their send cost)  -> opt_outs.created_at            (the STOP arrived)
+//   sales, revenue                -> conversion_events.created_at   (DETECTION, not Keitaro's
+//                                                                    event time — the network
+//                                                                    lags by hours, and a day's
+//                                                                    number must not move after
+//                                                                    the day closes)
 //
+// A row exists for a (partner, tag) the moment ANY of those is non-zero in the
+// range — the key set is the UNION of all five sources (see `keys`). Until
+// 2026-10-08 the send half was a COHORT: sends created in the range, and the
+// clicks / opt-outs / sales those sends ever produced, whenever they happened.
+// Under that reading a day with no intake and no sends showed "No leads in this
+// period" while eleven sales were being detected on leads sent the day before.
+// The two readings sum to the same totals over a range that contains both the
+// send and its outcome; they differ on which DAY the outcome is shown.
+//
+// ⚠️ TWO SOURCES FOR THE INTAKE HALF, BECAUSE ONE CANNOT ANSWER IT.
 // A landline lead has NO contact, NO stage_send and NO journey: G4 counts it at
 // intake and discards it. So "leads received including landlines" can only come
 // from a counter, and no stage-grained helper can ever produce it. That is why
 // this does not extend getStageMetricsInRange().
 //
-// ⚠️ THE SEND JOIN IS ONE-ROW-PER-SEND BY CONSTRUCTION.
+// ⚠️ THE LEAD ATTRIBUTION IS ONE-ROW-PER-SEND BY CONSTRUCTION (`viaLead`).
 // A contact can hold several journeys over time (a terminal state frees the
 // one-live-per-contact slot), so joining stage_sends to drip_journeys on
 // (org, contact, campaign) can match MORE THAN ONE journey and silently multiply
-// every send. That is exactly how the Offer Group Report came to report 904,926
-// sends against a true 88,536. The LATERAL below takes the single most recent
-// journey that had already started when the send was created, so the join can
-// only ever produce one row per stage_send.
+// every send, click and sale. That is exactly how the Offer Group Report came to
+// report 904,926 sends against a true 88,536. The LATERAL takes the single most
+// recent journey that had already started when the send was created, so each
+// event row maps to exactly one lead.
 //
 // ⚠️ SEND COST FOR PRE-2026-10-07 DRIP SENDS IS PRICED AT TODAY'S RATE.
 // Until then the drip inserts (lib/drip/scheduler.ts, lib/drip/send-one.ts)
@@ -56,15 +75,16 @@ export interface PartnerReportRow {
   rejected: number;
   lookups_spent: number;
   lookup_cost_usd: number;
-  /** Sends — through the journey. */
+  /** Messages with status 'sent' whose sent_at falls in the range. */
   sent: number;
   /**
-   * The stage cost model at send grain: each sent message at its rate, PLUS each
-   * opt-out reply at the rate of the send it is attributed to — the same
-   * rate × (sends + opt-outs) that campaign_stages.total_cost uses
-   * (lib/stages/total-cost.ts). Rate = the send's own cost_per_sms snapshot,
-   * falling back to the number's CURRENT rate for drip sends made before the
-   * drip path started snapshotting it (2026-10-07) — see the header.
+   * The stage cost model at send grain: each message sent in the range at its
+   * rate, PLUS each opt-out reply that ARRIVED in the range at the rate of the
+   * send it is attributed to — the same rate × (sends + opt-outs) that
+   * campaign_stages.total_cost uses (lib/stages/total-cost.ts). Rate = the
+   * send's own cost_per_sms snapshot, falling back to the number's CURRENT rate
+   * for drip sends made before the drip path started snapshotting it
+   * (2026-10-07) — see the header.
    */
   send_cost_usd: number;
   /** NULL when the provider reports no delivery receipts at all — not 0. */
@@ -73,7 +93,9 @@ export interface PartnerReportRow {
   /** NULL when nothing was sent — a CTR over zero sends is not 0%, it is unknown. */
   ctr: number | null;
   opt_outs: number;
+  /** Counted purchases DETECTED in the range, on this partner x tag's leads. */
   sales: number;
+  /** Approved revenue of conversions DETECTED in the range. */
   revenue_usd: number;
   /** revenue − (send cost + lookup cost). May be negative. */
   net_profit_usd: number;
@@ -118,6 +140,11 @@ export function stripRevenueForPartner(r: PartnerReportResult): PartnerReportRes
   };
 }
 
+/** The ET calendar day after `ymd`. UTC-noon arithmetic, so DST cannot shift it. */
+function nextDay(ymd: string): string {
+  return new Date(Date.parse(`${ymd}T12:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+}
+
 /**
  * @param from,to inclusive ET calendar days, `YYYY-MM-DD`.
  * @param partnerKeyId restrict to one partner (the signed-link view always does).
@@ -131,38 +158,20 @@ export async function getPartnerReport(
   const rate = await getCalibratedLookupRate();
   const onlyPartner = partnerKeyId != null ? sql`AND k.id = ${partnerKeyId}` : sql``;
 
-  const rows = (await db.execute(sql`
-    WITH bounds AS (
-      SELECT ${from}::date AS from_day, ${to}::date AS to_day
-    ),
-    -- ── intake half: the counters, already at partner x tag x day grain ──────
-    intake AS (
-      SELECT d.partner_key_id, d.interest_tag,
-             sum(d.received)::int      AS leads_received,
-             sum(d.mobile)::int        AS mobile,
-             sum(d.voip)::int          AS voip,
-             sum(d.unknown)::int       AS unknown,
-             sum(d.landline)::int      AS landline,
-             sum(d.duplicate)::int     AS duplicate,
-             sum(d.rejected)::int      AS rejected,
-             sum(d.lookups_spent)::int AS lookups_spent
-      FROM lead_intake_daily d, bounds b
-      WHERE d.org_id = ${orgId}::uuid
-        AND d.day_et >= b.from_day AND d.day_et <= b.to_day
-      GROUP BY 1, 2
-    ),
-    -- ── send half: every drip send, attributed to EXACTLY ONE journey ────────
-    attributed AS (
-      SELECT ss.id, ss.status, ss.link_id,
-             ss.contact_id,
-             le.partner_key_id, COALESCE(le.interest_tag, '') AS interest_tag,
-             -- Snapshot first, live rate only for un-snapshotted rows (header).
-             COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0) AS rate
-      FROM stage_sends ss
+  // The range as UTC instants (half-open), so every timestamp predicate below
+  // is a sargable range — never `(ts AT TIME ZONE …)::date = …`, which forces
+  // a scan of every row. Same rule as the drip funnel and the grading reports.
+  const fromTs = fromZonedTime(`${from}T00:00:00`, CAMPAIGN_TIMEZONE).toISOString();
+  const toTs = fromZonedTime(`${nextDay(to)}T00:00:00`, CAMPAIGN_TIMEZONE).toISOString();
+  const within = (ts: SQL) => sql`${ts} >= ${fromTs}::timestamptz AND ${ts} < ${toTs}::timestamptz`;
+
+  // Snapshot first, live rate only for un-snapshotted rows (header).
+  const rateExpr = sql`COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0)`;
+
+  // A drip send (`ss`) -> the ONE lead it belongs to (`le`). ⚠️ LATERAL + LIMIT 1:
+  // one journey per send, never many. See header.
+  const viaLead = sql`
       JOIN campaigns c ON c.id = ss.campaign_id AND c.type = 'drip'
-      LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
-      CROSS JOIN bounds b
-      -- ⚠️ LATERAL + LIMIT 1: one journey per send, never many. See header.
       JOIN LATERAL (
         SELECT j.lead_event_id
         FROM drip_journeys j
@@ -173,60 +182,66 @@ export async function getPartnerReport(
         ORDER BY j.routed_at DESC
         LIMIT 1
       ) jj ON true
-      JOIN lead_events le ON le.id = jj.lead_event_id AND le.sandbox = false
-      WHERE ss.org_id = ${orgId}::uuid
-        AND (ss.created_at AT TIME ZONE 'America/New_York')::date >= b.from_day
-        AND (ss.created_at AT TIME ZONE 'America/New_York')::date <= b.to_day
+      JOIN lead_events le ON le.id = jj.lead_event_id AND le.sandbox = false`;
+
+  const rows = (await db.execute(sql`
+    WITH
+    -- ── intake: the counters, already at partner x tag x day grain ──────────
+    intake AS (
+      SELECT d.partner_key_id, d.interest_tag,
+             sum(d.received)::int      AS leads_received,
+             sum(d.mobile)::int        AS mobile,
+             sum(d.voip)::int          AS voip,
+             sum(d.unknown)::int       AS unknown,
+             sum(d.landline)::int      AS landline,
+             sum(d.duplicate)::int     AS duplicate,
+             sum(d.rejected)::int      AS rejected,
+             sum(d.lookups_spent)::int AS lookups_spent
+      FROM lead_intake_daily d
+      WHERE d.org_id = ${orgId}::uuid
+        AND d.day_et >= ${from}::date AND d.day_et <= ${to}::date
+      GROUP BY 1, 2
     ),
-    -- Sales and revenue per RECIPIENT ROW, from the conversion_events ledger —
-    -- the shared aggregation (lib/sale-attribution.ts), which the dormant rollup
-    -- also uses, so the two cannot drift. Revenue is APPROVED only: a held payout
-    -- is not partner revenue.
-    --
-    -- ⚠️ UNEXERCISED BY ANY TEST: getPartnerReport runs against the module-level
-    -- db handle, which cannot see a rolled-back proof's fixtures, so this bound is
-    -- inert by construction and never executed by
-    -- scripts/test-p3-task4-reader-switch-db.ts (the rollup's equivalent bound IS
-    -- executed, via its check A8; A7 proves a bound of this shape changes no
-    -- number). A test that cannot fail would be worse than saying so here.
-    --
-    -- BOUNDED BY THIS REPORT'S OWN SEND SET, not by the range. Restricting to the
-    -- ids in the attributed CTE can only drop rows the LEFT JOIN below would
-    -- discard, so no number moves — where an occurred_at range filter WOULD move
-    -- one: a conversion trickles in days after its send, so an upper bound at the
-    -- range end would silently drop real payouts from a completed range's report.
-    purchases AS (${purchasesBySendSelect(
-      orgId,
-      sql`AND ce.stage_send_id IN (SELECT a.id FROM attributed a)`,
-    )}),
+    -- ── sent: messages that went out in the range ───────────────────────────
     sends AS (
-      SELECT a.partner_key_id, a.interest_tag,
-             count(*) FILTER (WHERE a.status = 'sent')::int AS sent,
-             coalesce(sum(a.rate) FILTER (WHERE a.status = 'sent'), 0)::float8 AS sent_cost,
-             coalesce(sum(p.purchases), 0)::int AS sales,
-             coalesce(sum(p.revenue), 0)::float8 AS revenue_usd
-      FROM attributed a
-      LEFT JOIN purchases p ON p.stage_send_id = a.id
+      SELECT le.partner_key_id, COALESCE(le.interest_tag, '') AS interest_tag,
+             count(*)::int AS sent,
+             coalesce(sum(${rateExpr}), 0)::float8 AS sent_cost
+      FROM stage_sends ss
+      LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
+      ${viaLead}
+      WHERE ss.org_id = ${orgId}::uuid
+        AND ss.status = 'sent'
+        AND ${within(sql`ss.sent_at`)}
       GROUP BY 1, 2
     ),
-    -- clicks: clean only, the same definition campaignTierExpr and the click
-    -- report use, so the three cannot disagree.
+    -- ── clicks: clean only, the same definition campaignTierExpr and the click
+    -- report use, so the three cannot disagree. Dated by the click. ───────────
     clicks AS (
-      SELECT a.partner_key_id, a.interest_tag, count(*)::int AS clicks
-      FROM attributed a
-      JOIN links l ON l.id = a.link_id
-      JOIN clicks ck ON ck.link_id = l.id
+      SELECT le.partner_key_id, COALESCE(le.interest_tag, '') AS interest_tag,
+             count(*)::int AS clicks
+      FROM clicks ck
+      JOIN links l ON l.id = ck.link_id
+      JOIN stage_sends ss ON ss.link_id = l.id
+      ${viaLead}
+      WHERE ck.org_id = ${orgId}::uuid
         AND ck.classification NOT IN ('bot', 'prefetch', 'suspect')
+        AND ${within(sql`ck.clicked_at`)}
       GROUP BY 1, 2
     ),
-    -- One row per opt-out (the same DISTINCT set the Opt-outs column counts),
-    -- carrying the rate of the send it replied to: an opt-out reply is billed
-    -- like a send (lib/stages/total-cost.ts), so it is part of Send Cost.
+    -- ── opt-outs: one row per STOP that arrived in the range (the same DISTINCT
+    -- set the Opt-outs column counts), carrying the rate of the send it replied
+    -- to: an opt-out reply is billed like a send (lib/stages/total-cost.ts). ──
     optout_rows AS (
-      SELECT a.partner_key_id, a.interest_tag, o.id, max(a.rate) AS rate
-      FROM attributed a
-      JOIN opt_out_attributions oa ON oa.stage_send_id = a.id
-      JOIN opt_outs o ON o.id = oa.opt_out_id
+      SELECT le.partner_key_id, COALESCE(le.interest_tag, '') AS interest_tag,
+             o.id, max(${rateExpr}) AS rate
+      FROM opt_outs o
+      JOIN opt_out_attributions oa ON oa.opt_out_id = o.id
+      JOIN stage_sends ss ON ss.id = oa.stage_send_id
+      LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
+      ${viaLead}
+      WHERE o.org_id = ${orgId}::uuid
+        AND ${within(sql`o.created_at`)}
       GROUP BY 1, 2, 3
     ),
     optouts AS (
@@ -235,15 +250,46 @@ export async function getPartnerReport(
       FROM optout_rows
       GROUP BY 1, 2
     ),
+    -- ── sales and revenue per RECIPIENT ROW, from the conversion_events ledger —
+    -- the shared aggregation (lib/sale-attribution.ts), which the dormant rollup
+    -- also uses, so the two cannot drift. Revenue is APPROVED only: a held payout
+    -- is not partner revenue.
+    --
+    -- The bound is this report's DATING RULE, not a scan limit: conversions
+    -- DETECTED in the range (ce.created_at), whichever day their send went out.
+    -- A payout the network reports days after the send lands on the day it was
+    -- detected, never on the send's day and never nowhere. A held payout that is
+    -- approved later raises its detection day's revenue when it is approved.
+    --
+    -- ⚠️ UNEXERCISED BY ANY ROLLED-BACK TEST: getPartnerReport runs against the
+    -- module-level db handle, which cannot see a rolled-back proof's fixtures
+    -- (scripts/test-p3-task4-reader-switch-db.ts proves the shape, not this
+    -- bound). scripts/partner-report-activity-proof.ts checks it against
+    -- production rows by hand. ────────────────────────────────────────────────
+    purchases AS (${purchasesBySendSelect(orgId, sql`AND ${within(sql`ce.created_at`)}`)}),
+    sales AS (
+      SELECT le.partner_key_id, COALESCE(le.interest_tag, '') AS interest_tag,
+             sum(p.purchases)::int AS sales,
+             sum(p.revenue)::float8 AS revenue_usd
+      FROM purchases p
+      JOIN stage_sends ss ON ss.id = p.stage_send_id
+      ${viaLead}
+      GROUP BY 1, 2
+      -- A rejected or unmapped conversion is in the ledger but is not activity.
+      HAVING sum(p.purchases) > 0 OR sum(p.revenue) > 0
+    ),
     -- ⚠️ THE KEY SET IS A UNION OF EVERY SOURCE, not one source with the others
     -- coalesced onto it. Joining metrics on a COALESCE'd tag silently drops a
     -- (partner, tag) that exists in one source but not another -- which is
     -- exactly what happened on real data: the pre-0171 counter row sits under
-    -- '' while its sends carry 'medicare', and the sends vanished.
+    -- '' while its sends carry 'medicare', and the sends vanished. And a day
+    -- with no intake still has rows: whichever source has activity.
     keys AS (
       SELECT partner_key_id, interest_tag FROM intake
-      UNION
-      SELECT partner_key_id, interest_tag FROM sends
+      UNION SELECT partner_key_id, interest_tag FROM sends
+      UNION SELECT partner_key_id, interest_tag FROM clicks
+      UNION SELECT partner_key_id, interest_tag FROM optouts
+      UNION SELECT partner_key_id, interest_tag FROM sales
     )
     SELECT k.id AS partner_key_id, k.partner_slug, k.name AS partner_name,
            ky.interest_tag,
@@ -258,8 +304,8 @@ export async function getPartnerReport(
            COALESCE(s.sent, 0)           AS sent,
            COALESCE(cl.clicks, 0)        AS clicks,
            COALESCE(oo.opt_outs, 0)      AS opt_outs,
-           COALESCE(s.sales, 0)          AS sales,
-           COALESCE(s.revenue_usd, 0)    AS revenue_usd,
+           COALESCE(sa.sales, 0)         AS sales,
+           COALESCE(sa.revenue_usd, 0)   AS revenue_usd,
            COALESCE(s.sent_cost, 0) + COALESCE(oo.optout_cost, 0) AS send_cost_usd
     FROM keys ky
     JOIN partner_keys k
@@ -271,6 +317,7 @@ export async function getPartnerReport(
     LEFT JOIN sends   s  ON s.partner_key_id  = ky.partner_key_id AND s.interest_tag  = ky.interest_tag
     LEFT JOIN clicks  cl ON cl.partner_key_id = ky.partner_key_id AND cl.interest_tag = ky.interest_tag
     LEFT JOIN optouts oo ON oo.partner_key_id = ky.partner_key_id AND oo.interest_tag = ky.interest_tag
+    LEFT JOIN sales   sa ON sa.partner_key_id = ky.partner_key_id AND sa.interest_tag = ky.interest_tag
     WHERE TRUE ${onlyPartner}
     ORDER BY k.partner_slug, ky.interest_tag
   `)) as unknown as Record<string, number | string>[];

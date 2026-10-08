@@ -197,7 +197,7 @@ export function PartnerReportView({
             {report.rows.length === 0 && (
               <tr>
                 <td colSpan={showRevenue ? 17 : 13} className="p-4 text-center text-muted-foreground">
-                  No leads in this period.
+                  No activity in this period.
                 </td>
               </tr>
             )}

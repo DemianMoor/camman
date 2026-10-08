@@ -2874,6 +2874,20 @@ sound, so the pattern is: **the ledger sets the RATE over a trailing window; a
 per-actor counter does the ATTRIBUTION.** See
 [drip-partner-reporting.md](04-features/drip-partner-reporting.md) §3.
 
+**⭐ UPDATED 2026-10-09 — the batches that produce those deltas are excluded from the
+CALIBRATION too, not just from billing.** `getCalibratedLookupRate` reads
+`trigger IN ('upload', 'backfill')` only (`CALIBRATION_TRIGGERS`). Measured on prod:
+190 of 200 `drip_intake` batches read ≤ 0, the rest sum to $1.52 over 14,237 lookups
+($0.000108). Mixed into a window with bulk batches they move the rate from
+$0.001592 to $0.001563 — tolerable. Alone in the window — which is where a trailing
+window ends up once the bulk batches age out (2026-10-12 → 12-23 for the 18 upload
+batches) — their sum is still *positive*, so the "fail toward flat when delta ≤ 0"
+rule never fires and the report keeps saying `source: "ledger"` at a 14× discount.
+A fallback keyed on the sign of a number is not a fallback against a number that
+is small and wrong. A window with no bulk batch now reports `flat`. See
+[drip-partner-reporting.md](04-features/drip-partner-reporting.md) §3 and
+`scripts/test-lookup-rate-calibration.ts`.
+
 Related: `lookup_batches.actual_cost_usd` equals `est_cost_usd` in 15/15 rows. It
 is an estimate wearing the word "actual". Nothing reads it.
 

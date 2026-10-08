@@ -3,6 +3,7 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import type { DbOrTx } from "@/lib/drip/groups";
 
 // Per-lookup cost, calibrated from the Telnyx balance ledger (Drip P7, R1).
 //
@@ -25,12 +26,31 @@ import { db } from "@/db/client";
 //
 // ⚠️ actual_cost_usd IS NOT ACTUAL. It equals est_cost_usd in 15 of 15 rows.
 // Nothing here reads it.
+//
+// ⭐ ONLY BULK BATCHES CALIBRATE (2026-10-08, C1 of the partner-attribution
+// plan). drip_intake batches are 1-2 lookups each, and their balance deltas are
+// not noise around the price — they are the failure above, 200 times over: on
+// prod 190 of 200 read <= 0 and the rest sum to $1.52 over 14,237 lookups,
+// $0.000108 per lookup, one fourteenth of the real price. Left in the window
+// they drag the rate down a little; left ALONE in the window — which is what
+// happens once the upload batches age past 90 days — they would keep the rate
+// "ledger" at a 14x discount, because the sum is positive. So the ledger rate
+// is read from upload / backfill batches only, and a window with none of them
+// falls to the flat rate and SAYS so (source "flat"), never "ledger".
 
 /** Fallback when the window yields no usable ledger movement. */
 export const FLAT_RATE_USD = 0.0015;
 
 /** How far back the rate is calibrated. Long enough to average out the noise. */
 export const CALIBRATION_DAYS = 90;
+
+/**
+ * The batch triggers whose ledger movement is trusted for calibration. A
+ * drip_intake batch is excluded by construction, not by a size threshold —
+ * a 1-lookup upload batch would be just as worthless, but uploads are never
+ * that small and a threshold is a number somebody has to keep right.
+ */
+export const CALIBRATION_TRIGGERS = ["upload", "backfill"] as const;
 
 export interface LookupRate {
   /** USD per lookup actually used for the report. */
@@ -57,8 +77,10 @@ export interface LookupRate {
  */
 export async function getCalibratedLookupRate(
   days = CALIBRATION_DAYS,
+  /** Executor — a transaction in tests so rolled-back fixtures are visible. */
+  dbc: DbOrTx = db,
 ): Promise<LookupRate> {
-  const rows = (await db.execute(sql`
+  const rows = (await dbc.execute(sql`
     SELECT
       count(*)::int                                        AS batches,
       sum(balance_before_usd - balance_after_usd)::float8   AS delta,
@@ -69,6 +91,9 @@ export async function getCalibratedLookupRate(
     WHERE balance_before_usd IS NOT NULL
       AND balance_after_usd IS NOT NULL
       AND created_at >= now() - make_interval(days => ${days})
+      -- bulk batches only — see the header. The drip rows are not merely
+      -- down-weighted, they are absent from every figure reported below.
+      AND trigger IN (${sql.join(CALIBRATION_TRIGGERS.map((t) => sql`${t}`), sql`, `)})
   `)) as unknown as {
     batches: number;
     delta: number | null;
@@ -113,13 +138,13 @@ export function lookupCostUsd(lookups: number, rate: LookupRate): number {
 export function describeRate(rate: LookupRate): string {
   if (rate.source === "flat") {
     return (
-      `$${rate.rate.toFixed(6)} per lookup (standard rate — the ledger had no ` +
-      `usable balance movement in the last ${CALIBRATION_DAYS} days).`
+      `$${rate.rate.toFixed(6)} per lookup (standard rate — no bulk lookup batch ` +
+      `with usable balance movement in the last ${CALIBRATION_DAYS} days).`
     );
   }
   return (
     `$${rate.rate.toFixed(6)} per lookup, calibrated from $${rate.ledgerDeltaUsd!.toFixed(2)} ` +
     `of metered balance across ${rate.lookupsProcessed!.toLocaleString()} lookups ` +
-    `(${rate.batches} batches, ${rate.from} to ${rate.to}).`
+    `(${rate.batches} bulk batches, ${rate.from} to ${rate.to}).`
   );
 }

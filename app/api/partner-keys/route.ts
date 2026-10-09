@@ -6,6 +6,7 @@ import { partner_keys } from "@/db/schema";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, isUniqueViolation, requireApiMembership } from "@/lib/api/helpers";
 import { generateSecret, generateToken, hashSecret } from "@/lib/intake/partner-key";
+import { KEY_LIST_SQL } from "@/lib/partners/queries";
 import { can } from "@/lib/permissions";
 import { partnerKeyCreateSchema } from "@/lib/validators/partner-keys";
 
@@ -25,41 +26,13 @@ export async function GET() {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
 
-  // Usage joins in one query: last 24h of accepted leads plus today's auth
-  // failures, so the settings page is a single round trip rather than N+1.
-  const rows = await db.execute(drizzleSql`
-    SELECT k.id, k.partner_slug, k.name, k.interest_tag_mode, k.interest_tag,
-           k.field_mapping, k.sandbox, k.rate_per_sec, k.rate_per_day,
-           k.max_payload_bytes, k.status, k.created_at, k.rotated_at, k.last_seen_at,
-           k.secret_last4,
-           -- Signed report link STATE only. ⚠️ NEVER report_token_hash: the
-           -- link is unrecoverable by design (hashed at rest, plaintext shown
-           -- once), and shipping the hash to the browser would hand an operator
-           -- the one value an attacker needs to go looking for a preimage.
-           -- "Is there a live link?" is all the UI needs.
-           (k.report_token_hash IS NOT NULL) AS report_link_active,
-           k.report_token_issued_at,
-           k.report_token_expires_at,
-           k.report_show_revenue,
-           COALESCE(u.leads_24h, 0)::int   AS leads_24h,
-           COALESCE(f.auth_fails_today, 0)::int AS auth_fails_today,
-           COALESCE(l.total_leads, 0)::int AS total_leads
-    FROM partner_keys k
-    LEFT JOIN LATERAL (
-      SELECT sum(count) AS leads_24h FROM partner_key_usage
-      WHERE partner_key_id = k.id AND window_kind = 'day'
-        AND window_start > now() - interval '24 hours'
-    ) u ON true
-    LEFT JOIN LATERAL (
-      SELECT sum(count) AS auth_fails_today FROM partner_key_usage
-      WHERE partner_key_id = k.id AND window_kind = 'auth_fail'
-        AND window_start > now() - interval '24 hours'
-    ) f ON true
-    LEFT JOIN LATERAL (
-      SELECT count(*) AS total_leads FROM lead_inbox WHERE partner_key_id = k.id
-    ) l ON true
+  // Usage joins in one query (KEY_LIST_SQL, shared with /api/partners): last
+  // 24h of accepted leads plus today's auth failures, one round trip not N+1.
+  // Since 0200 the signed-link state and the revenue flag live on the PARTNER
+  // and come from /api/partners, not from a key row.
+  const rows = await db.execute(drizzleSql`${KEY_LIST_SQL}
     WHERE k.org_id = ${orgId}::uuid
-    ORDER BY (k.status = 'active') DESC, k.partner_slug
+    ORDER BY (k.status = 'active') DESC, k.partner_slug, k.created_at
   `);
 
   return NextResponse.json({ data: rows });
@@ -88,6 +61,19 @@ export async function POST(req: NextRequest) {
   }
   const input = parsed.data;
 
+  // The key belongs to a partner (0200). Slug is copied from it, never typed.
+  const owner = (await db.execute(drizzleSql`
+    SELECT id, slug, status FROM partners WHERE id = ${input.partner_id} AND org_id = ${orgId}::uuid
+  `)) as unknown as { id: number; slug: string; status: string }[];
+  if (!owner[0]) {
+    return apiError(404, "Partner not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner" });
+  }
+  if (owner[0].status !== "active") {
+    return apiError(409, "Cannot add a key to an archived partner", API_ERROR_CODES.CONFLICT, {
+      code: "partner_archived",
+    });
+  }
+
   const token = generateToken();
   const secret = generateSecret();
 
@@ -96,7 +82,8 @@ export async function POST(req: NextRequest) {
       .insert(partner_keys)
       .values({
         org_id: orgId,
-        partner_slug: input.partner_slug,
+        partner_id: owner[0].id,
+        partner_slug: owner[0].slug,
         name: input.name,
         token,
         secret_hash: hashSecret(secret),
@@ -132,8 +119,10 @@ export async function POST(req: NextRequest) {
     );
   } catch (e) {
     if (isUniqueViolation(e)) {
-      return apiError(409, "A partner key with that slug already exists", API_ERROR_CODES.DUPLICATE, {
-        field: "partner_slug",
+      // Only partner_keys_token_uniq remains since 0200 (the per-org slug
+      // uniqueness moved to partners); a 24-byte random collision is theory.
+      return apiError(409, "A partner key with that token already exists", API_ERROR_CODES.DUPLICATE, {
+        field: "token",
       });
     }
     throw e;

@@ -1,6 +1,6 @@
 # Partner lead intake (Drip Phase 2)
 
-_Last updated: 2026-10-01_
+_Last updated: 2026-10-09_
 
 Real-time capture of partner-submitted leads. **Zero sends, zero processing.** The endpoint
 authenticates, rate-limits, validates shape, writes one row, and returns. Everything downstream —
@@ -185,14 +185,35 @@ ships with its consumer.
 
 ## UI
 
-`/settings/partners` ([components/settings/partner-keys.tsx](../../components/settings/partner-keys.tsx)).
-Create, rotate, enable/disable, sandbox toggle, per-key 24h counts and last-seen. `partner_keys.view`
-(manager+) to look, `partner_keys.manage` (admin+) to mint or rotate — the same split
-`provider_credentials` uses.
+`/settings/partners` ([components/settings/partners.tsx](../../components/settings/partners.tsx)):
+one card per **partner** (migration 0200) with its keys nested
+([components/settings/partner-key-card.tsx](../../components/settings/partner-key-card.tsx)).
+Per key: rotate, enable/disable, sandbox toggle, 24h counts and last-seen. Per partner: New key
+(the slug is copied from the partner — two keys of one partner share it), the signed report link,
+the revenue toggle, Archive / Restore. `partner_keys.view` (manager+) to look, `partner_keys.manage`
+(admin+) to mint, rotate or change a partner — the same split `provider_credentials` uses (ruling Q9:
+the permission ids did not change).
 
 **No delete.** `lead_inbox.partner_key_id` is `ON DELETE RESTRICT`, and the leads carry the key's
 slug as provenance. Disable instead; the endpoint answers a disabled key with 403 so the partner
-learns their key was turned off rather than mistyped.
+learns their key was turned off rather than mistyped. **An archived partner answers 403
+`This partner is archived` on every key it owns** — `resolvePartnerKey` reads `partners.status`
+through the key's `partner_id`, the keys' own status is untouched, and Restore re-enables intake
+in one flip (ruling Q7).
+
+### Partners (migration 0200)
+
+`partners` (`id, org_id, slug, name, status active|archived, archived_at, report_token_hash,
+report_token_issued_at, report_token_expires_at, report_show_revenue`) sits above `partner_keys`;
+`partner_keys.partner_id` references it (`ON DELETE RESTRICT`), **nullable until a follow-up
+migration sets NOT NULL** (ruling C2: additive leads code — every code path that creates a key
+writes it). 0200 backfilled one partner per existing key, copying slug, name, the token columns
+and the revenue flag, so pml's live link kept resolving. `partner_keys_org_slug_uniq` was dropped
+(two keys of one partner share the slug; `partners(org_id, slug)` is unique). API:
+`GET/POST /api/partners`, `GET/PATCH /api/partners/[partnerId]`, `POST …/archive`, `POST …/restore`,
+`POST/DELETE …/report-link`; `POST /api/partner-keys` takes `partner_id` instead of `partner_slug`.
+The list responses never carry `token`, `secret_hash` or `report_token_hash`
+([lib/partners/queries.ts](../../lib/partners/queries.ts)).
 
 The endpoint URL is shown only on an explicit "Show endpoint URL" click, not in the list response —
 it is half the credential and should not render on every settings visit.

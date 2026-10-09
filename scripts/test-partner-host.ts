@@ -42,7 +42,9 @@ const CALLBACK_ROUTE =
   "app/api/providers/[providerId]/credentials/[credentialId]/register-callback/route.ts";
 const TXR_ROUTE =
   "app/api/providers/[providerId]/credentials/[credentialId]/register-textrequest-hooks/route.ts";
-const PARTNER_KEYS = "components/settings/partner-keys.tsx";
+// The key card owns endpointUrl() since 0200 (components/settings/partners.tsx
+// renders partners; the per-key card is where the endpoint URL is built).
+const PARTNER_KEYS = "components/settings/partner-key-card.tsx";
 const DOCS_PAGE = "app/docs/partner-api/page.tsx";
 
 // Real hostnames this deployment is reachable on, plus a preview URL. These are
@@ -170,9 +172,9 @@ async function main() {
   // Structural: the component must go through partnerBase(), not window directly.
   console.log("\ncall sites use the shared helpers");
   const keys = read(PARTNER_KEYS);
-  check("partner-keys: builds the URL via partnerBase()", /partnerBase\(/.test(keys), true);
+  check("partner-key-card: builds the URL via partnerBase()", /partnerBase\(/.test(keys), true);
   check(
-    "partner-keys: window.location.origin appears ONLY as partnerBase's argument",
+    "partner-key-card: window.location.origin appears ONLY as partnerBase's argument",
     (keys.match(/window\.location\.origin/g) ?? []).length,
     (keys.match(/partnerBase\(\s*typeof window[^)]*window\.location\.origin\s*\)/g) ?? []).length,
   );

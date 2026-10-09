@@ -75,6 +75,10 @@ export async function PATCH(
     });
   }
   const input = parsed.data;
+  if (Object.keys(input).length === 0) {
+    // Drizzle refuses an empty SET; say so instead of a 500.
+    return apiError(400, "No fields to update", API_ERROR_CODES.VALIDATION);
+  }
 
   const existing = await db
     .select()
@@ -113,9 +117,7 @@ export async function PATCH(
       ...(input.rate_per_day !== undefined ? { rate_per_day: input.rate_per_day } : {}),
       ...(input.max_payload_bytes !== undefined ? { max_payload_bytes: input.max_payload_bytes } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.report_show_revenue !== undefined
-        ? { report_show_revenue: input.report_show_revenue }
-        : {}),
+      // report_show_revenue moved to the PARTNER (0200): PATCH /api/partners/[id].
     })
     .where(and(eq(partner_keys.id, keyId), eq(partner_keys.org_id, orgId)))
     .returning();

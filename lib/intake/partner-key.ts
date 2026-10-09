@@ -67,6 +67,12 @@ export interface ResolvedPartnerKey {
   rate_per_day: number;
   max_payload_bytes: number;
   status: string;
+  /**
+   * The owning partner's status (0200). NULL while a key has no partner (the
+   * C2 window). An ARCHIVED partner stops intake on every key it owns without
+   * touching the keys' own status, so restoring it re-enables them in one step.
+   */
+  partner_status: "active" | "archived" | null;
 }
 
 /**
@@ -82,10 +88,12 @@ export async function resolvePartnerKey(
   token: string,
 ): Promise<ResolvedPartnerKey | null> {
   const rows = (await dbc.execute(sql`
-    SELECT id, org_id, partner_slug, name, secret_hash, interest_tag_mode, interest_tag,
-           field_mapping, sandbox, rate_per_sec, rate_per_day, max_payload_bytes, status
-    FROM partner_keys
-    WHERE token = ${token}
+    SELECT k.id, k.org_id, k.partner_slug, k.name, k.secret_hash, k.interest_tag_mode, k.interest_tag,
+           k.field_mapping, k.sandbox, k.rate_per_sec, k.rate_per_day, k.max_payload_bytes, k.status,
+           p.status AS partner_status
+    FROM partner_keys k
+    LEFT JOIN partners p ON p.id = k.partner_id
+    WHERE k.token = ${token}
     LIMIT 1
   `)) as unknown as ResolvedPartnerKey[];
   return rows[0] ?? null;

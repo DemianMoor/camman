@@ -54,6 +54,7 @@ export function InternalPartnerReport() {
         <PartnerReportView
           token="" partnerName="All partners" showRevenue report={report}
           showDateControls={false}
+          showPartnerColumn
         />
       )}
     </div>

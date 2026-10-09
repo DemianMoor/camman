@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-09 (lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-09 (partner entity 0200: the signed link, the revenue toggle and the report scope live on `partners`; Partner column on the internal table; lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -12,7 +12,7 @@ report link and nothing else.
 
 ## 1. Grain: partner × interest tag × ET-day range
 
-`lib/reporting/partner-report.ts` → `getPartnerReport(orgId, from, to, partnerKeyId?)`.
+`lib/reporting/partner-report.ts` → `getPartnerReport(orgId, from, to, partnerId?)` — the optional scope is a **partner** id since migration 0200 (a partner with two keys is one report). Rows are still keyed `(partner_key_id, interest_tag)`; the partner is one join away (`LEFT JOIN partners`), and the internal table shows it in a **Partner** column (Q11). ⚠️ Until Phase 5 moves the grain to `(partner, contact group)`, a partner with **two keys on the same tag** sees one row per key on the signed link (the Total line is still right); rows are ordered by partner, tag, key id so the order is stable.
 
 `from` / `to` are inclusive **ET calendar days** (`YYYY-MM-DD`).
 
@@ -229,7 +229,7 @@ Public page: `app/partner-report/[token]/page.tsx` — `robots: { index: false }
 | opaque | 24 random bytes, base64url. Not a JWT, not an HMAC. |
 | hashed at rest | SHA-256; the plaintext is returned **once** at issue and is unrecoverable |
 | revocable | one `UPDATE` clearing the hash |
-| scoped | `resolveReportToken` returns `partnerKeyId`; every query filters by it. **The route never accepts a partner id**, so there is no parameter to tamper with. |
+| scoped | `resolveReportToken` returns `partnerId` (since 0200 the link lives on `partners`); every query filters by it. **The route never accepts a partner id**, so there is no parameter to tamper with. |
 | expiring | optional `report_token_expires_at` |
 
 ### ⚠️ Why not a signed token
@@ -240,20 +240,44 @@ meant to avoid. So: opaque, resolved by lookup, revoked by `UPDATE`.
 
 ### ⚠️ Every failure mode returns null indistinguishably
 
-Unknown token, revoked token, expired token, archived key, sandbox key — all
-`null`, and the page renders one `notFound()`. The page cannot be used to probe
-which tokens ever existed.
+Unknown token, revoked token, expired token, archived partner, sandbox-only
+partner — all `null`, and the page renders one `notFound()`. The page cannot be
+used to probe which tokens ever existed.
 
-Revoking a link does **not** disable the partner key: intake keeps working.
-Conversely, disabling the key kills its report link in the same action.
+### Who may hold a link (ruling Q7, migration 0200)
+
+The link is a **partner** property (`partners.report_token_hash`), one per
+partner; the four token columns left on `partner_keys` are dead copies until a
+destructive migration drops them. `PARTNER_CAN_HAVE_LINK` in
+[lib/reporting/partner-report-token.ts](../../lib/reporting/partner-report-token.ts)
+is the one definition, used by issue AND resolve:
+
+| partner | link? |
+|---|---|
+| no keys at all (file delivery) | **yes** |
+| at least one non-sandbox key, whatever its status | **yes** |
+| sandbox-only keys | no — issue returns 409 `sandbox_only`, resolve returns null |
+| archived | no — resolve returns null; restore brings it back |
+
+Consequences, deliberately: revoking a link does **not** disable any key (intake
+keeps working); **disabling a key no longer kills the link** — the partner's
+status does. Archiving a partner stops intake on every key it owns (the intake
+route answers 403 `This partner is archived`, reading `partners.status` through
+`resolvePartnerKey`) and kills its link, without touching the keys' own status,
+so Restore is one flip back. The Settings confirm dialog says both.
 
 ### Endpoints
 
-- `POST /api/partner-keys/[keyId]/report-link` — issue or rotate (rotation
-  invalidates the previous link; there is only ever one live link per key).
-  Returns the plaintext **once**. Requires `partner_keys.manage`.
-- `DELETE /api/partner-keys/[keyId]/report-link` — revoke.
+- `POST /api/partners/[partnerId]/report-link` — issue or rotate (rotation
+  invalidates the previous link; there is only ever one live link per partner).
+  Returns the plaintext **once**. Requires `partner_keys.manage`. 409
+  `sandbox_only` / `archived` when the partner may not hold one. (Moved from
+  `/api/partner-keys/[keyId]/report-link` in 0200; that route is gone.)
+- `DELETE /api/partners/[partnerId]/report-link` — revoke.
 - `GET /api/reports/partners?from&to` — the internal report. `campaigns.view`.
+- `GET/POST /api/partners`, `GET/PATCH /api/partners/[partnerId]`,
+  `POST …/archive`, `POST …/restore` — the partner entity
+  ([docs/04-features/partner-lead-intake.md](partner-lead-intake.md) §Partners).
 
 ### ⚠️ The proxy exclusion is an exact path segment
 
@@ -483,14 +507,15 @@ only by calling the endpoints directly. Entry points now:
 | surface | where |
 |---|---|
 | Internal report | Sidebar → Reports → **By Partner**, the Reports tab strip, and a **Partner report** button on Settings → Partners |
-| Generate / rotate a link | Settings → Partners, per key. The URL is shown **once** via `CopyableId`, the same contract as the intake secret |
-| Revoke | Settings → Partners, per key, behind a confirmation |
-| Revenue visibility | Settings → Partners, per key — `report_show_revenue`, off by default |
+| Generate / rotate a link | Settings → Partners, per **partner** (0200). The URL is shown **once** via `CopyableId`, the same contract as the intake secret |
+| Revoke | Settings → Partners, per partner, behind a confirmation |
+| Revenue visibility | Settings → Partners, per partner — `partners.report_show_revenue`, off by default |
+| New partner / New key / Archive / Restore | Settings → Partners. A key is created **under** a partner (slug copied, not typed); Archive's confirm dialog states that intake stops on all its keys and the link dies |
 
-⚠️ **Generate is disabled on sandbox keys.** `resolveReportToken` requires
-`status = 'active' AND sandbox = false`, so a link issued on a sandbox key
-resolves to null and the public page 404s. The button states the precondition
-rather than letting the operator find out from a dead URL.
+⚠️ **Generate is disabled while the partner may not hold a link** (sandbox-only
+keys, or archived — §4 table). The button states the precondition rather than
+letting the operator find out from a dead URL; the API answers 409 for the
+same cases.
 
 ⚠️ **The list API returns report-link STATE, never `report_token_hash`.** The
 link is unrecoverable by design; shipping the hash to the browser would hand an

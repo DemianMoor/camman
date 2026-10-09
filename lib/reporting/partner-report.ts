@@ -38,6 +38,10 @@ import { profitAndRoi } from "./partner-profit";
 // from a counter, and no stage-grained helper can ever produce it. That is why
 // this does not extend getStageMetricsInRange().
 //
+// Rows are still keyed (partner_key_id, interest_tag); the partner is one join
+// away (0200) and scopes the signed link. Phase 5 of partner attribution moves
+// the grain to (partner_id, contact_group_id).
+//
 // ⚠️ THE LEAD ATTRIBUTION IS ONE-ROW-PER-SEND BY CONSTRUCTION (`viaLead`).
 // A contact can hold several journeys over time (a terminal state frees the
 // one-live-per-contact slot), so joining stage_sends to drip_journeys on
@@ -62,6 +66,8 @@ import { profitAndRoi } from "./partner-profit";
 
 export interface PartnerReportRow {
   partner_key_id: number;
+  /** The key's partner (0200). NULL only for a key created before the code that writes it (the C2 window). */
+  partner_id: number | null;
   partner_slug: string;
   partner_name: string;
   interest_tag: string;
@@ -147,16 +153,17 @@ function nextDay(ymd: string): string {
 
 /**
  * @param from,to inclusive ET calendar days, `YYYY-MM-DD`.
- * @param partnerKeyId restrict to one partner (the signed-link view always does).
+ * @param partnerId restrict to one PARTNER (the signed-link view always does). A
+ *   partner id since 0200, not a key id: a partner with two keys is one report.
  */
 export async function getPartnerReport(
   orgId: string,
   from: string,
   to: string,
-  partnerKeyId?: number,
+  partnerId?: number,
 ): Promise<PartnerReportResult> {
   const rate = await getCalibratedLookupRate();
-  const onlyPartner = partnerKeyId != null ? sql`AND k.id = ${partnerKeyId}` : sql``;
+  const onlyPartner = partnerId != null ? sql`AND p.id = ${partnerId}` : sql``;
 
   // The range as UTC instants (half-open), so every timestamp predicate below
   // is a sargable range — never `(ts AT TIME ZONE …)::date = …`, which forces
@@ -291,7 +298,10 @@ export async function getPartnerReport(
       UNION SELECT partner_key_id, interest_tag FROM optouts
       UNION SELECT partner_key_id, interest_tag FROM sales
     )
-    SELECT k.id AS partner_key_id, k.partner_slug, k.name AS partner_name,
+    SELECT k.id AS partner_key_id,
+           p.id AS partner_id,
+           COALESCE(p.slug, k.partner_slug) AS partner_slug,
+           COALESCE(p.name, k.name)         AS partner_name,
            ky.interest_tag,
            COALESCE(i.leads_received, 0) AS leads_received,
            COALESCE(i.mobile, 0)         AS mobile,
@@ -313,13 +323,19 @@ export async function getPartnerReport(
      AND k.org_id = ${orgId}::uuid
      -- ⚠️ A sandbox KEY never appears at all (card): absent, not zeroed.
      AND k.sandbox = false
+    -- LEFT, not INNER (0200): a key with no partner yet (the C2 window) must
+    -- still report internally; the partner-scoped view filters on p.id, so it
+    -- can never see such a key.
+    LEFT JOIN partners p ON p.id = k.partner_id
     LEFT JOIN intake  i  ON i.partner_key_id  = ky.partner_key_id AND i.interest_tag  = ky.interest_tag
     LEFT JOIN sends   s  ON s.partner_key_id  = ky.partner_key_id AND s.interest_tag  = ky.interest_tag
     LEFT JOIN clicks  cl ON cl.partner_key_id = ky.partner_key_id AND cl.interest_tag = ky.interest_tag
     LEFT JOIN optouts oo ON oo.partner_key_id = ky.partner_key_id AND oo.interest_tag = ky.interest_tag
     LEFT JOIN sales   sa ON sa.partner_key_id = ky.partner_key_id AND sa.interest_tag = ky.interest_tag
     WHERE TRUE ${onlyPartner}
-    ORDER BY k.partner_slug, ky.interest_tag
+    -- k.id last: a partner with two keys on one tag shows one row per key until
+    -- Phase 5 moves the grain to (partner, contact group); keep that order stable.
+    ORDER BY 3, ky.interest_tag, k.id
   `)) as unknown as Record<string, number | string>[];
 
   return {
@@ -332,6 +348,7 @@ export async function getPartnerReport(
       const { net_profit_usd, roi } = profitAndRoi(revenue, sendCost, lookupCost);
       return {
         partner_key_id: Number(r.partner_key_id),
+        partner_id: r.partner_id == null ? null : Number(r.partner_id),
         partner_slug: String(r.partner_slug),
         partner_name: String(r.partner_name),
         interest_tag: String(r.interest_tag),

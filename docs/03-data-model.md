@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-07_
+_Last updated: 2026-10-09_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -213,6 +213,8 @@ erDiagram
   offers ||--o{ offer_exposures : "offer_id"
   campaigns ||--o{ offer_exposures : "first sender"
   offers ||--|| offer_exposure_counts : "precomputed distinct-lead count"
+  organizations ||--o{ partners : "lead partners (0200)"
+  partners ||--o{ partner_keys : "intake keys (partner_id, nullable until the follow-up)"
   organizations ||--o{ partner_keys : "drip partner intake keys"
   partner_keys ||--o{ lead_intake_daily : "per ET-day counters"
   partner_keys ||--o{ lead_intake_hourly : "per-hour counters (0199)"
@@ -476,7 +478,8 @@ Raw capture for partner-submitted leads. **Nothing consumes these tables yet** �
 
 | Table | Grain / keys | Notes |
 |---|---|---|
-| `partner_keys` | PK(`id`), UNIQUE(`token`), UNIQUE(`org_id`,`partner_slug`) | One credential per partner. `token` is **plaintext and indexed** (addressing — it is resolved by equality before any org context exists); `secret_hash` is a **one-way SHA-256** (authentication). `sandbox` defaults **true**. Carries the per-key contract: `rate_per_sec`, `rate_per_day`, `max_payload_bytes`, `field_mapping` JSONB, `interest_tag` + `interest_tag_mode` (`force`/`default`). RLS + SELECT-only org policy. **Signed report links (0172):** `report_token_hash` (SHA-256, partial UNIQUE `WHERE NOT NULL` — the plaintext is returned once at issue and is unrecoverable), `report_token_issued_at`, `report_token_expires_at`, `report_show_revenue` (default **false**) |
+| `partners` | PK(`id`), UNIQUE(`org_id`,`slug`), partial UNIQUE(`report_token_hash`) `WHERE NOT NULL`, CHECK `status IN ('active','archived')`, CHECK slug `^[a-z0-9][a-z0-9_-]*$` | **The partner entity (migration 0200).** One row per commercial partner; its credentials are `partner_keys` rows (`partner_keys.partner_id`, `ON DELETE RESTRICT`). Owns the signed report link (`report_token_hash` SHA-256, `report_token_issued_at`, `report_token_expires_at`) and `report_show_revenue` (default **false**), moved here from the key. `status` archived ⇒ intake 403 on every key + link dead; restore flips both back. RLS + SELECT-only org policy. Backfilled 1:1 from the existing keys |
+| `partner_keys` | PK(`id`), UNIQUE(`token`), INDEX(`org_id`,`partner_slug`) (the per-org slug UNIQUE was **dropped** in 0200 — two keys of one partner share the slug), INDEX(`partner_id`) | One credential per partner **key**; `partner_id` → `partners` (nullable until the follow-up migration sets NOT NULL, ruling C2). The four `report_*` columns and `report_show_revenue` are **dead copies** since 0200 (the live values are on `partners`), kept until a destructive migration drops them. `token` is **plaintext and indexed** (addressing — it is resolved by equality before any org context exists); `secret_hash` is a **one-way SHA-256** (authentication). `sandbox` defaults **true**. Carries the per-key contract: `rate_per_sec`, `rate_per_day`, `max_payload_bytes`, `field_mapping` JSONB, `interest_tag` + `interest_tag_mode` (`force`/`default`). RLS + SELECT-only org policy. **Signed report links (0172):** `report_token_hash` (SHA-256, partial UNIQUE `WHERE NOT NULL` — the plaintext is returned once at issue and is unrecoverable), `report_token_issued_at`, `report_token_expires_at`, `report_show_revenue` (default **false**) |
 | `lead_inbox` | PK(`id`), partial UNIQUE(`partner_key_id`,`dedup_key`) `WHERE dedup_key IS NOT NULL` | The raw payload in `raw` JSONB, plus addressing columns (`phone_e164`, `interest_tag`, `sandbox`). `normalized` stays NULL until Phase 3. `status` ∈ `received`/`processed`/`rejected`/`landline`/`duplicate`; index `(status, received_at)` is the worker's queue scan. `partner_slug` is denormalized and the FK is **ON DELETE RESTRICT** so provenance survives a rename and a key with leads cannot be deleted. RLS + SELECT-only org policy |
 | `partner_key_usage` | PK(`partner_key_id`,`window_kind`,`window_start`) | Rate-limit counters. **Units differ by `window_kind`**: `sec` counts REQUESTS, `day` counts LEADS, `auth_fail` counts failed secret checks on a resolved token. `day`/`auth_fail` windows start at the **ET** calendar day. RLS + SELECT-only org policy |
 | `alert_state` | PK(`alert_key`) | Generic state-transition gate for alerts (`ok`/`firing`). **Infra table: RLS on, NO policies**, same posture as `cron_locks`/`geoip_cache` |

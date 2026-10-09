@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-10-06_
+_Last updated: 2026-10-09_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -131,7 +131,7 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 | `SUPABASE_SERVICE_ROLE_KEY` | **server** | bypasses RLS; used by `lib/supabase/admin.ts`. Never expose to browser |
 | `DATABASE_URL` | server | Postgres connection (Supabase **transaction** pooler, port `6543`, `?prepare=false`). URL-encode special chars in the password (`#`/`&`) or rotate to alphanumerics — `#` silently truncates the string. One job derives a **session**-mode URL from this same string (port `5432`, `prepare` dropped) — see below; there is deliberately no second connection-string variable |
 | `NEXT_PUBLIC_SITE_URL` | public | **primary** app origin; auth callback base, internal alert deep-links, and every provider webhook/callback URL we register. Must match the deployed origin in prod |
-| `NEXT_PUBLIC_PARTNER_HOST` | public | **optional** partner-facing origin. Only affects URLs handed to a partner: the lead intake endpoint in Settings → Partner intake keys, and `/docs/partner-api`. Unset ⇒ those fall back to the operator's current browser origin (single-hostname behavior). Never used for auth, alerts, or webhooks. Inlined at **build time** — changing it requires a redeploy |
+| `NEXT_PUBLIC_PARTNER_HOST` | public | **optional** partner-facing origin. Only affects URLs handed to a partner: the lead intake endpoint in Settings → Partners, and `/docs/partner-api`. Unset ⇒ those fall back to the operator's current browser origin (single-hostname behavior). Never used for auth, alerts, or webhooks. Inlined at **build time** — changing it requires a redeploy |
 | `SPAM_PROVIDER` | server | which spam provider (`classifier` is the only option) |
 | `CLASSIFIER_URL` | server | Cloud Run URL of the classifier service |
 | `CLASSIFIER_API_KEY` | server | `X-API-Key` for the classifier |
@@ -201,7 +201,7 @@ is deliberate and one-directional:
 | | Hostname | Carries |
 |---|---|---|
 | **Primary** | `NEXT_PUBLIC_SITE_URL` | auth emails (verification, password reset), internal Telegram alert deep-links, every provider webhook/callback URL we register, the TextRequest callback base |
-| **Partner-facing** | `NEXT_PUBLIC_PARTNER_HOST` | the lead intake endpoint copied from Settings → Partner intake keys, and the public `/docs/partner-api` page |
+| **Partner-facing** | `NEXT_PUBLIC_PARTNER_HOST` | the lead intake endpoint copied from Settings → Partners, and the public `/docs/partner-api` page |
 
 **All machine traffic stays on the primary host.** Adding a second hostname does
 not move it, and nothing derives an outbound URL from the request `Host` header —

@@ -324,8 +324,13 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // ── partner-keys ─────────────────────────────────────────────────────────────
   "partner-keys": null, // drip / partner intake -- hidden from the operator
   "partner-keys/[keyId]": null, // drip / partner intake -- hidden from the operator
-  "partner-keys/[keyId]/report-link": null, // drip / partner intake -- hidden from the operator
   "partner-keys/[keyId]/rotate": null, // drip / partner intake -- hidden from the operator
+  // ── partners (0200) ──────────────────────────────────────────────────────────
+  "partners": null, // drip / partner intake -- hidden from the operator
+  "partners/[partnerId]": null, // drip / partner intake -- hidden from the operator
+  "partners/[partnerId]/archive": null, // drip / partner intake -- hidden from the operator
+  "partners/[partnerId]/restore": null, // drip / partner intake -- hidden from the operator
+  "partners/[partnerId]/report-link": null, // drip / partner intake -- hidden from the operator
 
   // ── provider-phones ─────────────────────────────────────────────────────────────
   // Needed to choose a sending number. Provider identity is redacted to a

@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- **Gating (owner, 2026-10-08):** every prod migration and data write stops at the proposal and waits for an explicit go; preview (camman-v2, ref `fdzxzxayhknywvmrhjcj`) first; prod apply only in the 05:00–06:00 UTC window. Stop and report after this phase; Phase 2 needs its own go.
+- **Gating (owner, 2026-10-08, amended 2026-10-09 F4):** every prod migration and data write stops at the proposal and waits for an explicit go; preview (camman-v2, ref `fdzxzxayhknywvmrhjcj`) first; the prod apply is **attended, any time before 12:00 UTC (14:00 Warsaw)**. Stop and report after this phase; Phase 2 needs its own go.
+- **Owner fixes applied 2026-10-09 (F1–F5):** F1 the exit-check baseline is captured by the OLD code from a checkout of `origin/main`, the compared range ends YESTERDAY (ET), capture and compare run the same morning minutes apart and both print the lookup rate; F2 every caller of `getPartnerReport`'s 4th argument moves to a partner id (findings in Task 3); F3 the exit check runs the resolver's exact WHERE against key 77's copied hash, and the owner opens pml's live link after the deploy; F4 the window above; F5 the slug-uniqueness drop was checked against every lookup by slug (findings in Task 1).
 - **C2:** 0200 adds `partner_keys.partner_id` **nullable** + backfill. No `SET NOT NULL` in 0200. The follow-up `SET NOT NULL` is the first statement of the next migration batch, after `SELECT count(*) FROM partner_keys WHERE partner_id IS NULL` reads 0 in prod with the new code deployed.
 - **Q7:** archiving a partner disables intake on its keys and kills its report link; the confirm dialog says both; restore re-enables. A sandbox-only partner gets no link; a file-only partner (no keys) can have one.
 - **Q9:** permission ids stay `partner_keys.view` / `partner_keys.manage`.
@@ -64,7 +65,9 @@
 - Create: `scripts/partners-phase1-exit-check.ts`
 
 **Interfaces:**
-- Produces: a JSON baseline file in the scratchpad `partners-phase1-baseline.json` = `getPartnerReport(orgId, "2026-10-01", <today ET>, 77).rows` plus `resolveReportToken` state (`link_live: true` for key 77), captured BEFORE 0200 is applied to prod. The same script re-runs after deploy in `--compare` mode.
+- Produces: a JSON baseline file `%LOCALAPPDATA%/Temp/claude/partners-phase1-baseline.json` = `getPartnerReport(orgId, "2026-10-01", <YESTERDAY ET>, <pml>)` rows + the lookup rate + key 77's hash, captured BEFORE 0200 is applied to prod. The same script re-runs after deploy in `--compare` mode.
+
+**F1 — two checkouts, one script.** `--capture` must run the OLD code: the worktree's `getPartnerReport` joins `partners`, which does not exist in prod before 0200, and its 4th argument is a partner id. So the capture runs from a detached checkout of `origin/main` (`git worktree add .claude/worktrees/partners-baseline origin/main --detach`, junction `node_modules`, hard-link `.env.local`), with this script copied in untracked; there the 4th argument is key 77. `--compare` runs from `partners-entity` after the deploy, where the 4th argument is pml's partner id (looked up through `partner_keys.partner_id`). The compared range ends **yesterday ET** (campaign 1606 sends live; today's rows move between the two runs), both runs happen the same morning minutes apart, and both print the lookup rate — a rate difference is printed next to the row diff, never hidden by it.
 
 - [ ] **Step 1: Write the script**
 
@@ -77,59 +80,130 @@ import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 import { getPartnerReport } from "@/lib/reporting/partner-report";
 
-// Phase 1 exit check (Q10). READ-ONLY. Captures pml's report rows before 0200
-// (`--capture`) and compares the deployed code's rows against them after
-// (`--compare`). The numbers must be identical: the partner entity is a
-// re-homing of the link and the toggle, not a change to any figure.
+// Phase 1 exit check (Q10, owner fixes F1–F3). READ-ONLY.
+//
+//   --capture  run from a checkout of origin/main (the OLD code, whose 4th
+//              argument is a partner KEY id and which does not know `partners`),
+//              BEFORE 0200 is applied to prod. Writes the baseline file.
+//   --compare  run from the Phase 1 worktree AFTER the deploy. Re-reads the same
+//              range with the NEW code (4th argument = pml's PARTNER id) and
+//              must print identical rows; also proves the link moved (F3) and
+//              that scoping by partner equals filtering the whole report (F2).
+//
+// The range ends YESTERDAY in ET: campaign 1606 sends live, so today's rows
+// move between the two runs. Capture and compare the same morning, minutes
+// apart; both print the lookup rate, and a rate difference is reported on its
+// own line, never hidden inside the row diff.
 //
 //   npx tsx --conditions=react-server scripts/partners-phase1-exit-check.ts --capture
 //   npx tsx --conditions=react-server scripts/partners-phase1-exit-check.ts --compare
 
 const PML_KEY_ID = 77;
 const FROM = "2026-10-01";
-const TO = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const FILE = `${process.env.LOCALAPPDATA}/Temp/claude/partners-phase1-baseline.json`;
 
-async function main() {
-  const org = (await db.execute(sql`SELECT org_id FROM partner_keys WHERE id = ${PML_KEY_ID}`)) as unknown as { org_id: string }[];
-  const orgId = org[0].org_id;
-  // Before 0200 the 4th argument is a partner KEY id; after Task 3 it is a PARTNER id.
-  // Both resolve to pml because 0200 backfills partner.id in key order — assert it below.
-  const partner = (await db.execute(sql`
-    SELECT p.id FROM partners p JOIN partner_keys k ON k.partner_id = p.id WHERE k.id = ${PML_KEY_ID}
-  `).catch(() => [])) as unknown as { id: number }[];
-  const scope = partner[0]?.id ?? PML_KEY_ID;
-  const report = await getPartnerReport(orgId, FROM, TO, scope);
-  const rows = report.rows.map((r) => ({ ...r, partner_id: undefined, partner_name: undefined }));
-  const link = (await db.execute(sql`
-    SELECT (report_token_hash IS NOT NULL) AS live, report_token_hash AS hash FROM partner_keys WHERE id = ${PML_KEY_ID}
-  `)) as unknown as { live: boolean; hash: string | null }[];
+function etDay(offsetDays: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - offsetDays);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(d);
+}
 
-  if (process.argv.includes("--capture")) {
-    writeFileSync(FILE, JSON.stringify({ rows, keyHash: link[0].hash, from: FROM, to: TO }, null, 2));
-    console.log(`baseline written: ${rows.length} rows, ${FROM}..${TO}, link live=${link[0].live}`);
-  } else {
-    const base = JSON.parse(readFileSync(FILE, "utf-8")) as { rows: unknown[]; keyHash: string; to: string };
-    const partnerHash = (await db.execute(sql`
-      SELECT p.report_token_hash AS hash, p.status FROM partners p JOIN partner_keys k ON k.partner_id = p.id WHERE k.id = ${PML_KEY_ID}
-    `)) as unknown as { hash: string; status: string }[];
-    const same = JSON.stringify(rows) === JSON.stringify(base.rows);
-    console.log(`${same ? "PASS" : "FAIL"} rows identical to the baseline (${rows.length} rows, through ${base.to})`);
-    const moved = partnerHash[0]?.hash === base.keyHash && partnerHash[0]?.status === "active";
-    console.log(`${moved ? "PASS" : "FAIL"} pml's token hash was copied verbatim to its partner and the partner is active`);
-    if (!same || !moved) process.exitCode = 1;
+type Baseline = { rows: unknown[]; rate: number; rateSource: string; keyHash: string | null; from: string; to: string };
+let failures = 0;
+function check(label: string, ok: boolean, detail = "") {
+  if (!ok) failures++;
+  console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${ok || !detail ? "" : `\n        ${detail}`}`);
+}
+// Columns that only the NEW row shape carries; dropped on both sides so the
+// comparison is about numbers.
+const strip = (r: Record<string, unknown>) => {
+  const { partner_id: _p, ...rest } = r;
+  return rest;
+};
+
+async function main() {
+  const capture = process.argv.includes("--capture");
+  const org = (await db.execute(sql`SELECT org_id, report_token_hash FROM partner_keys WHERE id = ${PML_KEY_ID}`)) as unknown as
+    { org_id: string; report_token_hash: string | null }[];
+  const orgId = org[0].org_id;
+
+  if (capture) {
+    const to = etDay(1);
+    // OLD code: the 4th argument is the KEY id.
+    const report = await getPartnerReport(orgId, FROM, to, PML_KEY_ID);
+    const rows = report.rows.map((r) => strip(r as unknown as Record<string, unknown>));
+    const baseline: Baseline = { rows, rate: report.rate.rate, rateSource: report.rate.source, keyHash: org[0].report_token_hash, from: FROM, to };
+    writeFileSync(FILE, JSON.stringify(baseline, null, 2));
+    console.log(`baseline written: ${rows.length} row(s), ${FROM}..${to}, rate ${report.rate.rate} (${report.rate.source}), key 77 link live=${org[0].report_token_hash !== null}`);
+    await pgConn.end();
+    return;
   }
+
+  const base = JSON.parse(readFileSync(FILE, "utf-8")) as Baseline;
+  console.log(`baseline: ${base.rows.length} row(s), ${base.from}..${base.to}, rate ${base.rate} (${base.rateSource})`);
+  check("the compare runs on the baseline's day (range ends yesterday ET)", base.to === etDay(1), `baseline to=${base.to}, yesterday=${etDay(1)} — re-capture is NOT allowed; investigate instead`);
+
+  // NEW code: the 4th argument is the PARTNER id, reached through the key.
+  const pm = (await db.execute(sql`
+    SELECT p.id, p.slug, p.status, p.report_token_hash
+    FROM partner_keys k JOIN partners p ON p.id = k.partner_id WHERE k.id = ${PML_KEY_ID}
+  `)) as unknown as { id: number; slug: string; status: string; report_token_hash: string | null }[];
+  check("key 77 has a partner and it is pml", pm[0]?.slug === "pml", JSON.stringify(pm[0]));
+  const partnerId = pm[0].id;
+
+  const scoped = await getPartnerReport(orgId, base.from, base.to, partnerId);
+  const whole = await getPartnerReport(orgId, base.from, base.to);
+  const rows = scoped.rows.map((r) => strip(r as unknown as Record<string, unknown>));
+  console.log(`now:      ${rows.length} row(s), rate ${scoped.rate.rate} (${scoped.rate.source})`);
+  check("lookup rate unchanged between the two runs", scoped.rate.rate === base.rate && scoped.rate.source === base.rateSource,
+        `baseline ${base.rate} (${base.rateSource}) vs now ${scoped.rate.rate} (${scoped.rate.source})`);
+  check("⭐ Q10: pml's rows are identical before and after", JSON.stringify(rows) === JSON.stringify(base.rows),
+        `baseline ${JSON.stringify(base.rows)}\n        now      ${JSON.stringify(rows)}`);
+  check("⭐ F2: scoping the report by pml's partner id == filtering the whole report to pml",
+        JSON.stringify(scoped.rows) === JSON.stringify(whole.rows.filter((r) => r.partner_slug === "pml")));
+
+  // F3: the resolver's EXACT WHERE, with key 77's copied hash. Same text as
+  // resolveReportToken minus the hash parameter (the plaintext is the partner's).
+  const resolved = (await db.execute(sql`
+    SELECT p.id, p.slug
+    FROM partners p
+    WHERE p.report_token_hash = ${base.keyHash}
+      AND p.status = 'active'
+      AND (
+        NOT EXISTS (SELECT 1 FROM partner_keys k WHERE k.partner_id = p.id)
+        OR EXISTS (SELECT 1 FROM partner_keys k WHERE k.partner_id = p.id AND k.sandbox = false)
+      )
+    LIMIT 1
+  `)) as unknown as { id: number; slug: string }[];
+  check("⭐ F3: the resolver's WHERE with key 77's copied hash returns pml's partner", resolved[0]?.id === partnerId && resolved[0]?.slug === "pml", JSON.stringify(resolved));
+  check("Q10: the hash on the partner is byte-identical to the key's", pm[0].report_token_hash === base.keyHash);
+
+  console.log(failures === 0 ? "\nAll checks passed. Owner step: open pml's live report link and confirm it renders." : `\n${failures} check(s) FAILED.`);
   await pgConn.end();
+  if (failures > 0) process.exitCode = 1;
 }
 main().catch(async (e) => { console.error(e); await pgConn.end(); process.exit(1); });
 ```
 
-- [ ] **Step 2: Capture the baseline (prod, read-only) — run this BEFORE 0200 is applied to prod**
+⚠️ `scripts/partners-phase1-exit-check.ts` imports `PARTNER_CAN_HAVE_LINK`'s text as a literal on purpose: the baseline checkout does not have Task 2's module. Task 2 Step 3 must keep `PARTNER_CAN_HAVE_LINK` byte-identical to the fragment above, and `scripts/test-partner-report-token-db.ts` check 3/4 exercises the module version.
 
-Run: `npx tsx --conditions=react-server scripts/partners-phase1-exit-check.ts --capture`
-Expected: `baseline written: 1 rows, 2026-10-01..<today>, link live=true`
+- [ ] **Step 2: Capture the baseline (prod, read-only, OLD code) — the morning of the prod apply, BEFORE `npm run db:migrate`**
 
-⚠️ `--compare` must be run with `TO` pinned to the baseline's `to` (the script reads `base.to` only to print it — before running `--compare` on a later day, re-capture is NOT allowed; instead pass the same `TO` by editing the constant to the baseline day, or run both on the same ET day). Simplest: capture in the morning window right before the apply, compare right after the deploy, same day.
+```bash
+cd /c/AFF/camman && git fetch -q origin main \
+  && git worktree add .claude/worktrees/partners-baseline origin/main --detach \
+  && cd .claude/worktrees/partners-baseline \
+  && cmd //c "mklink /J node_modules C:\\AFF\\camman\\node_modules" \
+  && cmd //c "mklink /H .env.local C:\\AFF\\camman\\.env.local" \
+  && cp ../partners-entity/scripts/partners-phase1-exit-check.ts scripts/ \
+  && npx tsx --conditions=react-server scripts/partners-phase1-exit-check.ts --capture
+```
+
+Expected: `baseline written: 1 row(s), 2026-10-01..<yesterday ET>, rate 0.001592 (ledger), key 77 link live=true`. (The old code's `getPartnerReport` accepts a key id, so this type-checks there; in the Phase 1 worktree the same call site is never executed because `--capture` is only ever run from the baseline checkout — `npx tsc` in the worktree still passes because `PML_KEY_ID` is a number.)
+
+Tear the baseline checkout down after `--compare` has passed: `cmd //c "rmdir node_modules"` → `rm .env.local` → `git worktree remove --force .claude/worktrees/partners-baseline`.
 
 - [ ] **Step 3: Commit**
 
@@ -265,6 +339,24 @@ main().catch(async (e) => { console.error(e); await pgConn.end(); process.exit(1
 
 Run: `DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" npx tsx --conditions=react-server scripts/test-partners-migration-db.ts`
 Expected: `✗ A1 partners has the 12 columns` (relation `partners` does not exist yet; the script may throw on the first query — either is the red).
+
+**F5 — dropping `partner_keys_org_slug_uniq`, what was checked (2026-10-09, read at `739ff7e1`).** Every lookup of a key by slug, and whether it assumes one row:
+
+| where | query | assumes one row? |
+|---|---|---|
+| `lib/intake/partner-key.ts` `resolvePartnerKey` | by `token` | n/a — token stays globally unique |
+| `lib/reporting/partner-report.ts` | joins `partner_keys` by `id` | no |
+| `lib/drip/intake-digest.ts` | joins `partner_keys` by `id` | no |
+| `lib/drip/enrichment.ts` | reads `lead_inbox.partner_slug` per lead (denormalized at capture) and derives the `<slug>-<tag>` group name from it | no — per-lead text, never a key lookup |
+| `lib/drip/groups.ts` | slug is a name component | no |
+| `lib/intake/capture.ts` | writes the key's slug onto `lead_inbox` / `lead_events` | no — two keys of one partner carry the same slug, so provenance stays right |
+| `scripts/backfill-partner-tag-groups.ts` | `lead_events … WHERE partner_slug = $PARTNER` | set semantics — fine |
+| `scripts/partner-report-cost-proof.ts` | `JOIN partner_keys k ON k.id = le.partner_key_id AND k.partner_slug = 'internal-test'` | no — join per lead event |
+| `scripts/test-intake-schema.ts` | `count(*) … WHERE partner_slug LIKE 'probe-%'` | counts — fine |
+| `scripts/drip-p5-proof-setup.ts` | `SELECT id, token FROM partner_keys WHERE partner_slug = 'internal-test'` → `existing[0]` | **yes** (fixture; picks an arbitrary key if internal-test ever gets a second one) |
+| `scripts/drip-p7-proof.ts` | `… WHERE org_id = … AND partner_slug = 'internal-test' LIMIT 1` | **yes** (fixture, same caveat) |
+
+No application code assumes one key per slug. The two fixture scripts take the first `internal-test` key; that partner has one key and the scripts issue/revoke on it, so they stay correct until someone adds a second internal-test key — noted in their headers in Task 6, not changed here. Safe to drop.
 
 - [ ] **Step 3: Write the migration**
 
@@ -750,6 +842,17 @@ git commit -m "feat(partners): signed report link and intake gate read the partn
 **Interfaces:**
 - Produces: `getPartnerReport(orgId, from, to, partnerId?: number)` — the 4th argument is now a **partner** id. `PartnerReportRow` gains `partner_id: number | null` and keeps `partner_key_id`, `partner_slug`, `partner_name` (now from `partners`, COALESCE'd to the key for an unassigned key).
 
+**F2 — every caller of the 4th argument (grep at `739ff7e1`, `getPartnerReport(` + `partnerKeyId`):**
+
+| caller | today | change |
+|---|---|---|
+| `app/partner-report/[token]/page.tsx` | passes `resolved.partnerKeyId` | → `resolved.partnerId` (Step 2) |
+| `app/api/reports/partners/route.ts` (internal) | `getPartnerReport(orgId, from, to)` — **no partner filter exists**; the internal page has no partner dropdown, and the Settings "Partner report" button links to `/reports/partners` without a parameter | none; the test below covers it at the function level |
+| `components/reports/partner-report-view.tsx` CSV | client-side from `rows`; no id | gains the Partner column on the internal view (Step 3) |
+| `scripts/drip-p7-proof.ts`, `scripts/partner-report-cost-proof.ts`, `scripts/partner-report-activity-proof.ts` | call with 3 arguments (and p7 with `resolved!.partnerKeyId`) | p7: `resolved!.partnerId` (its `ResolvedReportToken` field is renamed in Task 2); the other two are unchanged |
+
+**Test (F2):** `scripts/partners-phase1-exit-check.ts --compare` asserts `getPartnerReport(org, from, to, <pml partner id>).rows` deep-equals `getPartnerReport(org, from, to).rows.filter(r => r.partner_slug === "pml")`, i.e. filtering the internal report by pml returns the same rows as the scoped report, and the Q10 check asserts those rows equal the pre-0200 baseline.
+
 - [ ] **Step 1: Change the report**
 
 In `lib/reporting/partner-report.ts`:
@@ -1187,15 +1290,18 @@ git commit -m "docs(partners): partner entity, link on the partner, C2 additive-
 
 - [ ] **Step 1: Green on the PR.** `tsc`, `eslint` on changed files, `npm run check:guards` (the three new DB scripts import `_require-preview-db`; `partners-phase1-exit-check.ts` is read-only and has no write token), `scripts/test-route-map-coverage.ts`, `scripts/test-operator-permission-matrix.ts` (no new permission ids — Q9), the Task 1/2/4 preview tests, `verify-migration-integrity.ts` on the preview. PR title: `feat(partners): partner entity above partner_keys (0200, Phase 1 of partner attribution)`. PR body lists all of the above and the rollback target (latest `Production – camman` deployment id + sha from `gh api`).
 
-- [ ] **Step 2: STOP — prod migration proposal on card 869fem8bq.** Post: the 0200 SQL summary, "applied to camman-v2 on the PR preview, tests A1–A7/B1–B3 green", the revert script (`ALTER TABLE partner_keys DROP COLUMN partner_id; DROP TABLE partners; CREATE UNIQUE INDEX partner_keys_org_slug_uniq ON partner_keys (org_id, partner_slug);` — only valid while no key has been created under a partner), the window (05:00–06:00 UTC), and that the merge waits for the apply. **Wait for the owner's explicit go.**
+- [ ] **Step 2: STOP — prod migration proposal on card 869fem8bq.** Post: the 0200 SQL summary, "applied to camman-v2 on the PR preview, tests A1–A7/B1–B3 green", the revert script (`ALTER TABLE partner_keys DROP COLUMN partner_id; DROP TABLE partners; CREATE UNIQUE INDEX partner_keys_org_slug_uniq ON partner_keys (org_id, partner_slug);` — only valid while no key has been created under a partner), the window (**attended, any time before 12:00 UTC / 14:00 Warsaw** — F4), and that the merge waits for the apply. **Wait for the owner's explicit go.**
 
-- [ ] **Step 3: Apply (owner's go, morning window only).** From the worktree with `.env.local` (prod): `npx tsx --conditions=react-server scripts/partners-phase1-exit-check.ts --capture` (baseline), then `npm run db:migrate` (pending list must be exactly `0200_partners`), then `npx tsx scripts/verify-migration-integrity.ts` → `Migration integrity OK.`, then `SELECT count(*) FILTER (WHERE partner_id IS NULL) FROM partner_keys` → 0 and `SELECT id, slug, (report_token_hash IS NOT NULL) FROM partners ORDER BY id` → 4 rows, pml with a hash.
+- [ ] **Step 3: Apply (owner's go; attended; before 12:00 UTC).** In this order, the same morning:
+  1. Baseline with the OLD code (F1): Task 0 Step 2 — from the detached `partners-baseline` checkout of `origin/main`, `--capture`. Note the printed rate.
+  2. From `partners-entity` (`.env.local` = prod): `npm run db:migrate` — the pending list must be exactly `0200_partners`; then `npx tsx scripts/verify-migration-integrity.ts` → `Migration integrity OK.`
+  3. `SELECT count(*) FILTER (WHERE partner_id IS NULL) FROM partner_keys` → 0; `SELECT id, slug, status, (report_token_hash IS NOT NULL) AS link FROM partners ORDER BY id` → 4 rows (internal-test, pml, docs-curl-verify, bsd), pml with `link = true`.
 
 - [ ] **Step 4: Merge and deploy.** `gh pr merge --squash`; confirm the `Production – camman` deployment for the merge sha reaches `success`; `git rev-parse origin/main` equals the deployed sha.
 
-- [ ] **Step 5: Exit checks (prod, read-only).**
-  - `npx tsx --conditions=react-server scripts/partners-phase1-exit-check.ts --compare` → both PASS (Q10).
-  - Open pml's live link? **No** — the plaintext is the partner's. Instead: `SELECT p.id FROM partners p WHERE p.report_token_hash = (SELECT report_token_hash FROM partner_keys WHERE id = 77)` returns pml's partner, and the compare step above already proved `resolveReportToken`'s query shape on the preview.
+- [ ] **Step 5: Exit checks (prod, read-only), minutes after the capture, same morning.**
+  - From `partners-entity`: `npx tsx --conditions=react-server scripts/partners-phase1-exit-check.ts --compare` → all PASS: Q10 rows identical, rate unchanged (printed either way), F2 scoped == filtered, F3 the resolver's exact WHERE with key 77's copied hash returns pml's partner. Then tear down the `partners-baseline` checkout.
+  - **Owner step (F3):** the owner opens pml's live report link in a browser after the deploy and confirms it renders the same report. The plaintext is the partner's; nothing in this plan reads it.
   - `npx tsx --conditions=react-server scripts/partner-report-cost-proof.ts` → 12/12; `scripts/partner-report-activity-proof.ts` → all pass.
   - `npx tsx scripts/check-intake-hourly-invariant.ts` → passes (intake + digest unchanged).
   - Authenticated smoke: `GET /api/partners` → 200 with 4 partners (pml: `report_link_active true`, `report_show_revenue true`, 1 key); `GET /api/reports/partners?from=<today>&to=<today>` → 200 with `partner_name` on each row; `GET /api/partner-keys/77/report-link` → 404 (route gone).

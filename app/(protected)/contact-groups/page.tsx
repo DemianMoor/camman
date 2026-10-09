@@ -64,6 +64,10 @@ type ContactGroup = {
   created_at: string;
   org_id: string;
   contact_count: number;
+  // Partner attribution link (migration 0201) + the system marker (C4).
+  partner_id: number | null;
+  partner_name: string | null;
+  system_role: "drip_intake" | "drip_sandbox" | null;
   // Lifecycle overrides (migration 0187); null = inherit the org value.
   freeze_after_messages: number | null;
   freeze_cadence_days: number | null;
@@ -254,7 +258,14 @@ export default function ContactGroupsPage() {
 
   async function handleEdit(values: ContactGroupFormValues) {
     if (!editing) return;
-    const { contact_group_id: _omit, ...patch } = values;
+    const { contact_group_id: _omit, partner_id, ...rest } = values;
+    // The partner link travels only when this viewer may change it, the group
+    // is not locked (drip pipeline / system group — the API refuses those even
+    // unchanged), and it actually changed: a plain rename must not 403 / 409.
+    const linkChanged = (partner_id ?? null) !== (editing.partner_id ?? null);
+    const mayLink =
+      can("partner_keys.manage") && !editing.system_role && !editing.contact_group_id.startsWith("drip:");
+    const patch = mayLink && linkChanged ? { ...rest, partner_id: partner_id ?? null } : rest;
     const result = await updateApi.execute(
       `/api/contact-groups/${editing.id}`,
       {
@@ -307,6 +318,26 @@ export default function ContactGroupsPage() {
           row.original.description ? (
             <span className="line-clamp-2 max-w-md text-sm text-muted-foreground">
               {row.original.description}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+      },
+      {
+        // Partner attribution link (migration 0201). A drip partner×tag group
+        // is linked by the pipeline (F3); a system group never is (C4).
+        id: "partner",
+        header: "Partner",
+        enableSorting: false,
+        cell: ({ row }) =>
+          row.original.system_role ? (
+            <Badge variant="outline">system</Badge>
+          ) : row.original.partner_name ? (
+            <span className="text-sm">
+              {row.original.partner_name}
+              {row.original.contact_group_id.startsWith("drip:") ? (
+                <span className="ml-1 text-xs text-muted-foreground">drip</span>
+              ) : null}
             </span>
           ) : (
             <span className="text-muted-foreground">—</span>
@@ -576,6 +607,11 @@ export default function ContactGroupsPage() {
             groupId={editing.id}
             orgThresholds={orgThresholds ?? undefined}
             canConfigureLifecycle={mayConfigureLifecycle}
+            partnerLock={
+              editing.system_role ? "system" : editing.contact_group_id.startsWith("drip:") ? "drip" : null
+            }
+            canChangePartner={can("partner_keys.manage")}
+            canViewPartners={can("partner_keys.view")}
             initialValues={{
               name: editing.name,
               contact_group_id: editing.contact_group_id,
@@ -585,6 +621,7 @@ export default function ContactGroupsPage() {
               freeze_cadence_days: editing.freeze_cadence_days,
               suppress_after_days: editing.suppress_after_days,
               suppress_min_freeze_messages: editing.suppress_min_freeze_messages,
+              partner_id: editing.partner_id,
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}

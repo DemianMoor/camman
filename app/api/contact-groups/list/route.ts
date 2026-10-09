@@ -78,6 +78,13 @@ export async function GET(req: NextRequest) {
         // Returned so the campaign form's Freeze note can show the effective
         // cadence of the SELECTED groups without a second round trip.
         freeze_cadence_days: contact_groups.freeze_cadence_days,
+        // Partner attribution link (migration 0201) + the system marker (C4),
+        // for the Partner column and the read-only states of the group form.
+        partner_id: contact_groups.partner_id,
+        system_role: contact_groups.system_role,
+        partner_name: drizzleSql<string | null>`(
+          select p."name" from "partners" p where p."id" = "contact_groups"."partner_id"
+        )`,
         // Distinct contacts that carry this tag. Replaces the previous
         // segment_count (count of segments in this group), which is moot
         // after the 0031 flip — groups are on contacts now, not segments.

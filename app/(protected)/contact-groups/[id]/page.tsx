@@ -70,6 +70,10 @@ type ContactGroup = {
   freeze_cadence_days: number | null;
   suppress_after_days: number | null;
   suppress_min_freeze_messages: number | null;
+  // Partner attribution link (migration 0201) + the system marker (C4).
+  partner_id: number | null;
+  partner_name: string | null;
+  system_role: "drip_intake" | "drip_sandbox" | null;
   /** The org defaults, returned alongside the row for the "Effective: N" hints. */
   org_thresholds?: OrgThresholds;
 };
@@ -274,7 +278,14 @@ export default function ContactGroupDetailPage() {
 
   async function handleEdit(values: ContactGroupFormValues) {
     if (!group) return;
-    const { contact_group_id: _omit, ...patch } = values;
+    const { contact_group_id: _omit, partner_id, ...rest } = values;
+    // The partner link travels only when this viewer may change it, the group
+    // is not locked (drip pipeline / system group — the API refuses those even
+    // unchanged), and it actually changed: a plain rename must not 403 / 409.
+    const linkChanged = (partner_id ?? null) !== (group.partner_id ?? null);
+    const mayLink =
+      can("partner_keys.manage") && !group.system_role && !group.contact_group_id.startsWith("drip:");
+    const patch = mayLink && linkChanged ? { ...rest, partner_id: partner_id ?? null } : rest;
     const result = await updateApi.execute(`/api/contact-groups/${group.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -485,6 +496,14 @@ export default function ContactGroupDetailPage() {
               {group.contact_group_id}
             </span>
             <StatusPill status={group.status} />
+            {group.system_role ? (
+              <Badge variant="outline">System group</Badge>
+            ) : group.partner_name ? (
+              <Badge variant="secondary">
+                Partner: {group.partner_name}
+                {group.contact_group_id.startsWith("drip:") ? " (drip)" : ""}
+              </Badge>
+            ) : null}
             {group.description ? (
               <span className="text-xs text-muted-foreground">
                 {group.description}
@@ -715,6 +734,11 @@ export default function ContactGroupDetailPage() {
           groupId={group.id}
           orgThresholds={group.org_thresholds}
           canConfigureLifecycle={can("lifecycle.configure")}
+          partnerLock={
+            group.system_role ? "system" : group.contact_group_id.startsWith("drip:") ? "drip" : null
+          }
+          canChangePartner={can("partner_keys.manage")}
+          canViewPartners={can("partner_keys.view")}
           initialValues={{
             name: group.name,
             contact_group_id: group.contact_group_id,
@@ -724,6 +748,7 @@ export default function ContactGroupDetailPage() {
             freeze_cadence_days: group.freeze_cadence_days,
             suppress_after_days: group.suppress_after_days,
             suppress_min_freeze_messages: group.suppress_min_freeze_messages,
+            partner_id: group.partner_id,
           }}
           onSubmit={handleEdit}
           onCancel={() => setEditOpen(false)}

@@ -1056,6 +1056,20 @@ export const contact_groups = pgTable(
     freeze_cadence_days: smallint("freeze_cadence_days"),
     suppress_after_days: smallint("suppress_after_days"),
     suppress_min_freeze_messages: smallint("suppress_min_freeze_messages"),
+    // Partner attribution (migration 0201, ruling R1): the partner this group's
+    // contacts are credited to. NULL = not a partner entry. On a drip
+    // partner×tag group (contact_group_id LIKE 'drip:%') ONLY the pipeline
+    // sets it (owner fix F3); the group screen shows it read-only there.
+    // `partners` is declared later in this file — the arrow is lazy, so order
+    // does not matter.
+    partner_id: integer("partner_id").references(() => partners.id, {
+      onDelete: "restrict",
+    }),
+    // Ruling C4: the two system drip groups ("Drip intake" / "Drip sandbox")
+    // carry an explicit marker so the attribution resolver can exempt them
+    // from R3 without hard-coded ids. A system group can never be a partner
+    // entry (CHECK below).
+    system_role: text("system_role"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -1063,9 +1077,20 @@ export const contact_groups = pgTable(
   },
   (table) => [
     index("segment_groups_org_id_idx").on(table.org_id),
+    index("contact_groups_org_partner_idx")
+      .on(table.org_id, table.partner_id)
+      .where(sql`${table.partner_id} IS NOT NULL`),
     check(
       "contact_groups_status_check",
       sql`${table.status} IN ('active', 'archived')`,
+    ),
+    check(
+      "contact_groups_system_role_check",
+      sql`${table.system_role} IS NULL OR ${table.system_role} IN ('drip_intake', 'drip_sandbox')`,
+    ),
+    check(
+      "contact_groups_system_not_partner_check",
+      sql`${table.system_role} IS NULL OR ${table.partner_id} IS NULL`,
     ),
     check(
       "contact_groups_lifecycle_overrides_check",
@@ -4975,6 +5000,51 @@ export const partners = pgTable(
   ],
 );
 
+// Recalculation jobs for partner send attribution (migration 0201, recon
+// §5.3). A row is queued when a group's partner link changes; Phase 3's cron
+// consumes it (resumable, per campaign, inside the 300 s budget). Until then
+// rows accumulate as `queued` and nothing reads them.
+export const partner_attribution_recalcs = pgTable(
+  "partner_attribution_recalcs",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    contact_group_id: integer("contact_group_id")
+      .notNull()
+      .references(() => contact_groups.id, { onDelete: "cascade" }),
+    requested_at: timestamp("requested_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    requested_by: uuid("requested_by"),
+    /** 'link' (null → partner), 'unlink' (partner → null), 'relink' (partner → other), 'manual'. */
+    reason: text("reason").notNull(),
+    status: text("status").notNull().default("queued"),
+    campaigns_total: integer("campaigns_total"),
+    campaigns_done: integer("campaigns_done").notNull().default(0),
+    started_at: timestamp("started_at", { withTimezone: true }),
+    finished_at: timestamp("finished_at", { withTimezone: true }),
+    error: text("error"),
+  },
+  (table) => [
+    index("partner_attribution_recalcs_org_status_idx").on(
+      table.org_id,
+      table.status,
+      table.requested_at,
+    ),
+    index("partner_attribution_recalcs_group_idx").on(table.contact_group_id),
+    check(
+      "partner_attribution_recalcs_reason_check",
+      sql`${table.reason} IN ('link', 'unlink', 'relink', 'manual')`,
+    ),
+    check(
+      "partner_attribution_recalcs_status_check",
+      sql`${table.status} IN ('queued', 'running', 'done', 'failed')`,
+    ),
+  ],
+);
+
 export const partner_keys = pgTable(
   "partner_keys",
   {
@@ -5004,12 +5074,12 @@ export const partner_keys = pgTable(
     created_by: uuid("created_by"),
     rotated_at: timestamp("rotated_at", { withTimezone: true }),
     last_seen_at: timestamp("last_seen_at", { withTimezone: true }),
-    // The partner this key belongs to (0200). NULLABLE until the follow-up
-    // migration sets NOT NULL (ruling C2: additive leads code). Every code path
-    // that inserts a key writes it.
-    partner_id: integer("partner_id").references(() => partners.id, {
-      onDelete: "restrict",
-    }),
+    // The partner this key belongs to (0200). NOT NULL since 0201 (ruling C2:
+    // additive led code — the column shipped nullable + backfilled, every code
+    // path that inserts a key writes it, then the constraint followed).
+    partner_id: integer("partner_id")
+      .notNull()
+      .references(() => partners.id, { onDelete: "restrict" }),
     // Drip P7 — the partner's signed report link. SINCE 0200 THE LIVE COPY IS
     // ON `partners`; these four columns are dead copies kept until a later
     // destructive migration drops them. Opaque token, HASHED at rest exactly

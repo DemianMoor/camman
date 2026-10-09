@@ -4,31 +4,32 @@
 
 **Goal:** Link contact groups to partners (the attribution's one input), make a drip lead's partner-group membership date from its delivery, mark the two system drip groups, finish C2 with `SET NOT NULL`, and create the recalc job table Phase 3 will consume — with no send-path change and nothing Phase 3 cannot build on.
 
-**Architecture:** Two migrations. **0201** (schema, leads the batch): `SET NOT NULL` on `partner_keys.partner_id` behind an in-SQL zero-NULLs guard; `contact_groups.partner_id` (RESTRICT) + partial index; `contact_groups.system_role` marker (C4) backfilled onto `drip-intake` / `drip-sandbox`; the Q6 auto-link backfill (`pml-aca` → pml, `bsd-untagged` → bsd); `partner_attribution_recalcs`. **0202** (data): a backup table of the old stamps, then ONE `UPDATE` that sets every drip partner×tag membership's `created_at` to the lead's first delivery from that partner×tag (Q2). Code: the drip group helpers stamp delivery time and set the link/marker at creation; the group screen gets a partner select behind `partner_keys.manage`; a source-scan guard proves no send-path reader of the membership timestamp exists. Rows in `partner_attribution_recalcs` are written on link changes and consumed by nothing until Phase 3.
+**Architecture:** ONE migration, **0201** (schema): `SET NOT NULL` on `partner_keys.partner_id` behind an in-SQL zero-NULLs guard; `contact_groups.partner_id` (RESTRICT) + partial index; `contact_groups.system_role` marker (C4) backfilled onto `drip-intake` / `drip-sandbox`; the Q6 auto-link backfill (`pml-aca` → pml, `bsd-untagged` → bsd); `partner_attribution_recalcs`. The appearance repair (Q2) is **not a migration** (owner fix F1, 2026-10-09): it is an idempotent, re-runnable script with a dry-run mode that runs on prod only after the new enrichment code is deployed and one fresh pml lead is confirmed stamped at `received_at`, behind its own go. Code: the drip group helpers stamp delivery time and set the link/marker at creation; the group screen gets a partner select behind `partner_keys.manage` (locked read-only on drip partner×tag groups, F3); a source-scan guard proves no send-path reader of the membership timestamp exists. Rows in `partner_attribution_recalcs` are written on link changes and consumed by nothing until Phase 3.
 
 **Tech Stack:** Next.js 16 App Router, TypeScript, Drizzle (hand-authored SQL migrations + cloned snapshots), Zod, shadcn/ui, tsx proof scripts against the camman-v2 preview database.
 
-**Source of truth:** [docs/superpowers/specs/2026-10-08-partner-attribution-recon.md](../specs/2026-10-08-partner-attribution-recon.md) §2, §3, §5.3, §9.3, §9.5 (phase 2) and its **Approval** section (C2, C4, Q2, Q3, Q4, Q6, Q9, Q12). Phase 1 plan: [2026-10-09-partners-entity-phase1.md](2026-10-09-partners-entity-phase1.md). Where this plan and the recon body disagree, the Approval section wins.
+**Source of truth:** [docs/superpowers/specs/2026-10-08-partner-attribution-recon.md](../specs/2026-10-08-partner-attribution-recon.md) §2, §3, §5.3, §9.3, §9.5 (phase 2) and its **Approval** section (C2, C4, Q2, Q3, Q4, Q6, Q9, Q12), plus the owner's Phase 2 build fixes **F1–F5 (2026-10-09)** below. Phase 1 plan: [2026-10-09-partners-entity-phase1.md](2026-10-09-partners-entity-phase1.md). Where this plan and the recon body disagree, the Approval section and F1–F5 win.
 
 ## Global Constraints
 
-- **Gating (owner, 2026-10-08/09):** every prod migration and data write stops at the proposal and waits for an explicit go; preview (camman-v2, ref `fdzxzxayhknywvmrhjcj`) first; the prod apply is attended, any time before 12:00 UTC. Stop and report after this phase; Phase 3 needs its own go. **0202 is a production data write of ~15.8K rows** — it is proposed with the before counts below and applied only on the go.
-- **C2 (finished here):** `ALTER TABLE partner_keys ALTER COLUMN partner_id SET NOT NULL` is the FIRST statement of 0201 after `SET LOCAL lock_timeout`, behind a `DO $$` guard that raises if any NULL exists. Prod read **0 of 4 NULL** on 2026-10-09 10:0x UTC (after the 0200 backfill); Task 0 re-measures right before the apply.
+- **Gating (owner):** every prod migration and data write stops at the proposal and waits for an explicit go; preview (camman-v2, ref `fdzxzxayhknywvmrhjcj`) first; the prod apply is attended, any time before 12:00 UTC. This phase has **two prod gates**: (A) the 0201 apply; (B) the appearance-repair script, run only after the 0201 code is deployed and one fresh pml lead is confirmed stamped at `received_at`. Stop and report after this phase; Phase 3 needs its own go.
+- **F1 — the repair is a script, not a migration.** `scripts/repair-drip-membership-appearance.ts`: default = dry run (prints the counts); `--apply` fills the backup table, then updates. Re-runnable: a later run appends newly found rows to the backup (`ON CONFLICT DO NOTHING`, so an existing `old_created_at` is never overwritten) and repairs only rows still stamped after delivery. `--revert --apply` restores from the backup. Exit checks (Task 0 `--after`) run after the script. Listed in the preview-DB guard's `EXCLUSIONS` with the reason (it writes prod on purpose).
+- **F2 — `partners-phase2-measure.ts --before` runs on the PRE-0201 schema.** Its core numbers reference neither `contact_groups.system_role` nor `contact_groups.partner_id`: system groups are identified by `contact_group_id IN ('drip-intake','drip-sandbox')`, drip partner×tag groups by `contact_group_id LIKE 'drip:%'`, in BOTH modes (one predicate). `--after` additionally asserts the post-0201 state. **The real prod output (read-only, run on 2026-10-09) is pasted in the Proposal section below.**
+- **F3 — the link on drip partner×tag groups is locked.** For a group whose `contact_group_id LIKE 'drip:%'`, `PATCH … partner_id` → 409 `code: "drip_group"`, and the form shows the select read-only with "Set by the drip pipeline from the partner key — cannot be changed here." Only the pipeline (`ensurePartnerTagGroup`, 0201's backfill) sets it.
+- **F4 — auto-link match is an exact prefix comparison:** `left(g.name, length(p.slug) + 1) = p.slug || '-'` (never `LIKE`: `_` is a LIKE wildcard and slugs allow it), longest matching slug wins, in 0201 and its test.
+- **F5 — the Q6 exit check asserts the exact links** (`pml-aca` → partner slug `pml`, `bsd-untagged` → `bsd`), not a count. Form helper text: "Links this group's contacts to the partner for attribution. Reports update after a recalculation."
+- **C2 (finished here):** `ALTER TABLE partner_keys ALTER COLUMN partner_id SET NOT NULL` is the FIRST statement of 0201 after `SET LOCAL lock_timeout`, behind a `DO $$` guard that raises if any NULL exists. Prod read **0 of 4 NULL** on 2026-10-09; Task 0 re-measures right before the apply.
 - **C4:** the system drip groups are exempt from R3 via `contact_groups.system_role` (`'drip_intake'` / `'drip_sandbox'`), set by `ensureDripGroup` at creation and backfilled in 0201 by `contact_group_id IN ('drip-intake','drip-sandbox')` — never by hard-coded ids (113 / 114 in prod).
-- **Q2:** `contact_contact_groups.created_at` is REWRITTEN to the lead's first delivery for drip partner×tag groups; enrichment stamps delivery time going forward. No `appeared_at` column.
-- **Q3:** R3 uses strict `<`; R4 ties go to the lowest `contact_group_id`. (Both are Phase 3 resolver rules; this plan's measurements use the same strict `<`.)
-- **Q6:** drip `<slug>-<tag>` groups are auto-linked at creation; existing ones backfilled in 0201 (`pml-aca` → pml, and the `bsd-untagged` group created on 2026-10-08 → bsd).
-- **Q9:** changing a group's partner requires `partner_keys.manage`; `contact_groups.update` alone cannot.
+- **Q2:** `contact_contact_groups.created_at` is REWRITTEN to the lead's first delivery for drip partner×tag groups (by the script); enrichment stamps delivery time going forward. No `appeared_at` column.
+- **Q3:** R3 uses strict `<`; R4 ties go to the lowest `contact_group_id` (Phase 3 resolver rules; the measurements here use the same strict `<`).
+- **Q6:** drip `<slug>-<tag>` groups are auto-linked at creation; existing ones backfilled in 0201.
+- **Q9:** changing a (non-drip) group's partner requires `partner_keys.manage`; `contact_groups.update` alone cannot.
 - **Q12:** large-group recalcs are Phase 3's; here the link change only ENQUEUES a `partner_attribution_recalcs` row. No consumer yet.
-- **Measured on prod 2026-10-09 ~10:3x UTC (read-only, pml-aca = group 311, 15,785 members, every member has a `lead_events` row):**
-  - memberships stamped > 10 min after the lead's first delivery: **8,171** (the #311 backfill, unchanged since the recon);
-  - memberships stamped AFTER the first delivery at all: **15,785 = all of them** (enrichment stamps processing time, seconds later); max lag 1 h 23 m 38 s; stamped at-or-before: 0;
-  - **R3 count (members already in a non-drip, non-system group strictly before their first pml delivery): 73** — the recon measured **63** on 2026-10-08 against 14,180 members. It is a live count that grows with intake; the repair cannot move it (measured 73 against the current stamps AND against first delivery). The exit check is therefore **"R3 count after the repair == the count measured minutes before the apply, and == the count against first delivery"**, printed with both numbers — not the constant 63.
-  - drip groups: `113 drip-intake`, `114 drip-sandbox`, `311 drip:<org>:pml-aca`, `1129 drip:<org>:bsd-untagged`; partners `1 internal-test, 2 pml, 3 docs-curl-verify, 4 bsd`.
-- Prod migration ledger is at **0200**; this phase's migrations are **0201** (`when` 1794009600000) and **0202** (`when` 1794096000000). Hand-authored SQL + cloned snapshot + journal entry, as in Phase 1.
-- Prod `statement_timeout` is 120 s server-wide and binds `drizzle-kit migrate`; 0202's UPDATE touches ~15.8K rows of a 1.16M-row table through the PK — seconds, not minutes (the preview rehearsal in Task 3 times it).
+- **Measured on prod 2026-10-09 (read-only; the exact script output is in the Proposal section):** pml-aca = group 311, 15,785 members, every member has a `lead_events` row; **8,171** stamped > 10 min after first delivery (the #311 backfill); **15,785** (all) stamped after delivery at all (enrichment stamps processing time, seconds later); max lag 1 h 23 m 38 s; **R3 count 73** (the recon's 63 was 2026-10-08 on 14,180 members — a live count that grows with intake; the repair cannot move it: 73 against the current stamps and against first delivery). The exit check is **"R3 count after == the count measured minutes before the repair == the count against first delivery"**, printed, not the constant 63. Drip groups: `113 drip-intake`, `114 drip-sandbox`, `311 drip:<org>:pml-aca`, `1129 drip:<org>:bsd-untagged`; partners `1 internal-test, 2 pml, 3 docs-curl-verify, 4 bsd`.
+- Prod migration ledger is at **0200**; this phase's migration is **0201** (`when` 1794009600000). Hand-authored SQL + cloned snapshot + journal entry, as in Phase 1. (0202 stays free for Phase 3.)
+- Prod `statement_timeout` is 120 s server-wide; the repair UPDATE touches ~15.8K rows of a 1.16M-row table through the PK — seconds (the preview rehearsal in Task 3 times it); 0201 is milliseconds.
 - **Preview caveats (card 869fevxhb):** both Vercel projects run `db:migrate` on preview builds against the same preview DB (race); the preview DB had drifted on 0172 and was repaired by hand. Before trusting a preview failure, run drizzle-orm's `migrate()` directly to see the real error.
-- Work in a throwaway worktree off `origin/main` (`69a77635` or later); never touch the shared checkout's branch. `npm run check:guards` is a required CI check; a DB-writing script imports `./_require-preview-db` second.
+- Work in the throwaway worktree `.claude/worktrees/partners-phase2` (branch `feat/partners-phase2-plan` → the build continues on it), off `origin/main` `69a77635`; never touch the shared checkout's branch. `npm run check:guards` is a required CI check; a DB-writing script imports `./_require-preview-db` second, or is named in `EXCLUSIONS` with a reason.
 - Docs are part of done: `docs/03-data-model.md` (+ ERD), `docs/04-features/partner-lead-intake.md`, `docs/04-features/drip-partner-reporting.md`, the contact-groups feature doc, `docs/07-conventions.md`, `docs/CHANGELOG.md` (CRLF).
 
 ---
@@ -48,7 +49,13 @@ Grep at `origin/main` `69a77635`, every file under `lib/`, `app/`, `db/schema.ts
 | `app/api/contacts/list`, `app/api/contacts/[id]`, `app/(protected)/contacts/page.tsx`, `app/api/segments/[id]/*`, `app/api/contact-groups/list` | membership only |
 | **`app/api/contact-groups/[id]/contacts/route.ts` lines 27, 80, 105** | **`contact_contact_groups.created_at AS joined_at`** — the group's Contacts tab "joined" column and its sort. The ONLY reader. |
 
-`lib/sends/kickoff.ts`, `lib/sends/drain.ts`, `lib/sends/eligibility.ts`, `lib/campaign-tier.ts`, `lib/drip/scheduler.ts`, `lib/drip/send-one.ts`, `lib/drip/routing*.ts` do not reference the junction at all. `ccg.created_at`, `ccg2.created_at`, `contact_contact_groups.created_at` appear nowhere else. **Consequence:** 0202 changes what the Contacts tab shows as "joined" for drip partner groups (delivery time instead of processing/backfill time — the intended meaning) and nothing else. Task 6 turns this grep into a guard so it stays true.
+`lib/sends/kickoff.ts`, `lib/sends/drain.ts`, `lib/sends/eligibility.ts`, `lib/campaign-tier.ts`, `lib/drip/scheduler.ts`, `lib/drip/send-one.ts`, `lib/drip/routing*.ts` do not reference the junction at all. `ccg.created_at`, `ccg2.created_at`, `contact_contact_groups.created_at` appear nowhere else. **Consequence:** the repair changes what the Contacts tab shows as "joined" for drip partner groups (delivery time instead of processing/backfill time — the intended meaning) and nothing else. Task 6 turns this grep into a guard so it stays true.
+
+---
+
+## Proposal numbers (prod, read-only)
+
+Filled by Task 0 Step 2 with the verbatim output of `scripts/partners-phase2-measure.ts` run on 2026-10-09 against production on the pre-0201 schema. See the section at the end of this file: **"Measurement output 2026-10-09"**.
 
 ---
 
@@ -56,33 +63,35 @@ Grep at `origin/main` `69a77635`, every file under `lib/`, `app/`, `db/schema.ts
 
 | file | change |
 |---|---|
-| `scripts/partners-phase2-measure.ts` | **create** — read-only prod measurement + exit check (before / after) |
+| `scripts/partners-phase2-measure.ts` | **create** — read-only prod measurement + exit check (`--before` on the pre-0201 schema, `--after` after the repair) |
 | `db/migrations/0201_contact_group_partner_link.sql`, `db/migrations/meta/0201_snapshot.json`, `_journal.json` | **create / modify** |
-| `db/migrations/0202_drip_membership_appearance_repair.sql`, `db/migrations/meta/0202_snapshot.json`, `_journal.json` | **create / modify** (data migration + backup table) |
 | `db/schema.ts` | **modify** — `partner_keys.partner_id` notNull; `contact_groups.partner_id`, `contact_groups.system_role`; `partner_attribution_recalcs` |
+| `scripts/repair-drip-membership-appearance.ts` | **create** — the Q2 repair: dry run / `--apply` / `--revert --apply`; idempotent, re-runnable (F1) |
+| `scripts/test-preview-db-guard.ts` | **modify** — `EXCLUSIONS` gains the repair script with its reason |
 | `scripts/_partner-fixture.ts` | **create** — `createPartnerWithKey()` for every script that inserts a key |
 | 11 scripts: `test-drip-enrichment-schema`, `test-drip-geo-exclude-mode`, `test-drip-lifecycle`, `test-drip-routing-schema`, `test-drip-sends-schema`, `test-drip-unengaged-close`, `test-intake-hourly-db`, `test-intake-schema`, `test-registered-lane-consumers`, `verify-drip-enrichment-production`, `verify-drip-routing-production` | **modify** — use the fixture; `test-intake-schema` flips its "duplicate (org, partner_slug) ⇒ rejected" assertion (that index is gone since 0200 — the bar is RED on the preview today) |
 | `lib/drip/groups.ts` | **modify** — `ensureDripGroup` sets `system_role`; `ensurePartnerTagGroup` takes `partnerId`; `addContactsToGroup` takes `createdAt` |
 | `lib/drip/enrichment.ts` | **modify** — claim SELECT joins `partner_keys.partner_id`; the partner×tag membership is stamped `received_at` |
+| `scripts/backfill-partner-tag-groups.ts` | **modify** — passes the partner id `ensurePartnerTagGroup` now requires |
 | `lib/validators/contact-groups.ts` | **modify** — `partner_id` |
-| `app/api/contact-groups/[id]/route.ts` | **modify** — `partner_keys.manage` gate, org/archived/system checks, recalc row on change |
+| `app/api/contact-groups/[id]/route.ts` | **modify** — `partner_keys.manage` gate, org/archived/system/drip checks, recalc row on change |
 | `app/api/contact-groups/list/route.ts` | **modify** — `partner_id`, `partner_name`, `system_role` |
 | `app/(protected)/contact-groups/page.tsx` | **modify** — Partner column |
 | `app/(protected)/contact-groups/[id]/page.tsx` | **modify** — partner badge in the header; `partner_id` through the edit dialog |
-| `components/contact-groups/contact-group-form.tsx` | **modify** — Partner `<Select>` (plain; 4 partners) |
-| `scripts/test-0201-group-partner-link-db.ts`, `scripts/test-0202-appearance-repair-db.ts`, `scripts/test-drip-groups-stamping-db.ts`, `scripts/test-contact-group-partner-link-api.ts` | **create** — preview-only tests |
+| `components/contact-groups/contact-group-form.tsx` | **modify** — Partner `<Select>` (plain; read-only on drip groups) |
+| `scripts/test-0201-group-partner-link-db.ts`, `scripts/test-drip-membership-repair-db.ts`, `scripts/test-drip-groups-stamping-db.ts`, `scripts/test-contact-group-partner-link-api.ts` | **create** — preview-only tests |
 | `scripts/test-membership-timestamp-readers.ts` + `package.json` `check:guards` | **create / modify** — the proof as a guard |
 | docs listed above | **modify** |
 
 ---
 
-### Task 0: Measurement + exit-check script (read-only, prod)
+### Task 0: Measurement + exit-check script (read-only, prod; pre-0201 schema in `--before`)
 
 **Files:**
 - Create: `scripts/partners-phase2-measure.ts`
 
 **Interfaces:**
-- Produces: a read-only report, run three times — before the apply (`--before`, writes `%LOCALAPPDATA%/Temp/claude/partners-phase2-before.json`), after the apply (`--after`, compares and exits non-zero on any mismatch), and ad hoc. Every number below is what the owner reads in the proposal and the report.
+- Produces: a read-only report. `--before` writes `%LOCALAPPDATA%/Temp/claude/partners-phase2-before.json` and touches NO post-0201 column; `--after` re-measures with the same core predicate, compares, and asserts the post-0201 state (links by slug, markers, backup) — exits non-zero on any mismatch. No flag: print only.
 
 - [ ] **Step 1: Write the script**
 
@@ -96,16 +105,20 @@ import { db, sql as pgConn } from "@/db/client";
 
 // Partner attribution Phase 2 — measurements and the exit check. READ-ONLY.
 //
-//   --before   the morning of the apply, BEFORE `npm run db:migrate` (writes the baseline)
-//   --after    after the deploy: re-measures and compares
+//   (no flag)  print the core numbers (safe on any schema)
+//   --before   same, and write the baseline file — run on the PRE-0201 schema
+//              right before the repair (F2: this mode references neither
+//              contact_groups.system_role nor contact_groups.partner_id)
+//   --after    after the repair: re-measure, compare, and assert the post-0201
+//              state (exact links by slug, the markers, the backup table)
 //
-// The numbers (prod, 2026-10-09): pml-aca 15,785 members; 8,171 stamped > 10 min
-// after first delivery (the #311 backfill); 15,785 stamped after delivery at all;
-// R3 count 73 (63 in the recon on 10-08 — it grows with intake). The repair must
-// move the stamps and NOT the R3 count.
+// ONE predicate for both modes: system groups are contact_group_id IN
+// ('drip-intake','drip-sandbox'); drip partner×tag groups are
+// contact_group_id LIKE 'drip:%'. The match between a membership and its lead
+// events is the naming rule of lib/drip/groups.ts partnerTagGroupName, restated
+// in SQL so this script does not import the code it is checking.
 //
-//   npx tsx --conditions=react-server scripts/partners-phase2-measure.ts --before
-//   npx tsx --conditions=react-server scripts/partners-phase2-measure.ts --after
+//   npx tsx --conditions=react-server scripts/partners-phase2-measure.ts [--before|--after]
 
 const FILE = `${process.env.LOCALAPPDATA}/Temp/claude/partners-phase2-before.json`;
 type M = Record<string, number | string | null>;
@@ -115,11 +128,8 @@ function check(label: string, ok: boolean, detail = "") {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${ok || !detail ? "" : `\n        ${detail}`}`);
 }
 
-// One row per drip partner×tag membership with the lead's first delivery for
-// that EXACT group (the naming rule of lib/drip/groups.ts partnerTagGroupName,
-// restated in SQL so this script does not import app code it is checking).
 const MEMBERS = sql`
-  SELECT ccg.contact_id, ccg.contact_group_id, g.name AS group_name, g.partner_id, ccg.created_at AS stamped,
+  SELECT ccg.contact_id, ccg.contact_group_id, g.name AS group_name, ccg.created_at AS stamped,
          (SELECT min(le.received_at) FROM lead_events le
            WHERE le.contact_id = ccg.contact_id AND le.sandbox = false
              AND lower(le.partner_slug) || '-' || coalesce(nullif(lower(trim(le.interest_tag)), ''), 'untagged') = g.name) AS first_received
@@ -127,7 +137,15 @@ const MEMBERS = sql`
   JOIN contact_groups g ON g.id = ccg.contact_group_id
   WHERE g.contact_group_id LIKE 'drip:%'`;
 
-async function measure(): Promise<M> {
+// R3 (strict <, ruling Q3): a membership in a group that is neither a system
+// drip group nor a drip partner×tag group, stamped strictly before `at`.
+const r3 = (at: ReturnType<typeof sql>) => sql`count(*) FILTER (WHERE EXISTS (
+  SELECT 1 FROM contact_contact_groups o JOIN contact_groups og ON og.id = o.contact_group_id
+  WHERE o.contact_id = m.contact_id AND o.contact_group_id <> m.contact_group_id
+    AND og.contact_group_id NOT IN ('drip-intake', 'drip-sandbox') AND og.contact_group_id NOT LIKE 'drip:%'
+    AND o.created_at < ${at}))::int`;
+
+async function core(): Promise<M> {
   const r = (await db.execute(sql`
     WITH m AS (${MEMBERS})
     SELECT count(*)::int AS members,
@@ -137,49 +155,56 @@ async function measure(): Promise<M> {
            count(*) FILTER (WHERE stamped = first_received)::int AS stamped_at_delivery,
            count(*) FILTER (WHERE stamped < first_received)::int AS stamped_before_delivery,
            max(stamped - first_received)::text AS max_lag,
-           -- R3 (strict <, system groups exempt, partner-linked groups exempt): against the CURRENT stamp…
-           count(*) FILTER (WHERE EXISTS (
-             SELECT 1 FROM contact_contact_groups o JOIN contact_groups og ON og.id = o.contact_group_id
-             WHERE o.contact_id = m.contact_id AND o.contact_group_id <> m.contact_group_id
-               AND og.system_role IS NULL AND og.partner_id IS NULL AND og.contact_group_id NOT LIKE 'drip:%'
-               AND o.created_at < m.stamped))::int AS r3_against_stamp,
-           -- …and against first delivery (what the stamp becomes after 0202)
-           count(*) FILTER (WHERE EXISTS (
-             SELECT 1 FROM contact_contact_groups o JOIN contact_groups og ON og.id = o.contact_group_id
-             WHERE o.contact_id = m.contact_id AND o.contact_group_id <> m.contact_group_id
-               AND og.system_role IS NULL AND og.partner_id IS NULL AND og.contact_group_id NOT LIKE 'drip:%'
-               AND o.created_at < m.first_received))::int AS r3_against_delivery
+           ${r3(sql`m.stamped`)} AS r3_against_stamp,
+           ${r3(sql`m.first_received`)} AS r3_against_delivery,
+           (SELECT count(*) FROM partner_keys WHERE partner_id IS NULL)::int AS keys_null_partner,
+           (SELECT string_agg(id || ':' || contact_group_id || ':' || name, ' | ' ORDER BY id) FROM contact_groups
+             WHERE contact_group_id IN ('drip-intake', 'drip-sandbox') OR contact_group_id LIKE 'drip:%') AS drip_groups,
+           (SELECT string_agg(id || ':' || slug, ',' ORDER BY id) FROM partners) AS partners
     FROM m
   `)) as unknown as M[];
-  const g = (await db.execute(sql`
-    SELECT (SELECT count(*) FROM partner_keys WHERE partner_id IS NULL)::int AS keys_null_partner,
-           (SELECT string_agg(id || ':' || name || '→' || coalesce(partner_id::text, 'null') || '/' || coalesce(system_role, '-'), ' | ' ORDER BY id)
-              FROM contact_groups WHERE contact_group_id IN ('drip-intake','drip-sandbox') OR contact_group_id LIKE 'drip:%') AS drip_groups,
-           (SELECT count(*) FROM contact_groups WHERE system_role IS NOT NULL)::int AS system_groups,
-           (SELECT count(*) FROM contact_groups WHERE partner_id IS NOT NULL)::int AS linked_groups,
+  return r[0];
+}
+
+async function after(): Promise<M> {
+  const r = (await db.execute(sql`
+    SELECT (SELECT string_agg(g.name || '→' || coalesce(p.slug, 'null'), ',' ORDER BY g.name)
+              FROM contact_groups g LEFT JOIN partners p ON p.id = g.partner_id
+             WHERE g.contact_group_id LIKE 'drip:%') AS drip_links,
+           (SELECT string_agg(contact_group_id || '=' || coalesce(system_role, 'null'), ',' ORDER BY contact_group_id)
+              FROM contact_groups WHERE contact_group_id IN ('drip-intake', 'drip-sandbox')) AS markers,
+           (SELECT count(*) FROM contact_groups WHERE system_role IS NOT NULL AND partner_id IS NOT NULL)::int AS system_with_partner,
            (SELECT count(*) FROM partner_attribution_recalcs)::int AS recalc_rows,
-           (SELECT count(*) FROM ccg_stamp_backup_0202)::int AS backup_rows
-  `).catch(() => [{ keys_null_partner: -1, drip_groups: "(0201/0202 not applied: columns missing)", system_groups: -1, linked_groups: -1, recalc_rows: -1, backup_rows: -1 }])) as unknown as M[];
-  return { ...r[0], ...g[0] };
+           (SELECT count(*) FROM drip_membership_stamp_backup)::int AS backup_rows,
+           (SELECT count(*) FROM drip_membership_stamp_backup b
+              JOIN contact_contact_groups c ON c.contact_id = b.contact_id AND c.contact_group_id = b.contact_group_id
+             WHERE c.created_at <> b.new_created_at)::int AS backup_rows_not_applied
+  `)) as unknown as M[];
+  return r[0];
 }
 
 async function main() {
-  const m = await measure();
+  const m = await core();
   for (const [k, v] of Object.entries(m)) console.log(`  ${k}: ${v}`);
   if (process.argv.includes("--before")) {
     writeFileSync(FILE, JSON.stringify(m, null, 2));
     console.log(`\nbaseline written (${FILE})`);
   } else if (process.argv.includes("--after")) {
     const b = JSON.parse(readFileSync(FILE, "utf-8")) as M;
+    const a = await after();
+    for (const [k, v] of Object.entries(a)) console.log(`  ${k}: ${v}`);
     console.log("\n── exit checks ──");
-    check("0201: partner_keys.partner_id has 0 NULLs", m.keys_null_partner === 0);
-    check("0201: both system groups carry system_role", m.system_groups === 2, `${m.system_groups}`);
-    check("0201 (Q6): every drip partner×tag group is linked", String(m.drip_groups).split(" | ").filter((s) => s.includes("drip")).length >= 0 && m.linked_groups !== null && Number(m.linked_groups) >= 2, String(m.drip_groups));
-    check("⭐ 0202: no drip partner×tag membership is stamped after delivery any more", m.lag_positive === 0, `lag_positive=${m.lag_positive}`);
-    check("⭐ 0202: every membership is stamped exactly at first delivery", m.stamped_at_delivery === m.members && m.stamped_before_delivery === 0, `${m.stamped_at_delivery}/${m.members}, before=${m.stamped_before_delivery}`);
-    check("⭐ R3 count did NOT move (strict <, system + partner groups exempt)", m.r3_against_stamp === b.r3_against_delivery && m.r3_against_stamp === m.r3_against_delivery,
-          `before: against stamp ${b.r3_against_stamp}, against delivery ${b.r3_against_delivery}; after: ${m.r3_against_stamp} / ${m.r3_against_delivery}`);
-    check("0202: backup rows == rows that were repaired", m.backup_rows === b.lag_positive, `backup ${m.backup_rows} vs before lag_positive ${b.lag_positive}`);
+    check("0201 (C2): partner_keys.partner_id has 0 NULLs", m.keys_null_partner === 0);
+    check("0201 (C4): drip-intake=drip_intake, drip-sandbox=drip_sandbox", a.markers === "drip-intake=drip_intake,drip-sandbox=drip_sandbox", String(a.markers));
+    check("0201: no system group carries a partner", a.system_with_partner === 0);
+    check("⭐ 0201 (Q6, F5): exact links — bsd-untagged→bsd, pml-aca→pml", a.drip_links === "bsd-untagged→bsd,pml-aca→pml", String(a.drip_links));
+    check("⭐ repair: no drip partner×tag membership is stamped after delivery", m.lag_positive === 0, `lag_positive=${m.lag_positive}`);
+    check("⭐ repair: every membership is stamped exactly at first delivery", m.stamped_at_delivery === m.members && m.stamped_before_delivery === 0, `${m.stamped_at_delivery}/${m.members}, before=${m.stamped_before_delivery}`);
+    check("⭐ R3 count did NOT move (before == after == against delivery)",
+      m.r3_against_stamp === b.r3_against_stamp && m.r3_against_stamp === m.r3_against_delivery && b.r3_against_stamp === b.r3_against_delivery,
+      `before: stamp ${b.r3_against_stamp} / delivery ${b.r3_against_delivery}; after: stamp ${m.r3_against_stamp} / delivery ${m.r3_against_delivery}`);
+    check("repair: backup rows ≥ the rows that were repairable before, and every backup row is applied",
+      Number(a.backup_rows) >= Number(b.lag_positive) && a.backup_rows_not_applied === 0, `backup ${a.backup_rows} vs before lag_positive ${b.lag_positive}; not applied ${a.backup_rows_not_applied}`);
     console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
     if (failures > 0) process.exitCode = 1;
   }
@@ -188,17 +213,8 @@ async function main() {
 main().catch(async (e) => { console.error(e); await pgConn.end(); process.exit(1); });
 ```
 
-- [ ] **Step 2: Run it once now (read-only) and paste the output into the proposal**
-
-Run: `npx tsx --conditions=react-server scripts/partners-phase2-measure.ts`
-Expected (2026-10-09): `members 15785 … lag_over_10m 8171 … lag_positive 15785 … r3_against_stamp 73 … r3_against_delivery 73 … keys_null_partner 0`, and the `.catch` fallback line for the not-yet-applied columns.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add scripts/partners-phase2-measure.ts
-git commit -m "test(partners): phase 2 measurement + exit check (stamps, R3 count, link state)"
-```
+- [ ] **Step 2: Run it now (read-only, prod, no flag) and paste the verbatim output into the "Measurement output" section at the end of this file** — that is the Proposal's evidence (F2).
+- [ ] **Step 3: Commit** `git add scripts/partners-phase2-measure.ts docs/superpowers/plans/2026-10-09-partners-phase2-group-link-plan.md && git commit -m "test(partners): phase 2 measurement + exit check (pre-0201 schema in --before); proposal numbers"`.
 
 ---
 
@@ -232,6 +248,14 @@ function check(name: string, cond: boolean, detail = "") {
 const ROLLBACK = Symbol("rollback");
 const pgMessage = (e: unknown) => (e as { cause?: Error }).cause?.message ?? (e as Error).message;
 
+// The 0201 Q6 backfill statement, verbatim (F4: exact prefix, longest slug wins).
+const AUTOLINK = sql`
+  UPDATE contact_groups g SET partner_id = p.id FROM partners p
+  WHERE g.org_id = p.org_id AND g.contact_group_id LIKE 'drip:%' AND g.partner_id IS NULL AND g.system_role IS NULL
+    AND left(g.name, length(p.slug) + 1) = p.slug || '-'
+    AND NOT EXISTS (SELECT 1 FROM partners p2 WHERE p2.org_id = g.org_id AND p2.id <> p.id
+                      AND left(g.name, length(p2.slug) + 1) = p2.slug || '-' AND length(p2.slug) > length(p.slug))`;
+
 async function main() {
   // ── A. catalog ──────────────────────────────────────────────────────────
   const nn = (await db.execute(sql`SELECT is_nullable FROM information_schema.columns WHERE table_name = 'partner_keys' AND column_name = 'partner_id'`)) as unknown as { is_nullable: string }[];
@@ -242,7 +266,7 @@ async function main() {
   check("A3 partial index contact_groups_org_partner_idx WHERE partner_id IS NOT NULL", idx.some((i) => i.indexname === "contact_groups_org_partner_idx" && /WHERE \(partner_id IS NOT NULL\)/.test(i.indexdef)), idx.map((i) => i.indexname).join(","));
   check("A4 recalc indexes exist", ["partner_attribution_recalcs_org_status_idx", "partner_attribution_recalcs_group_idx"].every((n) => idx.some((i) => i.indexname === n)));
   const marks = (await db.execute(sql`SELECT contact_group_id, system_role FROM contact_groups WHERE contact_group_id IN ('drip-intake','drip-sandbox') ORDER BY 1`)) as unknown as { contact_group_id: string; system_role: string | null }[];
-  check("A5 (C4) drip-intake → drip_intake, drip-sandbox → drip_sandbox (when the groups exist here)",
+  check("A5 (C4) drip-intake → drip_intake, drip-sandbox → drip_sandbox (for the groups that exist here)",
     marks.every((m) => (m.contact_group_id === "drip-intake" ? m.system_role === "drip_intake" : m.system_role === "drip_sandbox")), JSON.stringify(marks));
   const rls = (await db.execute(sql`SELECT relrowsecurity FROM pg_class WHERE relname = 'partner_attribution_recalcs'`)) as unknown as { relrowsecurity: boolean }[];
   check("A6 RLS on partner_attribution_recalcs", rls[0]?.relrowsecurity === true);
@@ -252,37 +276,35 @@ async function main() {
     await db.transaction(async (tx) => {
       const org = (await tx.execute(sql`SELECT id FROM organizations ORDER BY created_at LIMIT 1`)) as unknown as { id: string }[];
       const orgId = org[0].id;
-      // B1 a key without a partner is refused now
       let notNull = false;
       await tx.execute(sql`SAVEPOINT s1`);
-      try {
-        await tx.execute(sql`INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash) VALUES (${orgId}::uuid, 'zz-nopartner', 'x', 'tok-zz-nopartner', 'h')`);
-      } catch (e) { notNull = /null value in column "partner_id"/.test(pgMessage(e)); await tx.execute(sql`ROLLBACK TO SAVEPOINT s1`); }
+      try { await tx.execute(sql`INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash) VALUES (${orgId}::uuid, 'zz-nopartner', 'x', 'tok-zz-nopartner', 'h')`); }
+      catch (e) { notNull = /null value in column "partner_id"/.test(pgMessage(e)); await tx.execute(sql`ROLLBACK TO SAVEPOINT s1`); }
       check("B1 a key without partner_id → 23502", notNull);
 
-      // B2 the Q6 backfill statement: longest slug wins; system groups and already-linked groups untouched
       const mk = async (slug: string) => ((await tx.execute(sql`INSERT INTO partners (org_id, slug, name) VALUES (${orgId}::uuid, ${slug}, ${slug}) RETURNING id`)) as unknown as { id: number }[])[0].id;
-      const pAb = await mk("zz-ab"); const pAbCd = await mk("zz-ab-cd"); const pOther = await mk("zz-other");
-      const grp = async (key: string, name: string, extra: ReturnType<typeof sql> = sql``) =>
-        ((await tx.execute(sql`INSERT INTO contact_groups (contact_group_id, org_id, name, status ${extra}) VALUES (${key}, ${orgId}::uuid, ${name}, 'active' ${extra ? sql`` : sql``}) RETURNING id`)) as unknown as { id: number }[])[0].id;
+      const pAb = await mk("zz-ab"); const pAbCd = await mk("zz-ab-cd"); const pOther = await mk("zz-other"); const pUnder = await mk("zz_u");
+      const grp = async (key: string, name: string) =>
+        ((await tx.execute(sql`INSERT INTO contact_groups (contact_group_id, org_id, name, status) VALUES (${key}, ${orgId}::uuid, ${name}, 'active') RETURNING id`)) as unknown as { id: number }[])[0].id;
       const g1 = await grp(`drip:${orgId}:zz-ab-cd-x`, "zz-ab-cd-x");
       const g2 = await grp(`drip:${orgId}:zz-ab-y`, "zz-ab-y");
-      const g3 = await grp(`zz-manual-ab-z`, "zz-ab-z"); // not a drip key → never auto-linked
+      const g3 = await grp(`zz-manual-ab-z`, "zz-ab-z");           // not a drip key → never auto-linked
       const g4 = await grp(`drip:${orgId}:zz-ab-w`, "zz-ab-w");
       await tx.execute(sql`UPDATE contact_groups SET partner_id = ${pOther} WHERE id = ${g4}`); // operator's choice must survive
-      await tx.execute(sql`
-        UPDATE contact_groups g SET partner_id = p.id FROM partners p
-        WHERE g.org_id = p.org_id AND g.contact_group_id LIKE 'drip:%' AND g.partner_id IS NULL AND g.system_role IS NULL
-          AND g.name LIKE p.slug || '-%'
-          AND NOT EXISTS (SELECT 1 FROM partners p2 WHERE p2.org_id = g.org_id AND p2.id <> p.id
-                            AND g.name LIKE p2.slug || '-%' AND length(p2.slug) > length(p.slug))`);
-      const got = (await tx.execute(sql`SELECT id, partner_id FROM contact_groups WHERE id IN (${g1}, ${g2}, ${g3}, ${g4}) ORDER BY id`)) as unknown as { id: number; partner_id: number | null }[];
+      const g5 = await grp(`drip:${orgId}:zzxu-t`, "zzxu-t");       // F4: 'zz_u' must NOT match 'zzxu-t' (underscore is not a wildcard here)
+      const g6 = await grp(`drip:${orgId}:zz_u-t`, "zz_u-t");       // …but DOES match its own slug
+      await tx.execute(AUTOLINK);
+      const got = (await tx.execute(sql`SELECT id, partner_id FROM contact_groups WHERE id IN (${g1}, ${g2}, ${g3}, ${g4}, ${g5}, ${g6}) ORDER BY id`)) as unknown as { id: number; partner_id: number | null }[];
       check("B2 longest slug wins: zz-ab-cd-x → zz-ab-cd", got[0].partner_id === pAbCd, JSON.stringify(got));
       check("B2b zz-ab-y → zz-ab", got[1].partner_id === pAb);
       check("B2c a non-drip key is never auto-linked", got[2].partner_id === null);
       check("B2d an already-linked group keeps the operator's partner", got[3].partner_id === pOther);
+      check("B2e (F4) 'zz_u' does not match 'zzxu-t' — exact prefix, not LIKE", got[4].partner_id === null);
+      check("B2f (F4) 'zz_u' matches 'zz_u-t'", got[5].partner_id === pUnder);
+      await tx.execute(AUTOLINK);
+      const again = (await tx.execute(sql`SELECT partner_id FROM contact_groups WHERE id = ${g1}`)) as unknown as { partner_id: number }[];
+      check("B2g idempotent", again[0].partner_id === pAbCd);
 
-      // B3 constraints
       let sysLinked = false;
       await tx.execute(sql`SAVEPOINT s2`);
       try { await tx.execute(sql`UPDATE contact_groups SET system_role = 'drip_intake', partner_id = ${pAb} WHERE id = ${g2}`); }
@@ -299,7 +321,6 @@ async function main() {
       catch (e) { restrict = /violates foreign key constraint/.test(pgMessage(e)); await tx.execute(sql`ROLLBACK TO SAVEPOINT s4`); }
       check("B3c deleting a linked partner is RESTRICTed", restrict);
 
-      // B4 recalc row shape
       const rc = (await tx.execute(sql`INSERT INTO partner_attribution_recalcs (org_id, contact_group_id, reason) VALUES (${orgId}::uuid, ${g1}, 'link') RETURNING status, campaigns_done`)) as unknown as { status: string; campaigns_done: number }[];
       check("B4 a recalc row starts queued with 0 done", rc[0].status === "queued" && rc[0].campaigns_done === 0, JSON.stringify(rc[0]));
       throw ROLLBACK;
@@ -312,7 +333,7 @@ async function main() {
 main().catch(async (e) => { console.error(e); await pgConn.end(); process.exit(1); });
 ```
 
-- [ ] **Step 2: Run it to verify it fails** (`relation "partner_attribution_recalcs" does not exist` / A1 is_nullable YES).
+- [ ] **Step 2: Run it to verify it fails** (`relation "partner_attribution_recalcs" does not exist` / A1 `is_nullable` YES).
 
 - [ ] **Step 3: Write the migration**
 
@@ -320,7 +341,9 @@ main().catch(async (e) => { console.error(e); await pgConn.end(); process.exit(1
 -- db/migrations/0201_contact_group_partner_link.sql
 -- Migration 0201: contact group → partner link (partner attribution Phase 2).
 --
--- Leads the batch (0201 + 0202 apply in one transaction).
+-- Leads the batch. The appearance repair is NOT here (owner fix F1): it is
+-- scripts/repair-drip-membership-appearance.ts, run on its own go after the
+-- enrichment code that stamps delivery time is deployed.
 SET LOCAL lock_timeout = '5s';
 --> statement-breakpoint
 
@@ -340,6 +363,9 @@ ALTER TABLE public.partner_keys ALTER COLUMN partner_id SET NOT NULL;
 --> statement-breakpoint
 
 -- ── R1: the link lives on the group ─────────────────────────────────────────
+-- ⚠️ On a drip partner×tag group (contact_group_id LIKE 'drip:%') ONLY the
+-- pipeline sets it (owner fix F3): ensurePartnerTagGroup at creation, and the
+-- backfill below. The group screen shows it read-only there.
 ALTER TABLE public.contact_groups
   ADD COLUMN partner_id integer REFERENCES public.partners(id) ON DELETE RESTRICT;
 --> statement-breakpoint
@@ -369,21 +395,23 @@ WHERE contact_group_id IN ('drip-intake', 'drip-sandbox') AND system_role IS NUL
 --> statement-breakpoint
 
 -- ── Q6: link the existing drip partner×tag groups to their partner ──────────
--- The group name is partnerTagGroupName(slug, tag) = '<slug>-<tag>'; slugs may
+-- The group name is partnerTagGroupName(slug, tag) = '<slug>-<tag>'. Exact
+-- prefix comparison (F4): `_` is a LIKE wildcard and slugs allow it. Slugs may
 -- contain '-', so the LONGEST matching slug in the org wins ('ab-cd-x' belongs
--- to 'ab-cd', not 'ab'). Idempotent: partner_id IS NULL only; an operator's
--- link is never overwritten. Prod: pml-aca → pml, bsd-untagged → bsd.
+-- to 'ab-cd', not 'ab'). Idempotent: partner_id IS NULL only. Prod (F5 exit
+-- check asserts exactly these): pml-aca → pml, bsd-untagged → bsd.
 UPDATE public.contact_groups g
 SET partner_id = p.id
 FROM public.partners p
 WHERE g.org_id = p.org_id
   AND g.contact_group_id LIKE 'drip:%'
   AND g.partner_id IS NULL AND g.system_role IS NULL
-  AND g.name LIKE p.slug || '-%'
+  AND left(g.name, length(p.slug) + 1) = p.slug || '-'
   AND NOT EXISTS (
     SELECT 1 FROM public.partners p2
     WHERE p2.org_id = g.org_id AND p2.id <> p.id
-      AND g.name LIKE p2.slug || '-%' AND length(p2.slug) > length(p.slug));
+      AND left(g.name, length(p2.slug) + 1) = p2.slug || '-'
+      AND length(p2.slug) > length(p.slug));
 --> statement-breakpoint
 
 -- ── §5.3: the recalc job table (consumed by Phase 3's cron; written from Phase 2's PATCH)
@@ -421,18 +449,13 @@ CREATE POLICY "partner_attribution_recalcs_select_own_org"
   USING (org_id = public.current_org_id());
 ```
 
-- [ ] **Step 4: `db/schema.ts`** — in `partner_keys`: `partner_id: integer("partner_id").notNull().references(() => partners.id, { onDelete: "restrict" })`. In `contact_groups` (declare `partners` before it or rely on the lazy reference): add `partner_id: integer("partner_id").references(() => partners.id, { onDelete: "restrict" })`, `system_role: text("system_role")`, index `contact_groups_org_partner_idx` on `(org_id, partner_id)` `.where(sql\`${table.partner_id} IS NOT NULL\`)`, checks `contact_groups_system_role_check`, `contact_groups_system_not_partner_check`. New table `partner_attribution_recalcs` with the columns above (`bigserial` → `bigserial("id", { mode: "number" }).primaryKey()`), its two indexes and two checks.
+- [ ] **Step 4: `db/schema.ts`** — in `partner_keys`: `partner_id: integer("partner_id").notNull().references(() => partners.id, { onDelete: "restrict" })`. In `contact_groups`: add `partner_id: integer("partner_id").references(() => partners.id, { onDelete: "restrict" })`, `system_role: text("system_role")`, index `contact_groups_org_partner_idx` on `(org_id, partner_id)` `.where(sql\`${table.partner_id} IS NOT NULL\`)`, checks `contact_groups_system_role_check`, `contact_groups_system_not_partner_check`. New table `partner_attribution_recalcs` (`bigserial("id", { mode: "number" }).primaryKey()` + the columns above, its two indexes and two checks). `partners` is declared after `contact_groups` in the file today — the `references(() => partners.id)` arrow is lazy, so no reordering is needed; add a one-line comment saying so.
 
-- [ ] **Step 5: Snapshot + journal** — clone `0200_snapshot.json` → `0201_snapshot.json` (`id` `0201a000-0201-4201-8201-000000000201`, `prevId` = 0200's id); `partner_keys.columns.partner_id.notNull = true`; `contact_groups`: + columns, + fk `contact_groups_partner_id_partners_id_fk` (restrict), + index with `where`, + the two checkConstraints; + table `public.partner_attribution_recalcs` (two fks, two indexes, two checks, policy `partner_attribution_recalcs_select_own_org`, `isRLSEnabled: true`). Journal: `{ "idx": 201, "version": "7", "when": 1794009600000, "tag": "0201_contact_group_partner_link", "breakpoints": true }`.
+- [ ] **Step 5: Snapshot + journal** — clone `0200_snapshot.json` → `0201_snapshot.json` (`id` `0201a000-0201-4201-8201-000000000201`, `prevId` = 0200's id); `partner_keys.columns.partner_id.notNull = true`; `contact_groups`: + columns, + fk `contact_groups_partner_id_partners_id_fk` (restrict), + index with `where`, + the two checkConstraints; + table `public.partner_attribution_recalcs` (two fks, two indexes, two checks, policy, `isRLSEnabled: true`). Journal: `{ "idx": 201, "version": "7", "when": 1794009600000, "tag": "0201_contact_group_partner_link", "breakpoints": true }`.
 
-- [ ] **Step 6: `npx tsc --noEmit`**, open the PR as a draft so the preview applies 0201 (and 0202, Task 3 — commit both before pushing, or push twice), then run Step 1's test → `All checks passed.` and `DATABASE_URL=<preview> npx tsx scripts/verify-migration-integrity.ts` → OK.
+- [ ] **Step 6: `npx tsc --noEmit`**, push the draft PR so the preview applies 0201, run Step 1's test → `All checks passed.`; `DATABASE_URL=<preview> npx tsx scripts/verify-migration-integrity.ts` → OK.
 
-- [ ] **Step 7: Commit**
-
-```bash
-git add db/migrations/0201_contact_group_partner_link.sql db/migrations/meta/0201_snapshot.json db/migrations/meta/_journal.json db/schema.ts scripts/test-0201-group-partner-link-db.ts
-git commit -m "feat(partners): migration 0201 — SET NOT NULL (C2), contact_groups.partner_id + system_role (C4), Q6 auto-link backfill, recalc job table"
-```
+- [ ] **Step 7: Commit** `git commit -m "feat(partners): migration 0201 — SET NOT NULL (C2), contact_groups.partner_id + system_role (C4), Q6 auto-link backfill (exact prefix), recalc job table"`.
 
 ---
 
@@ -443,7 +466,6 @@ git commit -m "feat(partners): migration 0201 — SET NOT NULL (C2), contact_gro
 - Modify: the 11 scripts in the file map (each `INSERT INTO partner_keys (…)` → `createPartnerWithKey(tx, …)`), plus `scripts/test-intake-schema.ts` lines 146–148.
 
 **Interfaces:**
-- Produces:
 
 ```ts
 // scripts/_partner-fixture.ts
@@ -478,126 +500,174 @@ export async function createPartnerWithKey(
 }
 ```
 
-- [ ] **Step 1:** write the helper; replace each direct insert (the grep `INSERT INTO partner_keys` over `scripts/` lists all 13 sites in 11 files; `test-intake-schema.ts` has 7, five of which are *rejection* probes that must keep inserting directly — they test CHECKs — and need `partner_id` added to their column list: use `(SELECT id FROM partners WHERE org_id = … AND slug = 'probe-a')` or the fixture's returned `partnerId`).
+- [ ] **Step 1:** write the helper; replace each direct insert (`grep -n "INSERT INTO partner_keys" scripts/` lists all sites in the 11 files; `test-intake-schema.ts`'s five *rejection* probes keep inserting directly — they test CHECKs — with `partner_id` added to their column list from the fixture's returned `partnerId`).
 - [ ] **Step 2:** `test-intake-schema.ts` 146–148: replace `expectReject(… "duplicate (org, partner_slug) ⇒ rejected" … "23505")` with an insert of a SECOND key under the same partner + `check("two keys of one partner share the slug (0200)", …)`.
-- [ ] **Step 3:** on the preview (0201 applied): run the 9 preview-only scripts (`test-intake-schema`, `test-intake-hourly-db`, `test-drip-enrichment-schema`, `test-drip-routing-schema`, `test-drip-sends-schema`, `test-drip-lifecycle`, `test-drip-unengaged-close`, `test-drip-geo-exclude-mode`, `test-registered-lane-consumers`) → all green. The two `verify-*-production` scripts are prod-writing probes (in `EXCLUSIONS`) — edit, type-check, do NOT run.
-- [ ] **Step 4: Commit** `git add scripts/_partner-fixture.ts scripts/test-*.ts scripts/verify-drip-*-production.ts && git commit -m "test(partners): shared partner fixture for every key-inserting script; slug-uniqueness assertion flipped (0200)"`.
+- [ ] **Step 3:** on the preview (0201 applied): run the 9 preview-only scripts → all green. The two `verify-*-production` scripts are prod-writing probes (in `EXCLUSIONS`) — edit, type-check, do NOT run.
+- [ ] **Step 4: Commit** `git commit -m "test(partners): shared partner fixture for every key-inserting script; slug-uniqueness assertion flipped (0200)"`.
 
 ---
 
-### Task 3: Migration 0202 — appearance = delivery for drip partner×tag memberships
+### Task 3: The appearance repair script (F1) — dry run, apply, revert; idempotent and re-runnable
 
 **Files:**
-- Create: `db/migrations/0202_drip_membership_appearance_repair.sql`, `db/migrations/meta/0202_snapshot.json`
-- Modify: `db/migrations/meta/_journal.json` (`idx 202`, `when 1794096000000`, tag `0202_drip_membership_appearance_repair`)
-- Test: `scripts/test-0202-appearance-repair-db.ts`
+- Create: `scripts/repair-drip-membership-appearance.ts`
+- Modify: `scripts/test-preview-db-guard.ts` (`EXCLUSIONS` entry: `{ file: "repair-drip-membership-appearance.ts", reason: "Phase 2 Q2 data repair; writes prod on the owner's go, dry-run by default, backs up every stamp it changes" }`)
+- Test: `scripts/test-drip-membership-repair-db.ts` (preview, rolled back)
 
-**The statements (exact):**
+**The script (exact):**
 
-```sql
--- db/migrations/0202_drip_membership_appearance_repair.sql
--- Migration 0202: appearance = delivery (ruling Q2). DATA.
---
--- The #311 backfill stamped 8,171 pml-aca memberships up to 1 h 24 m after the
--- lead arrived, and enrichment has always stamped processing time (seconds
--- after). R4 reads "appeared" off this stamp, so a drip partner×tag membership
--- must carry the lead's FIRST DELIVERY from that partner×tag. The old stamps are
--- kept in a backup table (the revert source) until the owner approves dropping it.
---
--- Scope: memberships of groups keyed 'drip:%' that are not system groups, where
--- the stamp is later than the first matching lead_events.received_at. The match
--- is the naming rule of lib/drip/groups.ts partnerTagGroupName:
--- lower(slug) || '-' || (lower(trim(tag)) or 'untagged') = group name.
--- Idempotent: a second run finds no row with created_at > first delivery.
--- Prod 2026-10-09: 15,785 rows qualify (8,171 of them > 10 min late).
-SET LOCAL lock_timeout = '5s';
---> statement-breakpoint
+```ts
+// scripts/repair-drip-membership-appearance.ts
+import "./_env-preload";
+import { sql, type SQL } from "drizzle-orm";
 
-CREATE TABLE IF NOT EXISTS public.ccg_stamp_backup_0202 AS
-SELECT ccg.contact_id, ccg.contact_group_id, ccg.created_at AS old_created_at, fr.first_received AS new_created_at, now() AS backed_up_at
-FROM public.contact_contact_groups ccg
-JOIN (
+import { db, sql as pgConn } from "@/db/client";
+import type { DbOrTx } from "@/lib/intake/partner-key";
+
+// Appearance = delivery (ruling Q2) for drip partner×tag memberships — the
+// Phase 2 data repair. PRODUCTION-WRITING ON PURPOSE (owner fix F1: a script,
+// not a migration; listed in scripts/test-preview-db-guard.ts EXCLUSIONS).
+//
+//   npx tsx --conditions=react-server scripts/repair-drip-membership-appearance.ts              dry run: prints the counts, writes nothing
+//   npx tsx --conditions=react-server scripts/repair-drip-membership-appearance.ts --apply      fills the backup, then updates
+//   npx tsx --conditions=react-server scripts/repair-drip-membership-appearance.ts --revert --apply   restores every backed-up stamp
+//
+// Why: the #311 backfill stamped 8,171 pml-aca memberships up to 1 h 24 m after
+// the lead arrived, and enrichment stamped processing time (seconds after) for
+// every other one — 15,785 of 15,785 on 2026-10-09. R4 reads "appeared" off
+// this stamp, so it must carry the lead's FIRST DELIVERY from that partner×tag.
+//
+// Scope: memberships of groups keyed 'drip:%' that are not the system groups
+// ('drip-intake' / 'drip-sandbox' by key — no dependency on 0201's marker),
+// stamped later than the first matching lead_events.received_at. The match is
+// the naming rule of lib/drip/groups.ts partnerTagGroupName, restated in SQL.
+//
+// Re-runnable: the backup takes ON CONFLICT DO NOTHING (an old_created_at is
+// never overwritten), the UPDATE touches only rows still stamped after their
+// delivery, so a later run appends the rows that arrived meanwhile and changes
+// nothing it already fixed. Runs on prod only AFTER the enrichment code that
+// stamps delivery time is deployed and one fresh pml lead is confirmed stamped
+// at received_at — otherwise new leads keep arriving late-stamped.
+
+export const BACKUP = "drip_membership_stamp_backup";
+
+/** Membership → first delivery for exactly that partner×tag group. */
+export const FIRST_DELIVERY: SQL = sql`
   SELECT ccg2.contact_id, ccg2.contact_group_id, min(le.received_at) AS first_received
-  FROM public.contact_contact_groups ccg2
-  JOIN public.contact_groups g ON g.id = ccg2.contact_group_id
-   AND g.contact_group_id LIKE 'drip:%' AND g.system_role IS NULL
-  JOIN public.lead_events le ON le.contact_id = ccg2.contact_id AND le.sandbox = false
+  FROM contact_contact_groups ccg2
+  JOIN contact_groups g ON g.id = ccg2.contact_group_id
+   AND g.contact_group_id LIKE 'drip:%'
+   AND g.contact_group_id NOT IN ('drip-intake', 'drip-sandbox')
+  JOIN lead_events le ON le.contact_id = ccg2.contact_id AND le.sandbox = false
    AND lower(le.partner_slug) || '-' || coalesce(nullif(lower(trim(le.interest_tag)), ''), 'untagged') = g.name
-  GROUP BY 1, 2
-) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
-WHERE ccg.created_at > fr.first_received;
---> statement-breakpoint
+  GROUP BY 1, 2`;
 
-ALTER TABLE public.ccg_stamp_backup_0202 ENABLE ROW LEVEL SECURITY;
---> statement-breakpoint
+export interface Counts { rows_to_repair: number; backfilled_rows: number; max_lag: string | null }
 
-UPDATE public.contact_contact_groups ccg
-SET created_at = b.new_created_at
-FROM public.ccg_stamp_backup_0202 b
-WHERE b.contact_id = ccg.contact_id
-  AND b.contact_group_id = ccg.contact_group_id
-  AND ccg.created_at > b.new_created_at;
+/** The before/after count query. */
+export async function countRepairable(dbc: DbOrTx): Promise<Counts> {
+  const r = (await dbc.execute(sql`
+    SELECT count(*)::int AS rows_to_repair,
+           count(*) FILTER (WHERE ccg.created_at > fr.first_received + interval '10 minutes')::int AS backfilled_rows,
+           max(ccg.created_at - fr.first_received)::text AS max_lag
+    FROM contact_contact_groups ccg
+    JOIN (${FIRST_DELIVERY}) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
+    WHERE ccg.created_at > fr.first_received`)) as unknown as Counts[];
+  return r[0];
+}
+
+/** Fill the backup (append-only), then repair. Returns what each step touched. */
+export async function repair(dbc: DbOrTx): Promise<{ backed_up_new: number; updated: number }> {
+  await dbc.execute(sql`
+    CREATE TABLE IF NOT EXISTS public.drip_membership_stamp_backup (
+      contact_id       uuid NOT NULL,
+      contact_group_id integer NOT NULL,
+      old_created_at   timestamptz NOT NULL,
+      new_created_at   timestamptz NOT NULL,
+      backed_up_at     timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (contact_id, contact_group_id))`);
+  await dbc.execute(sql`ALTER TABLE public.drip_membership_stamp_backup ENABLE ROW LEVEL SECURITY`);
+  const b = (await dbc.execute(sql`
+    INSERT INTO public.drip_membership_stamp_backup (contact_id, contact_group_id, old_created_at, new_created_at)
+    SELECT ccg.contact_id, ccg.contact_group_id, ccg.created_at, fr.first_received
+    FROM contact_contact_groups ccg
+    JOIN (${FIRST_DELIVERY}) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
+    WHERE ccg.created_at > fr.first_received
+    ON CONFLICT (contact_id, contact_group_id) DO NOTHING
+    RETURNING contact_id`)) as unknown as unknown[];
+  const u = (await dbc.execute(sql`
+    UPDATE contact_contact_groups ccg
+    SET created_at = b.new_created_at
+    FROM public.drip_membership_stamp_backup b
+    WHERE b.contact_id = ccg.contact_id AND b.contact_group_id = ccg.contact_group_id
+      AND ccg.created_at > b.new_created_at
+    RETURNING ccg.contact_id`)) as unknown as unknown[];
+  return { backed_up_new: b.length, updated: u.length };
+}
+
+/** Restore every backed-up stamp. The backup table is kept (dropped only on the owner's say-so). */
+export async function revert(dbc: DbOrTx): Promise<number> {
+  const r = (await dbc.execute(sql`
+    UPDATE contact_contact_groups ccg
+    SET created_at = b.old_created_at
+    FROM public.drip_membership_stamp_backup b
+    WHERE b.contact_id = ccg.contact_id AND b.contact_group_id = ccg.contact_group_id
+    RETURNING ccg.contact_id`)) as unknown as unknown[];
+  return r.length;
+}
+
+async function main() {
+  const apply = process.argv.includes("--apply");
+  const doRevert = process.argv.includes("--revert");
+  const ref = /postgres\.([a-z0-9]+):/.exec(process.env.DATABASE_URL ?? "")?.[1] ?? "(unknown)";
+  console.log(`target project ref: ${ref}   mode: ${doRevert ? "REVERT" : "repair"}${apply ? " (APPLY)" : " (dry run)"}`);
+  const before = await countRepairable(db);
+  console.log(`before: rows_to_repair=${before.rows_to_repair} backfilled_rows(>10 min)=${before.backfilled_rows} max_lag=${before.max_lag}`);
+  if (!apply) { console.log("dry run — nothing written. Re-run with --apply."); await pgConn.end(); return; }
+  if (doRevert) {
+    const n = await revert(db);
+    const after = await countRepairable(db);
+    console.log(`reverted ${n} stamp(s); now rows_to_repair=${after.rows_to_repair}`);
+  } else {
+    const t0 = Date.now();
+    const r = await db.transaction((tx) => repair(tx));
+    const after = await countRepairable(db);
+    console.log(`backed up ${r.backed_up_new} new row(s), updated ${r.updated} in ${Date.now() - t0} ms; now rows_to_repair=${after.rows_to_repair} (expect 0)`);
+    if (after.rows_to_repair !== 0) process.exitCode = 1;
+  }
+  await pgConn.end();
+}
+main().catch(async (e) => { console.error(e); await pgConn.end(); process.exit(1); });
 ```
 
-(The UPDATE reads the backup table it just wrote, so the set of rows that changed is exactly the set that can be reverted — one definition of scope, not two.)
+**Before / after (the same `countRepairable` query, by hand):** before (2026-10-09): `rows_to_repair 15785 | backfilled_rows 8171 | max_lag 01:23:38`; after `--apply`: `0 | 0 | NULL`; `SELECT count(*) FROM drip_membership_stamp_backup` == the before `rows_to_repair` (plus any rows that arrived late-stamped between the deploy and the run — there should be none once enrichment stamps delivery time, which is why the fresh-lead confirmation precedes the run).
 
-**Before / after count query (run by hand before the apply and after; Task 0 prints the same numbers):**
+**Revert:** `--revert --apply` runs the `revert()` statement above (`UPDATE … SET created_at = b.old_created_at FROM drip_membership_stamp_backup b …`); verify with the count query (`rows_to_repair` returns to the before number); `DROP TABLE drip_membership_stamp_backup` only after the owner confirms.
 
-```sql
-SELECT count(*) AS rows_to_repair,
-       count(*) FILTER (WHERE ccg.created_at > fr.first_received + interval '10 minutes') AS backfilled_rows,
-       max(ccg.created_at - fr.first_received) AS max_lag
-FROM public.contact_contact_groups ccg
-JOIN (
-  SELECT ccg2.contact_id, ccg2.contact_group_id, min(le.received_at) AS first_received
-  FROM public.contact_contact_groups ccg2
-  JOIN public.contact_groups g ON g.id = ccg2.contact_group_id
-   AND g.contact_group_id LIKE 'drip:%' AND g.system_role IS NULL
-  JOIN public.lead_events le ON le.contact_id = ccg2.contact_id AND le.sandbox = false
-   AND lower(le.partner_slug) || '-' || coalesce(nullif(lower(trim(le.interest_tag)), ''), 'untagged') = g.name
-  GROUP BY 1, 2
-) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
-WHERE ccg.created_at > fr.first_received;
--- BEFORE (2026-10-09 10:3x UTC): rows_to_repair 15785 | backfilled_rows 8171 | max_lag 01:23:38
--- AFTER:                         rows_to_repair 0     | backfilled_rows 0    | max_lag NULL
--- and: SELECT count(*) FROM ccg_stamp_backup_0202;  -- == the BEFORE rows_to_repair
-```
-
-**Revert (exact):**
-
-```sql
-UPDATE public.contact_contact_groups ccg
-SET created_at = b.old_created_at
-FROM public.ccg_stamp_backup_0202 b
-WHERE b.contact_id = ccg.contact_id AND b.contact_group_id = ccg.contact_group_id;
--- verify: the BEFORE count query returns rows_to_repair 15785 again;
--- then, and only then: DROP TABLE public.ccg_stamp_backup_0202;
-```
-
-- [ ] **Step 1: Write the failing test** (`scripts/test-0202-appearance-repair-db.ts`, preview, rolled back): seed a partner `zz-rep` + key, a drip group `drip:<org>:zz-rep-aca`, a contact, a `lead_events` row at T0, a membership stamped T0 + 50 min, a second contact whose membership is stamped at T0 exactly, a third whose group is a SYSTEM group (`system_role = 'drip_intake'`) with a late stamp; run the three 0202 statements' text; assert: contact 1's stamp == T0; contact 2 untouched; contact 3 untouched (system groups exempt); the backup holds exactly 1 row with `old_created_at = T0 + 50 min`; the revert statement restores it; the UPDATE run twice changes 0 rows. Also assert the preview apply's REAL effect after the deploy: `SELECT count(*) FROM ccg_stamp_backup_0202` ≥ 0 and the BEFORE query returns 0 (the preview has no drip memberships, so both are trivially 0 — say so in the output).
-- [ ] **Step 2:** run → fails (`relation "ccg_stamp_backup_0202" does not exist`).
-- [ ] **Step 3:** write the migration, snapshot (clone 0201 → 0202; the backup table is NOT added to `db/schema.ts` or the snapshot — it is a migration artifact, documented in 03-data-model as such), journal entry.
-- [ ] **Step 4:** push → preview applies → run the test → `All checks passed.`; `verify-migration-integrity.ts` OK; **time the UPDATE on the preview with the seeded rows and note it** (the prod run touches 15,785 rows through the PK; expect seconds).
-- [ ] **Step 5: Commit** `git commit -m "feat(partners): migration 0202 — drip partner×tag memberships dated at first delivery (Q2), with a backup table for the revert"`.
+- [ ] **Step 1: Write the failing test** (`scripts/test-drip-membership-repair-db.ts`, preview, ONE rolled-back transaction that imports `countRepairable`, `repair`, `revert`): seed partner `zz-rep` + key, group `drip:<org>:zz-rep-aca` (name `zz-rep-aca`), contact A with a `lead_events` row at T0 and a membership stamped T0 + 50 min; contact B with a membership stamped exactly T0 (its own lead event at T0); contact C in a group whose key is `drip-intake` (system) with a late stamp; contact D whose lead events are under slug `zz_rep` (underscore) — must not match `zz-rep-aca`. Assert: `countRepairable` = 1 before; `repair()` → `{ backed_up_new: 1, updated: 1 }`; A's stamp == T0; B, C, D untouched; the backup holds one row with `old_created_at = T0 + 50 min`; `repair()` again → `{ 0, 0 }` (idempotent); add contact E late-stamped → `repair()` → `{ 1, 1 }` and the backup has 2 rows with A's `old_created_at` unchanged (append-only); `revert()` → 2, A and E back to their old stamps; `countRepairable` = 2 again. Everything rolls back (the backup table too — it is created inside the transaction).
+- [ ] **Step 2:** run → fails (module not found).
+- [ ] **Step 3:** write the script + the `EXCLUSIONS` entry; `npm run check:guards` → green.
+- [ ] **Step 4:** run the test → `All checks passed.`; note the preview timing of `repair()` on the seeded rows. Run the DRY RUN against prod (read-only) and paste its line into the Gate B proposal.
+- [ ] **Step 5: Commit** `git commit -m "feat(drip): appearance repair script — drip partner×tag memberships dated at first delivery (Q2), dry-run/apply/revert, append-only backup"`.
 
 ---
 
 ### Task 4: Enrichment stamps delivery time; group helpers set the link and the marker
 
 **Files:**
-- Modify: `lib/drip/groups.ts`, `lib/drip/enrichment.ts`
+- Modify: `lib/drip/groups.ts`, `lib/drip/enrichment.ts`, `scripts/backfill-partner-tag-groups.ts`
 - Test: `scripts/test-drip-groups-stamping-db.ts`
 
 **Interfaces:**
-- `ensureDripGroup(dbc, { orgId, sandbox })` — unchanged signature; the INSERT adds `system_role` (`'drip_sandbox'` / `'drip_intake'`) and `ON CONFLICT (contact_group_id) DO UPDATE SET system_role = EXCLUDED.system_role` (heals a pre-0201 row).
-- `ensurePartnerTagGroup(dbc, { orgId, partnerSlug, interestTag, partnerId })` — `partnerId: number` (NOT optional: ruling, "an optional field hides the call sites nobody updated"); INSERT sets `partner_id`; `ON CONFLICT … DO UPDATE SET partner_id = COALESCE(contact_groups.partner_id, EXCLUDED.partner_id)` — an operator's existing link wins.
+- `ensureDripGroup(dbc, { orgId, sandbox })` — unchanged signature; the INSERT adds `system_role` and `ON CONFLICT (contact_group_id) DO UPDATE SET system_role = EXCLUDED.system_role` (heals a pre-0201 row).
+- `ensurePartnerTagGroup(dbc, { orgId, partnerSlug, interestTag, partnerId })` — `partnerId: number` (NOT optional — an optional field hides the call sites nobody updated); INSERT sets `partner_id`; `ON CONFLICT … DO UPDATE SET partner_id = COALESCE(contact_groups.partner_id, EXCLUDED.partner_id)`.
 - `addContactsToGroup(dbc, { orgId, groupId, contactIds, createdAt? })` — `createdAt?: Date | string`; when given, every VALUES row carries it; `ON CONFLICT DO NOTHING` keeps the first delivery.
-- `lib/drip/enrichment.ts`: the claim SELECT (line ~141) adds `k.partner_id` via `JOIN partner_keys k ON k.id = li.partner_key_id`; the partner×tag call passes `partnerId: row.partner_id` and `createdAt: row.received_at`; the system-group membership keeps `now()`.
+- `lib/drip/enrichment.ts`: the claim SELECT joins `partner_keys k ON k.id = li.partner_key_id` and selects `k.partner_id`; the partner×tag call passes `partnerId: row.partner_id` and `createdAt: row.received_at`; the system-group membership keeps `now()`.
 
-- [ ] **Step 1: Write the failing test** (preview, rolled back): `ensureDripGroup` twice → one row, `system_role` set; `ensurePartnerTagGroup` with partner A → `partner_id = A`; again with partner B → still A; `addContactsToGroup` with `createdAt = T0` → `created_at = T0`; again with `createdAt = T0 + 1h` → still T0; an enrichment-shaped flow (insert `lead_inbox` + run the real `processLeadInbox`/batch function on the fixture) → the partner×tag membership's `created_at` equals the inbox row's `received_at` to the microsecond and the `drip-intake` membership's does not.
+- [ ] **Step 1: Write the failing test** (preview, rolled back): `ensureDripGroup` twice → one row, `system_role` set; `ensurePartnerTagGroup` with partner A → `partner_id = A`; again with partner B → still A; `addContactsToGroup` with `createdAt = T0` → `created_at = T0`; again with `createdAt = T0 + 1h` → still T0; then the real enrichment path on a seeded `lead_inbox` row with `received_at = T0` (call the batch function the way `scripts/test-drip-enrichment-schema.ts` does) → the partner×tag membership's `created_at` == T0 to the microsecond, the `drip-intake` membership's is not T0, the group's `partner_id` is the key's partner.
 - [ ] **Step 2:** run → fails on `system_role` / `partner_id` / the stamp.
-- [ ] **Step 3:** implement; `npx tsc --noEmit` enumerates every `ensurePartnerTagGroup` call site (enrichment + `scripts/backfill-partner-tag-groups.ts`, which must pass the partner id it already knows).
-- [ ] **Step 4:** run → passes; also `scripts/test-drip-enrichment-schema.ts` (preview) still green.
+- [ ] **Step 3:** implement; `npx tsc --noEmit` enumerates every `ensurePartnerTagGroup` call site (enrichment + `scripts/backfill-partner-tag-groups.ts`).
+- [ ] **Step 4:** run → passes; `scripts/test-drip-enrichment-schema.ts` (preview) still green.
 - [ ] **Step 5: Commit** `git commit -m "feat(drip): partner×tag membership stamped at delivery; groups carry the partner link and the system marker at creation (Q2, Q6, C4)"`.
 
 ---
@@ -608,18 +678,18 @@ WHERE b.contact_id = ccg.contact_id AND b.contact_group_id = ccg.contact_group_i
 - Modify: `lib/validators/contact-groups.ts`, `app/api/contact-groups/[id]/route.ts`, `app/api/contact-groups/list/route.ts`, `app/(protected)/contact-groups/page.tsx`, `app/(protected)/contact-groups/[id]/page.tsx`, `components/contact-groups/contact-group-form.tsx`
 - Test: `scripts/test-contact-group-partner-link-api.ts` (preview deployment, throwaway owner — the Phase 1 `test-partners-api.ts` recipe), visual check on the preview.
 
-**Rules (from the Approval):**
+**Rules:**
 - `partner_id: z.number().int().positive().nullable().optional()` on create and update.
-- PATCH: when `partner_id` is in the payload → `can(role, "partner_keys.manage")` else 403 (Q9) — the same shape as the `touchesLifecycle` gate; the partner must be in the org (404) and active (409 `partner_archived`); a group with `system_role` set → 409 `system_group`; when the stored value changes → in the SAME transaction insert `partner_attribution_recalcs (org_id, contact_group_id, requested_by, reason)` with `reason` = `'link'` (null → id), `'unlink'` (id → null) or `'relink'` (id → other id). Linking an **archived group** is allowed (history is the point).
-- List API: `partner_id`, `partner_name` (LEFT JOIN `partners`), `system_role`; list page: a **Partner** column (name, or `system` badge for a system group).
+- PATCH: when `partner_id` is in the payload → `can(role, "partner_keys.manage")` else 403 (Q9) — the same shape as the `touchesLifecycle` gate; the group's `contact_group_id LIKE 'drip:%'` → 409 `code: "drip_group"` (**F3**, even for an owner, even when the value is unchanged); a group with `system_role` set → 409 `code: "system_group"`; the partner must be in the org (404) and active (409 `partner_archived`); when the stored value changes → in the SAME transaction insert `partner_attribution_recalcs (org_id, contact_group_id, requested_by, reason)` with `reason` = `'link'` (null → id), `'unlink'` (id → null) or `'relink'` (id → other id). Linking an **archived group** is allowed (history is the point).
+- List API: `partner_id`, `partner_name` (LEFT JOIN `partners`), `system_role`; list page: a **Partner** column (name; `system` badge for a system group; `drip` chip on `drip:%` groups).
 - Detail header: a `Handshake` badge with the partner's name when linked; "System group" badge when `system_role` is set.
-- Form: a plain `<Select>` "Partner" with "No partner" + active partners from `GET /api/partners` (fetched only when `can("partner_keys.view")`); disabled with a hint when the viewer lacks `partner_keys.manage`; hidden with the text "System group — cannot be linked" when `system_role` is set. Helper text: "Links this group's contacts to the partner for attribution. Changing it queues a recalculation (Phase 3)."
+- Form: a plain `<Select>` "Partner" with "No partner" + active partners from `GET /api/partners` (fetched only when `can("partner_keys.view")`); disabled with a hint when the viewer lacks `partner_keys.manage`; on a drip partner×tag group the select is **read-only** with "Set by the drip pipeline from the partner key — cannot be changed here." (**F3**); hidden with "System group — cannot be linked" when `system_role` is set. Helper text (**F5**): "Links this group's contacts to the partner for attribution. Reports update after a recalculation."
 
-- [ ] **Step 1: Write the API test** (the Phase 1 recipe; fixtures: partner `zz-link`, partner `zz-link-2`, an archived partner, a plain group, a system group seeded by SQL): PATCH `{partner_id}` as owner → 200 + 1 recalc row `link`; PATCH to the other partner → `relink` row; PATCH `null` → `unlink` row; PATCH on the system group → 409 `system_group`; PATCH to the archived partner → 409 `partner_archived`; PATCH with a partner id from another org → 404; GET list → `partner_name` on the linked row; as an **operator** (demote the throwaway user's membership to `operator`, which lacks `partner_keys.manage`) → PATCH `{partner_id}` → 403 while PATCH `{description}` → 200. Teardown by id.
+- [ ] **Step 1: Write the API test** (fixtures: partners `zz-link`, `zz-link-2`, an archived partner, a plain group, a drip group keyed `drip:<org>:zz-link-aca` with `partner_id` set by SQL, a system group seeded by SQL): PATCH `{partner_id}` as owner on the plain group → 200 + 1 recalc row `link`; to the other partner → `relink`; `null` → `unlink`; on the drip group → 409 `drip_group` (also with the same value it already has); on the system group → 409 `system_group`; to the archived partner → 409 `partner_archived`; a partner id from another org → 404; GET list → `partner_name` on the linked row and on the drip row; as an **operator** (demote the throwaway membership) → PATCH `{partner_id}` → 403 while PATCH `{description}` → 200. Teardown by id.
 - [ ] **Step 2:** run → fails (400 unknown field).
 - [ ] **Step 3:** implement validators → route → list API → UI.
-- [ ] **Step 4:** `tsc`, `eslint` on the changed files, the API test → green; visual: `/contact-groups` with the Partner column, `/contact-groups/[id]` header badge, the Edit dialog's Partner select (and its disabled state as operator). Screenshots → card 869fem8bq.
-- [ ] **Step 5: Commit** `git commit -m "feat(contact-groups): partner link on the group — select behind partner_keys.manage, Partner column, header badge, recalc row on change (R1, Q9, Q12)"`.
+- [ ] **Step 4:** `tsc`, `eslint`, the API test → green; visual: `/contact-groups` with the Partner column, `/contact-groups/[id]` header badge, the Edit dialog's Partner select on a plain group and read-only on a drip group. Screenshots → card 869fem8bq.
+- [ ] **Step 5: Commit** `git commit -m "feat(contact-groups): partner link on the group — select behind partner_keys.manage, locked on drip groups, Partner column, header badge, recalc row on change (R1, Q9, Q12, F3)"`.
 
 ---
 
@@ -633,10 +703,10 @@ WHERE b.contact_id = ccg.contact_id AND b.contact_group_id = ccg.contact_group_i
 
 ```ts
 // scripts/test-membership-timestamp-readers.ts
-// contact_contact_groups.created_at MEANS "appeared" since 0202 (appearance =
-// delivery for drip partner groups), and Phase 3's resolver reads it for R3/R4.
-// Nothing on the send path or in the audience snapshot may read it: a reader
-// there would make a membership stamp change the audience, and the Phase 2
+// contact_contact_groups.created_at MEANS "appeared" (appearance = delivery for
+// drip partner groups since the Phase 2 repair), and Phase 3's resolver reads it
+// for R3/R4. Nothing on the send path or in the audience snapshot may read it:
+// a reader there would make a membership stamp change the audience, and the
 // repair rewrote 15,785 of them. This bar enumerates every reader from the
 // filesystem (docs/07-conventions.md: a list of "files I think read it" only
 // tests the author's imagination) and allows exactly the known ones.
@@ -671,7 +741,6 @@ for (const root of ROOTS) {
   }
 }
 console.log(hits.length ? `✗ unallowed readers of contact_contact_groups.created_at:\n  ${hits.join("\n  ")}` : "✓ no reader of contact_contact_groups.created_at outside the allowlist");
-// controls: the bar can go red, and the allowed file really does read it
 const allowedSrc = readFileSync(resolve(process.cwd(), "app/api/contact-groups/[id]/contacts/route.ts"), "utf-8");
 const control1 = READS_STAMP.test("select ccg.created_at as joined_at from contact_contact_groups ccg");
 const control2 = READS_STAMP.test(allowedSrc) && JUNCTION.test(allowedSrc);
@@ -682,37 +751,45 @@ console.log(failed === 0 ? "\nAll checks passed." : `\n${failed} check(s) FAILED
 if (failed > 0) process.exit(1);
 ```
 
-- [ ] **Step 2:** run `npx tsx scripts/test-membership-timestamp-readers.ts` → passes on the current tree (the audit table above is what it finds); add it to `check:guards`; `npm run check:guards` → green.
+- [ ] **Step 2:** run → passes on the current tree; add it to `check:guards`; `npm run check:guards` → green.
 - [ ] **Step 3: Commit** `git commit -m "test(guards): no reader of contact_contact_groups.created_at outside the Contacts tab"`.
 
 ---
 
 ### Task 7: Docs
 
-- `docs/03-data-model.md`: `partner_keys.partner_id` NOT NULL (0201); `contact_groups.partner_id` (RESTRICT, partial index), `system_role` + both CHECKs; `partner_attribution_recalcs`; `ccg_stamp_backup_0202` as a migration artifact (revert source, RLS on, dropped later on approval); ERD: `partners ||--o{ contact_groups : "attribution link (0201)"`, `contact_groups ||--o{ partner_attribution_recalcs`.
-- `docs/04-features/partner-lead-intake.md`: enrichment stamps the partner×tag membership at `received_at`; system groups' marker; auto-link at creation.
-- The contact-groups feature doc (`docs/04-features/contact-groups.md` or where §10f lives): the Partner link (who may set it, what it queues, archived groups allowed, system groups never), the Partner column.
+- `docs/03-data-model.md`: `partner_keys.partner_id` NOT NULL (0201); `contact_groups.partner_id` (RESTRICT, partial index; locked on drip groups), `system_role` + both CHECKs; `partner_attribution_recalcs`; `drip_membership_stamp_backup` as a script artifact (revert source, RLS on, append-only, dropped later on approval); ERD: `partners ||--o{ contact_groups : "attribution link (0201)"`, `contact_groups ||--o{ partner_attribution_recalcs`.
+- `docs/04-features/partner-lead-intake.md`: enrichment stamps the partner×tag membership at `received_at`; the system groups' marker; auto-link at creation; the repair script and its gating.
+- The contact-groups feature doc: the Partner link (who may set it, locked on drip groups, archived groups allowed, system groups never, what a change queues), the Partner column.
 - `docs/04-features/drip-partner-reporting.md`: a one-line pointer (no report change in this phase).
-- `docs/07-conventions.md`: **"contact_contact_groups.created_at means APPEARED (0202)"** — appearance = delivery for drip partner groups, the Contacts tab is the only reader, the guard; "R3 count is a live number" (63 on 10-08 → 73 on 10-09: measure before and after, assert equality, never a constant); the C4 marker rule (never hard-code 113/114); the longest-slug auto-link rule. Update "Last updated".
+- `docs/07-conventions.md`: **"contact_contact_groups.created_at means APPEARED"** — appearance = delivery for drip partner groups, the Contacts tab is the only reader, the guard; "R3 count is a live number" (63 on 10-08 → 73 on 10-09: measure before and after, assert equality, never a constant); the C4 marker rule (never hard-code 113/114); the exact-prefix longest-slug auto-link rule (F4); "a data repair of a hot table is a dry-run-first, append-only-backup script, not a migration" (F1). Update "Last updated".
 - `docs/CHANGELOG.md`: one line, newest-first, CRLF.
 - `npm run check:docs` → green. Commit.
 
 ---
 
-### Task 8: Ship — gated
+### Task 8: Ship — two gates
 
-- [ ] **Step 1: Green on the PR** (`tsc`, `eslint`, `check:docs`, `check:guards` incl. the new guard, route-map coverage, the preview tests of Tasks 1–5, `verify-migration-integrity` on the preview, the 9 preview-only scripts of Task 2). PR title: `feat(partners): group → partner link, appearance repair, SET NOT NULL (0201/0202, Phase 2 of partner attribution)`; body with the audit table, the before counts, the revert, the rollback target.
-- [ ] **Step 2: STOP — prod proposal on card 869fem8bq**: 0201 + 0202 apply in ONE batch (one transaction); the BEFORE counts from Task 0 (`--before` run that morning, pasted); the exact UPDATE and revert; "R3 before == after" as the exit check with the live number; the Contacts-tab consequence; that 0202 writes ~15.8K rows and keeps a backup. **Wait for the owner's explicit go.**
-- [ ] **Step 3: Apply (attended, before 12:00 UTC):** `partners-phase2-measure.ts --before` → `npm run db:migrate` (pending list exactly `0201…`, `0202…`) → verify by QUERY (never the exit code): `partner_keys.partner_id` NOT NULL; `system_role` on 113/114; `pml-aca → 2`, `bsd-untagged → 4`; `partner_attribution_recalcs` exists; `ccg_stamp_backup_0202` rows == the before `rows_to_repair`; the BEFORE query now returns 0; ledger max `when` = 1794096000000 with one row each for 0201 and 0202 → `verify-migration-integrity.ts` OK. Any mismatch → STOP before the merge, report, revert 0202 with the statement above if the owner says so.
+- [ ] **Step 1: Green on the PR** (`tsc`, `eslint`, `check:docs`, `check:guards` incl. the new guard, route-map coverage, the preview tests of Tasks 1–5, `verify-migration-integrity` on the preview, the 9 preview-only scripts of Task 2). PR title: `feat(partners): group → partner link, SET NOT NULL, enrichment stamps delivery, appearance-repair script (0201, Phase 2 of partner attribution)`; body with the audit table, the measurement output, the dry-run line, the revert, the rollback target.
+- [ ] **Step 2: STOP — Gate A proposal on card 869fem8bq:** 0201 only (schema; ms on 4 keys + 26 groups); the measurement output (`--before` of that morning, pre-0201 schema); that the repair is NOT in it. **Wait for the owner's go.**
+- [ ] **Step 3: Apply 0201 (attended, before 12:00 UTC):** `partners-phase2-measure.ts --before` → `npm run db:migrate` (pending list exactly `0201…`) → verify by QUERY: `partner_keys.partner_id` NOT NULL; `system_role` on 113/114; `pml-aca → pml`, `bsd-untagged → bsd` (by slug); `partner_attribution_recalcs` exists; ledger max `when` = 1794009600000 with one 0201 row → `verify-migration-integrity.ts` OK. Any mismatch → STOP before the merge, report.
 - [ ] **Step 4: Merge, deploy** (prod deployment on the merge sha, state success).
-- [ ] **Step 5: Exit checks:** `partners-phase2-measure.ts --after` → all PASS (lag_positive 0; every stamp == first delivery; **R3 unchanged**; backup == repaired); the group screen on prod: pml-aca shows partner pml, the system groups show the marker; `check-intake-hourly-invariant.ts` 0 breaks; **the next real pml lead**: `SELECT ccg.created_at = le.received_at FROM …` for the newest `lead_events` row → true (enrichment stamps delivery time); the Phase 1 proofs (`partner-report-cost-proof`, `partner-report-activity-proof`) still pass; screenshots → card.
-- [ ] **Step 6: Report and stop** before Phase 3 (0203 `partner_send_attributions`, the C3 stateless-lookback cron, the recalc worker that consumes `partner_attribution_recalcs`).
+- [ ] **Step 5: Confirm the enrichment stamp on a fresh lead:** wait for the next real pml lead (`SELECT ccg.created_at = le.received_at … ORDER BY le.received_at DESC LIMIT 1` on a lead received after the deploy) → `true`. Also the group screen on prod: pml-aca shows partner pml read-only, the system groups show the marker; Phase 1 proofs still pass.
+- [ ] **Step 6: STOP — Gate B proposal:** the dry-run line from prod that morning (`rows_to_repair`, `backfilled_rows`, `max_lag`), the fresh-lead confirmation, the exact `--apply` command, the revert command, "R3 before == after" as the exit check with the live numbers. **Wait for the owner's go.**
+- [ ] **Step 7: Run the repair (attended, before 12:00 UTC):** `partners-phase2-measure.ts --before` (fresh baseline, minutes before) → `repair-drip-membership-appearance.ts` (dry run, read the counts) → `--apply` → the script's own after-count must be 0 → `partners-phase2-measure.ts --after` → all PASS (lag_positive 0; every stamp == first delivery; **R3 unchanged**; exact links; markers; backup applied) → `check-intake-hourly-invariant.ts` 0 breaks → screenshots → card.
+- [ ] **Step 8: Report and stop** before Phase 3 (0202 `partner_send_attributions`, the C3 stateless-lookback cron, the recalc worker that consumes `partner_attribution_recalcs`).
 
 ---
 
 ## Self-review
 
-- Spec coverage: C2 → Task 1 (guard + SET NOT NULL) + Task 2 (fixture, 11 scripts); 0201 (§9.3) → Task 1; 0202 (§9.3, Q2) → Task 3 with the exact UPDATE, counts, revert; enrichment stamping → Task 4; Q6 auto-link → Tasks 1 (backfill) + 4 (at creation); C4 marker → Tasks 1 + 4, exempted in the measurements; group form/list/header → Task 5; Q9 → Task 5 gate; Q12 → the recalc row only; the owner's three demands (exact 0202 + counts + revert; the R3 exit check; the send-path proof) → Task 3, Task 0/Task 8 Step 5, the Proof section + Task 6.
-- Placeholders: none; every migration statement, query and test is written out.
-- Consistency: the naming rule in Task 0's `MEMBERS`, in 0202 and in `partnerTagGroupName` is the same expression; `system_role` values are `'drip_intake'`/`'drip_sandbox'` everywhere; `reason` values `link|unlink|relink|manual` in 0201's CHECK and Task 5's inserts; `createPartnerWithKey` returns `{ partnerId, keyId, token }` and Task 5's test uses it.
-- One deliberate deviation from the owner's wording: the exit check is **"R3 count unchanged by the repair and equal to the count against first delivery"**, with both numbers printed, instead of **"= 63"** — the count is live (73 today) and the literal 63 would fail against correct data.
+- Spec coverage: C2 → Task 1 (guard + SET NOT NULL) + Task 2; 0201 (§9.3) → Task 1; Q2 repair → Task 3 as a script (F1) with the exact statements, counts, revert, idempotency and re-runnability, gated after the fresh-lead confirmation; enrichment stamping → Task 4; Q6 auto-link → Tasks 1 (backfill, F4 exact prefix) + 4 (at creation), exit check by exact links (F5); C4 marker → Tasks 1 + 4, exempted by key in the measurements (F2); group form/list/header → Task 5 with the drip-group lock (F3) and the helper text (F5); Q9 → Task 5 gate; Q12 → the recalc row only; the owner's three original demands → Task 3, Task 0 / Task 8 Step 7, the Proof section + Task 6; F2's "paste the real output" → the Measurement section below.
+- Placeholders: none; every migration statement, query, script and test is written out.
+- Consistency: the naming rule in Task 0's `MEMBERS`, in `FIRST_DELIVERY` and in `partnerTagGroupName` is the same expression; system groups are identified by key (`drip-intake`/`drip-sandbox`) in both the measurement and the repair, and by `system_role` only in 0201's CHECKs and the PATCH; `reason` values `link|unlink|relink|manual`; `createPartnerWithKey` returns `{ partnerId, keyId, token }`; the backup table is `drip_membership_stamp_backup` everywhere.
+- Deliberate deviation from the owner's original wording, carried over: the R3 exit check is "unchanged by the repair and equal to the count against first delivery", with both numbers printed, not "= 63".
+
+---
+
+## Measurement output 2026-10-09
+
+(Filled by Task 0 Step 2 — verbatim `scripts/partners-phase2-measure.ts` output against production, read-only, pre-0201 schema.)

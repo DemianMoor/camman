@@ -42,7 +42,11 @@ import { dripLookupBudget } from "./lookup-guard";
 // `FOR UPDATE SKIP LOCKED` inside one transaction, and the status write is the
 // commit point.
 
-const BATCH_SIZE = 200;
+// ⚠️ A cache-miss lead spends TWO claims (pass 1 enqueues, pass 2 finalizes),
+// so leads/min ≈ BATCH_SIZE / 2. At 200 a 195/min pml burst (2026-10-09) queued
+// 3,600 leads; 600 ≈ 300 leads/min. A 200-row run measured ~7s against the 60s
+// maxDuration, so 600 is ~20s.
+const BATCH_SIZE = 600;
 
 export interface EnrichmentResult {
   claimed: number;

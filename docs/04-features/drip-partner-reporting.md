@@ -12,7 +12,7 @@ report link and nothing else.
 
 ## 1. Grain: partner × interest tag × ET-day range
 
-`lib/reporting/partner-report.ts` → `getPartnerReport(orgId, from, to, partnerId?)` — the optional scope is a **partner** id since migration 0200 (a partner with two keys is one report). Rows are still keyed `(partner_key_id, interest_tag)`; the partner is one join away (`LEFT JOIN partners`), and the internal table shows it in a **Partner** column (Q11). ⚠️ Until Phase 5 moves the grain to `(partner, contact group)`, a partner with **two keys on the same tag** sees one row per key on the signed link (the Total line is still right); rows are ordered by partner, tag, key id so the order is stable.
+`lib/reporting/partner-report.ts` → `getPartnerReport(orgId, from, to, partnerId?)` — the optional scope is a **partner** id since migration 0200 (a partner with two keys is one report). Rows are still keyed `(partner_key_id, interest_tag)`; the partner is one join away (`LEFT JOIN partners`), and the internal table shows it in a **Partner** column (Q11). Phase 2 (migration 0201) links contact groups to partners and dates drip memberships at delivery; this report is unchanged in that phase — see [partner-lead-intake.md](partner-lead-intake.md) §Phase 2. ⚠️ Until Phase 5 moves the grain to `(partner, contact group)`, a partner with **two keys on the same tag** sees one row per key on the signed link (the Total line is still right); rows are ordered by partner, tag, key id so the order is stable.
 
 `from` / `to` are inclusive **ET calendar days** (`YYYY-MM-DD`).
 

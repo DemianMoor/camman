@@ -333,7 +333,9 @@ export async function getPartnerReport(
     LEFT JOIN optouts oo ON oo.partner_key_id = ky.partner_key_id AND oo.interest_tag = ky.interest_tag
     LEFT JOIN sales   sa ON sa.partner_key_id = ky.partner_key_id AND sa.interest_tag = ky.interest_tag
     WHERE TRUE ${onlyPartner}
-    ORDER BY 3, ky.interest_tag
+    -- k.id last: a partner with two keys on one tag shows one row per key until
+    -- Phase 5 moves the grain to (partner, contact group); keep that order stable.
+    ORDER BY 3, ky.interest_tag, k.id
   `)) as unknown as Record<string, number | string>[];
 
   return {

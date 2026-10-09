@@ -140,6 +140,10 @@ async function main() {
     check("7 PATCH /api/partners/[id] {report_show_revenue:true} → 200 and reflected", t7.status === 200 && t7.json.report_show_revenue === true, `${t7.status} ${t7.text.slice(0, 200)}`);
     const t7k = await api(`/api/partner-keys/${keyIds[0]}`, { method: "PATCH", body: JSON.stringify({ report_show_revenue: true }) });
     check("7b PATCH /api/partner-keys/[id] {report_show_revenue} → 400 (moved to the partner)", t7k.status === 400, `${t7k.status} ${t7k.text.slice(0, 160)}`);
+    const t7e = await api(`/api/partners/${partnerId}`, { method: "PATCH", body: "{}" });
+    check("7e PATCH /api/partners/[id] {} → 400, not 500", t7e.status === 400, `${t7e.status} ${t7e.text.slice(0, 160)}`);
+    const t7u = await api(`/api/partners/${partnerId}`, { method: "PATCH", body: JSON.stringify({ slug: "nope" }) });
+    check("7f PATCH /api/partners/[id] {slug} → 400 (immutable, strict schema)", t7u.status === 400, `${t7u.status} ${t7u.text.slice(0, 160)}`);
     const page7 = await fetch(link, { redirect: "manual" });
     check("7c the signed page now renders the revenue columns", (await page7.text()).includes("NET profit"));
 

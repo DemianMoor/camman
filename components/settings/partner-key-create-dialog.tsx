@@ -119,7 +119,16 @@ export function PartnerKeyCreateDialog({
             </div>
           </div>
           <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                // Same path as dismissing the dialog: the next partner's dialog
+                // must not inherit this one's typed values.
+                reset();
+                onOpenChange(false);
+              }}
+            >
               Cancel
             </Button>
             <Button

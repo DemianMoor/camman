@@ -11,7 +11,7 @@ import "./_require-preview-db"; // MUST be second — refuses any target but the
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
-import { countRepairable, repair, revert } from "./repair-drip-membership-appearance";
+import { countRepairable, dryRunStatus, repair, revert } from "./repair-drip-membership-appearance";
 
 let failed = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -26,7 +26,8 @@ async function main() {
       const org = (await tx.execute(sql`SELECT id FROM organizations ORDER BY created_at LIMIT 1`)) as unknown as { id: string }[];
       const orgId = org[0].id;
       const base = await countRepairable(tx);
-      console.log(`(preview baseline: rows_to_repair=${base.rows_to_repair})`);
+      const s0 = await dryRunStatus(tx);
+      console.log(`(preview baseline: rows_to_repair=${base.rows_to_repair} rows_in_backup=${s0.rows_in_backup} R3=${s0.r3_by_group})`);
 
       // fixtures — partner, key, groups
       const [p] = (await tx.execute(sql`INSERT INTO partners (org_id, slug, name) VALUES (${orgId}::uuid, 'zz-rep', 'zz-rep') RETURNING id`)) as unknown as { id: number }[];
@@ -35,6 +36,7 @@ async function main() {
       const grp = async (key: string, name: string) =>
         ((await tx.execute(sql`INSERT INTO contact_groups (contact_group_id, org_id, name, status) VALUES (${key}, ${orgId}::uuid, ${name}, 'active') RETURNING id`)) as unknown as { id: number }[])[0].id;
       const gAca = await grp(`drip:${orgId}:zz-rep-aca`, "zz-rep-aca");
+      const gPlain = await grp("zz-rep-plain", "zz-rep-plain"); // an ordinary group: the R3 counterpart
       // a system group with no 0201 marker dependency: identified by its key
       const sys = (await tx.execute(sql`SELECT id FROM contact_groups WHERE contact_group_id = 'drip-intake'`)) as unknown as { id: number }[];
       const gSys = sys[0]?.id ?? (await grp("drip-intake", "Drip intake"));
@@ -54,6 +56,7 @@ async function main() {
       const B = await contact("+15550000002"); await lead(B, "zz-rep", "aca", T0); await member(B, gAca, T0);                      // exact → untouched
       const C = await contact("+15550000003"); await lead(C, "zz-rep", "aca", T0); await member(C, gSys, "2026-10-01T12:50:00Z");   // system group → untouched
       const D = await contact("+15550000004"); await lead(D, "zz_rep", "aca", T0); await member(D, gAca, "2026-10-01T12:50:00Z");   // slug 'zz_rep' ≠ 'zz-rep' → no match → untouched
+      const F = await contact("+15550000006"); await lead(F, "zz-rep", "aca", T0); await member(F, gAca, T0); await member(F, gPlain, "2026-09-30T12:00:00Z"); // in a plain group BEFORE → R3 = 1
 
       const c1 = await countRepairable(tx);
       check("1 exactly one membership is repairable (A)", c1.rows_to_repair === base.rows_to_repair + 1 && c1.backfilled_rows === base.backfilled_rows + 1, JSON.stringify(c1));
@@ -68,6 +71,9 @@ async function main() {
       check("2f the backup holds A's old and new stamps", bk.length === 1 && bk[0].o.startsWith("2026-10-01 12:50:00") && bk[0].n.startsWith("2026-10-01 12:00:00.123456"), JSON.stringify(bk));
       const c2 = await countRepairable(tx);
       check("3 nothing left to repair", c2.rows_to_repair === 0, JSON.stringify(c2));
+      const s1 = await dryRunStatus(tx);
+      check("3c status: rows_in_backup = the rows just backed up (on top of any pre-existing backup)", s1.rows_in_backup === (s0.rows_in_backup ?? 0) + r1.backed_up_new, JSON.stringify(s1));
+      check("3d status: R3 per group counts F (plain membership stamped before) and nobody else in zz-rep-aca", (s1.r3_by_group ?? "").split(", ").includes("zz-rep-aca=1"), JSON.stringify(s1));
       const r2 = await repair(tx);
       check("3b a second run is a no-op (idempotent)", r2.backed_up_new === 0 && r2.updated === 0, JSON.stringify(r2));
 

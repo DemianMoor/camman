@@ -61,6 +61,38 @@ export async function countRepairable(dbc: DbOrTx): Promise<Counts> {
   return r[0];
 }
 
+export interface Status {
+  /** rows already in the backup table; null = the table does not exist yet (first run) */
+  rows_in_backup: number | null;
+  /** R3 per drip partner×tag group, e.g. "pml-aca=74"; null = no members */
+  r3_by_group: string | null;
+}
+
+/**
+ * The two gate B proposal numbers the counts above do not carry. R3 (strict <,
+ * ruling Q3) is restated from scripts/partners-phase2-measure.ts: a drip
+ * partner×tag member with a membership in a non-drip group stamped BEFORE this
+ * one. Read before and after so the proposal and the exit check quote the same query.
+ */
+export async function dryRunStatus(dbc: DbOrTx): Promise<Status> {
+  const t = (await dbc.execute(sql`SELECT to_regclass('public.drip_membership_stamp_backup') IS NOT NULL AS present`)) as unknown as { present: boolean }[];
+  const rows_in_backup = t[0].present
+    ? ((await dbc.execute(sql`SELECT count(*)::int AS n FROM public.drip_membership_stamp_backup`)) as unknown as { n: number }[])[0].n
+    : null;
+  const r = (await dbc.execute(sql`
+    SELECT string_agg(name || '=' || n, ', ' ORDER BY name) AS s FROM (
+      SELECT g.name, count(*) FILTER (WHERE EXISTS (
+        SELECT 1 FROM contact_contact_groups o JOIN contact_groups og ON og.id = o.contact_group_id
+        WHERE o.contact_id = ccg.contact_id AND o.contact_group_id <> ccg.contact_group_id
+          AND og.contact_group_id NOT IN ('drip-intake', 'drip-sandbox') AND og.contact_group_id NOT LIKE 'drip:%'
+          AND o.created_at < ccg.created_at))::int AS n
+      FROM contact_contact_groups ccg
+      JOIN contact_groups g ON g.id = ccg.contact_group_id
+      WHERE g.contact_group_id LIKE 'drip:%'
+      GROUP BY g.name) x`)) as unknown as { s: string | null }[];
+  return { rows_in_backup, r3_by_group: r[0].s };
+}
+
 /** Fill the backup (append-only), then repair. Returns what each step touched. */
 export async function repair(dbc: DbOrTx): Promise<{ backed_up_new: number; updated: number }> {
   await dbc.execute(sql`
@@ -107,7 +139,9 @@ async function main() {
   const ref = /postgres\.([a-z0-9]+):/.exec(process.env.DATABASE_URL ?? "")?.[1] ?? "(unknown)";
   console.log(`target project ref: ${ref}   mode: ${doRevert ? "REVERT" : "repair"}${apply ? " (APPLY)" : " (dry run)"}   at ${new Date().toISOString()}`);
   const before = await countRepairable(db);
+  const fmt = (s: Status) => `rows_in_backup=${s.rows_in_backup ?? "0 (no backup table yet)"} R3=${s.r3_by_group ?? "(no members)"}`;
   console.log(`before: rows_to_repair=${before.rows_to_repair} backfilled_rows(>10 min)=${before.backfilled_rows} max_lag=${before.max_lag}`);
+  console.log(`        ${fmt(await dryRunStatus(db))}`);
   if (!apply) {
     console.log("dry run — nothing written. Re-run with --apply.");
     await pgConn.end();
@@ -117,11 +151,13 @@ async function main() {
     const n = await revert(db);
     const after = await countRepairable(db);
     console.log(`reverted ${n} stamp(s); now rows_to_repair=${after.rows_to_repair}`);
+    console.log(`        ${fmt(await dryRunStatus(db))}`);
   } else {
     const t0 = Date.now();
     const r = await db.transaction((tx) => repair(tx));
     const after = await countRepairable(db);
     console.log(`backed up ${r.backed_up_new} new row(s), updated ${r.updated} in ${Date.now() - t0} ms; now rows_to_repair=${after.rows_to_repair} (expect 0)`);
+    console.log(`        ${fmt(await dryRunStatus(db))}   (R3 must equal the before line)`);
     if (after.rows_to_repair !== 0) process.exitCode = 1;
   }
   await pgConn.end();

@@ -225,7 +225,9 @@ The list responses never carry `token`, `secret_hash` or `report_token_hash`
   The system-group membership (`Drip intake` / `Drip sandbox`) keeps `now()`.
 - **Existing rows are repaired by a script, not a migration** (owner fix F1):
   `scripts/repair-drip-membership-appearance.ts` — dry run by default (prints `rows_to_repair`,
-  `backfilled_rows (>10 min)`, `max_lag`), `--apply` fills `drip_membership_stamp_backup`
+  `backfilled_rows (>10 min)`, `max_lag`, plus `rows_in_backup` — null until the first `--apply` creates
+  the table — and `R3` per drip partner×tag group, the gate B proposal numbers; `dryRunStatus` prints
+  the same two after `--apply`, where R3 must equal the before line), `--apply` fills `drip_membership_stamp_backup`
   (append-only) then re-dates every drip partner×tag membership stamped after its lead's first
   delivery for that exact group (match = `partnerTagGroupName` restated in SQL), `--revert --apply`
   restores. Re-runnable. Runs on prod only after this code is deployed and one fresh pml lead is

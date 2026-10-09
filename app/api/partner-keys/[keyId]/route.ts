@@ -75,6 +75,10 @@ export async function PATCH(
     });
   }
   const input = parsed.data;
+  if (Object.keys(input).length === 0) {
+    // Drizzle refuses an empty SET; say so instead of a 500.
+    return apiError(400, "No fields to update", API_ERROR_CODES.VALIDATION);
+  }
 
   const existing = await db
     .select()

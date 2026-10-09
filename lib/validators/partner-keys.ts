@@ -66,6 +66,9 @@ export const partnerKeyCreateSchema = z
 export const partnerKeyUpdateSchema = z
   .object(shared)
   .partial()
+  // Strict, so a field that MOVED to the partner (report_show_revenue, 0200)
+  // is a 400 naming the key, not a silently stripped no-op.
+  .strict()
   .superRefine((v, ctx) => {
     if (v.interest_tag_mode === "force" && v.interest_tag !== undefined) forceNeedsTag(v, ctx);
   });

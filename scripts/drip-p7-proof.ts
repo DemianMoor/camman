@@ -152,34 +152,36 @@ async function main() {
 
   // ── the signed link ──────────────────────────────────────────────────────
   console.log("\n── R4: signed report links ──");
+  // Since 0200 the link lives on the PARTNER; the internal-test key's partner
+  // (one key, live) is the fixture.
   const key = (await db.execute(sql`
-    SELECT id, partner_slug FROM partner_keys
-    WHERE org_id = ${orgId}::uuid AND partner_slug = 'internal-test' LIMIT 1
+    SELECT p.id, p.slug AS partner_slug FROM partners p
+    WHERE p.org_id = ${orgId}::uuid AND p.slug = 'internal-test' LIMIT 1
   `)) as unknown as { id: number; partner_slug: string }[];
-  if (key.length === 0) throw new Error("internal-test partner key not found");
-  const keyId = key[0].id;
+  if (key.length === 0) throw new Error("internal-test partner not found");
+  const keyId = key[0].id; // the PARTNER id (name kept for the diff)
 
   const token = await issueReportToken(orgId, keyId, null);
   check("a token is issued", typeof token === "string" && token!.length > 20, true);
 
   const stored = (await db.execute(sql`
-    SELECT report_token_hash, report_show_revenue FROM partner_keys WHERE id = ${keyId}
+    SELECT report_token_hash, report_show_revenue FROM partners WHERE id = ${keyId}
   `)) as unknown as { report_token_hash: string; report_show_revenue: boolean }[];
   check("⭐ the plaintext token is NOT in the database",
         stored[0].report_token_hash === token, false);
   check("⭐ what is stored is a sha256 hex digest",
         /^[0-9a-f]{64}$/.test(stored[0].report_token_hash), true);
-  check("⭐ revenue is OFF by default for this key", stored[0].report_show_revenue, false);
+  check("⭐ revenue is OFF by default for this partner", stored[0].report_show_revenue, false);
 
   const resolved = await resolveReportToken(token);
-  check("the token resolves", resolved?.partnerKeyId, keyId);
-  check("⭐ scope comes from the key row", resolved?.partnerSlug, "internal-test");
+  check("the token resolves", resolved?.partnerId, keyId);
+  check("⭐ scope comes from the partner row", resolved?.partnerSlug, "internal-test");
   check("⭐ and it carries the revenue flag, not the URL", resolved?.showRevenue, false);
 
   // partner-scoped data only
-  const scoped = await getPartnerReport(orgId, FROM, TO, resolved!.partnerKeyId);
+  const scoped = await getPartnerReport(orgId, FROM, TO, resolved!.partnerId);
   check("⭐ the scoped report contains ONLY this partner",
-        [...new Set(scoped.rows.map((r) => r.partner_key_id))], [keyId]);
+        [...new Set(scoped.rows.map((r) => r.partner_id))], [keyId]);
   check("⭐ and it is a strict subset of the internal report",
         scoped.rows.length <= report.rows.length, true);
 
@@ -212,7 +214,9 @@ async function main() {
         await resolveReportToken(token), null);
 
   const afterRevoke = (await db.execute(sql`
-    SELECT report_token_hash IS NULL AS cleared, status FROM partner_keys WHERE id = ${keyId}
+    SELECT p.report_token_hash IS NULL AS cleared,
+           (SELECT k.status FROM partner_keys k WHERE k.partner_id = p.id ORDER BY k.id LIMIT 1) AS status
+    FROM partners p WHERE p.id = ${keyId}
   `)) as unknown as { cleared: boolean; status: string }[];
   check("the hash is cleared", afterRevoke[0].cleared, true);
   check("⭐ the KEY itself still works — intake is unaffected by revoking a link",

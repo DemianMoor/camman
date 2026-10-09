@@ -55,6 +55,11 @@ export async function POST(
     // their key was disabled rather than mistyped.
     return jsonError(403, "This partner key is disabled");
   }
+  if (key.partner_status === "archived") {
+    // Ruling Q7 (0200): archiving a partner stops intake on every key it owns,
+    // without touching the keys' own status — restore re-enables them in one step.
+    return jsonError(403, "This partner is archived");
+  }
 
   // ---- second factor: the secret (header only, ruling G12) ----------------
   // Header, not body: the secret is then STRUCTURALLY absent from the payload

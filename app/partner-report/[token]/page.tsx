@@ -8,7 +8,7 @@ import { resolveReportToken } from "@/lib/reporting/partner-report-token";
 // PUBLIC partner report (Drip Phase 7) — no login, no session.
 //
 // ⚠️ SCOPE COMES FROM THE TOKEN'S KEY ROW, NEVER THE URL. The only parameter is
-// the token; `partnerKeyId` is whatever it resolved to, so there is nothing an
+// the token; `partnerId` is whatever it resolved to, so there is nothing a
 // visitor can edit to see another partner. No org data beyond their aggregates
 // is fetched at all — not filtered out downstream, never queried.
 //
@@ -64,8 +64,8 @@ export default async function PartnerReportPage({
     resolved.orgId,
     from > to ? to : from,
     to,
-    // scope — from the key row
-    resolved.partnerKeyId,
+    // scope — from the partner row (0200)
+    resolved.partnerId,
   );
 
   // ⭐ Stripped on the SERVER, not hidden by the component — see

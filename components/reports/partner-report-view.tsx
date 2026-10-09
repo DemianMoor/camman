@@ -33,8 +33,9 @@ function tagLabel(t: string): string {
   return t === "" ? "(untagged)" : t;
 }
 
-function toCsv(rows: PartnerReportRow[], showRevenue: boolean): string {
+function toCsv(rows: PartnerReportRow[], showRevenue: boolean, showPartnerColumn: boolean): string {
   const head = [
+    ...(showPartnerColumn ? ["partner"] : []),
     "interest_tag", "leads_received", "mobile", "voip", "unknown", "landline",
     "sent", ...(showRevenue ? ["send_cost_usd"] : []),
     "delivered_pct", "clicks", "ctr", "opt_outs", "sales", "lookup_cost_usd",
@@ -52,6 +53,7 @@ function toCsv(rows: PartnerReportRow[], showRevenue: boolean): string {
   for (const r of rows) {
     lines.push(
       [
+        ...(showPartnerColumn ? [r.partner_name] : []),
         tagLabel(r.interest_tag), r.leads_received, r.mobile, r.voip, r.unknown, r.landline,
         r.sent, ...(showRevenue ? [r.send_cost_usd.toFixed(4)] : []),
         r.delivered_pct, r.clicks, r.ctr, r.opt_outs, r.sales,
@@ -71,11 +73,18 @@ export function PartnerReportView({
   showRevenue,
   report,
   showDateControls = true,
+  showPartnerColumn = false,
 }: {
   token: string;
   partnerName: string;
   showRevenue: boolean;
   report: PartnerReportResult;
+  /**
+   * The INTERNAL page sets this: it lists every partner, and since 0200 two
+   * partners can share a tag, so the tag alone no longer names a row. The
+   * signed link is one partner by construction and leaves it off.
+   */
+  showPartnerColumn?: boolean;
   /**
    * The public signed-link page owns its range through a plain GET form, so it
    * leaves this on. The INTERNAL page owns the range in React state and refetches
@@ -112,7 +121,7 @@ export function PartnerReportView({
   }, [report.rows]);
 
   function downloadCsv() {
-    const blob = new Blob([toCsv(report.rows, showRevenue)], { type: "text/csv" });
+    const blob = new Blob([toCsv(report.rows, showRevenue, showPartnerColumn)], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `report-${report.from}-to-${report.to}.csv`;
@@ -170,6 +179,7 @@ export function PartnerReportView({
         <table className="w-full text-sm">
           <thead className="bg-muted/50 text-xs">
             <tr>
+              {showPartnerColumn && <th className="p-2 text-left">Partner</th>}
               <th className="p-2 text-left">Tag</th>
               <th className="p-2 text-right">Leads</th>
               <th className="p-2 text-right">Mobile</th>
@@ -196,13 +206,14 @@ export function PartnerReportView({
           <tbody>
             {report.rows.length === 0 && (
               <tr>
-                <td colSpan={showRevenue ? 17 : 13} className="p-4 text-center text-muted-foreground">
+                <td colSpan={(showRevenue ? 17 : 13) + (showPartnerColumn ? 1 : 0)} className="p-4 text-center text-muted-foreground">
                   No activity in this period.
                 </td>
               </tr>
             )}
             {report.rows.map((r) => (
               <tr key={`${r.partner_key_id}-${r.interest_tag}`} className="border-t">
+                {showPartnerColumn && <td className="p-2">{r.partner_name}</td>}
                 <td className="p-2">{tagLabel(r.interest_tag)}</td>
                 <td className="p-2 text-right">{r.leads_received.toLocaleString()}</td>
                 <td className="p-2 text-right">{r.mobile.toLocaleString()}</td>
@@ -230,7 +241,7 @@ export function PartnerReportView({
           {report.rows.length > 0 && (
             <tfoot className="border-t-2 bg-muted/30 font-medium">
               <tr>
-                <td className="p-2">Total</td>
+                <td className="p-2" colSpan={showPartnerColumn ? 2 : 1}>Total</td>
                 <td className="p-2 text-right">{totals.leads.toLocaleString()}</td>
                 <td className="p-2 text-right" colSpan={3} />
                 <td className="p-2 text-right">{totals.landline.toLocaleString()}</td>

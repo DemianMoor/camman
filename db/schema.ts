@@ -4931,6 +4931,50 @@ export type ContactAttributeImportMapping =
 // provider_credentials, the secret is NOT encrypted: CamMan never replays it, so
 // there is nothing to decrypt, and a hash survives a key rotation and leaks
 // nothing in a database dump. See migration 0152 for the full reasoning.
+// The partner ENTITY (partner attribution Phase 1, migration 0200). One row per
+// commercial partner; its intake credentials are partner_keys rows below. The
+// signed report link and the revenue toggle live HERE since 0200 — a partner
+// with two keys, or with no key at all (file delivery), has exactly one link.
+export const partners = pgTable(
+  "partners",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    created_by: uuid("created_by"),
+    report_token_hash: text("report_token_hash"),
+    report_token_issued_at: timestamp("report_token_issued_at", {
+      withTimezone: true,
+    }),
+    report_token_expires_at: timestamp("report_token_expires_at", {
+      withTimezone: true,
+    }),
+    report_show_revenue: boolean("report_show_revenue")
+      .notNull()
+      .default(false),
+  },
+  (table) => [
+    uniqueIndex("partners_org_slug_uniq").on(table.org_id, table.slug),
+    uniqueIndex("partners_report_token_hash_uniq")
+      .on(table.report_token_hash)
+      .where(sql`${table.report_token_hash} IS NOT NULL`),
+    index("partners_org_status_idx").on(table.org_id, table.status),
+    check(
+      "partners_status_check",
+      sql`${table.status} IN ('active', 'archived')`,
+    ),
+    check("partners_slug_check", sql`${table.slug} ~ '^[a-z0-9][a-z0-9_-]*$'`),
+  ],
+);
+
 export const partner_keys = pgTable(
   "partner_keys",
   {
@@ -4960,10 +5004,17 @@ export const partner_keys = pgTable(
     created_by: uuid("created_by"),
     rotated_at: timestamp("rotated_at", { withTimezone: true }),
     last_seen_at: timestamp("last_seen_at", { withTimezone: true }),
-    // Drip P7 — the partner's signed report link. Opaque token, HASHED at rest
-    // exactly like secret_hash: the plaintext is shown once and is
-    // unrecoverable, so a database read cannot yield a working report link.
-    // NULL = no link issued (the safe default).
+    // The partner this key belongs to (0200). NULLABLE until the follow-up
+    // migration sets NOT NULL (ruling C2: additive leads code). Every code path
+    // that inserts a key writes it.
+    partner_id: integer("partner_id").references(() => partners.id, {
+      onDelete: "restrict",
+    }),
+    // Drip P7 — the partner's signed report link. SINCE 0200 THE LIVE COPY IS
+    // ON `partners`; these four columns are dead copies kept until a later
+    // destructive migration drops them. Opaque token, HASHED at rest exactly
+    // like secret_hash: the plaintext is shown once and is unrecoverable, so a
+    // database read cannot yield a working report link.
     report_token_hash: text("report_token_hash"),
     report_token_issued_at: timestamp("report_token_issued_at", {
       withTimezone: true,
@@ -4979,10 +5030,9 @@ export const partner_keys = pgTable(
   },
   (table) => [
     uniqueIndex("partner_keys_token_uniq").on(table.token),
-    uniqueIndex("partner_keys_org_slug_uniq").on(
-      table.org_id,
-      table.partner_slug,
-    ),
+    // Non-unique since 0200: two keys of one partner share the partner's slug.
+    index("partner_keys_org_slug_idx").on(table.org_id, table.partner_slug),
+    index("partner_keys_partner_id_idx").on(table.partner_id),
     index("partner_keys_org_status_idx").on(table.org_id, table.status),
     check(
       "partner_keys_interest_tag_mode_check",

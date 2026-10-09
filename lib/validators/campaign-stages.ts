@@ -34,8 +34,13 @@ const stageBaseSchema = z.object({
     .nullable()
     .optional(),
   creative_id: z.number().int().positive().nullable().optional(),
-  sms_provider_id: z.number().int().positive().nullable().optional(),
-  provider_phone_id: z.number().int().positive().nullable().optional(),
+  // ⚠️ REQUIRED, on every campaign type. The drain refuses a stage with no
+  // provider (drain.ts `no_provider`) — but the drip scheduler picks its number
+  // from the campaign's pool and queues pending rows anyway, so a provider-less
+  // drip stage stalled 442 messages on 2026-10-09 (stage 5178). Update may
+  // change these but never clear them (see stageUpdateSchema).
+  sms_provider_id: z.number({ error: "Provider is required" }).int().positive(),
+  provider_phone_id: z.number({ error: "Phone number is required" }).int().positive(),
   sales_page_label: z
     .union([z.string().trim().max(80), z.literal("")])
     .nullable()
@@ -104,6 +109,10 @@ export const stageUpdateSchema = stageBaseSchema
     include_clickers: z.boolean().optional(),
     exclude_clickers: z.boolean().optional(),
     include_no_status: z.boolean().optional(),
+    // Changeable, never clearable: an explicit null is a 400, an omitted key
+    // leaves the stored value (incl. a legacy NULL) untouched.
+    sms_provider_id: z.number({ error: "Provider is required" }).int().positive().optional(),
+    provider_phone_id: z.number({ error: "Phone number is required" }).int().positive().optional(),
   })
   // Same pattern as campaignUpdateSchema: accept tracking_id only to
   // explicitly reject it with a TRACKING_ID_IMMUTABLE code instead of

@@ -1062,6 +1062,19 @@ export function StageForm({
       toast.error("Scheduled time can't be in the past");
       return;
     }
+    // Mirrors the server (stageCreateSchema): a stage with no provider/phone
+    // can't be drained, so it is not saveable — on any campaign type.
+    const { sms_provider_id, provider_phone_id } = form.getValues();
+    if (sms_provider_id === null || provider_phone_id === null) {
+      if (sms_provider_id === null) {
+        form.setError("sms_provider_id", { message: "Provider is required" });
+      }
+      if (provider_phone_id === null) {
+        form.setError("provider_phone_id", { message: "Phone number is required" });
+      }
+      toast.error("Pick a provider and phone number");
+      return;
+    }
     await onSubmit(form.getValues());
   }
 
@@ -1730,21 +1743,21 @@ export function StageForm({
                 name="sms_provider_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Provider</FormLabel>
+                    <FormLabel required>Provider</FormLabel>
                     <Select
-                      value={field.value === null ? NONE : String(field.value)}
-                      onValueChange={(v) =>
-                        field.onChange(v === NONE ? null : Number(v))
-                      }
+                      value={field.value === null ? "" : String(field.value)}
+                      onValueChange={(v) => {
+                        field.onChange(Number(v));
+                        form.clearErrors("sms_provider_id");
+                      }}
                       disabled={isSubmitting}
                     >
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue placeholder="Unassigned" />
+                          <SelectValue placeholder="Select a provider" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value={NONE}>Unassigned</SelectItem>
                         {providers.map((p) => (
                           <SelectItem key={p.id} value={String(p.id)}>
                             <span className="inline-flex items-center gap-2">
@@ -1769,12 +1782,13 @@ export function StageForm({
                 name="provider_phone_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Phone number</FormLabel>
+                    <FormLabel required>Phone number</FormLabel>
                     <Select
-                      value={field.value === null ? NONE : String(field.value)}
-                      onValueChange={(v) =>
-                        field.onChange(v === NONE ? null : Number(v))
-                      }
+                      value={field.value === null ? "" : String(field.value)}
+                      onValueChange={(v) => {
+                        field.onChange(Number(v));
+                        form.clearErrors("provider_phone_id");
+                      }}
                       disabled={
                         isSubmitting ||
                         watchedProviderId === null ||
@@ -1789,13 +1803,12 @@ export function StageForm({
                                 ? "Pick a provider first"
                                 : phones.length === 0
                                   ? "No active phones for this provider"
-                                  : "Unassigned"
+                                  : "Select a phone number"
                             }
                           />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value={NONE}>Unassigned</SelectItem>
                         {phones.map((p) => (
                           <SelectItem key={p.id} value={String(p.id)}>
                             <span className="font-mono text-xs">

@@ -792,4 +792,22 @@ if (failed > 0) process.exit(1);
 
 ## Measurement output 2026-10-09
 
-(Filled by Task 0 Step 2 — verbatim `scripts/partners-phase2-measure.ts` output against production, read-only, pre-0201 schema.)
+Verbatim `npx tsx --conditions=react-server scripts/partners-phase2-measure.ts` against production, read-only, pre-0201 schema (no post-0201 column referenced):
+
+```
+target project ref: rtdarhkkjwcetlmruftl   at 2026-10-09T14:08:26.699Z
+  members: 16182
+  no_lead_event: 0
+  lag_over_10m: 8171
+  lag_positive: 16182
+  stamped_at_delivery: 0
+  stamped_before_delivery: 0
+  max_lag: 01:23:38.911987
+  r3_against_stamp: 74
+  r3_against_delivery: 74
+  keys_null_partner: 0
+  drip_groups: 113:drip-intake:Drip intake | 114:drip-sandbox:Drip sandbox | 311:drip:b0ce3435-5ea2-4510-ab11-8cdd0d0c125b:pml-aca:pml-aca | 1129:drip:b0ce3435-5ea2-4510-ab11-8cdd0d0c125b:bsd-untagged:bsd-untagged
+  partners: 1:internal-test,2:pml,3:docs-curl-verify,4:bsd
+```
+
+Reading: pml-aca has grown to 16,182 members since the morning's 15,785; **every** membership is stamped after delivery (`lag_positive == members`, `stamped_at_delivery 0`) — the 8,171 backfilled ones by up to 1 h 24 m, the rest by seconds; the R3 count is now **74** (73 in the morning, 63 in the recon) and is identical against the current stamps and against first delivery, so the repair cannot move it. `keys_null_partner 0` is 0201's precondition. `drip-intake` / `drip-sandbox` are identified by key, which is how `--before` will read them on the pre-0201 schema.

@@ -7,7 +7,6 @@ import {
   FolderTree,
   Gauge,
   Handshake,
-  KeyRound,
   Layers,
   LayoutDashboard,
   LinkIcon,
@@ -270,13 +269,13 @@ export const navGroups: NavGroup[] = [
         permission: "lookup.admin",
         icon: Phone,
       },
-      // Partner intake credentials (Drip P2). Leads captured through these keys
-      // are stored raw and processed by nothing until Phase 3 — the page says so.
+      // Partners (0200) and their intake credentials (Drip P2). Leads captured
+      // through the keys are stored raw and processed by the drip pipeline.
       {
-        label: "Partner Keys",
+        label: "Partners",
         href: "/settings/partners",
         permission: "partner_keys.view",
-        icon: KeyRound,
+        icon: Handshake,
       },
       // The drip routing debugger. Lives under Settings because it is an
       // operator tool, not a campaign surface.

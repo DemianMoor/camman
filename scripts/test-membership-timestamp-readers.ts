@@ -19,6 +19,13 @@ const JUNCTION = /contact_contact_groups/;
 const READS_STAMP =
   /\bccg\w*\.created_at\b|contact_contact_groups\.created_at|"contact_contact_groups"\."created_at"|contactContactGroups\.created_at/;
 
+// A reader is CODE. Comments and docstrings may (and should) name the column
+// when they explain what it means — lib/drip/groups.ts does — so they are
+// stripped before the scan. Block comments first, then line comments.
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/[^\n]*/g, "$1");
+}
+
 function walk(dir: string, out: string[] = []): string[] {
   for (const e of readdirSync(dir)) {
     const p = join(dir, e);
@@ -37,7 +44,7 @@ let scanned = 0;
 for (const root of ROOTS) {
   for (const f of walk(resolve(process.cwd(), root))) {
     scanned++;
-    const src = readFileSync(f, "utf-8");
+    const src = stripComments(readFileSync(f, "utf-8"));
     if (!JUNCTION.test(src) || !READS_STAMP.test(src)) continue;
     const rel = relative(process.cwd(), f).split(sep).join("/");
     if (!ALLOWED.has(rel)) {
@@ -55,9 +62,13 @@ console.log(
 // controls: the bar can go red, and the allowed file really does read it
 const allowedSrc = readFileSync(resolve(process.cwd(), "app/api/contact-groups/[id]/contacts/route.ts"), "utf-8");
 const control1 = READS_STAMP.test("select ccg.created_at as joined_at from contact_contact_groups ccg");
-const control2 = READS_STAMP.test(allowedSrc) && JUNCTION.test(allowedSrc);
-if (!control1 || !control2) failed++;
+const control2 = READS_STAMP.test(stripComments(allowedSrc)) && JUNCTION.test(allowedSrc);
+const control3 = !READS_STAMP.test(
+  stripComments("// `contact_contact_groups.created_at` means appeared\n/* ccg.created_at */\nselect 1 from contact_contact_groups"),
+);
+if (!control1 || !control2 || !control3) failed++;
 console.log(`${control1 ? "✓" : "✗"} control: a synthetic reader is flagged`);
 console.log(`${control2 ? "✓" : "✗"} control: the allowed file is a real reader (the scan is not blind)`);
+console.log(`${control3 ? "✓" : "✗"} control: a mention inside a comment is NOT a reader`);
 console.log(failed === 0 ? "\nAll checks passed." : `\n${failed} check(s) FAILED.`);
 if (failed > 0) process.exit(1);

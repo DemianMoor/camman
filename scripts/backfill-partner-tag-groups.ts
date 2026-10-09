@@ -16,14 +16,18 @@ const APPLY = process.argv.includes("--apply");
 const PARTNER = process.argv.find((a) => a.startsWith("--partner="))?.slice("--partner=".length) ?? null;
 
 async function main() {
+  // partner_id: the group is linked to its partner at creation (ruling Q6,
+  // migration 0201). lead_events.partner_slug is the partner's slug (copied
+  // onto the key, copied onto the event), so the partner resolves by slug.
   const combos = (await db.execute(sql`
-    SELECT org_id, partner_slug, interest_tag, count(DISTINCT contact_id)::int AS contacts
-    FROM lead_events
-    WHERE sandbox = false
-      AND (${PARTNER}::text IS NULL OR partner_slug = ${PARTNER})
+    SELECT le.org_id, le.partner_slug, le.interest_tag, count(DISTINCT le.contact_id)::int AS contacts,
+           (SELECT p.id FROM partners p WHERE p.org_id = le.org_id AND p.slug = le.partner_slug) AS partner_id
+    FROM lead_events le
+    WHERE le.sandbox = false
+      AND (${PARTNER}::text IS NULL OR le.partner_slug = ${PARTNER})
     GROUP BY 1, 2, 3
     ORDER BY 1, 2, 3
-  `)) as unknown as { org_id: string; partner_slug: string; interest_tag: string | null; contacts: number }[];
+  `)) as unknown as { org_id: string; partner_slug: string; interest_tag: string | null; contacts: number; partner_id: number | null }[];
 
   for (const c of combos) {
     const name = partnerTagGroupName(c.partner_slug, c.interest_tag);
@@ -31,9 +35,15 @@ async function main() {
       console.log(`[dry-run] ${name}: ${c.contacts} contacts`);
       continue;
     }
+    if (c.partner_id === null) {
+      // A lead event whose slug has no partner row cannot happen after 0200's
+      // backfill; refuse rather than create an unlinked group.
+      throw new Error(`no partners row for slug "${c.partner_slug}" in org ${c.org_id}`);
+    }
     const added = await db.transaction(async (tx) => {
       const groupId = await ensurePartnerTagGroup(tx, {
         orgId: c.org_id, partnerSlug: c.partner_slug, interestTag: c.interest_tag,
+        partnerId: c.partner_id!,
       });
       // IS NOT DISTINCT FROM: a NULL tag must match NULL-tagged events.
       const rows = (await tx.execute(sql`

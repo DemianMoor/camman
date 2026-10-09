@@ -43,10 +43,8 @@ function check(label: string, ok: boolean, detail = "") {
 }
 // Columns that only the NEW row shape carries; dropped on both sides so the
 // comparison is about numbers.
-const strip = (r: Record<string, unknown>) => {
-  const { partner_id: _p, ...rest } = r;
-  return rest;
-};
+const strip = (r: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(r).filter(([k]) => k !== "partner_id"));
 
 async function main() {
   const capture = process.argv.includes("--capture");

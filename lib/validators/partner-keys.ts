@@ -8,16 +8,11 @@ import { LEAD_FIELD_KEYS } from "@/lib/intake/fields";
 // server-side and are not user-supplied at any point: accepting a caller-chosen
 // token would let someone pick a guessable one, and accepting a hash would let
 // them set a secret nobody ever generated. Rotation is its own endpoint.
-
-const slug = z
-  .string()
-  .trim()
-  .min(2, "Partner slug must be at least 2 characters")
-  .max(64)
-  // Lowercase alphanumerics plus underscore/hyphen. The slug is stamped onto
-  // every lead and will be a report dimension in Phase 7, so it has to stay
-  // stable and comparable — free text would fragment the reporting.
-  .regex(/^[a-z0-9][a-z0-9_-]*$/, "Use lowercase letters, digits, _ and - only");
+//
+// ⚠️ Since 0200 a key belongs to a PARTNER: creation takes `partner_id`, and the
+// slug is copied from the partner server-side (see lib/validators/partners.ts
+// for the slug rule). The signed report link and `report_show_revenue` moved to
+// the partner with it, so neither schema here carries them any more.
 
 // field_mapping maps a PARTNER's field name -> one of OUR canonical fields. The
 // target is validated against LEAD_FIELD_KEYS so a typo cannot create a mapping
@@ -36,9 +31,6 @@ const shared = {
   rate_per_day: z.number().int().positive().max(10_000_000).optional(),
   max_payload_bytes: z.number().int().min(1024).max(4_194_304).optional(),
   status: z.enum(["active", "disabled"]).optional(),
-  // Whether the partner's signed report shows revenue. Off by default (P7 R2):
-  // revenue is our margin, not the partner's number.
-  report_show_revenue: z.boolean().optional(),
 };
 
 // Mirrors the DB CHECK partner_keys_force_needs_tag_check. Enforced in both
@@ -59,16 +51,18 @@ const forceNeedsTag = (
 
 export const partnerKeyCreateSchema = z
   .object({
-    partner_slug: slug,
+    // The key belongs to a partner (0200); its slug is COPIED from the partner
+    // server-side, never typed — two keys of one partner share it.
+    partner_id: z.number().int().positive(),
     ...shared,
     interest_tag_mode: shared.interest_tag_mode.default("default"),
   })
   .superRefine(forceNeedsTag);
 
-// partner_slug is NOT updatable: it is stamped onto every lead already captured
-// (lead_inbox.partner_slug is denormalized precisely so provenance survives),
-// so renaming it would make historical leads disagree with the key they came
-// from. Create a new key instead.
+// partner_slug (and partner_id) are NOT updatable: the slug is stamped onto
+// every lead already captured (lead_inbox.partner_slug is denormalized
+// precisely so provenance survives), so moving a key would make historical
+// leads disagree with the key they came from. Create a new key instead.
 export const partnerKeyUpdateSchema = z
   .object(shared)
   .partial()

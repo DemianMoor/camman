@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-10-02_
+_Last updated: 2026-10-09_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -8,6 +8,7 @@ The campaign core: a **campaign** is a long-running container with a frozen audi
 ## 2. Key concepts / entities
 - `campaigns` — status machine `draft → active ⇄ paused → completed ⇄ active; completed → archived`; `link_mode` manual/tracked; audience recipe (see [audience-snapshot.md](audience-snapshot.md)). `completed` is no longer terminal — see reactivation below.
 - `campaign_stages` — `stage_number` (trigger-assigned), creative + provider + phone, URLs, schedule, result counters, A/B split fields.
+- **Provider + phone are REQUIRED on every stage, on every campaign type (2026-10-09).** `stageCreateSchema` ([`lib/validators/campaign-stages.ts`](../../lib/validators/campaign-stages.ts)) rejects a create without `sms_provider_id` and `provider_phone_id`; `stageUpdateSchema` lets a PATCH change either but rejects an explicit `null` (omitted keys leave the stored value alone, so the 11 legacy NULL stages on archived/completed manual campaigns stay editable until someone opens them in the form, which then demands a pick). The stage form marks both fields required and blocks Save. Copy paths (stage/campaign duplicate, split, behavioural lanes, drip children) inherit the source's values and are not re-validated. Why: the drip scheduler takes its number from the campaign pool and queues `pending` rows for a provider-less stage, but the drain refuses it (`no_provider`) — stage 5178 stalled 442 messages this way.
 - `creatives` — many-to-many with offers via `creative_offers`; cached spam columns.
 - `campaign_tracking_counters` — atomic per-(org,brand,offer,day) sequence.
 

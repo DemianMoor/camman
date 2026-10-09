@@ -2,6 +2,7 @@ import "./_env-preload";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { createPartnerWithKey } from "./_partner-fixture";
 import { evaluateLeadRouting } from "@/lib/drip/routing-eval";
 import { runDripRoutingBatch } from "@/lib/drip/routing";
 
@@ -68,17 +69,16 @@ async function main() {
     SELECT drip_enabled FROM org_settings WHERE org_id = ${orgId}::uuid`);
   console.log(`drip posture before: ${priorPosture.drip_enabled}`);
 
-  const created = { campaigns: [] as number[], keys: [] as number[], contacts: [] as string[] };
+  const created = { campaigns: [] as number[], keys: [] as number[], partners: [] as number[], contacts: [] as string[] };
 
   try {
     // ── fixtures ─────────────────────────────────────────────────────────
-    const keyA = (await one<{ id: number }>(sql`
-      INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-      VALUES (${orgId}, ${"zz-p4a-" + sfx}, 'p4 A', ${"tp4a" + sfx}, 'h') RETURNING id`)).id;
-    const keyB = (await one<{ id: number }>(sql`
-      INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-      VALUES (${orgId}, ${"zz-p4b-" + sfx}, 'p4 B', ${"tp4b" + sfx}, 'h') RETURNING id`)).id;
+    const fxA = await createPartnerWithKey(db, { orgId, slug: "zz-p4a-" + sfx, name: "p4 A", token: "tp4a" + sfx });
+    const fxB = await createPartnerWithKey(db, { orgId, slug: "zz-p4b-" + sfx, name: "p4 B", token: "tp4b" + sfx });
+    const keyA = fxA.keyId;
+    const keyB = fxB.keyId;
     created.keys.push(keyA, keyB);
+    created.partners.push(fxA.partnerId, fxB.partnerId);
 
     const mkCampaign = async (
       name: string,
@@ -353,6 +353,10 @@ async function main() {
       const kl = sql.join(created.keys.map((i) => sql`${i}`), sql`, `);
       await db.execute(sql`DELETE FROM lead_events WHERE partner_key_id IN (${kl})`);
       await db.execute(sql`DELETE FROM partner_keys WHERE id IN (${kl})`);
+    }
+    if (created.partners.length) {
+      const pl = sql.join(created.partners.map((i) => sql`${i}`), sql`, `);
+      await db.execute(sql`DELETE FROM partners WHERE id IN (${pl})`);
     }
 
     const residue = await one<Record<string, number>>(sql`

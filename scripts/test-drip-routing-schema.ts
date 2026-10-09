@@ -1,5 +1,6 @@
 import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { createPartnerWithKey } from "./_partner-fixture";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -155,10 +156,9 @@ async function main() {
         INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${"+1996" + sfx})
         RETURNING id`)) as unknown as { id: string }[])[0].id;
 
-      const keyId = ((await tx.execute(sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-        VALUES (${orgId}, ${"p4k-" + sfx}, 'p4', ${"tokp4" + sfx}, 'h')
-        RETURNING id`)) as unknown as { id: number }[])[0].id;
+      const keyId = (await createPartnerWithKey(tx, {
+        orgId, slug: "p4k-" + sfx, name: "p4", token: "tokp4" + sfx,
+      })).keyId;
 
       const mkEvent = async (n: number) =>
         ((await tx.execute(sql`

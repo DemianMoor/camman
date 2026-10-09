@@ -1,5 +1,6 @@
 import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { createPartnerWithKey } from "./_partner-fixture";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -200,12 +201,9 @@ async function main() {
       });
       // A journey per contact, so getDripFunnel has something to aggregate
       // (contact → partner_keys → lead_events → drip_journeys).
-      const pk = (
-        (await db.execute(sql`
-          INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-          VALUES (${orgId}::uuid, ${"p4c" + sfx + i}, 'probe', ${"tok" + sfx + i}, 'h')
-          RETURNING id`)) as unknown as { id: number }[]
-      )[0].id;
+      const pk = (await createPartnerWithKey(db, {
+        orgId, slug: "p4c" + sfx + i, name: "probe", token: "tok" + sfx + i,
+      })).keyId;
       const le = (
         (await db.execute(sql`
           INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, received_at)

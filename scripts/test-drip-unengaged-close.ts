@@ -1,5 +1,6 @@
 import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { createPartnerWithKey } from "./_partner-fixture";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -45,13 +46,13 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * either. Everything here is built and rolled back.
  */
 async function makePartnerKey(tx: Tx, orgId: string): Promise<number> {
-  const k = (await tx.execute(sql`
-    INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash,
-                              interest_tag_mode, interest_tag, sandbox, status)
-    VALUES (${orgId}::uuid, 'p7-unengaged-fixture', 'P7 fixture',
-            'p7-fixture-token', repeat('0', 64), 'force', 'medicare', false, 'active')
-    RETURNING id`)) as unknown as { id: number }[];
-  return k[0].id;
+  // Since 0201 a key needs its partner first — the shared fixture makes both.
+  const k = await createPartnerWithKey(tx, {
+    orgId, slug: "p7-unengaged-fixture", name: "P7 fixture", token: "p7-fixture-token",
+    secretHash: "0".repeat(64), interestTagMode: "force", interestTag: "medicare",
+    sandbox: false, status: "active",
+  });
+  return k.keyId;
 }
 
 /** A drip campaign of this test's own making — `drip_journeys_campaign_required_check`

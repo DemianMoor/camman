@@ -1,5 +1,6 @@
 import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { createPartnerWithKey } from "./_partner-fixture";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -105,10 +106,9 @@ async function main() {
       if (!orgId) throw new Error("no organization in the preview database");
       const uniq = String(Date.now()).slice(-7);
 
-      const keyId = ((await tx.execute(sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-        VALUES (${orgId}, ${"p3-" + uniq}, 'p3 probe', ${"tok3_" + uniq}, 'h')
-        RETURNING id`)) as unknown as { id: number }[])[0].id;
+      const keyId = (await createPartnerWithKey(tx, {
+        orgId, slug: "p3-" + uniq, name: "p3 probe", token: "tok3_" + uniq,
+      })).keyId;
 
       // ── 0155: the widened CHECKs ────────────────────────────────────────
       console.log("\n0155 — widened CHECK constraints:");

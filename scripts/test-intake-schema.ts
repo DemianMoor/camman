@@ -107,11 +107,16 @@ async function main() {
       `)) as unknown as { id: string }[];
       const orgId = org[0]?.id;
       if (!orgId) throw new Error("no organization in the preview database");
+      // Since 0200/0201 every key belongs to a partner (NOT NULL); the probes
+      // below insert keys directly because they test the key CHECKs.
+      const probePartner = ((await tx.execute(sql`
+        INSERT INTO partners (org_id, slug, name) VALUES (${orgId}::uuid, 'probe-partner', 'probe')
+        RETURNING id`)) as unknown as { id: number }[])[0].id;
 
       const mkKey = async (slug: string, extra = sql``) =>
         ((await tx.execute(sql`
-          INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash ${extra})
-          VALUES (${orgId}, ${slug}, ${"Test " + slug}, ${"tok_" + slug}, ${"h_" + slug} ${extra})
+          INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash ${extra})
+          VALUES (${orgId}, ${probePartner}, ${slug}, ${"Test " + slug}, ${"tok_" + slug}, ${"h_" + slug} ${extra})
           RETURNING id, sandbox, rate_per_sec, rate_per_day, max_payload_bytes, status`)) as unknown as {
           id: number; sandbox: boolean; rate_per_sec: number; rate_per_day: number;
           max_payload_bytes: number; status: string;
@@ -129,29 +134,32 @@ async function main() {
       // ── CHECK constraints actually reject ───────────────────────────────
       console.log("\npartner_keys constraints reject bad values:");
       await expectReject(tx, "interest_tag_mode='force' with NO tag ⇒ rejected", sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, interest_tag_mode)
-        VALUES (${orgId},'probe-force','x','tok_force','h','force')`, "23514");
+        INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash, interest_tag_mode)
+        VALUES (${orgId}, ${probePartner},'probe-force','x','tok_force','h','force')`, "23514");
       await expectReject(tx, "unknown interest_tag_mode ⇒ rejected", sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, interest_tag_mode)
-        VALUES (${orgId},'probe-bad','x','tok_bad','h','sometimes')`, "23514");
+        INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash, interest_tag_mode)
+        VALUES (${orgId}, ${probePartner},'probe-bad','x','tok_bad','h','sometimes')`, "23514");
       await expectReject(tx, "rate_per_sec = 0 ⇒ rejected", sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, rate_per_sec)
-        VALUES (${orgId},'probe-z','x','tok_z','h',0)`, "23514");
+        INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash, rate_per_sec)
+        VALUES (${orgId}, ${probePartner},'probe-z','x','tok_z','h',0)`, "23514");
       await expectReject(tx, "max_payload_bytes above Vercel's ~4.5MB ceiling ⇒ rejected", sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, max_payload_bytes)
-        VALUES (${orgId},'probe-big','x','tok_big','h',9999999)`, "23514");
+        INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash, max_payload_bytes)
+        VALUES (${orgId}, ${probePartner},'probe-big','x','tok_big','h',9999999)`, "23514");
       await expectReject(tx, "duplicate token ⇒ rejected (global uniqueness)", sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-        VALUES (${orgId},'probe-dup','x','tok_probe-a','h')`, "23505");
-      await expectReject(tx, "duplicate (org, partner_slug) ⇒ rejected", sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-        VALUES (${orgId},'probe-a','x','tok_other','h')`, "23505");
+        INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash)
+        VALUES (${orgId}, ${probePartner},'probe-dup','x','tok_probe-a','h')`, "23505");
+      // 0200 dropped partner_keys_org_slug_uniq: two keys of one partner share
+      // the partner's slug (the uniqueness lives on partners(org_id, slug)).
+      const second = (await tx.execute(sql`
+        INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash)
+        VALUES (${orgId}, ${probePartner},'probe-a','x','tok_other','h') RETURNING id`)) as unknown as { id: number }[];
+      check("a second key with the same (org, partner_slug) ⇒ allowed since 0200", second.length, 1);
 
       // 'force' WITH a tag must be allowed — the constraint must not be a
       // blanket ban on the mode it exists to make safe.
       const forced = (await tx.execute(sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, interest_tag_mode, interest_tag)
-        VALUES (${orgId},'probe-forced','x','tok_forced','h','force','ACA')
+        INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash, interest_tag_mode, interest_tag)
+        VALUES (${orgId}, ${probePartner},'probe-forced','x','tok_forced','h','force','ACA')
         RETURNING interest_tag_mode`)) as unknown as { interest_tag_mode: string }[];
       check("interest_tag_mode='force' WITH a tag ⇒ allowed", forced[0]?.interest_tag_mode, "force");
 

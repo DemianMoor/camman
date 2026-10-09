@@ -1,5 +1,6 @@
 import "./_env-preload";
 import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { createPartnerWithKey } from "./_partner-fixture";
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -159,12 +160,9 @@ async function main() {
             INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${phone})
             RETURNING id`)) as unknown as { id: string }[]
         )[0].id;
-        const pk = (
-          (await tx.execute(sql`
-            INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-            VALUES (${orgId}, ${"lc" + sfx + seq}, 'probe', ${"tok" + sfx + seq++}, 'h')
-            RETURNING id`)) as unknown as { id: number }[]
-        )[0].id;
+        const pk = (await createPartnerWithKey(tx, {
+          orgId, slug: "lc" + sfx + seq, name: "probe", token: "tok" + sfx + seq++,
+        })).keyId;
         const le = (
           (await tx.execute(sql`
             INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, received_at)
@@ -189,12 +187,9 @@ async function main() {
       async function slotFree(cid: string): Promise<boolean> {
         try {
           await tx.transaction(async (sp) => {
-            const pk2 = (
-              (await sp.execute(sql`
-                INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-                VALUES (${orgId}, ${"sf" + sfx + seq}, 'probe', ${"sftok" + sfx + seq++}, 'h')
-                RETURNING id`)) as unknown as { id: number }[]
-            )[0].id;
+            const pk2 = (await createPartnerWithKey(sp, {
+              orgId, slug: "sf" + sfx + seq, name: "probe", token: "sftok" + sfx + seq++,
+            })).keyId;
             const le2 = (
               (await sp.execute(sql`
                 INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, received_at)

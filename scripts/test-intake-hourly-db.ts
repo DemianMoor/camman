@@ -12,6 +12,7 @@
 // the right numbers; (5) hourStart keeps the two DST fall-back 01:00s apart.
 import "./_env-preload";
 import "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { createPartnerWithKey } from "./_partner-fixture";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
@@ -42,11 +43,9 @@ async function main() {
     await db.transaction(async (tx) => {
       const org = (await tx.execute(sql`SELECT id FROM organizations ORDER BY created_at LIMIT 1`)) as unknown as { id: string }[];
       const orgId = org[0].id;
-      const key = (await tx.execute(sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, sandbox)
-        VALUES (${orgId}::uuid, 'zztest', 'hourly test', 'tok-hourly-test', 'x', false)
-        RETURNING id`)) as unknown as { id: number }[];
-      const k = key[0].id;
+      const k = (await createPartnerWithKey(tx, {
+        orgId, slug: "zztest", name: "hourly test", token: "tok-hourly-test", secretHash: "x", sandbox: false,
+      })).keyId;
       const bump = (iso: string, deltas: Record<string, number>, tag = "aca") =>
         bumpIntakeCounters(tx, { orgId, partnerKeyId: k, at: at(iso), interestTag: tag, deltas });
 

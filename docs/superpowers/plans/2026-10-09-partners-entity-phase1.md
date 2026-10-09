@@ -51,7 +51,8 @@
 | `components/settings/partners.tsx` | **create** — partner cards, New partner, archive/restore, link + revenue controls |
 | `components/settings/partner-key-card.tsx` | **create** — one key's card, moved out of `partner-keys.tsx` |
 | `components/settings/partner-key-create-dialog.tsx` | **create** — the create-key dialog, partner fixed, no slug field |
-| `components/settings/partner-keys.tsx` | **delete** (split into the three files above) |
+| `components/settings/partner-keys.tsx` | **delete** (split into the three files above; the row types are `import type`d from `lib/partners/queries.ts`, no separate types file) |
+| `scripts/test-partner-host.ts` | **modify** — its source guard reads the key card (where `endpointUrl` moved) instead of the deleted component |
 | `app/(protected)/settings/partners/page.tsx`, `components/protected/nav-config.ts` | **modify** — copy: "Partners" |
 | `scripts/test-partners-migration-db.ts`, `scripts/test-partner-report-token-db.ts`, `scripts/test-partners-api.ts` | **create** — preview-only tests |
 | `scripts/partners-phase1-exit-check.ts` | **create** — read-only prod exit check (pml link resolves, numbers identical to the baseline) |
@@ -187,7 +188,7 @@ async function main() {
 main().catch(async (e) => { console.error(e); await pgConn.end(); process.exit(1); });
 ```
 
-⚠️ `scripts/partners-phase1-exit-check.ts` imports `PARTNER_CAN_HAVE_LINK`'s text as a literal on purpose: the baseline checkout does not have Task 2's module. Task 2 Step 3 must keep `PARTNER_CAN_HAVE_LINK` byte-identical to the fragment above, and `scripts/test-partner-report-token-db.ts` check 3/4 exercises the module version.
+⚠️ `scripts/partners-phase1-exit-check.ts` carries `PARTNER_CAN_HAVE_LINK`'s predicate as a literal on purpose: the baseline checkout does not have Task 2's module. A change to the module's predicate is a change to this literal, and `scripts/test-partner-report-token-db.ts` checks 1–4 exercise the module version.
 
 - [ ] **Step 2: Capture the baseline (prod, read-only, OLD code) — the morning of the prod apply, BEFORE `npm run db:migrate`**
 

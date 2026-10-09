@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
+_Last updated: 2026-10-09 (sweeper batch 200 → 600; digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -25,6 +25,13 @@ claims from `lookup_queue` and calls Telnyx inline ([lib/telnyx/worker.ts](../..
 
 Latency: **same pass on a cache hit**, ~2–5 min on a miss, degraded while a bulk upload is in the
 queue (mitigated below).
+
+**Throughput: ~`BATCH_SIZE / 2` leads per minute.** One tick claims up to `BATCH_SIZE` rows (**600**
+since 2026-10-09, was 200) across both passes, and a cache-miss lead is claimed twice — once to
+enqueue, once to finalize. At 200 the ceiling was ~100 leads/min; a 195/min pml burst on 2026-10-09
+queued 3,600 leads and tripped the backlog alert. A 200-row run measured ~7 s (claim → heartbeat),
+so 600 runs ~20 s under the 60 s `maxDuration`. A `received` backlog with a fresh heartbeat means
+the sweeper is **outpacing-limited, not dead**.
 
 ## Line-type policy — only landline is discarded
 

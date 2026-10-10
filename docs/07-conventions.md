@@ -1,6 +1,10 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-09_
+_Last updated: 2026-10-11_
+
+## An oldest-first work queue must never keep rows it cannot act on (2026-10-11)
+
+`ORDER BY received_at LIMIT N` is only safe while every row it returns either gets processed or leaves the queue. If a row it can't act on stays in place, it keeps its spot at the head of every batch. N such rows stop the worker completely, and fewer than N quietly cut its throughput, with nothing failing. That is how ~180 opted-out leads starved 44,968 routable ones on 2026-10-10 ([04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#unrouted-leads-permanent-deferred-expired-2026-10-11-card-869ency4b)). For every such queue, decide per outcome: **permanent** → write a terminal state now; **temporary** → move it behind fresh work with a re-check time (`lead_events.drip_recheck_at`); never "no row, retry next tick at the head". The drip enrichment and follow-up batches had the same shape.
 
 ## A stage must have a provider AND a phone — the drip scheduler doesn't check (2026-10-09)
 

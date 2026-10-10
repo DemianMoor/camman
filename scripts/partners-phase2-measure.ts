@@ -29,10 +29,13 @@ function check(label: string, ok: boolean, detail = "") {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${ok || !detail ? "" : `\n        ${detail}`}`);
 }
 
+// le.org_id = g.org_id is for the planner: lead_events has no bare contact_id index, only
+// (org_id, contact_id, received_at); without it the correlated min() seq-scans lead_events
+// once per member (38K × 41K rows on 2026-10-10 → statement timeout at 2 min).
 const MEMBERS = sql`
   SELECT ccg.contact_id, ccg.contact_group_id, g.name AS group_name, ccg.created_at AS stamped,
          (SELECT min(le.received_at) FROM lead_events le
-           WHERE le.contact_id = ccg.contact_id AND le.sandbox = false
+           WHERE le.org_id = g.org_id AND le.contact_id = ccg.contact_id AND le.sandbox = false
              AND lower(le.partner_slug) || '-' || coalesce(nullif(lower(trim(le.interest_tag)), ''), 'untagged') = g.name) AS first_received
   FROM contact_contact_groups ccg
   JOIN contact_groups g ON g.id = ccg.contact_group_id
@@ -100,7 +103,7 @@ async function main() {
     check("0201 (C2): partner_keys.partner_id has 0 NULLs", m.keys_null_partner === 0);
     check("0201 (C4): drip-intake=drip_intake, drip-sandbox=drip_sandbox", a.markers === "drip-intake=drip_intake,drip-sandbox=drip_sandbox", String(a.markers));
     check("0201: no system group carries a partner", a.system_with_partner === 0);
-    check("⭐ 0201 (Q6, F5): exact links — bsd-untagged→bsd, pml-aca→pml", a.drip_links === "bsd-untagged→bsd,pml-aca→pml", String(a.drip_links));
+    check("⭐ 0201 (Q6, F5): exact links — bsd-untagged→bsd, pml-aca→pml, pml-medicare→pml", a.drip_links === "bsd-untagged→bsd,pml-aca→pml,pml-medicare→pml", String(a.drip_links));
     check("⭐ repair: no drip partner×tag membership is stamped after delivery", m.lag_positive === 0, `lag_positive=${m.lag_positive}`);
     check("⭐ repair: every membership is stamped exactly at first delivery", m.stamped_at_delivery === m.members && m.stamped_before_delivery === 0, `${m.stamped_at_delivery}/${m.members}, before=${m.stamped_before_delivery}`);
     check("⭐ R3 count did NOT move (before == after == against delivery)",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -16,6 +16,13 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ColorPicker } from "@/components/color-picker";
 import { toastApiError } from "@/lib/api/toast-error";
@@ -60,7 +67,19 @@ export interface ContactGroupFormProps {
   orgThresholds?: OrgThresholds;
   /** Whether this viewer may change the lifecycle overrides (lifecycle.configure). */
   canConfigureLifecycle?: boolean;
+  /**
+   * Partner attribution link (migration 0201), edit mode only. The group's
+   * `partner_id` rides in `initialValues`; these three decide how the select
+   * renders: locked (`drip` = set by the drip pipeline, owner fix F3; `system`
+   * = a system group, ruling C4), changeable (partner_keys.manage, ruling Q9),
+   * and whether the partner list may be fetched at all (partner_keys.view).
+   */
+  partnerLock?: "drip" | "system" | null;
+  canChangePartner?: boolean;
+  canViewPartners?: boolean;
 }
+
+type PartnerOption = { id: number; slug: string; name: string; status: string };
 
 export function ContactGroupForm({
   mode,
@@ -71,8 +90,21 @@ export function ContactGroupForm({
   groupId,
   orgThresholds,
   canConfigureLifecycle = false,
+  partnerLock = null,
+  canChangePartner = false,
+  canViewPartners = false,
 }: ContactGroupFormProps) {
   const isEdit = mode === "edit";
+  const partnersApi = useApiCall<{ data: PartnerOption[] }>();
+  const [partnerOptions, setPartnerOptions] = useState<PartnerOption[]>([]);
+  const loadPartners = partnersApi.execute;
+  useEffect(() => {
+    if (!isEdit || !canViewPartners) return;
+    (async () => {
+      const r = await loadPartners("/api/partners");
+      if (r.ok) setPartnerOptions(r.data.data.filter((p) => p.status === "active"));
+    })();
+  }, [isEdit, canViewPartners, loadPartners]);
   const previewApi = useApiCall<PreviewResult>();
   const [groupPreview, setGroupPreview] = useState<PreviewResult | null>(null);
 
@@ -87,6 +119,7 @@ export function ContactGroupForm({
       freeze_cadence_days: initialValues?.freeze_cadence_days ?? null,
       suppress_after_days: initialValues?.suppress_after_days ?? null,
       suppress_min_freeze_messages: initialValues?.suppress_min_freeze_messages ?? null,
+      partner_id: initialValues?.partner_id ?? null,
     },
   });
 
@@ -200,6 +233,60 @@ export function ContactGroupForm({
             </FormItem>
           )}
         />
+
+        {/* Partner attribution link (migration 0201). Edit mode only: a group
+            is created first and linked after. A plain Select — four partners
+            today; swap for SearchableSelect past ten (docs/07-conventions.md). */}
+        {isEdit && canViewPartners ? (
+          <FormField
+            control={form.control}
+            name="partner_id"
+            render={({ field }) => {
+              const current = partnerOptions.find((p) => p.id === field.value);
+              const locked = partnerLock !== null || !canChangePartner;
+              return (
+                <FormItem>
+                  <FormLabel>Partner</FormLabel>
+                  <FormControl>
+                    {partnerLock === "system" ? (
+                      <Input value="System group — cannot be linked" readOnly disabled />
+                    ) : (
+                      <Select
+                        value={field.value == null ? "none" : String(field.value)}
+                        onValueChange={(v) => field.onChange(v === "none" ? null : Number(v))}
+                        disabled={isSubmitting || locked}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="No partner">
+                            {field.value == null ? "No partner" : (current?.name ?? `Partner #${field.value}`)}
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">No partner</SelectItem>
+                          {partnerOptions.map((p) => (
+                            <SelectItem key={p.id} value={String(p.id)}>
+                              {p.name} <span className="text-muted-foreground">({p.slug})</span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </FormControl>
+                  <FormDescription>
+                    {partnerLock === "drip"
+                      ? "Set by the drip pipeline from the partner key — cannot be changed here."
+                      : partnerLock === "system"
+                        ? "A system group is a pipeline artifact, never a partner entry."
+                        : !canChangePartner
+                          ? "Changing the partner needs the partner management permission."
+                          : "Links this group's contacts to the partner for attribution. Reports update after a recalculation."}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              );
+            }}
+          />
+        ) : null}
 
         <div className="space-y-3 rounded-md border p-3">
           <div>

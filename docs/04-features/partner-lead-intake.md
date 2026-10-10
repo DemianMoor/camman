@@ -215,6 +215,40 @@ and the revenue flag, so pml's live link kept resolving. `partner_keys_org_slug_
 The list responses never carry `token`, `secret_hash` or `report_token_hash`
 ([lib/partners/queries.ts](../../lib/partners/queries.ts)).
 
+### Phase 2 — delivery-time stamps, group links, the system marker (migration 0201)
+
+- **The partner×tag membership is stamped at DELIVERY** (ruling Q2): enrichment passes
+  `createdAt: row.received_at` to `addContactsToGroup` for the `<slug>-<tag>` group
+  ([lib/drip/enrichment.ts](../../lib/drip/enrichment.ts), [lib/drip/groups.ts](../../lib/drip/groups.ts)),
+  because `contact_contact_groups.created_at` means *appeared* to the attribution resolver and
+  processing time is seconds to an hour later. `ON CONFLICT DO NOTHING` keeps the first delivery.
+  The system-group membership (`Drip intake` / `Drip sandbox`) keeps `now()`.
+- **Existing rows are repaired by a script, not a migration** (owner fix F1):
+  `scripts/repair-drip-membership-appearance.ts` — dry run by default (prints `rows_to_repair`,
+  `backfilled_rows (>10 min)`, `max_lag`, plus `rows_in_backup` — null until the first `--apply` creates
+  the table — and `R3` per drip partner×tag group, the gate B proposal numbers; `dryRunStatus` prints
+  the same two after `--apply`, where R3 must equal the before line), `--apply` fills `drip_membership_stamp_backup`
+  (append-only) then re-dates every drip partner×tag membership stamped after its lead's first
+  delivery for that exact group (match = `partnerTagGroupName` restated in SQL), `--revert --apply`
+  restores. Re-runnable. Runs on prod only after this code is deployed and one fresh pml lead is
+  confirmed stamped at `received_at`, on the owner's go. Prod 2026-10-09: 16,182 rows qualified
+  (8,171 of them the #311 backfill, up to 1 h 24 m late).
+- **The group is linked to the key's partner at creation** (ruling Q6): `ensurePartnerTagGroup`
+  takes `partnerId` and sets `contact_groups.partner_id`; an existing link is kept (COALESCE).
+  0201 backfilled the existing groups by the exact-prefix longest-slug rule
+  (`left(name, length(slug)+1) = slug || '-'`, owner fix F4): `pml-aca` → pml, `bsd-untagged` → bsd.
+  The link on a `drip:%` group is **locked** — the group screen shows it read-only and
+  `PATCH … partner_id` answers 409 `drip_group` (owner fix F3).
+- **The two system groups carry `system_role`** (`drip_intake` / `drip_sandbox`, ruling C4), set by
+  `ensureDripGroup` (healing a pre-0201 row on conflict) and backfilled by `contact_group_id`,
+  never by id. The resolver exempts them from R3 by the marker.
+- **`partner_keys.partner_id` is NOT NULL** since 0201 (C2 finished behind an in-SQL zero-NULLs
+  guard). Every fixture script that inserts a key creates its partner first through
+  `scripts/_partner-fixture.ts` → `createPartnerWithKey()`.
+- The guard `scripts/test-membership-timestamp-readers.ts` (in `check:guards`) asserts the only
+  reader of `contact_contact_groups.created_at` in `lib/`, `app/`, `db/` is the group's Contacts
+  tab (`app/api/contact-groups/[id]/contacts/route.ts`); comments are stripped before the scan.
+
 The endpoint URL is shown only on an explicit "Show endpoint URL" click, not in the list response —
 it is half the credential and should not render on every settings visit.
 

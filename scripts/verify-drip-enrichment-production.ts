@@ -2,6 +2,7 @@ import "./_env-preload";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
+import { createPartnerWithKey } from "./_partner-fixture";
 
 // Production proof for the Drip Phase 3 enrichment sweeper.
 //
@@ -55,14 +56,14 @@ async function main() {
   console.log(`org ${orgId}`);
 
   // ── seed: two partner keys and two CACHE rows (no Telnyx call) ──────────
-  const liveKey = await one<{ id: number }>(sql`
-    INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, sandbox)
-    VALUES (${orgId}, ${"zz-p3-live-" + sfx}, 'P3 probe (live)', ${"tokp3l" + sfx}, 'h', false)
-    RETURNING id`);
-  const sandboxKey = await one<{ id: number }>(sql`
-    INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash, sandbox)
-    VALUES (${orgId}, ${"zz-p3-sbx-" + sfx}, 'P3 probe (sandbox)', ${"tokp3s" + sfx}, 'h', true)
-    RETURNING id`);
+  const liveFx = await createPartnerWithKey(db, {
+    orgId, slug: "zz-p3-live-" + sfx, name: "P3 probe (live)", token: "tokp3l" + sfx, sandbox: false,
+  });
+  const sandboxFx = await createPartnerWithKey(db, {
+    orgId, slug: "zz-p3-sbx-" + sfx, name: "P3 probe (sandbox)", token: "tokp3s" + sfx, sandbox: true,
+  });
+  const liveKey = { id: liveFx.keyId };
+  const sandboxKey = { id: sandboxFx.keyId };
 
   // The cache hits. This is what makes the run free — enqueueNormalized sees
   // lookup_status='complete' and never queues a Telnyx call.
@@ -232,6 +233,7 @@ async function main() {
     await db.execute(sql`DELETE FROM lead_inbox WHERE partner_key_id IN (${liveKey.id}, ${sandboxKey.id})`);
     await db.execute(sql`DELETE FROM partner_key_usage WHERE partner_key_id IN (${liveKey.id}, ${sandboxKey.id})`);
     await db.execute(sql`DELETE FROM partner_keys WHERE id IN (${liveKey.id}, ${sandboxKey.id})`);
+    await db.execute(sql`DELETE FROM partners WHERE id IN (${liveFx.partnerId}, ${sandboxFx.partnerId})`);
     const ct = (await db.execute(sql`
       DELETE FROM contacts WHERE org_id = ${orgId}
         AND phone_number IN (${phoneMobile}, ${phoneLandline}, ${phoneSandbox})

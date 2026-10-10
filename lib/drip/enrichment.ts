@@ -60,6 +60,8 @@ interface InboxRow {
   id: string;
   org_id: string;
   partner_key_id: number;
+  /** The key's partner (0200/0201) — the partner×tag group is linked to it (Q6). */
+  partner_id: number;
   partner_slug: string;
   raw: Record<string, unknown>;
   phone_e164: string | null;
@@ -141,6 +143,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
       SELECT li.id, li.org_id, li.partner_key_id, li.partner_slug, li.raw, li.phone_e164,
              li.interest_tag, li.sandbox, li.received_at, li.status,
              pk.field_mapping,
+             pk.partner_id,
              pl.line_type,
              (pl.lookup_status = 'complete') AS lookup_complete
       FROM lead_inbox li
@@ -308,16 +311,23 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
 
       // Real leads also join their partner x tag group ("pml-aca"). Never
       // sandbox — that group must stay the only place a sandbox lead lives.
+      // The group is linked to the key's partner at creation (ruling Q6), and
+      // the membership is stamped at DELIVERY (ruling Q2): its created_at is
+      // what the attribution resolver reads as "appeared", and processing time
+      // (the system-group stamp above) is minutes to an hour later.
       if (!row.sandbox) {
         const gkey = partnerTagGroupName(row.partner_slug, row.interest_tag);
         let groupId = partnerTagGroups.get(gkey);
         if (groupId === undefined) {
           groupId = await ensurePartnerTagGroup(tx, {
             orgId, partnerSlug: row.partner_slug, interestTag: row.interest_tag,
+            partnerId: row.partner_id,
           });
           partnerTagGroups.set(gkey, groupId);
         }
-        await addContactsToGroup(tx, { orgId, groupId, contactIds: [contactId] });
+        await addContactsToGroup(tx, {
+          orgId, groupId, contactIds: [contactId], createdAt: row.received_at,
+        });
       }
 
       await tx.execute(sql`

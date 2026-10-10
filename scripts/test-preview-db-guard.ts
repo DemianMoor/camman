@@ -87,6 +87,10 @@ const EXCLUSIONS: ReadonlyArray<{
 }> = [
   // ── production operations tooling: changing production IS the purpose ──────
   {
+    file: "repair-drip-membership-appearance.ts",
+    why: "partner attribution Phase 2 (Q2) data repair: dates drip partner×tag memberships at first delivery on prod, on the owner's go; dry-run by default, every changed stamp backed up first (append-only), --revert restores",
+  },
+  {
     file: "apply-0099.ts",
     why: "controlled apply of migration 0099 against the production database",
   },

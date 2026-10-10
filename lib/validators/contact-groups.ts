@@ -34,6 +34,10 @@ export const contactGroupCreateSchema = z.object({
   freeze_cadence_days: z.number().int().min(1).max(365).nullable().optional(),
   suppress_after_days: z.number().int().min(1).max(730).nullable().optional(),
   suppress_min_freeze_messages: z.number().int().min(1).max(100).nullable().optional(),
+  // Partner attribution link (migration 0201, ruling R1). null = not a partner
+  // entry. Changing it needs partner_keys.manage (Q9); on a drip partner×tag
+  // group and on a system group the route refuses it (F3 / C4).
+  partner_id: z.number().int().positive().nullable().optional(),
 });
 
 /** The four lifecycle override columns, shared by the form, the PATCH route and the preview. */

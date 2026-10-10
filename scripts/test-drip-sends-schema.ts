@@ -1,5 +1,6 @@
 import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
+import { createPartnerWithKey } from "./_partner-fixture";
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -213,10 +214,9 @@ async function main() {
       const contactRows = (await tx.execute(sql`
         INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${"+1992" + sfx})
         RETURNING id`)) as unknown as { id: string }[];
-      const keyRows = (await tx.execute(sql`
-        INSERT INTO partner_keys (org_id, partner_slug, name, token, secret_hash)
-        VALUES (${orgId}, ${"p5k-" + sfx}, 'p5', ${"tp5" + sfx}, 'h') RETURNING id
-      `)) as unknown as { id: number }[];
+      const keyRows = [{
+        id: (await createPartnerWithKey(tx, { orgId, slug: "p5k-" + sfx, name: "p5", token: "tp5" + sfx })).keyId,
+      }];
       const evRows = (await tx.execute(sql`
         INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, received_at)
         VALUES (${orgId}, ${contactRows[0].id}, ${keyRows[0].id}, 'p5', now()) RETURNING id

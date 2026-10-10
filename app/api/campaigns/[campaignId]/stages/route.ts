@@ -736,8 +736,8 @@ export async function POST(
     campaign_id: cid,
     label: nullIfEmpty(input.label),
     creative_id: input.creative_id ?? null,
-    sms_provider_id: input.sms_provider_id ?? null,
-    provider_phone_id: input.provider_phone_id ?? null,
+    sms_provider_id: input.sms_provider_id,
+    provider_phone_id: input.provider_phone_id,
     landing_page_id: input.landing_page_id ?? null,
     // ⚠️ THESE THREE MUST BE LISTED HERE OR THEY ARE SILENTLY DISCARDED.
     // Drizzle's .values() writes exactly the keys it is given; a field the

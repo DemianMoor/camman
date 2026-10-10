@@ -2,6 +2,10 @@
 
 _Last updated: 2026-10-09_
 
+## A stage must have a provider AND a phone — the drip scheduler doesn't check (2026-10-09)
+
+The drip scheduler ([`lib/drip/scheduler.ts`](../lib/drip/scheduler.ts)) picks the send-from number from the campaign's drip number pool and inserts `pending` `stage_sends` rows without reading the stage's `sms_provider_id`. The drain ([`lib/sends/drain.ts`](../lib/sends/drain.ts)) keys on the stage's provider and returns `no_provider` every tick when it is NULL. The result is a silent stall that only the backlog-stall alert catches (stage 5178, "Noon Stage_2", 442 messages, 2026-10-09). The fix is at the entry point: `sms_provider_id` and `provider_phone_id` are required on stage create and can't be cleared on update, on every campaign type ([campaigns-stages-creatives.md](04-features/campaigns-stages-creatives.md)). Any NEW path that creates a stage outside the validated POST must copy both from a source stage or refuse.
+
 ## Intake counters are written at TWO grains in ONE statement (2026-10-07)
 
 `bumpIntakeCounters` ([lib/drip/counters.ts](../lib/drip/counters.ts)) upserts `lead_intake_daily`

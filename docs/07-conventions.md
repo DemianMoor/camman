@@ -1,6 +1,10 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-09_
+_Last updated: 2026-10-11_
+
+## A stop control must be read by the DRAIN, not only by the job that queues (2026-10-11)
+
+Drip jobs ([`lib/drip/scheduler.ts`](../lib/drip/scheduler.ts), [`lib/drip/followups.ts`](../lib/drip/followups.ts)) only INSERT `pending` `stage_sends`; the drain ([`lib/sends/drain.ts`](../lib/sends/drain.ts)) is what calls the provider. A switch checked only upstream stops new rows being queued and nothing else. The org drip posture (`drip_enabled` / `drip_paused`) was exactly that until 2026-10-11, so already-queued drip rows kept sending after drip was turned off. Any new "stop sending X" control must go into the drain's pre-claim gate AND its between-batch re-check (see `isDripSendingHalted` in [`lib/sends/circuit-breakers.ts`](../lib/sends/circuit-breakers.ts)), and be proved mid-burst the way `scripts/test-drip-stop-controls.ts` does.
 
 ## A stage must have a provider AND a phone — the drip scheduler doesn't check (2026-10-09)
 

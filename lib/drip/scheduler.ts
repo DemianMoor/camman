@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
+import { isCampaignPaused, isDripSendingHalted } from "@/lib/sends/circuit-breakers";
 import { getDescriptor } from "@/lib/sends/providers/registry";
 import {
   bodyCarriesStop,
@@ -151,7 +152,11 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       // ⚠️ The campaign latch is checked BEFORE any insert, not after. A paused
       // campaign accumulates journeys; it must not accumulate pending sends,
       // because the drain would ship them the moment someone unpauses.
-      if (head.campaign_paused) {
+      // FRESH read too: the due list is as old as the tick, and a pause (campaign
+      // latch or the org drip switches) can land while earlier campaigns insert.
+      if (head.campaign_paused ||
+          await isCampaignPaused(db, campaignId) ||
+          await isDripSendingHalted(db, campaignId)) {
         res.pausedSkipped += leads.length;
         continue;
       }

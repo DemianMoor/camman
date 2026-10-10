@@ -9,7 +9,7 @@ import type { DbOrTx } from "@/lib/intake/partner-key";
 // not a migration; listed in scripts/test-preview-db-guard.ts EXCLUSIONS).
 //
 //   npx tsx --conditions=react-server scripts/repair-drip-membership-appearance.ts                    dry run: prints the counts, writes nothing
-//   npx tsx --conditions=react-server scripts/repair-drip-membership-appearance.ts --apply            fills the backup, then updates
+//   npx tsx --conditions=react-server scripts/repair-drip-membership-appearance.ts --apply            per group: fills the backup, then updates (one transaction each)
 //   npx tsx --conditions=react-server scripts/repair-drip-membership-appearance.ts --revert --apply   restores every backed-up stamp
 //
 // Why: the #311 backfill stamped 8,171 pml-aca memberships up to 1 h 24 m after
@@ -33,15 +33,25 @@ import type { DbOrTx } from "@/lib/intake/partner-key";
 export const BACKUP_TABLE = "drip_membership_stamp_backup";
 
 /** Membership → first delivery for exactly that partner×tag group. */
-export const FIRST_DELIVERY: SQL = sql`
+/**
+ * Membership → first delivery for exactly that partner×tag group. `le.org_id = g.org_id`
+ * is for the planner as much as for tenancy: lead_events has no bare contact_id index, only
+ * (org_id, contact_id, received_at) — the same fix the measurement script needed on
+ * 2026-10-10 when the member count doubled overnight. With `groupId` the set is one group's.
+ */
+export function firstDelivery(groupId?: number): SQL {
+  return sql`
   SELECT ccg2.contact_id, ccg2.contact_group_id, min(le.received_at) AS first_received
   FROM contact_contact_groups ccg2
   JOIN contact_groups g ON g.id = ccg2.contact_group_id
    AND g.contact_group_id LIKE 'drip:%'
    AND g.contact_group_id NOT IN ('drip-intake', 'drip-sandbox')
-  JOIN lead_events le ON le.contact_id = ccg2.contact_id AND le.sandbox = false
+  JOIN lead_events le ON le.org_id = g.org_id AND le.contact_id = ccg2.contact_id AND le.sandbox = false
    AND lower(le.partner_slug) || '-' || coalesce(nullif(lower(trim(le.interest_tag)), ''), 'untagged') = g.name
+  ${groupId === undefined ? sql`` : sql`WHERE ccg2.contact_group_id = ${groupId}`}
   GROUP BY 1, 2`;
+}
+export const FIRST_DELIVERY: SQL = firstDelivery();
 
 export interface Counts {
   rows_to_repair: number;
@@ -49,16 +59,27 @@ export interface Counts {
   max_lag: string | null;
 }
 
-/** The before/after count query. */
-export async function countRepairable(dbc: DbOrTx): Promise<Counts> {
+/** The before/after count query (all groups, or one). */
+export async function countRepairable(dbc: DbOrTx, groupId?: number): Promise<Counts> {
   const r = (await dbc.execute(sql`
     SELECT count(*)::int AS rows_to_repair,
            count(*) FILTER (WHERE ccg.created_at > fr.first_received + interval '10 minutes')::int AS backfilled_rows,
            max(ccg.created_at - fr.first_received)::text AS max_lag
     FROM contact_contact_groups ccg
-    JOIN (${FIRST_DELIVERY}) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
+    JOIN (${firstDelivery(groupId)}) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
     WHERE ccg.created_at > fr.first_received`)) as unknown as Counts[];
   return r[0];
+}
+
+/** The batches: every drip partner×tag group that still has a repairable row, with its count. Ordered by id. */
+export async function listRepairGroups(dbc: DbOrTx): Promise<{ id: number; name: string; rows: number }[]> {
+  return (await dbc.execute(sql`
+    SELECT g.id, g.name, count(*)::int AS rows
+    FROM contact_contact_groups ccg
+    JOIN contact_groups g ON g.id = ccg.contact_group_id
+    JOIN (${firstDelivery()}) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
+    WHERE ccg.created_at > fr.first_received
+    GROUP BY g.id, g.name ORDER BY g.id`)) as unknown as { id: number; name: string; rows: number }[];
 }
 
 export interface Status {
@@ -93,8 +114,8 @@ export async function dryRunStatus(dbc: DbOrTx): Promise<Status> {
   return { rows_in_backup, r3_by_group: r[0].s };
 }
 
-/** Fill the backup (append-only), then repair. Returns what each step touched. */
-export async function repair(dbc: DbOrTx): Promise<{ backed_up_new: number; updated: number }> {
+/** The append-only backup table (created on the first run, kept until the owner says drop). */
+export async function ensureBackupTable(dbc: DbOrTx): Promise<void> {
   await dbc.execute(sql`
     CREATE TABLE IF NOT EXISTS public.drip_membership_stamp_backup (
       contact_id       uuid NOT NULL,
@@ -104,11 +125,20 @@ export async function repair(dbc: DbOrTx): Promise<{ backed_up_new: number; upda
       backed_up_at     timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (contact_id, contact_group_id))`);
   await dbc.execute(sql`ALTER TABLE public.drip_membership_stamp_backup ENABLE ROW LEVEL SECURITY`);
+}
+
+/**
+ * ONE batch = one group: back up its repairable rows (append-only), then re-date them.
+ * Run inside a transaction so a failed UPDATE leaves no half-backed-up batch; the CLI
+ * opens one transaction per group (owner, 2026-10-10: batched, each batch backed up
+ * before it is updated — one statement over every group would carry 38K+ rows).
+ */
+export async function repairGroup(dbc: DbOrTx, groupId: number): Promise<{ backed_up_new: number; updated: number }> {
   const b = (await dbc.execute(sql`
     INSERT INTO public.drip_membership_stamp_backup (contact_id, contact_group_id, old_created_at, new_created_at)
     SELECT ccg.contact_id, ccg.contact_group_id, ccg.created_at, fr.first_received
     FROM contact_contact_groups ccg
-    JOIN (${FIRST_DELIVERY}) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
+    JOIN (${firstDelivery(groupId)}) fr ON fr.contact_id = ccg.contact_id AND fr.contact_group_id = ccg.contact_group_id
     WHERE ccg.created_at > fr.first_received
     ON CONFLICT (contact_id, contact_group_id) DO NOTHING
     RETURNING contact_id`)) as unknown as unknown[];
@@ -117,18 +147,32 @@ export async function repair(dbc: DbOrTx): Promise<{ backed_up_new: number; upda
     SET created_at = b.new_created_at
     FROM public.drip_membership_stamp_backup b
     WHERE b.contact_id = ccg.contact_id AND b.contact_group_id = ccg.contact_group_id
+      AND b.contact_group_id = ${groupId}
       AND ccg.created_at > b.new_created_at
     RETURNING ccg.contact_id`)) as unknown as unknown[];
   return { backed_up_new: b.length, updated: u.length };
 }
 
-/** Restore every backed-up stamp. The backup table is kept (dropped only on the owner's say-so). */
-export async function revert(dbc: DbOrTx): Promise<number> {
+/** Every group, sequentially, on the given executor (the test's rolled-back transaction). */
+export async function repair(dbc: DbOrTx): Promise<{ backed_up_new: number; updated: number }> {
+  await ensureBackupTable(dbc);
+  const total = { backed_up_new: 0, updated: 0 };
+  for (const g of await listRepairGroups(dbc)) {
+    const r = await repairGroup(dbc, g.id);
+    total.backed_up_new += r.backed_up_new;
+    total.updated += r.updated;
+  }
+  return total;
+}
+
+/** Restore every backed-up stamp (all groups, or one). The backup table is kept. */
+export async function revert(dbc: DbOrTx, groupId?: number): Promise<number> {
   const r = (await dbc.execute(sql`
     UPDATE contact_contact_groups ccg
     SET created_at = b.old_created_at
     FROM public.drip_membership_stamp_backup b
     WHERE b.contact_id = ccg.contact_id AND b.contact_group_id = ccg.contact_group_id
+      ${groupId === undefined ? sql`` : sql`AND b.contact_group_id = ${groupId}`}
     RETURNING ccg.contact_id`)) as unknown as unknown[];
   return r.length;
 }
@@ -138,25 +182,43 @@ async function main() {
   const doRevert = process.argv.includes("--revert");
   const ref = /postgres\.([a-z0-9]+):/.exec(process.env.DATABASE_URL ?? "")?.[1] ?? "(unknown)";
   console.log(`target project ref: ${ref}   mode: ${doRevert ? "REVERT" : "repair"}${apply ? " (APPLY)" : " (dry run)"}   at ${new Date().toISOString()}`);
-  const before = await countRepairable(db);
   const fmt = (s: Status) => `rows_in_backup=${s.rows_in_backup ?? "0 (no backup table yet)"} R3=${s.r3_by_group ?? "(no members)"}`;
-  console.log(`before: rows_to_repair=${before.rows_to_repair} backfilled_rows(>10 min)=${before.backfilled_rows} max_lag=${before.max_lag}`);
+  const t0 = Date.now();
+  const before = await countRepairable(db);
+  const tCount = Date.now() - t0;
+  const groups = await listRepairGroups(db);
+  console.log(`before: rows_to_repair=${before.rows_to_repair} backfilled_rows(>10 min)=${before.backfilled_rows} max_lag=${before.max_lag}   (count query ${tCount} ms)`);
   console.log(`        ${fmt(await dryRunStatus(db))}`);
+  console.log(`        batches (one transaction per group, backup then update): ${groups.map((g) => `${g.name}#${g.id}=${g.rows}`).join(", ") || "(none)"}   dry run total ${Date.now() - t0} ms`);
   if (!apply) {
     console.log("dry run — nothing written. Re-run with --apply.");
     await pgConn.end();
     return;
   }
   if (doRevert) {
-    const n = await revert(db);
+    const backed = (await db.execute(sql`SELECT contact_group_id AS id, count(*)::int AS rows FROM public.drip_membership_stamp_backup GROUP BY 1 ORDER BY 1`)) as unknown as { id: number; rows: number }[];
+    let n = 0;
+    for (const g of backed) {
+      const t = Date.now();
+      const r = await db.transaction((tx) => revert(tx, g.id));
+      n += r;
+      console.log(`  reverted group ${g.id}: ${r} stamp(s) in ${Date.now() - t} ms`);
+    }
     const after = await countRepairable(db);
     console.log(`reverted ${n} stamp(s); now rows_to_repair=${after.rows_to_repair}`);
     console.log(`        ${fmt(await dryRunStatus(db))}`);
   } else {
-    const t0 = Date.now();
-    const r = await db.transaction((tx) => repair(tx));
+    await db.transaction((tx) => ensureBackupTable(tx));
+    const total = { backed_up_new: 0, updated: 0 };
+    for (const g of groups) {
+      const t = Date.now();
+      const r = await db.transaction((tx) => repairGroup(tx, g.id));
+      total.backed_up_new += r.backed_up_new;
+      total.updated += r.updated;
+      console.log(`  batch ${g.name}#${g.id}: backed up ${r.backed_up_new} new row(s), updated ${r.updated} in ${Date.now() - t} ms`);
+    }
     const after = await countRepairable(db);
-    console.log(`backed up ${r.backed_up_new} new row(s), updated ${r.updated} in ${Date.now() - t0} ms; now rows_to_repair=${after.rows_to_repair} (expect 0)`);
+    console.log(`backed up ${total.backed_up_new} new row(s), updated ${total.updated} in ${Date.now() - t0} ms total; now rows_to_repair=${after.rows_to_repair} (expect 0)`);
     console.log(`        ${fmt(await dryRunStatus(db))}   (R3 must equal the before line)`);
     if (after.rows_to_repair !== 0) process.exitCode = 1;
   }

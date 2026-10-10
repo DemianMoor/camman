@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
+_Last updated: 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -96,6 +96,31 @@ $0 and a purely historical threshold would never fire, precisely when drip first
 **⚠️ Cap exhaustion leaves the row as `received`, not `awaiting_lookup`.** The claim only re-picks an
 awaiting row whose lookup is **complete**, so parking a never-enqueued lead there would strand it
 silently forever. Leaving it `received` keeps it claimable next tick.
+
+## Throughput: batches until the deadline (2026-10-11)
+
+One tick now claims and processes batches of 200, **each in its own transaction**, until nothing is
+claimable, 45 s have passed (`ENRICHMENT_DEADLINE_MS`; the route allows 60 s), or 1,500 claims
+(`ENRICHMENT_MAX_CLAIMS_PER_TICK`). Pass-2 rows (lookup complete, finishing a lead) are claimed
+before pass-1 rows. Each batch belongs to ONE org (the one owning the oldest claimable row); the
+batch used to take `rows[0].org_id` for rows that could span orgs.
+
+**Why:** one batch of 200 per tick, with every cache miss claimed twice, capped processing at
+~100 leads/min. On 2026-10-10 ProMarketing's 50,000 took **8 h 16 min**: arrival → lookup reached a
+median of 251 min while the Telnyx worker (30 rps ≈ 1,800/min) was mostly idle, and lookup →
+processed took ~12 s.
+
+**Cost:** ~14 database round trips and ~5–8 ms of DB time per lead (pg_stat_statements on prod).
+Production runs in Vercel `fra1` next to Supabase `eu-central-1`, so a batch of 200 is ~5 s and a
+45 s tick is ~1,500 claims ≈ 650–750 leads/min. The cron logs one `[lead-enrichment] {…}` line per
+tick (`claimed`, `processed`, `batches`, `elapsedMs`, `hitDeadline`); read that for the real figure.
+
+**No head-of-line block on the lookup cap.** When the drip lookup sub-cap is spent, a `received` row
+that needs Telnyx is no longer claimed at all. Before, up to 200 such rows headed every batch (each
+left `received` as `capDeferred`), so leads whose lookup had completed behind them waited for the ET
+day to roll over. Proof: `scripts/test-drip-enrichment-throughput.ts`. With the cap spent and 50
+ready leads behind 300 blocked ones, **50 were processed** (old code: **0**, with 200 claimed and
+deferred).
 
 ## Queue priority (head-of-line blocking)
 

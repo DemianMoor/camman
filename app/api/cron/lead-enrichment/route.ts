@@ -49,6 +49,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       skippedCount: leased.skippedCount,
     });
   }
+  // One summary line per tick: the throughput evidence for card 869ency4b
+  // (count, batches, elapsed) without a log-drain or a new table.
+  console.log(`[lead-enrichment] ${JSON.stringify(leased.result)}`);
   await recordHeartbeat(db, HEARTBEAT_JOBS.leadEnrichment.job_name);
   return NextResponse.json(leased.result);
 }

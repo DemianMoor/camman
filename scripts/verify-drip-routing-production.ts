@@ -272,7 +272,7 @@ async function main() {
     // ── 8. the worker: one campaign only, and caps ───────────────────────
     console.log("\n8. the worker — one journey per contact, and cap admission:");
     const runA = await runDripRoutingBatch();
-    console.log(`        routed=${runA.routed} unrouted=${runA.unrouted} lostRace=${runA.lostRace}`);
+    console.log(`        routed=${runA.routed} deferred=${runA.deferred} unroutable=${runA.markedUnroutable} lostRace=${runA.lostRace}`);
     check("worker reports posture on", runA.postureOn, true);
 
     const perContact = await one<{ n: number }>(sql`

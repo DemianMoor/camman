@@ -3518,6 +3518,12 @@ export const org_settings = pgTable("org_settings", {
   drip_paused_reason: text("drip_paused_reason"),
   drip_paused_at: timestamp("drip_paused_at", { withTimezone: true }),
   drip_paused_by: uuid("drip_paused_by"),
+  // Drip freshness (0202): a lead is admitted to a drip campaign only until the
+  // end of its arrival ET day plus this many minutes. 0 = midnight ET.
+  // Overridable per campaign (drip_campaign_configs.admission_cutoff_minutes).
+  // Restricts drip admission only — the contact is otherwise untouched.
+  // CHECK (>= 0) is org_settings_drip_admission_cutoff_check, in 0202.
+  drip_admission_cutoff_minutes: integer("drip_admission_cutoff_minutes").notNull().default(0),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })
@@ -5285,11 +5291,20 @@ export const lead_events = pgTable(
     // Phase 4 can filter per campaign rather than the call being made
     // irreversibly at intake.
     line_type: text("line_type"),
+    // Drip routing (0202): a lead whose only blockers are TEMPORARY (in use,
+    // week rule, a cap, a paused campaign) is not re-evaluated before this
+    // time, and never-evaluated leads are always taken first. NULL = never
+    // deferred. See lib/drip/routing.ts.
+    drip_recheck_at: timestamp("drip_recheck_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (table) => [
+    // The routing worker's candidate scan: one ET day of non-sandbox leads.
+    index("lead_events_drip_candidates_idx")
+      .on(table.org_id, table.received_at)
+      .where(sql`${table.sandbox} = false`),
     uniqueIndex("lead_events_inbox_uniq")
       .on(table.inbox_id)
       .where(sql`${table.inbox_id} IS NOT NULL`),
@@ -5477,6 +5492,10 @@ export const drip_campaign_configs = pgTable(
     daily_cap: integer("daily_cap"),
     campaign_cap: integer("campaign_cap"),
     routing_daily_admission_cap: integer("routing_daily_admission_cap"),
+    // Freshness override (0202): minutes after the end of the lead's arrival
+    // ET day that this campaign may still admit it. NULL = the org default
+    // (org_settings.drip_admission_cutoff_minutes).
+    admission_cutoff_minutes: integer("admission_cutoff_minutes"),
     // Lower wins; ties broken by the most recently created campaign.
     priority: integer("priority").notNull().default(100),
     // gender / age_band / state / country / income_band / kids / married.
@@ -5521,6 +5540,10 @@ export const drip_campaign_configs = pgTable(
     check(
       "drip_campaign_configs_admission_cap_check",
       sql`${table.routing_daily_admission_cap} IS NULL OR ${table.routing_daily_admission_cap} > 0`,
+    ),
+    check(
+      "drip_campaign_configs_admission_cutoff_check",
+      sql`${table.admission_cutoff_minutes} IS NULL OR ${table.admission_cutoff_minutes} >= 0`,
     ),
     check(
       "drip_campaign_configs_interest_tag_check",

@@ -1,6 +1,6 @@
 # Partner lead intake (Drip Phase 2)
 
-_Last updated: 2026-10-09_
+_Last updated: 2026-10-10_
 
 Real-time capture of partner-submitted leads. **Zero sends, zero processing.** The endpoint
 authenticates, rate-limits, validates shape, writes one row, and returns. Everything downstream —
@@ -227,10 +227,15 @@ The list responses never carry `token`, `secret_hash` or `report_token_hash`
   `scripts/repair-drip-membership-appearance.ts` — dry run by default (prints `rows_to_repair`,
   `backfilled_rows (>10 min)`, `max_lag`, plus `rows_in_backup` — null until the first `--apply` creates
   the table — and `R3` per drip partner×tag group, the gate B proposal numbers; `dryRunStatus` prints
-  the same two after `--apply`, where R3 must equal the before line), `--apply` fills `drip_membership_stamp_backup`
+  the same two after `--apply`, where R3 must equal the before line, and the batch list with per-group row
+  counts and the dry run's runtime), `--apply` runs **one transaction per drip partner×tag group** (owner,
+  2026-10-10: batched, each batch backed up before it is updated — `repairGroup`; a single statement over
+  every group would carry 38K+ rows after pml's `medicare` burst) and in each fills `drip_membership_stamp_backup`
   (append-only) then re-dates every drip partner×tag membership stamped after its lead's first
   delivery for that exact group (match = `partnerTagGroupName` restated in SQL), `--revert --apply`
-  restores. Re-runnable. Runs on prod only after this code is deployed and one fresh pml lead is
+  restores, per group. The first-delivery join carries `le.org_id = g.org_id` so it uses
+  `lead_events_org_contact_received_idx` (there is no bare `contact_id` index; the same fix the measurement
+  script needed on 2026-10-10). Re-runnable. Runs on prod only after this code is deployed and one fresh pml lead is
   confirmed stamped at `received_at`, on the owner's go. Prod 2026-10-09: 16,182 rows qualified
   (8,171 of them the #311 backfill, up to 1 h 24 m late).
 - **The group is linked to the key's partner at creation** (ruling Q6): `ensurePartnerTagGroup`

@@ -11,7 +11,7 @@ import "./_require-preview-db"; // MUST be second — refuses any target but the
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
-import { countRepairable, dryRunStatus, repair, revert } from "./repair-drip-membership-appearance";
+import { countRepairable, dryRunStatus, listRepairGroups, repair, repairGroup, revert } from "./repair-drip-membership-appearance";
 
 let failed = 0;
 function check(name: string, cond: boolean, detail = "") {
@@ -60,8 +60,15 @@ async function main() {
 
       const c1 = await countRepairable(tx);
       check("1 exactly one membership is repairable (A)", c1.rows_to_repair === base.rows_to_repair + 1 && c1.backfilled_rows === base.backfilled_rows + 1, JSON.stringify(c1));
+      const batches = await listRepairGroups(tx);
+      const aca = batches.find((g) => g.id === gAca);
+      check("1b the batch list names zz-rep-aca with 1 row and never the system group", aca?.rows === 1 && !batches.some((g) => g.id === gSys), JSON.stringify(batches));
+      const c1g = await countRepairable(tx, gAca);
+      check("1c the per-group count for zz-rep-aca is exactly 1 (the batch the CLI would run)", c1g.rows_to_repair === 1, JSON.stringify(c1g));
       const r1 = await repair(tx);
-      check("2 repair() backs up 1 and updates 1", r1.backed_up_new === base.rows_to_repair + 1 && r1.updated === base.rows_to_repair + 1, JSON.stringify(r1));
+      check("2 repair() (every batch in turn) backs up 1 and updates 1", r1.backed_up_new === base.rows_to_repair + 1 && r1.updated === base.rows_to_repair + 1, JSON.stringify(r1));
+      const r1g = await repairGroup(tx, gAca);
+      check("2a repairGroup() on the same group right after is a no-op", r1g.backed_up_new === 0 && r1g.updated === 0, JSON.stringify(r1g));
       const a1 = await stamp(A, gAca);
       check("2b A is stamped at its first delivery, to the microsecond", a1.startsWith("2026-10-01 12:00:00.123456"), a1);
       check("2c B (exact) untouched", (await stamp(B, gAca)).startsWith("2026-10-01 12:00:00.123456"));

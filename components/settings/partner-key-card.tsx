@@ -20,6 +20,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { CopyableId } from "@/components/ui/copyable-id";
 import { DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { FormDialog } from "@/components/ui/form-dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
@@ -102,6 +103,10 @@ export function PartnerKeyCard({
   const [shownToken, setShownToken] = useState<string | null>(null);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [rotated, setRotated] = useState<{ token: string; secret: string } | null>(null);
+  const [limitDraft, setLimitDraft] = useState(String(row.rate_per_day));
+  const limitValue = Number(limitDraft);
+  const limitValid = Number.isInteger(limitValue) && limitValue >= 1 && limitValue <= 10_000_000;
+  const atLimit = row.accepted_today >= row.rate_per_day;
 
   const patch = async (body: Record<string, unknown>, ok: string) => {
     const r = await mutateApi.execute(`/api/partner-keys/${row.id}`, {
@@ -146,7 +151,11 @@ export function PartnerKeyCard({
 
         <div className="text-muted-foreground grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2 lg:grid-cols-4">
           <span>
-            Leads (24h): <span className="text-foreground font-medium">{row.leads_24h}</span>
+            Accepted today (ET):{" "}
+            <span className={atLimit ? "text-destructive font-medium" : "text-foreground font-medium"}>
+              {row.accepted_today.toLocaleString()} / {row.rate_per_day.toLocaleString()}
+            </span>
+            {atLimit && " — limit reached, further leads refused until midnight ET"}
           </span>
           <span>
             Leads (total): <span className="text-foreground font-medium">{row.total_leads}</span>
@@ -210,6 +219,30 @@ export function PartnerKeyCard({
             >
               {row.status === "active" ? "Disable" : "Enable"}
             </Button>
+            <div className="flex items-center gap-2">
+              <Label htmlFor={`limit-${row.id}`} className="text-xs">
+                Daily limit
+              </Label>
+              <Input
+                id={`limit-${row.id}`}
+                inputMode="numeric"
+                className="h-8 w-28"
+                value={limitDraft}
+                onChange={(e) => setLimitDraft(e.target.value)}
+                disabled={mutateApi.isLoading}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={mutateApi.isLoading || !limitValid || limitValue === row.rate_per_day}
+                onClick={() =>
+                  void patch({ rate_per_day: limitValue }, `Daily limit set to ${limitValue.toLocaleString()}`)
+                }
+              >
+                Save limit
+              </Button>
+            </div>
             <div className="ml-auto flex items-center gap-2">
               <Label htmlFor={`sandbox-${row.id}`} className="text-xs">
                 Sandbox

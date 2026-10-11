@@ -73,7 +73,10 @@ export const RESPONSE_CODES: ResponseCode[] = [
     meaning:
       "The payload exceeds the size limit, the batch exceeds the per-call lead limit, " +
       "or the batch exceeds the daily allowance. The applicable limit is named in the body.",
-    action: "Split into smaller batches and resend. No leads were stored.",
+    action:
+      "Split into smaller batches and resend. No leads were stored. Exception: if the body " +
+      "names `rate_per_day`, the batch is larger than your whole daily allowance and cannot " +
+      "succeed until that limit is raised — contact us instead of retrying.",
     retry: "yes",
   },
   {
@@ -81,7 +84,9 @@ export const RESPONSE_CODES: ResponseCode[] = [
     meaning: "A rate limit was exceeded. No leads were stored.",
     action:
       "Wait the interval given in `Retry-After`, then resend the full batch. " +
-      "Allowance is not consumed.",
+      "Allowance is not consumed. For the DAILY limit (`\"window\": \"day\"`) `Retry-After` " +
+      "runs to midnight US Eastern: today's allowance is used up, so this is final for today — " +
+      "resend tomorrow, not later today.",
     retry: "after-delay",
   },
   {

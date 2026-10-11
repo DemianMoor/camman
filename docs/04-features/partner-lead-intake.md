@@ -1,6 +1,6 @@
 # Partner lead intake (Drip Phase 2)
 
-_Last updated: 2026-10-10_
+_Last updated: 2026-10-11_
 
 Real-time capture of partner-submitted leads. **Zero sends, zero processing.** The endpoint
 authenticates, rate-limits, validates shape, writes one row, and returns. Everything downstream —
@@ -95,6 +95,21 @@ pre-check cannot be deleted later as redundant.
 
 A 429 stores nothing and consumes no daily budget. An over-cap batch is refused **whole** — partial
 acceptance would leave the partner unable to tell which leads landed.
+
+**The daily limit is final for the ET day (2026-10-11).** The daily 429 carries
+`{"error":"Daily lead limit exceeded","limit","window":"day","leads_in_call"}` and `Retry-After` =
+seconds to the next ET midnight. The partner docs (generated `docs/partners/lead-intake.md`, the
+public `/docs/partner-api` page and `lib/intake/api-contract.ts`) now say so explicitly, and no
+longer tell a partner to "split into smaller batches" when a 413 names `rate_per_day` (a batch
+larger than the whole day can never succeed). Every lead in an accepted call counts, including
+landlines and rejects: on 2026-10-10 ProMarketing (key 77, `rate_per_day` 50,000, the default) used
+exactly 50,000, of which 1,464 were landlines.
+
+**Settings → Partners, per key:** "Accepted today (ET): N / limit" reads the SAME
+`partner_key_usage` day row the limit consumes (`window_start` = ET midnight); it replaced
+"Leads (24h)", a rolling sum that did not line up with the ET day. Managers edit the daily limit
+inline (`PATCH /api/partner-keys/[keyId]` `{rate_per_day}`, 1..10,000,000); the change applies to
+the next request.
 
 ## What gets stored
 

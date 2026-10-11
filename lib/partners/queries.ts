@@ -31,7 +31,9 @@ export interface PartnerKeyJson {
   rotated_at: string | null;
   last_seen_at: string | null;
   secret_last4: string | null;
-  leads_24h: number;
+  /** Leads counted against rate_per_day in the CURRENT ET day — the same counter row
+   *  the intake limit consumes (partner_key_usage, window_kind 'day'). */
+  accepted_today: number;
   auth_fails_today: number;
   total_leads: number;
 }
@@ -59,14 +61,16 @@ export const KEY_LIST_SQL: SQL = sql`
            k.field_mapping, k.sandbox, k.rate_per_sec, k.rate_per_day,
            k.max_payload_bytes, k.status, k.created_at, k.rotated_at, k.last_seen_at,
            k.secret_last4,
-           COALESCE(u.leads_24h, 0)::int   AS leads_24h,
+           COALESCE(u.accepted_today, 0)::int AS accepted_today,
            COALESCE(f.auth_fails_today, 0)::int AS auth_fails_today,
            COALESCE(l.total_leads, 0)::int AS total_leads
     FROM partner_keys k
     LEFT JOIN LATERAL (
-      SELECT sum(count) AS leads_24h FROM partner_key_usage
+      SELECT sum(count) AS accepted_today FROM partner_key_usage
       WHERE partner_key_id = k.id AND window_kind = 'day'
-        AND window_start > now() - interval '24 hours'
+        -- The ET-day window the limit itself uses (lib/intake/rate-limit.ts windowStart).
+        AND window_start = date_trunc('day', now() AT TIME ZONE 'America/New_York')
+                             AT TIME ZONE 'America/New_York'
     ) u ON true
     LEFT JOIN LATERAL (
       SELECT sum(count) AS auth_fails_today FROM partner_key_usage

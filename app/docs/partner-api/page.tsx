@@ -396,6 +396,16 @@ Retry-After: 37
             A <Code>429</Code> stores nothing and does not consume allowance. Resend the full
             batch after the specified interval.
           </p>
+          <p className="mt-3 text-sm leading-relaxed">
+            <strong>The daily limit is final for the day.</strong> Once it is reached, every
+            further lead that day is refused, and <Code>Retry-After</Code> counts down to
+            midnight US Eastern. Retrying later the same day will not succeed — resend the next
+            day.
+          </p>
+          <Block>{`HTTP/1.1 429 Too Many Requests
+Retry-After: 21600
+
+{ "error": "Daily lead limit exceeded", "limit": 50000, "window": "day", "leads_in_call": 500 }`}</Block>
         </Section>
 
         <Section id="sandbox" title="Sandbox">

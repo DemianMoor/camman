@@ -95,8 +95,8 @@ do not need to change your payload.
 | \`400\` | Body was not valid JSON. | Fix the request; do not retry unchanged. |
 | \`401\` | Token or secret wrong. | Check credentials. Repeated failures alert us. |
 | \`403\` | Your key is disabled. | Contact us. |
-| \`413\` | Payload or batch too large. | Split into smaller batches. The limit is in the response body. |
-| \`429\` | Rate limit hit. | Wait and retry — see \`Retry-After\`. Nothing was stored, so resend the whole batch. |
+| \`413\` | Payload or batch too large. | Split into smaller batches. The limit is in the response body. If it names \`rate_per_day\`, the batch is bigger than your whole daily allowance — splitting will not help; contact us. |
+| \`429\` | Rate limit hit. | Wait and retry — see \`Retry-After\`. Nothing was stored, so resend the whole batch. If the body says \`"window": "day"\`, today's allowance is used up: this is **final for today** and \`Retry-After\` points at midnight US Eastern. |
 | \`500\` | We failed to store it. | **Retry.** We would rather have it twice than not at all. |
 
 A \`202\` body looks like:
@@ -139,6 +139,11 @@ Two separate limits, and they count different things:
 
 A \`429\` stores nothing at all, and does **not** consume your daily budget — so
 being rate-limited never eats into what you can send later that day.
+
+**The daily limit is final for the day.** Once it is reached, every further lead
+that day is refused with \`429\` and \`"window": "day"\`, and \`Retry-After\` counts
+down to midnight US Eastern. Retrying later the same day will not succeed;
+resend the next day. Leads in a refused batch are not stored.
 
 ## Sandbox
 

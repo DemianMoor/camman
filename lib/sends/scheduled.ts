@@ -225,7 +225,14 @@ export async function selectDrainableStages(
         WHERE ss.stage_id = s.id AND ss.status = 'pending'
       )
       ${orgId ? sql`AND c.org_id = ${orgId}` : sql``}
-    ORDER BY s.scheduled_at ASC NULLS LAST, s.id ASC
+    -- ⚠️ DRIP STAGES HAVE NO scheduled_at. They are released by sent_at
+    -- (stampDripStageDrainable), so ordering on scheduled_at alone put every
+    -- drip stage LAST, and with maxStages regular stages pending a drip stage was
+    -- not selected at all that tick (card 869ency4b item 6). Order by when the
+    -- stage became due: scheduled_at, else the release stamp. Regular stages are
+    -- unchanged relative to each other (a released regular stage keeps its
+    -- scheduled_at).
+    ORDER BY COALESCE(s.scheduled_at, s.sent_at) ASC NULLS LAST, s.id ASC
     LIMIT ${maxStages}
   `)) as unknown as DrainableRow[];
 }

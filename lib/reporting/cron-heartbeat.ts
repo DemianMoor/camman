@@ -64,6 +64,15 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 1,
     label: "drip scheduler (1-min)",
   },
+  // Drip behavioural follow-ups (Phase 6), every 5 min. Its OWN heartbeat:
+  // until 2026-10-11 the follow-ups route stamped dripScheduler's, so a dead
+  // scheduler looked alive whenever follow-ups ran. Watched by drip-monitors.
+  dripFollowups: {
+    job_name: "drip-followups",
+    max_age_hours: 1,
+    label: "drip follow-ups (5-min)",
+    first_run_grace_hours: 0.5,
+  },
   // The drip monitors job itself — watched BY the scheduler, closing the
   // P3 gap where the watcher had no watcher.
   dripMonitors: {

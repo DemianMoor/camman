@@ -42,6 +42,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const heartbeats = await checkHeartbeats(db, [
       HEARTBEAT_JOBS.leadEnrichment,
       HEARTBEAT_JOBS.dripRouting,
+      // Documented as watched here since Phase 5, but never actually listed —
+      // and its heartbeat was also being stamped by the follow-ups job.
+      HEARTBEAT_JOBS.dripScheduler,
+      HEARTBEAT_JOBS.dripFollowups,
     ]);
     return { ...monitors, heartbeats };
   });

@@ -45,7 +45,16 @@ export function stageTotalCost(
 type Executor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Recompute one stage's total_cost in SQL from its current counters and its
-// provider phone's cost. Skips manual/imported stages. Used by the opt-out
+// provider phone's cost. Skips manual/imported stages.
+//
+// DRIP stages are priced per SEND instead: each 'sent' row at its own
+// cost_per_sms snapshot (else the sending number's current rate; drip inserts
+// wrote no snapshot before 2026-10-07), plus each attributed opt-out reply at
+// the rate of the send it answered. That is the Overview's per-day drip cost
+// (dripCostByStageInRange in lib/reporting/stage-funnel.ts) summed over all
+// days, so the two foot, and a rate edit doesn't re-price weeks of past drip
+// sends. A drip stage sends for weeks, so it is also refreshed on a timer
+// (refreshDripStageCosts below) — opt-outs alone left it stale between them. Used by the opt-out
 // poller (after it bumps opt_out_count) and the stage PATCH (after a
 // provider-phone change). Reads the post-write counter values, so call it
 // AFTER the mutation that changed sms_count / opt_out_count / provider_phone_id.
@@ -56,6 +65,21 @@ export async function recomputeStageTotalCost(
   await exec.execute(sql`
     UPDATE campaign_stages cs
     SET total_cost = CASE
+      WHEN c.type = 'drip' THEN
+        COALESCE(
+          (SELECT sum(COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0))
+           FROM stage_sends ss
+           LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
+           WHERE ss.stage_id = cs.id AND ss.status = 'sent'),
+          0
+        ) + COALESCE(
+          (SELECT sum(COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0))
+           FROM opt_out_attributions oa
+           JOIN stage_sends ss ON ss.id = oa.stage_send_id
+           LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
+           WHERE oa.stage_id = cs.id),
+          0
+        )
       WHEN cs.sms_count > 0
         OR EXISTS (
           SELECT 1 FROM stage_sends ss
@@ -74,7 +98,33 @@ export async function recomputeStageTotalCost(
         )
       ELSE 0
     END
+    FROM campaigns c
     WHERE cs.id = ${stageId}
+      AND c.id = cs.campaign_id
       AND cs.total_cost_manual = false
   `);
+}
+
+// Recompute every drip stage that sent within `sinceMinutes`. Run from the
+// send-scheduled cron (every 5 min) after the drain; the 60-minute default
+// covers missed ticks. Candidates come off the (org_id, sent_at) index, so the
+// lookup reads only the window's sends, not each stage's history.
+export async function refreshDripStageCosts(
+  exec: Executor,
+  opts: { orgId?: string; sinceMinutes?: number } = {},
+): Promise<number> {
+  const since = opts.sinceMinutes ?? 60;
+  const stages = (await exec.execute(sql`
+    SELECT DISTINCT ss.stage_id
+    FROM organizations o
+    JOIN stage_sends ss ON ss.org_id = o.id
+    JOIN campaigns c ON c.id = ss.campaign_id AND c.type = 'drip'
+    WHERE ss.status = 'sent'
+      AND ss.sent_at >= now() - make_interval(mins => ${since})
+      ${opts.orgId ? sql`AND o.id = ${opts.orgId}::uuid` : sql``}
+  `)) as unknown as { stage_id: number }[];
+  for (const { stage_id } of stages) {
+    await recomputeStageTotalCost(exec, Number(stage_id));
+  }
+  return stages.length;
 }

@@ -67,7 +67,12 @@ export type DrainStopReason =
   // midnight. Reporting either as the other would send an operator to the wrong
   // control. Rows stay pending; the next tick resumes them once another
   // carrier's rows are reachable or the ET day rolls over.
-  | "carrier_daily_cap";
+  | "carrier_daily_cap"
+  // A DRIP campaign whose org drip switches went off mid-run
+  // (org_settings.drip_enabled false OR drip_paused true). SOFT: rows stay
+  // pending and resume when drip is switched back on. Never fires for a
+  // regular campaign.
+  | "drip_halted";
 
 export function isHardStop(reason: DrainStopReason): boolean {
   return reason === "paused" || reason === "failure_spike" || reason === "pacing_tripwire";
@@ -360,6 +365,27 @@ export async function isCampaignPaused(dbc: DbOrTx, campaignId: number): Promise
     SELECT send_paused FROM campaigns WHERE id = ${campaignId} LIMIT 1
   `)) as unknown as { send_paused: boolean }[];
   return r[0]?.send_paused === true;
+}
+
+// ⭐ THE DRIP SWITCHES STOP THE SENDER, not just the jobs that queue rows. The
+// drip scheduler and follow-ups only INSERT pending stage_sends; this drain is
+// what calls the provider. Checking the org drip switches only upstream meant
+// rows already queued kept going out after drip was switched off (found
+// 2026-10-10). True for a DRIP campaign when drip_enabled is not true OR
+// drip_paused is true; always false for a regular campaign. A missing
+// org_settings row reads as halted for drip — an unreadable switch must never
+// mean "send".
+export async function isDripSendingHalted(dbc: DbOrTx, campaignId: number): Promise<boolean> {
+  const r = (await dbc.execute(sql`
+    SELECT (c.type = 'drip'
+            AND NOT (COALESCE(os.drip_enabled, false) AND NOT COALESCE(os.drip_paused, false)))
+           AS halted
+    FROM campaigns c
+    LEFT JOIN org_settings os ON os.org_id = c.org_id
+    WHERE c.id = ${campaignId}
+    LIMIT 1
+  `)) as unknown as { halted: boolean }[];
+  return r[0]?.halted === true;
 }
 
 // Latch the per-campaign pause + append a campaign_circuit_events audit row.

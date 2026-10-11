@@ -6,7 +6,7 @@ import { db } from "@/db/client";
 import { campaignTierExpr } from "@/lib/campaign-tier";
 import { isCampaignPaused, isDripSendingHalted } from "@/lib/sends/circuit-breakers";
 import { resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
-import { followupDueAt, type FollowupTier } from "./followup-timing";
+import { followupDueAt, OFFER_REACH_POLL_CYCLE_MINUTES, type FollowupTier } from "./followup-timing";
 import { isDripPostureOn } from "./in-use";
 import { closeJourneyUnengaged } from "./lifecycle";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
@@ -44,6 +44,8 @@ export interface FollowupResult {
   mintRefused: number;
   /** Journeys closed completed/unengaged because the Ignored lane fired (R4). */
   closedUnengaged: number;
+  /** The tick stopped paging at FOLLOWUP_DEADLINE_MS; the rest is next tick. */
+  hitDeadline: boolean;
 }
 
 interface CandidateRow {
@@ -79,13 +81,17 @@ interface CandidateRow {
 }
 
 const BATCH = 200;
+/** The cron allows 60 s. */
+const FOLLOWUP_DEADLINE_MS = 45_000;
 
 export async function runDripFollowups(now = new Date()): Promise<FollowupResult> {
   const res: FollowupResult = {
     postureOn: false, considered: 0, inserted: 0, notDue: 0, noDetection: 0,
     tierMismatch: 0, alreadySent: 0, capBlocked: 0, numbersExhausted: 0,
     pausedSkipped: 0, gateRefused: 0, mintRefused: 0, closedUnengaged: 0,
+    hitDeadline: false,
   };
+  const startedAt = Date.now();
 
   const orgs = (await db.execute(sql`
     SELECT DISTINCT org_id FROM drip_journeys WHERE state = 'active'
@@ -108,9 +114,19 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
         AND j.campaign_id IS NOT NULL AND j.first_send_at IS NOT NULL
     `)) as unknown as { campaign_id: number }[];
 
-    const rows: CandidateRow[] = [];
+    // ⭐ ONLY ROWS THAT ARE DUE (card 869ency4b item 6). The page used to be the
+    // 200 oldest (journey x child) rows by first_send_at, filtered in JS — so
+    // already-sent children, other lanes and not-yet-due Ignored rows (24 h) all
+    // took slots, and a Clicked follow-up due in 1 h could sit behind 200 older
+    // Ignored rows for most of a day. The filters below are the SQL form of the
+    // JS checks (already_sent, tier match, followupDueAt's raw due time); quiet
+    // hours can still push a due row later, which only ever delays it. Pages
+    // repeat until a page queues nothing, runs short, or the deadline passes.
     for (const { campaign_id: campaignId } of camps) {
-      const got = (await db.execute(sql`
+     for (;;) {
+      if (Date.now() - startedAt > FOLLOWUP_DEADLINE_MS) { res.hitDeadline = true; break; }
+      const rows = (await db.execute(sql`
+        SELECT * FROM (
         SELECT j.id AS journey_id, j.contact_id, ct.phone_number AS phone,
                j.campaign_id, c.name AS campaign_name,
                c.brand_id, b.name AS brand_name, b.landing_host AS brand_landing_host,
@@ -189,11 +205,20 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
           AND j.campaign_id = ${campaignId}
           AND j.state = 'active'
           AND j.first_send_at IS NOT NULL
-        ORDER BY j.first_send_at
+        ) q
+        WHERE NOT q.already_sent
+          AND q.tier = q.child_tier
+          AND (CASE WHEN q.child_tier = 0
+                    THEN q.first_send_at + make_interval(mins => GREATEST(q.child_minutes, ${OFFER_REACH_POLL_CYCLE_MINUTES}))
+                    ELSE q.detected_at + make_interval(mins => q.child_minutes)
+               END) <= ${now.toISOString()}::timestamptz
+        ORDER BY (CASE WHEN q.child_tier = 0
+                       THEN q.first_send_at + make_interval(mins => GREATEST(q.child_minutes, ${OFFER_REACH_POLL_CYCLE_MINUTES}))
+                       ELSE q.detected_at + make_interval(mins => q.child_minutes)
+                  END), q.journey_id, q.child_stage_id
         LIMIT ${BATCH}
       `)) as unknown as CandidateRow[];
-      rows.push(...got);
-    }
+      const insertedBefore = res.inserted;
 
     for (const r of rows) {
       res.considered++;
@@ -318,6 +343,11 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
         const code = (e as { cause?: { code?: string } })?.cause?.code;
         if (code !== "23505") throw e;
       }
+    }
+      // A short page is the last one; a page that queued nothing would come
+      // back identical (cap, numbers, pause), so stop rather than spin.
+      if (rows.length < BATCH || res.inserted === insertedBefore) break;
+     }
     }
   }
   return res;

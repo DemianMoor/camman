@@ -45,7 +45,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       skipped: true, reason: "prior_run_in_progress", skippedCount: leased.skippedCount,
     });
   }
-  await recordHeartbeat(db, HEARTBEAT_JOBS.dripScheduler.job_name);
+  await recordHeartbeat(db, HEARTBEAT_JOBS.dripFollowups.job_name);
   return NextResponse.json(leased.result);
 }
 

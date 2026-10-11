@@ -1,6 +1,6 @@
 # Behavioral lanes (campaign behavioral branching)
 
-_Last updated: 2026-09-18_
+_Last updated: 2026-10-11_
 
 Behavioral branching lets one campaign send a different message to a contact
 depending on how that contact has behaved **so far in this campaign**. A stage
@@ -412,6 +412,18 @@ Two entry points for two different actions; deliberately not two for one action.
   ledger arms stay org-scoped. Scoping is excluded from the comparison by
   construction — the literal-vs-correlated difference is the reason the copy
   exists. That replaces the manual grep the conventions doc used to prescribe.
+- **Drip follow-up candidates are DUE rows only (2026-10-11, card 869ency4b):**
+  the page used to be the 200 oldest (journey × child) rows by `first_send_at`,
+  filtered in JS, so already-sent children, other lanes and not-yet-due Ignored
+  rows (24 h) took the slots and a Clicked follow-up due in 1 h could wait most
+  of a day behind them. The query now filters `NOT already_sent`, exact tier
+  match and the raw due time (`followupDueAt`'s rule, in SQL), orders by due
+  time, and pages until a page queues nothing, runs short, or 45 s pass. Quiet
+  hours are still applied in JS and only ever delay. Follow-ups also stamp their
+  OWN heartbeat (`drip-followups`); they used to stamp the scheduler's, and
+  `drip-monitors` now watches both. Proof: `scripts/test-drip-item6-queues.ts`
+  F1/F2 (old code: 200 slots spent on 100 not-due + 100 wrong-lane rows, the
+  due Clicked row never reached).
 - **Drip follow-up scheduling (the detection ladder):**
   `runDripFollowups()` in [lib/drip/followups.ts](../../lib/drip/followups.ts)
   imports `campaignTierExpr` (it is not a third copy of the scale) and matches a

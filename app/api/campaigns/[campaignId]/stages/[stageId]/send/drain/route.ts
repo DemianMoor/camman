@@ -53,6 +53,10 @@ const REFUSAL: Record<DrainRefusal, { status: number; message: string }> = {
     status: 409,
     message: "Sending is paused for this campaign (opt-out-rate breaker or manual pause)",
   },
+  drip_halted: {
+    status: 409,
+    message: "Drip sending is switched off or paused for this organization (org drip posture)",
+  },
   no_provider: { status: 400, message: "Stage has no SMS provider" },
   unknown_provider: {
     status: 400,

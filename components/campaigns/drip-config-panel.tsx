@@ -45,6 +45,8 @@ type Config = {
   daily_cap: number | null;
   campaign_cap: number | null;
   routing_daily_admission_cap: number | null;
+  admission_cutoff_minutes: number | null;
+  org_admission_cutoff_minutes: number | null;
   priority: number | null;
   journeys_total: number;
 };
@@ -95,6 +97,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   const [campaignCap, setCampaignCap] = useState("");
   const [admissionCap, setAdmissionCap] = useState("");
   const [dailyCap, setDailyCap] = useState("");
+  const [cutoff, setCutoff] = useState("");
 
   const loadCfg = cfgApi.execute;
   const loadJ = journeysApi.execute;
@@ -113,6 +116,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
           r.data.routing_daily_admission_cap == null ? "" : String(r.data.routing_daily_admission_cap),
         );
         setDailyCap(r.data.daily_cap == null ? "" : String(r.data.daily_cap));
+        setCutoff(r.data.admission_cutoff_minutes == null ? "" : String(r.data.admission_cutoff_minutes));
       }
     })();
   }, [loadCfg, campaignId, tick]);
@@ -204,6 +208,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
         campaign_cap: num(campaignCap),
         routing_daily_admission_cap: num(admissionCap),
         daily_cap: num(dailyCap),
+        admission_cutoff_minutes: cutoff.trim() === "" ? null : Number(cutoff),
       }),
     });
     if (!r.ok) return toastApiError(r);
@@ -328,6 +333,34 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
                 </p>
               </div>
             </div>
+            <p className="text-muted-foreground text-xs">
+              Routing per day only limits who enters this campaign. Leads above it are still
+              accepted, saved as contacts and reported; they just don&apos;t join the drip.
+            </p>
+          </div>
+
+          <div className="space-y-2 rounded-md border p-3">
+            <p className="text-sm font-medium">Freshness</p>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <Label htmlFor="drip-cutoff" className="text-xs">
+                  Admission closes (minutes after midnight ET)
+                </Label>
+                <Input
+                  id="drip-cutoff"
+                  inputMode="numeric"
+                  value={cutoff}
+                  onChange={(e) => setCutoff(e.target.value)}
+                  placeholder={`org default: ${cfg?.org_admission_cutoff_minutes ?? 0}`}
+                  disabled={!canEdit}
+                />
+              </div>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              A lead can join this campaign only until midnight ET at the end of the day it arrived,
+              plus these minutes. Leave empty to use the org default (0 = midnight). Leads that miss
+              the window stay ordinary contacts, usable in regular campaigns, groups and segments.
+            </p>
           </div>
 
           {canEdit && (

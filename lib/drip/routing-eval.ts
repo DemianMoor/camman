@@ -101,9 +101,14 @@ interface RawRow {
   attr_kids: boolean | null;
   attr_married: boolean | null;
   attr_age_band: string | null;
+  arrival_day_end: string;
+  org_cutoff_minutes: number | null;
   campaign_id: number | null;
   campaign_name: string | null;
   campaign_offer_id: number | null;
+  campaign_status: string | null;
+  campaign_send_paused: boolean | null;
+  cfg_cutoff_minutes: number | null;
   cfg_tag: string | null;
   cfg_partner_key_id: number | null;
   cfg_start_at: string | null;
@@ -131,15 +136,47 @@ function bandFromAge(age: number): string | null {
   return "65_plus";
 }
 
+/** Journeys per campaign (excluding 'unroutable'): all-time and in the current ET day. */
+export type CampaignJourneyCounts = Map<number, { total: number; today: number }>;
+
+/**
+ * The per-campaign journey counts the cap rules read, for every drip campaign
+ * in the org. The routing worker computes this ONCE per tick and passes it to
+ * every evaluation (incrementing it as it routes): counting a 20K-journey
+ * campaign per lead was ~11 ms of every evaluation and grows with the campaign.
+ */
+export async function loadCampaignJourneyCounts(
+  dbc: DbOrTx,
+  { orgId, now = new Date() }: { orgId: string; now?: Date },
+): Promise<CampaignJourneyCounts> {
+  const rows = (await dbc.execute(sql`
+    SELECT j.campaign_id,
+           count(*)::int AS total,
+           count(*) FILTER (
+             WHERE j.routed_at >= date_trunc('day', ${now.toISOString()}::timestamptz
+                     AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York')::int AS today
+    FROM drip_journeys j
+    JOIN campaigns c ON c.id = j.campaign_id
+    WHERE j.org_id = ${orgId}::uuid AND j.state <> 'unroutable'
+      AND c.type = 'drip' AND c.status IN ('active', 'paused')
+    GROUP BY j.campaign_id
+  `)) as unknown as { campaign_id: number; total: number; today: number }[];
+  return new Map(rows.map((r) => [Number(r.campaign_id), { total: r.total, today: r.today }]));
+}
+
 /**
  * Evaluate one lead against every drip campaign in the org.
  *
  * Read-only. Writes nothing — the caller decides what to do with the verdict,
  * which is what lets the debugging tool run it against an already-routed lead.
+ *
+ * `counts` is the routing worker's per-tick cache (loadCampaignJourneyCounts).
+ * Without it — the debugging tool — the counts are read per call, as before.
  */
 export async function evaluateLeadRouting(
   dbc: DbOrTx,
-  { orgId, leadEventId, now = new Date() }: { orgId: string; leadEventId: string; now?: Date },
+  { orgId, leadEventId, now = new Date(), counts }:
+    { orgId: string; leadEventId: string; now?: Date; counts?: CampaignJourneyCounts },
 ): Promise<LeadRoutingEvaluation | null> {
   const rows = (await dbc.execute(sql`
     WITH le AS (
@@ -173,21 +210,31 @@ export async function evaluateLeadRouting(
            ELSE extract(year from age((${now.toISOString()}::timestamptz
                                        AT TIME ZONE 'America/New_York')::date, ca2.dob))::int
       END AS attr_age_years,
+      -- Freshness (item 3): a lead may be admitted only until the END OF ITS
+      -- ARRIVAL ET DAY plus a cutoff (org default, per-campaign override).
+      (date_trunc('day', le.received_at AT TIME ZONE 'America/New_York') + interval '1 day')
+        AT TIME ZONE 'America/New_York' AS arrival_day_end,
+      (SELECT os.drip_admission_cutoff_minutes FROM org_settings os
+        WHERE os.org_id = ${orgId}::uuid) AS org_cutoff_minutes,
       c.id AS campaign_id, c.name AS campaign_name, c.offer_id AS campaign_offer_id,
+      c.status AS campaign_status, c.send_paused AS campaign_send_paused,
+      cfg.admission_cutoff_minutes AS cfg_cutoff_minutes,
       cfg.interest_tag AS cfg_tag, cfg.partner_key_id AS cfg_partner_key_id,
       cfg.start_at AS cfg_start_at, cfg.end_at AS cfg_end_at,
       cfg.priority AS cfg_priority, cfg.filters AS cfg_filters,
       cfg.campaign_cap AS cfg_campaign_cap,
       cfg.routing_daily_admission_cap AS cfg_admission_cap,
       (c.audience_filters -> 'carrier_filter') AS carrier_filter,
-      COALESCE((SELECT count(*)::int FROM drip_journeys j2
+      ${counts
+        ? sql`0 AS journeys_total, 0 AS journeys_today,`
+        : sql`COALESCE((SELECT count(*)::int FROM drip_journeys j2
                 WHERE j2.campaign_id = c.id
                   AND j2.state <> 'unroutable'), 0) AS journeys_total,
       COALESCE((SELECT count(*)::int FROM drip_journeys j3
                 WHERE j3.campaign_id = c.id AND j3.state <> 'unroutable'
                   AND j3.routed_at >= date_trunc('day', ${now.toISOString()}::timestamptz
                         AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'), 0)
-        AS journeys_today,
+        AS journeys_today,`}
       EXISTS (SELECT 1 FROM offer_exposures oe
               WHERE oe.org_id = ${orgId}::uuid AND oe.contact_id = le.contact_id
                 AND c.offer_id IS NOT NULL AND oe.offer_id = c.offer_id) AS had_offer_exposure,
@@ -198,17 +245,29 @@ export async function evaluateLeadRouting(
        WHERE s2.campaign_id = c.id AND s2.drip_active IS TRUE
          AND s2.archived_at IS NULL AND s2.creative_id IS NOT NULL) AS active_creative_ids,
       -- What this contact has already been sent, from ANY campaign on this offer.
-      (SELECT array_agg(DISTINCT s3.creative_id)
+      -- ⚠️ Only read when the contact HAS an exposure to the offer — the only
+      -- case the creative rule consults it. The planner walks every send of
+      -- every campaign on the offer to find this contact (no contact index on
+      -- stage_sends), ~28 ms per campaign per lead, so skipping it for the
+      -- common no-exposure lead is most of the per-lead cost.
+      CASE WHEN c.offer_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM offer_exposures oe2
+             WHERE oe2.org_id = ${orgId}::uuid AND oe2.contact_id = le.contact_id
+               AND oe2.offer_id = c.offer_id)
+      THEN (SELECT array_agg(DISTINCT s3.creative_id)
        FROM stage_sends ss3
        JOIN campaign_stages s3 ON s3.id = ss3.stage_id
        JOIN campaigns c3 ON c3.id = ss3.campaign_id
        WHERE ss3.org_id = ${orgId}::uuid AND ss3.contact_id = le.contact_id
          AND ss3.status = 'sent' AND s3.creative_id IS NOT NULL
-         AND c.offer_id IS NOT NULL AND c3.offer_id = c.offer_id) AS seen_creative_ids
+         AND c3.offer_id = c.offer_id)
+      END AS seen_creative_ids
     FROM le
     LEFT JOIN contact_attributes ca2 ON ca2.contact_id = le.contact_id
+    -- A PAUSED drip campaign is still a candidate: it owns its tag, so a lead
+    -- matching it is deferred (temporary), never "no campaign exists".
     LEFT JOIN campaigns c
-      ON c.org_id = ${orgId}::uuid AND c.type = 'drip' AND c.status = 'active'
+      ON c.org_id = ${orgId}::uuid AND c.type = 'drip' AND c.status IN ('active', 'paused')
     LEFT JOIN drip_campaign_configs cfg ON cfg.campaign_id = c.id
   `)) as unknown as (RawRow & { attr_age_years: number | null })[];
 
@@ -273,6 +332,29 @@ export async function evaluateLeadRouting(
     } else {
       rules.partner = "mismatch";
       detail.partner = `campaign restricted to partner key ${r.cfg_partner_key_id}`;
+    }
+
+    // A paused campaign (status 'paused' OR the send-pause latch) still owns
+    // its tag: TEMPORARY, so the lead is deferred and re-checked, never treated
+    // as having no campaign.
+    const paused = r.campaign_status !== "active" || r.campaign_send_paused === true;
+    rules.campaign_paused = paused ? "blocked" : "pass";
+    if (paused) {
+      detail.campaign_paused = r.campaign_status !== "active"
+        ? `campaign status is ${r.campaign_status}`
+        : "campaign sending is paused";
+    }
+
+    // Freshness (drip only): admitted only until the end of the lead's arrival
+    // ET day plus the cutoff — the campaign's override, else the org default.
+    // Past it the lead is skipped for this campaign and nothing is written.
+    const cutoffMin = r.cfg_cutoff_minutes ?? head.org_cutoff_minutes ?? 0;
+    const freshUntil = new Date(head.arrival_day_end).getTime() + cutoffMin * 60_000;
+    rules.freshness = now.getTime() < freshUntil ? "pass" : "mismatch";
+    if (rules.freshness !== "pass") {
+      detail.freshness =
+        `lead arrived ${head.received_at}; admission closed ${new Date(freshUntil).toISOString()} ` +
+        `(end of arrival ET day + ${cutoffMin} min)`;
     }
 
     const rec = new Date(head.received_at).getTime();
@@ -390,18 +472,21 @@ export async function evaluateLeadRouting(
       rules.creative_check = "pass";
     }
 
-    // Caps.
-    const capOk = r.cfg_campaign_cap == null || r.journeys_total < r.cfg_campaign_cap;
+    // Caps. From the worker's per-tick counts when given, else the per-call SQL.
+    const cached = counts ? (counts.get(Number(r.campaign_id)) ?? { total: 0, today: 0 }) : null;
+    const journeysTotal = cached ? cached.total : r.journeys_total;
+    const journeysToday = cached ? cached.today : r.journeys_today;
+    const capOk = r.cfg_campaign_cap == null || journeysTotal < r.cfg_campaign_cap;
     rules.campaign_cap = capOk ? "pass" : "blocked";
     if (!capOk) {
-      detail.campaign_cap = `campaign cap ${r.cfg_campaign_cap} reached (${r.journeys_total} journeys)`;
+      detail.campaign_cap = `campaign cap ${r.cfg_campaign_cap} reached (${journeysTotal} journeys)`;
     }
-    const admOk = r.cfg_admission_cap == null || r.journeys_today < r.cfg_admission_cap;
+    const admOk = r.cfg_admission_cap == null || journeysToday < r.cfg_admission_cap;
     rules.routing_daily_admission = admOk ? "pass" : "blocked";
     if (!admOk) {
       detail.routing_daily_admission =
         `today's routing admission cap ${r.cfg_admission_cap} reached ` +
-        `(${r.journeys_today} routed today) — this is NOT the send-time daily cap`;
+        `(${journeysToday} routed today) — this is NOT the send-time daily cap`;
     }
 
     const eligible = Object.values(rules).every((v) => v === "pass");
@@ -435,4 +520,46 @@ export async function evaluateLeadRouting(
     candidates,
     winner,
   };
+}
+
+// ── what the routing worker does with a verdict (card 869ency4b item 1) ──────
+//
+// ⭐ PERMANENT vs TEMPORARY. A lead that can never be routed must leave the
+// queue on its FIRST evaluation; before this, every unrouted lead sat at the
+// head of the oldest-first batch for 7 days and was re-checked every minute
+// (2026-10-10: ~180 dead leads starved 44,968 good ones).
+//
+//   permanent — gets a terminal 'unroutable' row now: opted out, or every
+//               candidate fails a rule that cannot change today (tag, partner,
+//               window, demographic/carrier filters, same offer + creative), or
+//               there is no live-or-paused drip campaign at all.
+//   defer     — only TEMPORARY rules fail somewhere (contact in use, week rule,
+//               a cap, a paused campaign): re-checked later, behind fresh leads.
+//   expired   — the only remaining candidates are past their freshness cutoff:
+//               skipped, nothing terminal written (the lead stays an ordinary
+//               contact).
+
+/** Global rules that clear on their own (the contact leaves a campaign, the week passes). */
+const TEMPORARY_GLOBAL_RULES = new Set(["in_use", "week_rule"]);
+/** Per-campaign rules that can clear within the day. */
+const TEMPORARY_CANDIDATE_RULES = new Set(["campaign_paused", "campaign_cap", "routing_daily_admission"]);
+
+export type RoutingOutcome = "route" | "permanent" | "defer" | "expired";
+
+export function classifyRoutingOutcome(v: LeadRoutingEvaluation): RoutingOutcome {
+  if (v.winner) return "route";
+  const failedGlobal = Object.entries(v.global).filter(([, x]) => x !== "pass").map(([k]) => k);
+  if (failedGlobal.some((k) => !TEMPORARY_GLOBAL_RULES.has(k))) return "permanent";
+
+  let anyOpen = false;   // eligible, or failing only temporary rules
+  let anyExpired = false;
+  for (const c of v.candidates) {
+    const failed = Object.entries(c.rules).filter(([, x]) => x !== "pass").map(([k]) => k);
+    if (failed.some((k) => k !== "freshness" && !TEMPORARY_CANDIDATE_RULES.has(k))) continue;
+    if (failed.includes("freshness")) { anyExpired = true; continue; }
+    anyOpen = true;
+  }
+  if (anyOpen) return "defer";
+  if (anyExpired) return "expired";
+  return "permanent";
 }

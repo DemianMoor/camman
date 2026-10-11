@@ -8,6 +8,7 @@ import {
   countSentSince,
   type DrainStopReason,
   isCampaignPaused,
+  isDripSendingHalted,
   isProviderPaused,
   isProviderSendsEnabled,
   latchPause,
@@ -111,6 +112,7 @@ export type DrainRefusal =
   | "provider_sends_disabled"
   | "provider_paused" // the latching circuit breaker is engaged for this provider
   | "campaign_paused" // the per-campaign latch (opt-out-rate breaker / manual)
+  | "drip_halted" // drip campaign whose org drip switches are off (drip_enabled / drip_paused)
   | "no_provider"
   | "unknown_provider" // provider row's sms_provider_id has no registered adapter (G3)
   | "no_credentials";
@@ -395,6 +397,8 @@ export async function runStageDrain(
   // provider latch — this refuses only THIS campaign; siblings keep sending.
   if (stage.campaign_send_paused)
     return { ok: false, reason: "campaign_paused", ...EMPTY };
+  if (await isDripSendingHalted(dbc, stage.campaign_id))
+    return { ok: false, reason: "drip_halted", ...EMPTY };
   if (stage.provider_id == null)
     return { ok: false, reason: "no_provider", ...EMPTY };
 
@@ -574,6 +578,14 @@ export async function runStageDrain(
     if (await isCampaignPaused(dbc, stage.campaign_id)) {
       halted = true;
       stopReason = "paused";
+      break;
+    }
+    // Same mid-run kill for the org DRIP switches: switching drip off or
+    // pausing it halts a drip stage at the next batch boundary. SOFT — rows
+    // stay pending and resume when drip is back on.
+    if (await isDripSendingHalted(dbc, stage.campaign_id)) {
+      halted = true;
+      stopReason = "drip_halted";
       break;
     }
 

@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { campaignTierExpr } from "@/lib/campaign-tier";
+import { isCampaignPaused, isDripSendingHalted } from "@/lib/sends/circuit-breakers";
 import { resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
 import { followupDueAt, type FollowupTier } from "./followup-timing";
 import { isDripPostureOn } from "./in-use";
@@ -218,6 +219,15 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
       if (!due.due) { res.noDetection++; continue; }
       if (due.at > now) { res.notDue++; continue; }
       if (!r.child_creative_text) { res.mintRefused++; continue; }
+
+      // ⭐ FRESH READ of both stop controls right before queuing. The candidate
+      // query's campaign_paused is as old as the tick, and the org gate above
+      // reads drip_enabled only — so drip_paused, or a pause landing mid-tick,
+      // used to be ignored here.
+      if (await isCampaignPaused(db, r.campaign_id) ||
+          await isDripSendingHalted(db, r.campaign_id)) {
+        res.pausedSkipped++; continue;
+      }
 
       // Daily cap counts EVERY drip send on the campaign, first-sends included —
       // a follow-up costs the same money and the same carrier reputation.

@@ -82,6 +82,10 @@ export async function PUT(
       API_ERROR_CODES.VALIDATION, { field: parsed.error.issues[0]?.path.join(".") });
   }
   const input = parsed.data;
+  // "Was this field SENT?" must be read from the raw body: the filters schema
+  // has .default({}), so parsed.data.filters is never undefined and an omitted
+  // field looked like "clear all filters" (caught by the preview check, 2026-10-11).
+  const sent = (k: string) => typeof json === "object" && json !== null && k in json;
 
   const camp = await db
     .select({ id: campaigns.id, type: campaigns.type })
@@ -115,7 +119,7 @@ export async function PUT(
         -- The panel PUTs tag/dates/priority/caps only; a plain EXCLUDED here
         -- reset the campaign's partner restriction and demographic filters to
         -- empty on every panel save (found 2026-10-11).
-        partner_key_id = CASE WHEN ${input.partner_key_id !== undefined}
+        partner_key_id = CASE WHEN ${sent("partner_key_id")}
                               THEN EXCLUDED.partner_key_id
                               ELSE drip_campaign_configs.partner_key_id END,
         start_at = EXCLUDED.start_at,
@@ -125,11 +129,11 @@ export async function PUT(
         routing_daily_admission_cap = EXCLUDED.routing_daily_admission_cap,
         -- Only the drip settings panel sends this field; the campaign editor
         -- PUTs the rest of the config without it and must not wipe an override.
-        admission_cutoff_minutes = CASE WHEN ${input.admission_cutoff_minutes !== undefined}
+        admission_cutoff_minutes = CASE WHEN ${sent("admission_cutoff_minutes")}
                                         THEN EXCLUDED.admission_cutoff_minutes
                                         ELSE drip_campaign_configs.admission_cutoff_minutes END,
         priority = EXCLUDED.priority,
-        filters = CASE WHEN ${input.filters !== undefined}
+        filters = CASE WHEN ${sent("filters")}
                        THEN EXCLUDED.filters
                        ELSE drip_campaign_configs.filters END,
         updated_at = now()

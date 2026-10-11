@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import { fromZonedTime } from "date-fns-tz";
 
 import { db } from "@/db/client";
@@ -138,6 +138,17 @@ export async function getStageMetricsInRange(
   const fromUtc = fromZonedTime(`${from}T00:00:00`, CAMPAIGN_TIMEZONE);
   const toExclusiveUtc = fromZonedTime(`${addOneDay(to)}T00:00:00`, CAMPAIGN_TIMEZONE);
 
+  // Drip stage cost by SEND DAY (conversion_date only). A drip stage sends for
+  // weeks, but campaign_stages.sent_at is its FIRST send and total_cost its
+  // LIFETIME cost, so the regular rule below (all of total_cost, on the sent_at
+  // day) put every drip dollar on day one and $0 on every later day. See
+  // dripCostByStageInRange. Under send_date a cohort stage reports everything
+  // to date, which IS total_cost, so the regular rule stands there.
+  const dripCost =
+    sendDate || excludeDrip
+      ? new Map<number, number>()
+      : await dripCostByStageInRange(orgId, fromUtc, toExclusiveUtc);
+
   // Stages SENT in range. Under conversion_date they seed stages Keitaro has no
   // results row for (zero-click or unpolled) so their send Cost + Total Sent
   // aren't silently dropped; under send_date they ARE the stage set.
@@ -167,8 +178,12 @@ export async function getStageMetricsInRange(
       and(
         eq(campaign_stages.org_id, orgId),
         isNull(campaign_stages.archived_at),
-        gte(campaign_stages.sent_at, fromUtc),
-        lt(campaign_stages.sent_at, toExclusiveUtc),
+        // A drip stage that sent in range but first sent earlier is seeded too,
+        // so its in-range sends and cost don't depend on a Keitaro row existing.
+        or(
+          and(gte(campaign_stages.sent_at, fromUtc), lt(campaign_stages.sent_at, toExclusiveUtc)),
+          dripCost.size > 0 ? inArray(campaign_stages.id, [...dripCost.keys()]) : undefined,
+        ),
         ...notDrip,
       ),
     );
@@ -398,7 +413,11 @@ export async function getStageMetricsInRange(
       // needs it. It was summed into grandSalesTopup and thrown away before.
       // ON THE TALLY, so mergeFunnel rolls it up with the breakdown it explains.
       acc.tally.manual_topup = manual;
-      acc.tally.cost = inRange ? a.totalCost : 0;
+      acc.tally.cost = dripCost.has(acc.stage_id)
+        ? dripCost.get(acc.stage_id)!
+        : inRange
+          ? a.totalCost
+          : 0;
       grandOptOuts += acc.opt_outs;
       grandTotalSent += acc.total_sent;
       grandSalesTopup += manual;
@@ -478,4 +497,55 @@ async function getClickerDenominators(
     lifetimeRevenueByStage,
     lifetimeRevenueTotal,
   };
+}
+
+// Drip stage cost over a UTC window, at send grain: each message SENT in the
+// window at its rate, plus each opt-out reply ATTRIBUTED in the window at the
+// rate of the send it answered. That is campaign_stages.total_cost's model,
+// rate × (sends + opt-outs), cut by event day (lib/stages/total-cost.ts).
+// Rate = the send's cost_per_sms snapshot, else the sending number's CURRENT
+// rate: drip inserts wrote no snapshot before 2026-10-07, the same fallback the
+// partner report uses (lib/reporting/partner-report.ts).
+//
+// Keyed by the drip stages with a send or an opt-out in the window; the caller
+// seeds those that have no Keitaro row and no in-range sent_at.
+async function dripCostByStageInRange(
+  orgId: string,
+  fromUtc: Date,
+  toExclusiveUtc: Date,
+): Promise<Map<number, number>> {
+  const rows = (await db.execute(sql`
+    WITH ds AS (
+      SELECT cs.id
+      FROM campaign_stages cs
+      JOIN campaigns c ON c.id = cs.campaign_id AND c.type = 'drip'
+      WHERE cs.org_id = ${orgId}::uuid AND cs.archived_at IS NULL
+    ),
+    sends AS (
+      SELECT ss.stage_id, sum(COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0)) AS cost
+      FROM stage_sends ss
+      LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
+      WHERE ss.org_id = ${orgId}::uuid
+        AND ss.stage_id IN (SELECT id FROM ds)
+        AND ss.status = 'sent'
+        AND ss.sent_at >= ${fromUtc.toISOString()}::timestamptz
+        AND ss.sent_at < ${toExclusiveUtc.toISOString()}::timestamptz
+      GROUP BY 1
+    ),
+    optouts AS (
+      SELECT oa.stage_id, sum(COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0)) AS cost
+      FROM opt_out_attributions oa
+      JOIN stage_sends ss ON ss.id = oa.stage_send_id
+      LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
+      WHERE oa.org_id = ${orgId}::uuid
+        AND oa.stage_id IN (SELECT id FROM ds)
+        AND oa.created_at >= ${fromUtc.toISOString()}::timestamptz
+        AND oa.created_at < ${toExclusiveUtc.toISOString()}::timestamptz
+      GROUP BY 1
+    )
+    SELECT stage_id, sum(cost)::float8 AS cost
+    FROM (SELECT * FROM sends UNION ALL SELECT * FROM optouts) x
+    GROUP BY 1
+  `)) as unknown as { stage_id: number; cost: number }[];
+  return new Map(rows.map((r) => [Number(r.stage_id), Number(r.cost)]));
 }

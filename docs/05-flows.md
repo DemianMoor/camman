@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-07_
+_Last updated: 2026-10-11_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -95,6 +95,7 @@ sequenceDiagram
     Drain->>Drain: re-check lifecycle eligibility (lifecycle campaigns only)<br/>suppressed / bought_offer / freeze_not_due — freeze reads stage_sends LIVE, not contact_engagement<br/>losers → skipped_ineligible + reason in last_error; FAILS OPEN (counted, never halts the batch)
   Drain->>Drain: mark sent / filtered (status="Suppressed") / failed; ceilings + spike checks
   end
+  Note over Drain: send-scheduled cron, after the drain + reconcileStuckStages:<br/>refreshDripStageCosts recomputes total_cost for DRIP stages that sent in the last 60 min
   Rec->>R: GET /r/<code>
   R->>R: first-pass classify (UA/headers)
   R->>R: INSERT clicks; append &sub_id1=<send_token>; 302 → destination

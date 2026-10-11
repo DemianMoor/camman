@@ -5,6 +5,7 @@ import { requireApiMembership } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
 import { reconcileStuckStages } from "@/lib/sends/reconcile-stages";
 import { runScheduledSends } from "@/lib/sends/scheduled";
+import { refreshDripStageCosts } from "@/lib/stages/total-cost";
 
 // Fires DUE scheduled sends for API (tracked) campaigns. See lib/sends/scheduled.ts.
 //
@@ -46,7 +47,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // (it dispatches nothing). See lib/sends/reconcile-stages.ts.
   const reconciled = await reconcileStuckStages(db, { orgId });
 
-  return NextResponse.json({ ...result, reconciled });
+  // Drip stages send for weeks, and nothing in the drain writes total_cost, so
+  // refresh the ones that sent recently. Dispatches nothing.
+  const dripCostsRefreshed = await refreshDripStageCosts(db, { orgId });
+
+  return NextResponse.json({ ...result, reconciled, dripCostsRefreshed });
 }
 
 // Cron (Bearer) hits GET; a manual trigger hits POST. Both share one handler.

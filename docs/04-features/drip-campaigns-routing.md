@@ -314,6 +314,35 @@ checks the route's source text as well as the behaviour.
 Number selection (P5), stages and the scheduler (P5), sends (P5), behavioural follow-ups (P6), the
 pause button's wiring (P5 — the list shows type only), and the creative half of the same-offer rule.
 
+## Stop controls: what halts drip sends, and where
+
+Three switches stop drip messages. Each is checked by **the drain** (`lib/sends/drain.ts`, the
+only code that calls a provider) before it claims anything AND between every batch of 50, so a
+switch flipped mid-burst stops sending within one batch — up to 49 messages of the batch already
+in flight still go out. Rows left behind stay `pending` and resume when the switch is cleared.
+
+| Switch | Column | Drain stop reason |
+|---|---|---|
+| Campaign "Pause sending" | `campaigns.send_paused` | `paused` (refusal `campaign_paused`) |
+| Org drip posture OFF | `org_settings.drip_enabled = false` | `drip_halted` |
+| Org drip paused | `org_settings.drip_paused = true` | `drip_halted` |
+
+The drip switches are read by `isDripSendingHalted` (`lib/sends/circuit-breakers.ts`): true for a
+**drip** campaign when posture is off or paused, and always false for a regular campaign. **Before
+2026-10-11 the drain never read the drip switches** — only the scheduler did, which merely queues
+rows — so turning drip off left already-queued drip rows sending. The scheduler and follow-ups also
+re-read both the campaign latch and the drip switches right before queuing (the follow-ups gate
+used to read `drip_enabled` only, so `drip_paused` never stopped follow-ups).
+
+Intake, lookup and enrichment never read any of these switches: leads keep arriving and being
+stored while sending is stopped. Routing stops admitting new journeys while the org drip switches
+are off, but keeps admitting under a campaign pause, so journeys accumulate for that campaign.
+
+Proof: `scripts/test-drip-stop-controls.ts` (preview DB) — a 200-row drip burst through the real
+drain with an injected sender, each control flipped after message 10: 50 sent / 150 pending for
+each, a regular campaign unaffected. Against the previous code, posture OFF and drip paused sent
+all 200.
+
 ## Activation and the drainable stamp
 
 A drip campaign is **exempt from the contact-group launch requirement** in both

@@ -187,14 +187,55 @@ They cannot be one number: a journey routed at 23:50 ET sends the next day. Enfo
 against journeys now and against sends later would give two caps fighting over one field. The UI
 labels which are live — a cap that silently does nothing looks like protection.
 
-## Unrouted leads
+## Unrouted leads: permanent, deferred, expired (2026-10-11, card 869ency4b)
 
-No row is written. The lead is re-evaluated every tick — a campaign may be created, a cap may reset,
-the contact may leave another campaign. After **7 days** it becomes a terminal `unroutable` row
-carrying its last reason.
+Every verdict without a winner is classified by `classifyRoutingOutcome`
+([lib/drip/routing-eval.ts](../../lib/drip/routing-eval.ts)):
 
-Seven days is chosen to coincide with the >1-week re-entry rule, so an unroutable lead becomes
-re-eligible as a "new" arrival exactly when that rule would have re-qualified it anyway.
+| Outcome | When | What is written |
+|---|---|---|
+| **permanent** | opted out; or every candidate fails a rule that cannot change today (tag, partner, window, demographic/carrier filter, same offer + creative, no config); or no live-or-paused drip campaign exists | a terminal `unroutable` row on the **first** evaluation, `reason.permanent = true` with every rule |
+| **defer** | only TEMPORARY rules fail somewhere: contact in use, week rule, campaign cap, daily admission cap, campaign paused (status `paused` **or** `send_paused`) | `lead_events.drip_recheck_at = now + 15 min`; nothing else |
+| **expired** | the only candidates left are past their freshness cutoff | the same re-check stamp; nothing terminal |
+
+**Candidate order:** never-evaluated leads first (oldest first), then deferred leads whose re-check
+time has passed. Up to **600 per tick**, stopping at 45 s (the route's `maxDuration` is 60 s); the
+rest head the next tick.
+
+**Why (2026-10-10):** candidates used to be "the 200 oldest leads with no journey", and an unrouted
+lead got no row for 7 days. About 180 dead leads (mostly opted out) sat at the head of every batch,
+and 44,968 routable ProMarketing leads behind them never got a turn. 90% of all evaluations ever run
+(414K vs 41K inserts) were re-checks of dead leads. `scripts/test-drip-routing-queue.ts` reproduces
+it: against the old worker, 0 of 10 good leads were routed behind 250 dead ones after 600
+evaluations; now all 10 are routed after 260 (each dead lead once).
+
+A **paused** campaign is still a candidate: it owns its tag, so a lead that matches only a paused
+campaign is deferred, never "no campaign exists". Under freshness, a pause that outlasts the lead's
+admission window means that lead never enters drip.
+
+## Freshness — drip admission closes at the end of the arrival day
+
+A lead is admitted to a drip campaign only until the **end of its arrival ET day plus a cutoff**:
+`drip_campaign_configs.admission_cutoff_minutes` if set, else
+`org_settings.drip_admission_cutoff_minutes` (default **0** = midnight ET). It is the `freshness`
+rule in the evaluator. The worker's candidate scan starts at the earliest arrival day any live or
+paused campaign could still admit, so older leads are **never evaluated and never written to**.
+They stay ordinary contacts, fully usable in regular campaigns, contact groups and segments.
+
+Evening arrivals are admitted the same day and texted the next morning when the send window opens;
+that is intended (owner, 2026-10-11).
+
+The ~45K ProMarketing leads waiting from 2026-10-10 were left exactly as they were (owner ruling, no
+cleanup). They are below the floor, so routing skips them.
+
+## Per-tick journey counts
+
+The cap rules read journey counts per campaign. The worker loads them **once per tick**
+(`loadCampaignJourneyCounts`) and increments them as it inserts, so the admission cap holds within a
+tick. The debugging tool passes no counts and reads them per call, as before. The
+"creatives already received" lookup now runs only when the contact has an exposure to the
+campaign's offer, the only case the creative rule reads it. On production one evaluation went from
+**78.6 ms / 47,932 buffers to 7.8 ms / 114 buffers** (EXPLAIN ANALYZE, lead 431198a6, 2026-10-11).
 
 **⚠️ An `unroutable` row has `campaign_id = NULL`** (migration 0163). It matched nothing, so naming
 a campaign would inflate that campaign's journey count and mislead the debugging tool. A CHECK keeps

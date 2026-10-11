@@ -112,12 +112,85 @@ export function normalizeLead(
   return out;
 }
 
-/** Claim a batch and drive every row to its next state. One transaction. */
-export async function runEnrichmentBatch(now: Date = new Date()): Promise<EnrichmentResult> {
+/** Per-tick budget: the cron's maxDuration is 60 s. */
+export const ENRICHMENT_DEADLINE_MS = 45_000;
+/** Hard ceiling on claims per tick (each lead is claimed twice on a cache miss). */
+export const ENRICHMENT_MAX_CLAIMS_PER_TICK = 1_500;
+
+export interface EnrichmentTickResult extends EnrichmentResult {
+  batches: number;
+  hitDeadline: boolean;
+  elapsedMs: number;
+}
+
+/**
+ * One tick: claim-and-process batches of BATCH_SIZE, each in its OWN short
+ * transaction, until the inbox has nothing claimable, the deadline passes, or
+ * the per-tick ceiling is hit.
+ *
+ * ⭐ WHY A LOOP (card 869ency4b item 2, 2026-10-10). One batch of 200 per
+ * minute, with every lead claimed TWICE on a cache miss (pass 1 enqueue, pass 2
+ * finish), capped intake processing at ~100 leads/min: ProMarketing's 50,000
+ * took 8h16m, and arrival → lookup reached 251 min at the median while the
+ * Telnyx worker itself (30 rps) sat mostly idle. Per-lead DB work is ~5–8 ms
+ * (pg_stat_statements), so the tick can do several batches.
+ */
+export async function runEnrichmentBatch(
+  now: Date = new Date(),
+  opts: { deadlineMs?: number; maxClaims?: number } = {},
+): Promise<EnrichmentTickResult> {
+  const deadlineMs = opts.deadlineMs ?? ENRICHMENT_DEADLINE_MS;
+  const maxClaims = opts.maxClaims ?? ENRICHMENT_MAX_CLAIMS_PER_TICK;
+  const startedAt = Date.now();
+  const total: EnrichmentTickResult = {
+    claimed: 0, processed: 0, landline: 0, awaitingLookup: 0, capDeferred: 0,
+    rejected: 0, lookupsEnqueued: 0, capReached: false,
+    batches: 0, hitDeadline: false, elapsedMs: 0,
+  };
+  while (total.claimed < maxClaims) {
+    if (Date.now() - startedAt > deadlineMs) { total.hitDeadline = true; break; }
+    const r = await runEnrichmentOnce(now);
+    total.batches++;
+    total.claimed += r.claimed;
+    total.processed += r.processed;
+    total.landline += r.landline;
+    total.awaitingLookup += r.awaitingLookup;
+    total.capDeferred += r.capDeferred;
+    total.rejected += r.rejected;
+    total.lookupsEnqueued += r.lookupsEnqueued;
+    total.capReached ||= r.capReached;
+    if (r.claimed < BATCH_SIZE) break; // drained (or only rows waiting on Telnyx left)
+  }
+  total.elapsedMs = Date.now() - startedAt;
+  return total;
+}
+
+/** Claim one batch for ONE org and drive every row to its next state. One transaction. */
+async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
   const res: EnrichmentResult = {
     claimed: 0, processed: 0, landline: 0, awaitingLookup: 0, capDeferred: 0,
     rejected: 0, lookupsEnqueued: 0, capReached: false,
   };
+
+  // ⚠️ ONE ORG PER BATCH. The batch below resolves groups, the lookup budget and
+  // the enqueue for a single org; it used to take rows[0].org_id for a batch
+  // that could span orgs. Take the org owning the oldest claimable row.
+  const head = (await db.execute(sql`
+    SELECT li.org_id FROM lead_inbox li
+    WHERE li.status IN ('received', 'awaiting_lookup')
+    ORDER BY li.received_at LIMIT 1
+  `)) as unknown as { org_id: string }[];
+  if (head.length === 0) return res;
+  const batchOrgId = head[0].org_id;
+
+  // ⭐ NO HEAD-OF-LINE BLOCK ON THE LOOKUP CAP. When the drip lookup sub-cap is
+  // spent, a 'received' row that still needs Telnyx can only be left as it is
+  // (see capDeferred below). Claiming it anyway put up to 200 such rows at the
+  // head of every batch, so leads whose lookup HAD completed behind them were
+  // never finished until the ET day rolled over. With the budget at zero they
+  // are not claimed at all.
+  const lookupBudgetOpen =
+    (await dripLookupBudget(db, { orgId: batchOrgId, want: 1, now })).allowed > 0;
 
   // Numbers needing a Telnyx call, collected inside the transaction and
   // enqueued AFTER it commits — enqueueNormalized opens its own transaction,
@@ -136,9 +209,10 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
   };
 
   await db.transaction(async (tx) => {
-    // Claim: 'received' (pass 1) and 'awaiting_lookup' whose result has landed
-    // (pass 2), oldest first. SKIP LOCKED so a slow batch never blocks the next
-    // tick, and the lease already guarantees a single runner anyway.
+    // Claim: 'awaiting_lookup' whose result has landed (pass 2 — finishing a
+    // lead) FIRST, then 'received' (pass 1), oldest first within each. SKIP
+    // LOCKED so a slow batch never blocks the next tick, and the lease already
+    // guarantees a single runner anyway.
     const rows = (await tx.execute(sql`
       SELECT li.id, li.org_id, li.partner_key_id, li.partner_slug, li.raw, li.phone_e164,
              li.interest_tag, li.sandbox, li.received_at, li.status,
@@ -149,9 +223,14 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
       FROM lead_inbox li
       JOIN partner_keys pk ON pk.id = li.partner_key_id
       LEFT JOIN phone_lookups pl ON pl.phone = li.phone_e164
-      WHERE li.status IN ('received', 'awaiting_lookup')
-        AND (li.status = 'received' OR pl.lookup_status = 'complete')
-      ORDER BY li.received_at
+      WHERE li.org_id = ${batchOrgId}::uuid
+        AND li.status IN ('received', 'awaiting_lookup')
+        AND (
+          (li.status = 'awaiting_lookup' AND pl.lookup_status = 'complete')
+          OR (li.status = 'received'
+              AND (${lookupBudgetOpen} OR li.sandbox OR pl.lookup_status = 'complete'))
+        )
+      ORDER BY (li.status = 'received'), li.received_at
       LIMIT ${BATCH_SIZE}
       FOR UPDATE OF li SKIP LOCKED
     `)) as unknown as InboxRow[];
@@ -159,7 +238,7 @@ export async function runEnrichmentBatch(now: Date = new Date()): Promise<Enrich
     res.claimed = rows.length;
     if (rows.length === 0) return;
 
-    const orgId = rows[0].org_id;
+    const orgId = batchOrgId;
     toEnqueue.orgId = orgId;
 
     // Group ids resolved once per batch, not per lead.

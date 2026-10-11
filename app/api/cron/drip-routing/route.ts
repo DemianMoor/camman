@@ -40,6 +40,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       skipped: true, reason: "prior_run_in_progress", skippedCount: leased.skippedCount,
     });
   }
+  // One summary line per tick: the throughput evidence for card 869ency4b
+  // (count, batches, elapsed) without a log-drain or a new table.
+  console.log(`[drip-routing] ${JSON.stringify(leased.result)}`);
   await recordHeartbeat(db, HEARTBEAT_JOBS.dripRouting.job_name);
   return NextResponse.json(leased.result);
 }

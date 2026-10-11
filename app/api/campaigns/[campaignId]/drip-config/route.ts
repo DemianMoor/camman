@@ -40,6 +40,9 @@ export async function GET(
            (c.audience_filters -> 'carrier_filter') AS carrier_filter,
            cfg.interest_tag, cfg.partner_key_id, cfg.start_at, cfg.end_at,
            cfg.daily_cap, cfg.campaign_cap, cfg.routing_daily_admission_cap,
+           cfg.admission_cutoff_minutes,
+           (SELECT os.drip_admission_cutoff_minutes FROM org_settings os
+             WHERE os.org_id = c.org_id) AS org_admission_cutoff_minutes,
            cfg.priority, cfg.filters,
            COALESCE((SELECT count(*)::int FROM drip_journeys j
                      WHERE j.campaign_id = c.id AND j.state <> 'unroutable'), 0) AS journeys_total
@@ -98,22 +101,37 @@ export async function PUT(
     await tx.execute(drizzleSql`
       INSERT INTO drip_campaign_configs
         (campaign_id, org_id, interest_tag, partner_key_id, start_at, end_at,
-         daily_cap, campaign_cap, routing_daily_admission_cap, priority, filters, updated_at)
+         daily_cap, campaign_cap, routing_daily_admission_cap, admission_cutoff_minutes,
+         priority, filters, updated_at)
       VALUES (${cid}, ${orgId}::uuid, ${input.interest_tag}, ${input.partner_key_id ?? null},
               ${input.start_at ?? null}::timestamptz, ${input.end_at ?? null}::timestamptz,
               ${input.daily_cap ?? null}, ${input.campaign_cap ?? null},
-              ${input.routing_daily_admission_cap ?? null}, ${input.priority ?? 100},
+              ${input.routing_daily_admission_cap ?? null},
+              ${input.admission_cutoff_minutes ?? null}, ${input.priority ?? 100},
               ${JSON.stringify(input.filters ?? {})}::jsonb, now())
       ON CONFLICT (campaign_id) DO UPDATE SET
         interest_tag = EXCLUDED.interest_tag,
-        partner_key_id = EXCLUDED.partner_key_id,
+        -- ⚠️ KEEP-IF-OMITTED for the fields the drip settings panel does not send.
+        -- The panel PUTs tag/dates/priority/caps only; a plain EXCLUDED here
+        -- reset the campaign's partner restriction and demographic filters to
+        -- empty on every panel save (found 2026-10-11).
+        partner_key_id = CASE WHEN ${input.partner_key_id !== undefined}
+                              THEN EXCLUDED.partner_key_id
+                              ELSE drip_campaign_configs.partner_key_id END,
         start_at = EXCLUDED.start_at,
         end_at = EXCLUDED.end_at,
         daily_cap = EXCLUDED.daily_cap,
         campaign_cap = EXCLUDED.campaign_cap,
         routing_daily_admission_cap = EXCLUDED.routing_daily_admission_cap,
+        -- Only the drip settings panel sends this field; the campaign editor
+        -- PUTs the rest of the config without it and must not wipe an override.
+        admission_cutoff_minutes = CASE WHEN ${input.admission_cutoff_minutes !== undefined}
+                                        THEN EXCLUDED.admission_cutoff_minutes
+                                        ELSE drip_campaign_configs.admission_cutoff_minutes END,
         priority = EXCLUDED.priority,
-        filters = EXCLUDED.filters,
+        filters = CASE WHEN ${input.filters !== undefined}
+                       THEN EXCLUDED.filters
+                       ELSE drip_campaign_configs.filters END,
         updated_at = now()
     `);
 

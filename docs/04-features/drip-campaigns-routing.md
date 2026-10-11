@@ -228,6 +228,20 @@ that is intended (owner, 2026-10-11).
 The ~45K ProMarketing leads waiting from 2026-10-10 were left exactly as they were (owner ruling, no
 cleanup). They are below the floor, so routing skips them.
 
+**Where it is set:** the campaign page's Drip settings → **Freshness** box ("Admission closes (minutes
+after midnight ET)"), placeholder showing the org default. Empty = org default. The org default
+(`org_settings.drip_admission_cutoff_minutes`) has no screen yet; it is 0.
+
+## Drip settings panel saves are partial (2026-10-11)
+
+The panel PUTs tag, dates, priority, caps and the cutoff — not `partner_key_id`, `filters` or the
+carrier filter. `PUT /api/campaigns/[campaignId]/drip-config` used to set every column from the body,
+so **saving caps from the panel reset the campaign's partner restriction and demographic filters to
+empty**. Those three fields (and `admission_cutoff_minutes`, which the campaign editor never sends) are
+now **kept when omitted**; an explicit `null` still clears them. The admission cap
+("Routing per day") was already on this panel and in the editor ("Daily admission"); it limits drip
+admission only, which the panel now says in plain words.
+
 ## Per-tick journey counts
 
 The cap rules read journey counts per campaign. The worker loads them **once per tick**

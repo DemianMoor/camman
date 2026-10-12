@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { salesRevenueTotals } from "@/lib/reporting/attribution";
+import { dripCostByStageInRange } from "@/lib/reporting/stage-funnel";
 import {
   loadEventTypes,
   visibleEventTypesByCount,
@@ -20,7 +21,8 @@ import {
 //   • sales / revenue → conversion-dated via salesRevenueTotals (Keitaro
 //     stat_date ∨ manual-tally entry date, max-deduped per stage).
 //   • spend           → Σ campaign_stages.total_cost attributed to the stage's
-//     send moment (sent_at) — the same rule /reports uses for Cost.
+//     send moment (sent_at) — the same rule /reports uses for Cost — for
+//     REGULAR stages; DRIP stages by send day (see spendInRange).
 //   • opt-outs        → count of opt_outs (reason='opt_out') by created_at.
 //   • delivered       → stage_sends accepted by the provider (status='sent') by
 //     sent_at. CamMan does NOT poll DLR (out of scope), so "delivered" here is
@@ -81,19 +83,29 @@ export function etDayRange(bounds: { start: Date; end: Date }): EtDayRange {
   };
 }
 
-// Sum campaign_stages.total_cost across all orgs for stages sent within the
-// window. Archived stages excluded — matches salesRevenueTotals. Exported so the
-// hourly Telegram report can fetch yesterday's spend alone (one query) instead
-// of a full second computeReportMetrics — see app/api/cron/telegram-report.
+// Spend across all orgs in the window, the same rule as the /reports Overview
+// Cost: a REGULAR stage's total_cost on its sent_at day, plus DRIP cost by send
+// day. A drip stage's sent_at is its FIRST send and total_cost its lifetime
+// cost, so the regular rule booked all of it on day one and $0 every later day
+// (dripCostByStageInRange, lib/reporting/stage-funnel.ts). Archived stages
+// excluded — matches salesRevenueTotals. Exported so the hourly Telegram report
+// can fetch yesterday's spend alone instead of a full second
+// computeReportMetrics — see app/api/cron/telegram-report.
 export async function spendInRange(range: EtDayRange): Promise<number> {
+  // Sequential, not Promise.all: the hourly report's peak concurrency is held at
+  // 4 queries on purpose (cold-start pooler stall — docs/04-features/crons.md).
   const rows = (await db.execute(sql`
     select coalesce(sum(cs.total_cost), 0)::numeric(12,4)::text as spend
     from campaign_stages cs
+    join campaigns c on c.id = cs.campaign_id and c.type <> 'drip'
     where cs.archived_at is null
       and cs.sent_at >= ${range.fromUtc.toISOString()}::timestamptz
       and cs.sent_at <  ${range.toExclusiveUtc.toISOString()}::timestamptz
-  `)) as unknown as { spend: string }[];
-  return Number(rows[0]?.spend ?? 0);
+    `)) as unknown as { spend: string }[];
+  const drip = await dripCostByStageInRange(null, range.fromUtc, range.toExclusiveUtc);
+  let dripSpend = 0;
+  for (const v of drip.values()) dripSpend += v;
+  return Number(rows[0]?.spend ?? 0) + dripSpend;
 }
 
 // Count opt-out events (reason='opt_out') across all orgs by created_at.

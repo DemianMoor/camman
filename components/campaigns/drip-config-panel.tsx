@@ -22,6 +22,11 @@ import {
 } from "@/components/campaigns/drip-followup-children";
 import { minutesToLabel } from "@/lib/drip/windows";
 import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { MAX_CARRY_DAYS } from "@/lib/drip/admission-window";
+
+const carryLabel = (d: number) =>
+  d === 0 ? "Same day only" : d === 1 ? "Also 1 day later" : `Also up to ${d} days later`;
 
 // Drip campaign config + routed journeys (Drip Phase 4).
 //
@@ -47,6 +52,8 @@ type Config = {
   routing_daily_admission_cap: number | null;
   admission_cutoff_minutes: number | null;
   org_admission_cutoff_minutes: number | null;
+  carry_days: number | null;
+  org_carry_days: number | null;
   priority: number | null;
   journeys_total: number;
 };
@@ -98,6 +105,9 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   const [admissionCap, setAdmissionCap] = useState("");
   const [dailyCap, setDailyCap] = useState("");
   const [cutoff, setCutoff] = useState("");
+  // "" = account default; "0" | "1" = fixed; "n" = up to N (carryN holds 2..7)
+  const [carryMode, setCarryMode] = useState("");
+  const [carryN, setCarryN] = useState("2");
 
   const loadCfg = cfgApi.execute;
   const loadJ = journeysApi.execute;
@@ -117,6 +127,9 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
         );
         setDailyCap(r.data.daily_cap == null ? "" : String(r.data.daily_cap));
         setCutoff(r.data.admission_cutoff_minutes == null ? "" : String(r.data.admission_cutoff_minutes));
+        const cd = r.data.carry_days;
+        setCarryMode(cd == null ? "" : cd <= 1 ? String(cd) : "n");
+        setCarryN(cd != null && cd >= 2 ? String(cd) : "2");
       }
     })();
   }, [loadCfg, campaignId, tick]);
@@ -198,6 +211,16 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   const num = (v: string) => (v.trim() === "" ? null : Number(v));
 
   const save = async () => {
+    let carryDays: number | null = carryMode === "" ? null : Number(carryMode);
+    if (carryMode === "n") {
+      const t = carryN.trim();
+      const n = Number(t);
+      if (!/^\d+$/.test(t) || n < 2 || n > MAX_CARRY_DAYS) {
+        toast.error(`N must be a whole number from 2 to ${MAX_CARRY_DAYS}`);
+        return;
+      }
+      carryDays = n;
+    }
     const r = await saveApi.execute(`/api/campaigns/${campaignId}/drip-config`, {
       method: "PUT",
       body: JSON.stringify({
@@ -209,6 +232,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
         routing_daily_admission_cap: num(admissionCap),
         daily_cap: num(dailyCap),
         admission_cutoff_minutes: cutoff.trim() === "" ? null : Number(cutoff),
+        carry_days: carryDays,
       }),
     });
     if (!r.ok) return toastApiError(r);
@@ -355,11 +379,45 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
                   disabled={!canEdit}
                 />
               </div>
+              <div>
+                <Label htmlFor="drip-carry" className="text-xs">Send leads</Label>
+                <Select
+                  value={carryMode === "" ? "default" : carryMode}
+                  onValueChange={(v) => setCarryMode(v === "default" ? "" : v)}
+                  disabled={!canEdit}
+                >
+                  <SelectTrigger id="drip-carry" className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">
+                      Account default ({carryLabel(cfg?.org_carry_days ?? 0)})
+                    </SelectItem>
+                    <SelectItem value="0">Same day only</SelectItem>
+                    <SelectItem value="1">Also 1 day later</SelectItem>
+                    <SelectItem value="n">Also up to N days later</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {carryMode === "n" && (
+                <div>
+                  <Label htmlFor="drip-carry-n" className="text-xs">N (days, 2–{MAX_CARRY_DAYS})</Label>
+                  <Input
+                    id="drip-carry-n"
+                    inputMode="numeric"
+                    value={carryN}
+                    onChange={(e) => setCarryN(e.target.value)}
+                    disabled={!canEdit}
+                  />
+                </div>
+              )}
             </div>
             <p className="text-muted-foreground text-xs">
               A lead can join this campaign only until midnight ET at the end of the day it arrived,
               plus these minutes (0–1439). Leave empty to use the org default (0 = midnight). Leads that miss
               the window stay ordinary contacts, usable in regular campaigns, groups and segments.
+            </p>
+            <p className="text-muted-foreground text-xs">
+              Leads not messaged on their arrival day are dropped from this campaign, or kept and
+              messaged on the following day(s).
             </p>
           </div>
 

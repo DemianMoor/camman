@@ -3525,6 +3525,12 @@ export const org_settings = pgTable("org_settings", {
   // CHECK (0..1439) is org_settings_drip_admission_cutoff_check, 0202 / 0203:
   // a cutoff of a day or more would re-admit already-skipped leads.
   drip_admission_cutoff_minutes: integer("drip_admission_cutoff_minutes").notNull().default(0),
+  // Carry-over (0204): drip admission stays open this many extra ET days.
+  // 0 = same day only. CHECK 0..7. Per-campaign override: drip_campaign_configs.carry_days.
+  drip_carry_days: integer("drip_carry_days").notNull().default(0),
+  // Stamped by trigger org_settings_drip_admission_widened whenever the org's
+  // window (carry×1440 + cutoff) grows. Leads that arrived earlier are same day only.
+  drip_admission_widened_at: timestamp("drip_admission_widened_at", { withTimezone: true }),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })
@@ -5497,6 +5503,11 @@ export const drip_campaign_configs = pgTable(
     // ET day that this campaign may still admit it. NULL = the org default
     // (org_settings.drip_admission_cutoff_minutes).
     admission_cutoff_minutes: integer("admission_cutoff_minutes"),
+    // Carry-over (0204): NULL = the org default (org_settings.drip_carry_days).
+    carry_days: integer("carry_days"),
+    // Stamped by trigger drip_campaign_configs_admission_widened when this
+    // campaign's effective window grows (never by application code).
+    admission_widened_at: timestamp("admission_widened_at", { withTimezone: true }),
     // Lower wins; ties broken by the most recently created campaign.
     priority: integer("priority").notNull().default(100),
     // gender / age_band / state / country / income_band / kids / married.
@@ -5545,6 +5556,10 @@ export const drip_campaign_configs = pgTable(
     check(
       "drip_campaign_configs_admission_cutoff_check",
       sql`${table.admission_cutoff_minutes} IS NULL OR (${table.admission_cutoff_minutes} >= 0 AND ${table.admission_cutoff_minutes} <= 1439)`,
+    ),
+    check(
+      "drip_campaign_configs_carry_days_check",
+      sql`${table.carry_days} IS NULL OR (${table.carry_days} >= 0 AND ${table.carry_days} <= 7)`,
     ),
     check(
       "drip_campaign_configs_interest_tag_check",
@@ -5609,6 +5624,9 @@ export const drip_journeys = pgTable(
       },
     ),
     first_send_at: timestamp("first_send_at", { withTimezone: true }),
+    // Carry-over (0204): ET days between the lead's arrival and its admission.
+    // 0 = same day (incl. an evening admission texted next morning). > 0 = carried.
+    carried_days: smallint("carried_days").notNull().default(0),
     // Correlation only — deliberately NOT an FK, so it survives retention.
     first_send_id: uuid("first_send_id"),
     // Why this campaign won and what was skipped. Read by the "why not routed"
@@ -5655,6 +5673,7 @@ export const drip_journeys = pgTable(
       sql`(${table.state} = 'routed' AND ${table.first_send_at} IS NULL)
           OR (${table.state} <> 'routed')`,
     ),
+    check("drip_journeys_carried_days_check", sql`${table.carried_days} >= 0`),
     index("drip_journeys_due_idx")
       .on(table.org_id, table.campaign_id, table.routed_at)
       .where(sql`state = 'routed' AND first_send_at IS NULL`),

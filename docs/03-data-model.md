@@ -220,6 +220,19 @@ erDiagram
   organizations ||--o{ partner_keys : "drip partner intake keys"
   partner_keys ||--o{ lead_intake_daily : "per ET-day counters"
   partner_keys ||--o{ lead_intake_hourly : "per-hour counters (0199)"
+  campaigns ||--|| drip_campaign_configs : "drip config (carry_days, admission_widened_at: 0204)"
+  campaigns ||--o{ drip_journeys : "carried_days (0204)"
+  drip_campaign_configs {
+    int carry_days "NULL = account default, 0-7 (0204)"
+    timestamptz admission_widened_at "trigger-stamped (0204)"
+  }
+  drip_journeys {
+    smallint carried_days "ET days between arrival and routing, default 0 (0204)"
+  }
+  org_settings {
+    int drip_carry_days "0-7, default 0 (0204)"
+    timestamptz drip_admission_widened_at "trigger-stamped (0204)"
+  }
 ```
 
 > **Per-recipient sale attribution** (migration 0067): the Keitaro conversions poll
@@ -528,6 +541,13 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 | `lead_events.drip_recheck_at` *(0202)* | partial index `lead_events_drip_candidates_idx` (`org_id`, `received_at`) `WHERE sandbox = false` | Set by the routing worker when a lead's only blockers are TEMPORARY (contact in use, week rule, a cap, a paused campaign): not re-evaluated before this time, and never-evaluated leads are always taken first. NULL = never deferred. The index serves the worker's one-ET-day candidate scan |
 | `org_settings.drip_admission_cutoff_minutes` *(0202, 0203)* | NOT NULL DEFAULT 0, CHECK 0–1439 | **Drip freshness**: a lead is admitted to a drip campaign only until the end of its arrival ET day plus this many minutes (0 = midnight ET). Restricts drip admission only — the contact is otherwise untouched |
 | `drip_campaign_configs.admission_cutoff_minutes` *(0202, 0203)* | NULL, CHECK NULL or 0–1439 | Per-campaign override of the freshness cutoff; NULL = the org default |
+| `org_settings.drip_carry_days` *(0204)* | NOT NULL DEFAULT 0, CHECK 0–7 | **"Send leads" account default**: how many extra ET days after arrival a drip campaign may still admit a lead. 0 = same day only. Has no screen yet |
+| `org_settings.drip_admission_widened_at` *(0204)* | timestamptz NULL | Stamped by trigger `org_settings_drip_admission_widened` (function `drip_org_admission_widened()`) — never by callers. See [Carry-over](04-features/drip-campaigns-routing.md#carry-over--send-leads) |
+| `drip_campaign_configs.carry_days` *(0204)* | NULL, CHECK NULL or 0–7 | Per-campaign "Send leads" override; NULL = the account default |
+| `drip_campaign_configs.admission_widened_at` *(0204)* | timestamptz NULL | Stamped by trigger `drip_campaign_configs_admission_widened` (function `drip_cfg_admission_widened()`) |
+| `drip_journeys.carried_days` *(0204)* | smallint NOT NULL DEFAULT 0, CHECK ≥ 0 | ET date(routed) − ET date(arrival) at insert. `> 0` = **carried**. Constant default ⇒ metadata-only add, no table rewrite |
+
+> **⭐ Two BEFORE triggers stamp `widened_at` (migration [0204](../db/migrations/0204_drip_carry_over.sql)).** Effective window = `carry_days × 1440 + cutoff minutes` (campaign value, else the org's). The stamp is `now()` whenever that window GROWS on UPDATE, and on INSERT of a config/org row whose window is already > 0 — so a new or duplicated campaign with a cutoff or carry never admits leads that expired before it existed. The org trigger fires on `drip_carry_days` / `drip_admission_cutoff_minutes`; the config trigger on `carry_days` / `admission_cutoff_minutes` (it reads the org row for inherited values).
 
 > **⚠️ "In use" is now defined in one shared builder** ([lib/drip/in-use.ts](../lib/drip/in-use.ts)) used by BOTH `iu_set` (campaign flag) and `applyInUseExclusion` (segment flag). They were independent definitions that agreed only by coincidence.
 

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { MAX_CARRY_DAYS } from "@/lib/drip/admission-window";
+
 import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
 import { DEMOGRAPHIC_FILTERS, GEO_FILTER_MODES } from "@/lib/drip/routing-eval";
 // Shared with the campaign editor so the dropdown can never offer a value the
@@ -67,6 +69,9 @@ export const dripConfigSchema = z
     // At most 1439 (0203): a day or more would move the routing floor back and
     // re-admit leads freshness already skipped.
     admission_cutoff_minutes: z.number().int().min(0).max(1439).nullable().optional(),
+    // Carry-over (0204): extra ET days a lead stays admissible. NULL = account
+    // default. OMITTED = keep (the campaign editor never sends it).
+    carry_days: z.number().int().min(0).max(MAX_CARRY_DAYS).nullable().optional(),
     priority: z.number().int().min(1).max(10000).optional(),
     filters: filtersSchema.optional(),
     // Drip reuses the regular campaign carrier filter representation.

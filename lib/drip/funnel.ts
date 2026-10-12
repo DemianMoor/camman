@@ -72,13 +72,20 @@ export interface FunnelStageRow {
   opt_outs: number;
 }
 
+export interface FunnelSplitRow { routed: number; sent: number; clicked: number; sales: number }
+export interface FunnelSplit { same_day: FunnelSplitRow; carried: FunnelSplitRow; unmatched_sales: number }
+
 export interface DripFunnel {
   progression: FunnelProgression;
   /** Events during the current ET day, any journey. NOT nested — see above. */
   today: FunnelProgression;
   outcomes: FunnelOutcome[];
   stages: FunnelStageRow[];
+  /** Same-day vs carried (carry-over spec §8). null ⇔ no carried journey in this campaign. */
+  split: FunnelSplit | null;
 }
+
+type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const OUTCOME_LABELS: Record<string, string> = {
   "active|": "Live",
@@ -115,9 +122,10 @@ function laneLabel(tier: number | null, stageNumber: number | null): string {
 export async function getDripFunnel(
   orgId: string,
   campaignId: number,
+  dbc: DbOrTx = db,
 ): Promise<DripFunnel> {
   // ── progression ──────────────────────────────────────────────────────────
-  const prog = (await db.execute(sql`
+  const prog = (await dbc.execute(sql`
     SELECT
       count(*)::int                                              AS routed,
       count(*) FILTER (WHERE j.first_send_at IS NOT NULL)::int    AS sent,
@@ -143,7 +151,7 @@ export async function getDripFunnel(
   const { start, end } = campaignDayBoundsUtc();
   const dayStart = sql`${start.toISOString()}::timestamptz`;
   const dayEnd = sql`${end.toISOString()}::timestamptz`;
-  const today = (await db.execute(sql`
+  const today = (await dbc.execute(sql`
     SELECT
       (SELECT count(*)::int FROM drip_journeys j
         WHERE j.org_id = ${orgId}::uuid AND j.campaign_id = ${campaignId}
@@ -170,7 +178,7 @@ export async function getDripFunnel(
   `)) as unknown as Record<string, number>[];
 
   // ── outcomes: disjoint, one row per journey ──────────────────────────────
-  const outcomes = (await db.execute(sql`
+  const outcomes = (await dbc.execute(sql`
     SELECT j.state, j.close_reason, count(*)::int AS count,
            count(*) FILTER (WHERE j.closed_at >= ${dayStart} AND j.closed_at < ${dayEnd})::int
              AS today_count
@@ -187,7 +195,7 @@ export async function getDripFunnel(
   // thing that actually happened. Clicks are joined through `links`, whose rows
   // carry the stage — so a click is attributed to the message that carried the
   // link, never to the journey as a whole.
-  const stages = (await db.execute(sql`
+  const stages = (await dbc.execute(sql`
     SELECT s.id AS stage_id, s.stage_number, s.behavioral_tier,
            count(ss.id) FILTER (WHERE ss.status = 'sent')::int AS sent,
            COALESCE((
@@ -212,6 +220,58 @@ export async function getDripFunnel(
     ORDER BY s.behavioral_tier NULLS FIRST, s.stage_number
   `)) as unknown as Record<string, number | null>[];
 
+  // ── same-day vs carried (carry-over spec §8). Total only; Today stays
+  // event-based and unsplit. Sales go to the contact's journey in this campaign
+  // routed most recently at or before the sale; a sale with none is shown as
+  // unmatched rather than dropped, so the halves + unmatched = converted.
+  // Cheap guard first: the split query materialises campaignTierExpr again, so skip
+  // it entirely when the campaign has no carried journeys (the common case).
+  const hasCarried = Boolean(((await dbc.execute(sql`
+    SELECT EXISTS (SELECT 1 FROM drip_journeys
+                   WHERE org_id = ${orgId}::uuid AND campaign_id = ${campaignId} AND carried_days > 0) AS has_carried
+  `)) as unknown as { has_carried: boolean }[])[0]?.has_carried);
+  const splitRows = !hasCarried ? [] : (await dbc.execute(sql`
+    WITH jj AS (
+      SELECT j.contact_id, j.routed_at, j.first_send_at, (j.carried_days > 0) AS carried,
+             COALESCE(t.tier, 0) AS tier
+      FROM drip_journeys j
+      LEFT JOIN (${campaignTierExpr(campaignId, orgId)}) t ON t.contact_id = j.contact_id
+      WHERE j.org_id = ${orgId}::uuid AND j.campaign_id = ${campaignId}
+    ), sales AS (
+      -- LATERAL over drip_journeys itself (not jj) so drip_journeys_org_contact_idx
+      -- (org_id, contact_id, routed_at DESC) serves the per-sale lookup; id DESC
+      -- makes a routed_at tie deterministic.
+      SELECT m.carried
+      FROM conversion_events ce
+      LEFT JOIN LATERAL (
+        SELECT (j.carried_days > 0) AS carried
+        FROM drip_journeys j
+        WHERE j.org_id = ce.org_id AND j.campaign_id = ${campaignId}
+          AND j.contact_id = ce.contact_id AND j.routed_at <= ce.occurred_at
+        ORDER BY j.routed_at DESC, j.id DESC
+        LIMIT 1
+      ) m ON true
+      WHERE ce.org_id = ${orgId}::uuid AND ce.campaign_id = ${campaignId} AND ${purchasedClause()}
+    )
+    SELECT
+      (SELECT count(*) FROM jj WHERE carried)::int                                AS carried_journeys,
+      (SELECT count(*) FROM jj WHERE NOT carried)::int                            AS sd_routed,
+      (SELECT count(*) FROM jj WHERE NOT carried AND first_send_at IS NOT NULL)::int AS sd_sent,
+      (SELECT count(*) FROM jj WHERE NOT carried AND tier >= 1)::int             AS sd_clicked,
+      (SELECT count(*) FROM jj WHERE carried)::int                                AS co_routed,
+      (SELECT count(*) FROM jj WHERE carried AND first_send_at IS NOT NULL)::int AS co_sent,
+      (SELECT count(*) FROM jj WHERE carried AND tier >= 1)::int                 AS co_clicked,
+      (SELECT count(*) FROM sales WHERE carried IS FALSE)::int                    AS sd_sales,
+      (SELECT count(*) FROM sales WHERE carried IS TRUE)::int                     AS co_sales,
+      (SELECT count(*) FROM sales WHERE carried IS NULL)::int                     AS unmatched_sales
+  `)) as unknown as Record<string, number>[];
+  const sp = splitRows[0] ?? {};
+  const split: FunnelSplit | null = !hasCarried || Number(sp.carried_journeys ?? 0) === 0 ? null : {
+    same_day: { routed: Number(sp.sd_routed), sent: Number(sp.sd_sent), clicked: Number(sp.sd_clicked), sales: Number(sp.sd_sales) },
+    carried: { routed: Number(sp.co_routed), sent: Number(sp.co_sent), clicked: Number(sp.co_clicked), sales: Number(sp.co_sales) },
+    unmatched_sales: Number(sp.unmatched_sales),
+  };
+
   const toProgression = (p: Record<string, number> = {}): FunnelProgression => ({
     routed: Number(p.routed ?? 0),
     sent: Number(p.sent ?? 0),
@@ -220,6 +280,7 @@ export async function getDripFunnel(
     converted: Number(p.converted ?? 0),
   });
   return {
+    split,
     progression: toProgression(prog[0]),
     today: toProgression(today[0]),
     outcomes: outcomes.map((o) => ({

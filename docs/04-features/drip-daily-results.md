@@ -91,6 +91,21 @@ Heartbeats are stamped only when every org refreshed cleanly.
   - **O**: per drip stage, the rollup equals the live `getStageMetricsInRange` (drip ON) on Total Sent, Cost and Opt-outs. Sales and revenue are **reported**, not failed (Overview dates them by `occurred_at`);
   - **L**: lead rows equal hand counts.
 
+## 4b. Money columns — `dailyMoney()` ([lib/reporting/drip-daily-money.ts](../../lib/reporting/drip-daily-money.ts))
+
+Read-time arithmetic over SUMMED cells (owner rulings Q1/Q3, 2026-10-12). One function serves day rows, breakdown rows and the totals row. It is client-safe, so the tab's totals line uses it too.
+
+| column | rule |
+|---|---|
+| Lookup cost | admitted × `getCalibratedLookupRate()`, the partner report's rate (the reconciliation asserts they are equal). Exact per campaign, because an admitted lead belongs to one campaign. Lookups of leads never admitted, landlines included, stay in the partner report only. A cache-hit lookup cost nothing (~1%), so the column slightly overstates; the tooltip says so. Admissions have no stage, so under **By stage** lookup cost sits on the campaign total only |
+| Profit | revenue − send cost − lookup cost (`profitAndRoi`, the partner report's NET) |
+| ROI | Profit ÷ (send + lookup cost); `null` ("—") when that cost is 0 |
+| Revenue per admitted lead | Cohort only: Σ revenue ÷ Σ admitted; `null` over 0 |
+
+None of these are stored. The rate moves and the partner report reprices with it, so this does too.
+
+The tab shows **"older days updated nightly"**, plus "as of HH:MM ET" for today and yesterday.
+
 ## 5. Retention (card 869enz8ge)
 
 Activity cells are permanent, complete per stage (the unattributed bucket),

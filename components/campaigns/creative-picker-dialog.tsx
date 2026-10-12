@@ -216,11 +216,15 @@ export function CreativePickerDialog({
   // this initializer is the reset; no reset-on-open effect needed.
   const [activeId, setActiveId] = useState<number | null>(selectedCreativeId);
 
+  // Keyed on the id, not the object: the stage form passes a fresh
+  // campaignOffer object on every render, and keying on it re-ran the creatives
+  // fetch each time (9 identical requests in 8 s on prod, 2026-10-12).
+  const campaignOfferId = campaignOffer?.id ?? null;
   const offerIds = useMemo(() => {
     const ids = new Set<number>(extraOfferIds);
-    if (campaignOffer) ids.add(campaignOffer.id);
+    if (campaignOfferId !== null) ids.add(campaignOfferId);
     return Array.from(ids);
-  }, [extraOfferIds, campaignOffer]);
+  }, [extraOfferIds, campaignOfferId]);
 
   // Fetch the active org offers for the "show more creatives" panel.
   useEffect(() => {
@@ -252,6 +256,10 @@ export function CreativePickerDialog({
         include_all_offers: includeAllOffers ? "true" : "false",
       });
       if (offerIds.length > 0) sp.set("offer_ids", offerIds.join(","));
+      // The metrics describe the campaign's offer only — the extra offers just
+      // widen the list of creatives to choose from.
+      if (campaignOfferId !== null)
+        sp.set("metrics_offer_id", String(campaignOfferId));
       const r = await creativesApi.execute(`/api/creatives/list?${sp.toString()}`);
       if (!cancelled && r.ok) {
         setCreatives(r.data.data);
@@ -261,7 +269,7 @@ export function CreativePickerDialog({
     return () => {
       cancelled = true;
     };
-  }, [creativesApi.execute, offerIds, includeAllOffers]);
+  }, [creativesApi.execute, offerIds, includeAllOffers, campaignOfferId]);
 
   // Client-side search (text/slug) + sequence/quality/funnel filter over the
   // fetched set. The server already ranked by EPC desc; filtering preserves
@@ -328,6 +336,9 @@ export function CreativePickerDialog({
             Filter and preview creatives
             {campaignOffer ? ` for “${campaignOffer.name}”` : ""}, then pick one
             for this stage.
+            {campaignOffer
+              ? ` EPC, CTR and sales are results on “${campaignOffer.name}” only.`
+              : ""}
           </DialogDescription>
         </DialogHeader>
 

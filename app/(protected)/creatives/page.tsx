@@ -1243,6 +1243,8 @@ export default function CreativesPage() {
 
   const isAuthLoading = !auth;
   const confirmBusy = archiveApi.isLoading || restoreApi.isLoading;
+  const selectedOfferName =
+    offers.find((o) => o.id === filters.offer_id)?.name ?? null;
 
   function toggleQuality(q: CreativeQuality) {
     const set = new Set(filters.qualities);
@@ -1263,6 +1265,15 @@ export default function CreativesPage() {
             SMS copy linked to offers. Active creatives can be picked when
             building a campaign stage.
           </p>
+          {selectedOfferName ? (
+            <p className="text-sm text-muted-foreground">
+              Results (CTR, conversions, EPC, sales, used campaigns) are for{" "}
+              <span className="font-medium text-foreground">
+                {selectedOfferName}
+              </span>{" "}
+              only.
+            </p>
+          ) : null}
         </div>
         {canCreate ? (
           <Button onClick={() => setCreateOpen(true)}>

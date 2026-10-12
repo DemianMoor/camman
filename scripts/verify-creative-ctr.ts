@@ -21,7 +21,7 @@ function check(name: string, ok: boolean, detail?: unknown) {
   if (!ok) failures++;
 }
 
-type Counts = Omit<CreativeCtrRow, "creative_id">;
+type Counts = Omit<CreativeCtrRow, "creative_id" | "offer_id">;
 const FIELDS: (keyof Counts)[] = [
   "sent_7d",
   "clicks_7d",
@@ -45,12 +45,17 @@ async function main() {
 
       console.log("A. computeCreativeCtr");
       const t = Date.now();
-      const snapshot = await computeCreativeCtr(tx, orgId);
-      console.log(`    ${Date.now() - t}ms, ${snapshot.length} creatives`);
+      const allRows = await computeCreativeCtr(tx, orgId);
+      // The all-offers rows; sections C-E check these. B checks every row.
+      const snapshot = allRows.filter((r) => r.offer_id === null);
+      console.log(
+        `    ${Date.now() - t}ms, ${snapshot.length} creatives, ${allRows.length - snapshot.length} creative × offer rows`,
+      );
 
       console.log("\nB. independent recount");
       const stages = (await tx.execute(sql`
         SELECT cs.id, cs.creative_id, cs.sms_count, cs.click_count, c.link_mode,
+               coalesce(c.offer_id, 0) AS offer_key,
                coalesce(cs.sent_at >= now() - interval '7 days', false) AS in_7d,
                coalesce(cs.sent_at >= now() - interval '30 days', false) AS in_30d,
                (cs.sent_at IS NOT NULL AND cs.archived_at IS NULL) AS in_report
@@ -58,6 +63,7 @@ async function main() {
         WHERE cs.org_id = ${orgId}::uuid`)) as unknown as {
         id: number;
         creative_id: number | null;
+        offer_key: number;
         sms_count: number;
         click_count: number;
         link_mode: string;
@@ -89,52 +95,62 @@ async function main() {
       );
 
       const stageById = new Map(stages.map((s) => [s.id, s]));
-      const truth = new Map<number, Counts>();
-      const acc = (creativeId: number): Counts => {
-        let c = truth.get(creativeId);
+      // Keyed "creative:offer" ("creative:all" = every offer). Each stage feeds
+      // its total key and, when its campaign has an offer, its offer key.
+      const keysOf = (s: { creative_id: number; offer_key: number }) =>
+        s.offer_key === 0 ? [`${s.creative_id}:all`] : [`${s.creative_id}:all`, `${s.creative_id}:${s.offer_key}`];
+      const truth = new Map<string, Counts>();
+      const acc = (key: string): Counts => {
+        let c = truth.get(key);
         if (!c) {
           c = { sent_7d: 0, clicks_7d: 0, sent_30d: 0, clicks_30d: 0, sent_lifetime: 0, clicks_lifetime: 0 };
-          truth.set(creativeId, c);
+          truth.set(key, c);
         }
         return c;
       };
       for (const r of sendRows) {
         const s = stageById.get(r.stage_id);
         if (!s?.creative_id || s.link_mode !== "tracked") continue;
-        const c = acc(s.creative_id);
-        c.sent_7d += r.d7;
-        c.sent_30d += r.d30;
-        c.sent_lifetime += r.life;
+        for (const k of keysOf({ creative_id: s.creative_id, offer_key: s.offer_key })) {
+          const c = acc(k);
+          c.sent_7d += r.d7;
+          c.sent_30d += r.d30;
+          c.sent_lifetime += r.life;
+        }
       }
       // Manual-mode stages: operator-entered sms_count and Keitaro click_count,
       // windowed by the stage's own send time.
       for (const s of stages) {
         if (!s.creative_id || s.link_mode === "tracked") continue;
-        const c = acc(s.creative_id);
-        c.sent_lifetime += s.sms_count;
-        c.clicks_lifetime += s.click_count;
-        if (s.in_30d) {
-          c.sent_30d += s.sms_count;
-          c.clicks_30d += s.click_count;
-        }
-        if (s.in_7d) {
-          c.sent_7d += s.sms_count;
-          c.clicks_7d += s.click_count;
+        for (const k of keysOf({ creative_id: s.creative_id, offer_key: s.offer_key })) {
+          const c = acc(k);
+          c.sent_lifetime += s.sms_count;
+          c.clicks_lifetime += s.click_count;
+          if (s.in_30d) {
+            c.sent_30d += s.sms_count;
+            c.clicks_30d += s.click_count;
+          }
+          if (s.in_7d) {
+            c.sent_7d += s.sms_count;
+            c.clicks_7d += s.click_count;
+          }
         }
       }
-      const contacts = new Map<number, [Set<string>, Set<string>, Set<string>]>();
+      const contacts = new Map<string, [Set<string>, Set<string>, Set<string>]>();
       for (const r of clickRows) {
         const s = stageById.get(r.stage_id);
         if (!s?.creative_id) continue;
-        acc(s.creative_id);
-        let sets = contacts.get(s.creative_id);
-        if (!sets) {
-          sets = [new Set(), new Set(), new Set()];
-          contacts.set(s.creative_id, sets);
+        for (const k of keysOf({ creative_id: s.creative_id, offer_key: s.offer_key })) {
+          acc(k);
+          let sets = contacts.get(k);
+          if (!sets) {
+            sets = [new Set(), new Set(), new Set()];
+            contacts.set(k, sets);
+          }
+          if (r.in_7d) sets[0].add(r.contact_id);
+          if (r.in_30d) sets[1].add(r.contact_id);
+          sets[2].add(r.contact_id);
         }
-        if (r.in_7d) sets[0].add(r.contact_id);
-        if (r.in_30d) sets[1].add(r.contact_id);
-        sets[2].add(r.contact_id);
       }
       for (const [creativeId, [d7, d30, life]] of contacts) {
         const c = truth.get(creativeId)!;
@@ -143,9 +159,11 @@ async function main() {
         c.clicks_lifetime += life.size;
       }
 
-      const snapById = new Map(snapshot.map((r) => [r.creative_id, r]));
+      const snapById = new Map(
+        allRows.map((r) => [`${r.creative_id}:${r.offer_id ?? "all"}`, r]),
+      );
       check(
-        "same creative set as the recount",
+        "same creative × offer set as the recount (totals + per offer)",
         snapById.size === truth.size && [...truth.keys()].every((id) => snapById.has(id)),
         { snapshot: snapById.size, recount: truth.size },
       );
@@ -157,7 +175,7 @@ async function main() {
         }
       }
       check(
-        `every creative × field (${truth.size} × ${FIELDS.length}) matches the recount exactly`,
+        `every creative/offer row × field (${truth.size} × ${FIELDS.length}) matches the recount exactly`,
         mismatches.length === 0,
         { count: mismatches.length, first: mismatches.slice(0, 5) },
       );

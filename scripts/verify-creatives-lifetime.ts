@@ -5,7 +5,7 @@ function assert(c:boolean,m:string){if(!c)throw new Error(`ASSERTION FAILED: ${m
 async function main(){
   const c=postgres(process.env.DATABASE_URL!,{prepare:false,max:3}); const d=drizzle(c);
   const org=(await d.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as {id:string}[];
-  const rows=await computeCreativeMetrics(org[0].id);
+  const rows=(await computeCreativeMetrics(org[0].id)).filter(r=>r.offer_id===null);
   const clean30=(r:typeof rows[0])=>r.manual_clean+r.tracked_clean;
 
   assert(rows.length>0,"metrics computed");

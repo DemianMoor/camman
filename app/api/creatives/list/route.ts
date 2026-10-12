@@ -97,6 +97,16 @@ export async function GET(req: NextRequest) {
   // render EPC/CTR — are unaffected.
   const includeMetrics = sp.get("include_metrics") !== "false";
 
+  // Which offer the metrics (and Used Campaigns) describe. The stage picker
+  // sends metrics_offer_id = the campaign's offer, independent of the offers it
+  // widens the LIST with; /creatives sends only offer_id, its filter, and the
+  // numbers follow it. Neither ⇒ the creative across all offers.
+  const metricsOfferRaw = sp.get("metrics_offer_id") ?? sp.get("offer_id");
+  const metricsOfferId =
+    metricsOfferRaw !== null && /^\d+$/.test(metricsOfferRaw)
+      ? Number(metricsOfferRaw)
+      : null;
+
   const where = buildCreativeListWhere({
     orgId,
     search: params.search,
@@ -131,7 +141,7 @@ export async function GET(req: NextRequest) {
   // renders no generated columns, which is the consistent reading.
   const tMetricsStart = performance.now();
   const [metricsRows, eventTypes] = includeMetrics
-    ? await Promise.all([getCreativeMetrics(orgId), loadEventTypes(db, orgId)])
+    ? await Promise.all([getCreativeMetrics(orgId, metricsOfferId), loadEventTypes(db, orgId)])
     : [[], [] as EventTypeSpec[]];
   // Its own Server-Timing segment: on a cache HIT this is ~0ms, on a MISS it is
   // the full aggregate. Without splitting it out the miss cost would be charged
@@ -147,7 +157,7 @@ export async function GET(req: NextRequest) {
   // NULL counters) without needing a sentinel row.
   const metricsAgg = drizzleSql`(
     SELECT * FROM jsonb_to_recordset(${JSON.stringify(metricsRows)}::jsonb)
-      AS m(creative_id int, delivered int, checkouts int, sales int,
+      AS m(creative_id int, offer_id int, delivered int, checkouts int, sales int,
            payout numeric, manual_clean int, tracked_clean int,
            lifetime_payout numeric, lifetime_clean int, lifetime_sales int,
            ctr_sent_7d int, ctr_clicks_7d int, ctr_sent_30d int, ctr_clicks_30d int,
@@ -179,12 +189,24 @@ export async function GET(req: NextRequest) {
   // column interpolated into a SELECT-list expression as a bare "id", which
   // inside this subquery binds to campaign_stages.id — every row came back 0.
   // ORDER BY and joined selects qualify it, so only that one path broke.
+  //
+  // With an offer selected it counts only that offer's campaigns, matching the
+  // metric columns beside it.
   const usedCampaignsSql = drizzleSql<number>`(
     SELECT count(DISTINCT cs.campaign_id)::int
       FROM campaign_stages cs
      WHERE cs.org_id = ${orgId}
        AND cs.creative_id = creatives.id
        AND cs.sent_at IS NOT NULL
+       ${
+         metricsOfferId === null
+           ? drizzleSql``
+           : drizzleSql`AND EXISTS (
+               SELECT 1 FROM campaigns c
+                WHERE c.id = cs.campaign_id
+                  AND c.org_id = ${orgId}
+                  AND c.offer_id = ${metricsOfferId})`
+       }
   )`;
 
   const sortBy = params.sortBy ?? "created_at";

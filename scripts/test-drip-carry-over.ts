@@ -84,7 +84,7 @@ async function main() {
     const freshAt = new Date(Math.min(today.getTime() + 1000, now.getTime()));
 
     // C1 carry 0 — only today's lead is admitted, carried_days 0
-    const c0 = await mkCampaign("c0");
+    await mkCampaign("c0");
     const c0Old = await mkLead("c0", new Date(yStart.getTime() + 20 * 3600_000));
     const c0New = await mkLead("c0", freshAt);
     // C2 carry 1 widened at T — before T never evaluated, after T admitted carried

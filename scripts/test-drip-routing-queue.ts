@@ -22,6 +22,7 @@ import { runDripRoutingBatch } from "@/lib/drip/routing";
 //   Q7  the admission cap holds within one tick (per-tick counts are incremented)
 //   Q8  ⭐ freshness: yesterday's lead is never evaluated and never written to
 //   Q9  a per-campaign cutoff override admits a lead the org default would not
+//   Q9b ⭐ a cutoff set after the lead's window closed does not revive it
 // The org (and everything under it) is deleted at the end.
 
 const MARKER = "__DRIP_ROUTING_QUEUE_TEST__";
@@ -157,12 +158,26 @@ async function main() {
     // Override: campaign L admits until (minutes into today + 60) after the end
     // of the arrival day ⇒ yesterday's lead is still admissible right now.
     const campLate = await mkCampaign(`L${sfx}`, "active", { cutoff: minsIntoDay + 60 });
+    // Spec §4.2 (0204): an INSERT with window > 0 stamps admission_widened_at = now(),
+    // and a lead that arrived before it gets window 0. Backdate the stamp so the
+    // override predates the lead — the case this check is about.
+    await db.execute(sql`
+      UPDATE drip_campaign_configs
+      SET admission_widened_at = ${new Date(yesterday.getTime() - 60 * 60_000).toISOString()}::timestamptz
+      WHERE campaign_id = ${campLate}`);
     const staleL = await mkLead(`L${sfx}`, yesterday);
     await tick();
     bar("Q9 a per-campaign cutoff override admits yesterday's lead to that campaign",
       (await journeyOf(staleL.id))?.campaign_id === campLate);
     bar("    …while yesterday's lead for a default-cutoff campaign stays untouched",
       (await journeyOf(stale.id)) === undefined);
+
+    // Same cutoff, NOT backdated: set after the lead's window closed ⇒ no revival.
+    await mkCampaign(`M${sfx}`, "active", { cutoff: minsIntoDay + 60 });
+    const staleM = await mkLead(`M${sfx}`, yesterday);
+    await tick();
+    bar("Q9b ⭐ a cutoff set AFTER the lead's window closed does not revive it (0204 widened_at)",
+      (await journeyOf(staleM.id)) === undefined);
   } finally {
     if (orgId) {
       const name = (await one<{ name: string } | undefined>(

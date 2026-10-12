@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-12 (drip carry-over: Same day vs carried funnel split, migration 0204); 2026-10-09 (partner entity 0200: the signed link, the revenue toggle and the report scope live on `partners`; Partner column on the internal table; lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-12 (public report tab title leads with the partner name); 2026-10-12 (drip carry-over: Same day vs carried funnel split, migration 0204); 2026-10-09 (partner entity 0200: the signed link, the revenue toggle and the report scope live on `partners`; Partner column on the internal table; lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -222,7 +222,7 @@ invoice can be checked by hand.
 
 `lib/reporting/partner-report-token.ts`, migration **0172**.
 
-Public page: `app/partner-report/[token]/page.tsx` — `robots: { index: false }`.
+Public page: `app/partner-report/[token]/page.tsx` — `robots: { index: false }`. The browser-tab title is `<partner name> — Partner report` (`generateMetadata`, sharing one `cache()`d token lookup with the page); an unresolvable token keeps the generic `Partner report` title and the usual 404.
 
 | property | how |
 |---|---|

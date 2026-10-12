@@ -1,7 +1,7 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
-import type { DripFunnel } from "@/lib/drip/funnel";
+import type { DripFunnel, FunnelSplit, FunnelSplitRow } from "@/lib/drip/funnel";
 
 // The journey funnel for one drip campaign (Drip Phase 7, ruling R4).
 //
@@ -98,6 +98,8 @@ export function JourneyFunnel({ funnel }: { funnel: DripFunnel }) {
         </div>
       </div>
 
+      {funnel.split && <CarrySplit split={funnel.split} />}
+
       <div>
         <h4 className="mb-1 text-xs font-medium tracking-wide uppercase">How they ended</h4>
         <p className="text-muted-foreground mb-3 text-xs">
@@ -173,6 +175,46 @@ export function JourneyFunnel({ funnel }: { funnel: DripFunnel }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function CarrySplit({ split }: { split: FunnelSplit }) {
+  const rows: [string, FunnelSplitRow][] = [["Same day", split.same_day], ["Carried", split.carried]];
+  const ctr = (r: FunnelSplitRow) => (r.sent > 0 ? `${((r.clicked / r.sent) * 100).toFixed(1)}%` : "—");
+  return (
+    <div>
+      <h4 className="mb-1 text-xs font-medium tracking-wide uppercase">Same day vs carried</h4>
+      <p className="text-muted-foreground mb-3 text-xs">
+        Carried = admitted on a later day than the lead arrived. All-time counts.
+        {split.unmatched_sales > 0 && ` ${split.unmatched_sales.toLocaleString()} sale(s) matched no journey.`}
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tabular-nums">
+          <thead className="text-muted-foreground text-xs">
+            <tr>
+              <th className="text-left font-normal" />
+              <th className="text-right font-normal">Routed</th>
+              <th className="text-right font-normal">Sent</th>
+              <th className="text-right font-normal">Clicked</th>
+              <th className="text-right font-normal">CTR</th>
+              <th className="text-right font-normal">Sales</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([label, r]) => (
+              <tr key={label}>
+                <td>{label}</td>
+                <td className="text-right">{r.routed.toLocaleString()}</td>
+                <td className="text-right">{r.sent.toLocaleString()}</td>
+                <td className="text-right">{r.clicked.toLocaleString()}</td>
+                <td className="text-right">{ctr(r)}</td>
+                <td className="text-right">{r.sales.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

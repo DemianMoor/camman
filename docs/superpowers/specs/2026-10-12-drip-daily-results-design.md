@@ -116,7 +116,7 @@ Every cell is built from the **existing report fragments**, not a rewrite: the `
 | Cost | `COALESCE(ss.cost_per_sms, phone rate, 0)` per send by `sent_at` + per opt-out by its date | the cohort's sends + opt-outs | identical to `dripCostByStageInRange` |
 | Revenue | approved revenue by detection | the cohort's | `approvedRevenueClause` |
 | Profit, ROI | revenue − cost; profit ÷ cost, `null` at 0 | same | `profitAndRoi()` on summed money |
-| Median lead-to-send | first sends by `sent_at`; value = `sent_at − lead_events.received_at` | the cohort's first sends | the #350 definition (excludes carried + re-check leads), but anchored on `lead_events.received_at` because **`lead_inbox` rows are DELETEd after processing** (`lib/drip/enrichment.ts:331`) |
+| Median lead-to-send | first sends by `sent_at`; value = `sent_at − lead_events.received_at` | the cohort's first sends | the #350 definition (excludes carried + re-check leads), but anchored on `lead_inbox.received_at` exactly as `leadToSendLatency` (now on main, #350) does. ⚠️ Corrected 2026-10-12: only LANDLINE inbox rows are deleted (`lib/drip/enrichment.ts:331`); admitted leads keep theirs |
 
 - **Every column is additive except the median.** Totals and multi-day ranges sum the counters and money, then recompute every ratio from the sums. They never average ratios.
 - **The median** is stored as a fixed log-bucket histogram (24 buckets, 5 s → 48 h). The totals row and any range sum the histograms and interpolate the median. That is exact to the bucket (±~15% at the median); it is labelled "≈".
@@ -127,6 +127,8 @@ Every cell is built from the **existing report fragments**, not a rewrite: the `
 ---
 
 ## 3. Refresh and recompute strategy
+
+> **As built (PR 3):** every **15** min (`1,16,31,46`), fresh tier = today + yesterday; the 14-day settle runs **nightly** (05:00 UTC), not 3-hourly — cold, the receipt side reads ~830 MB per 3 days, which belongs in the quiet slot (the brief's own "last 14 days nightly"). Candidate sets are temp tables + ANALYZE. Details: [drip-daily-results.md](../../04-features/drip-daily-results.md).
 
 One new cron, `/api/cron/drip-daily-rollup`, at **`*/10`** offset to `:07,:17,…`. That makes 35 of Vercel's 40. The pattern is copied from `delivery-rollup`:
 

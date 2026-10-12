@@ -141,6 +141,11 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production backfill of stage_delivery_rollup (migration 0186); dry-run default, writes only behind --apply, through lib/reporting/delivery-rollup (so it carries no write token of its own)",
   },
   {
+    file: "backfill-drip-daily-rollup.ts",
+    viaLibrary: true,
+    why: "one-shot production backfill of drip_daily_rollup (migration 0208); dry-run default (rolled back), writes only behind --apply, through lib/reporting/drip-daily-rollup",
+  },
+  {
     file: "backfill-drip-journey-lifecycle.ts",
     why: "one-shot production backfill; closes journeys already terminal in fact",
   },

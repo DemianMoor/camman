@@ -169,6 +169,28 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     first_run_grace_hours: 48, // 2x the daily interval
     label: "Delivered % rollup reconciliation (nightly)",
   },
+  // ---- Drip Daily results rollup (migration 0208). The refresh is watched by
+  // /api/cron/drip-monitors; the refresh run watches its own nightly settle +
+  // reconciliation, which are separate stamps (a different job never vouches
+  // for itself through the same stamp).
+  dripDailyRollup: {
+    job_name: "drip-daily-rollup",
+    max_age_hours: 1, // every 15 min; 1 h is ~3 missed runs
+    first_run_grace_hours: 0.5, // 2x the 15-min interval
+    label: "Drip Daily results rollup refresh (every 15 min)",
+  },
+  dripDailyRollupSettle: {
+    job_name: "drip-daily-rollup-settle",
+    max_age_hours: 50, // nightly; ~2 missed nights
+    first_run_grace_hours: 48,
+    label: "Drip Daily results rollup 14-day settle (nightly)",
+  },
+  dripDailyRollupReconcile: {
+    job_name: "drip-daily-rollup-reconcile",
+    max_age_hours: 50,
+    first_run_grace_hours: 48,
+    label: "Drip Daily results rollup reconciliation (nightly)",
+  },
   // ---- Contact engagement (migration 0187). The 15-min job is watched by the
   // hourly tracking-monitors; the nightly full recount is watched by the 15-min
   // job. Neither vouches for itself. Both watches stay silent while no org has

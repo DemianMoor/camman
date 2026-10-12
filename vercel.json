@@ -125,6 +125,10 @@
       "schedule": "44 7 * * *"
     },
     {
+      "path": "/api/cron/drip-daily-rollup",
+      "schedule": "1,16,31,46 * * * *"
+    },
+    {
       "path": "/api/cron/refresh-contact-engagement",
       "schedule": "10,25,40,55 * * * *"
     },

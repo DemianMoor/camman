@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
+import { scanFloor, type AdmissionSettings } from "./admission-window";
 import { isDripPostureOn } from "./in-use";
 import {
   classifyRoutingOutcome,
@@ -35,12 +36,13 @@ import {
 //               never-evaluated leads are always taken first;
 //   expired   → past its freshness cutoff: re-check stamp only, nothing terminal.
 //
-// ⭐ FRESHNESS (drip only). A lead is admitted only until the end of its ARRIVAL
-// ET DAY plus a cutoff (org_settings.drip_admission_cutoff_minutes, default 0,
-// per-campaign drip_campaign_configs.admission_cutoff_minutes). The candidate
-// query never looks below the earliest arrival day any campaign could still
-// admit, so older leads are never evaluated and never written to — they stay
-// ordinary contacts, usable in regular campaigns, groups and segments.
+// ⭐ FRESHNESS + CARRY-OVER (drip only). A lead is admitted only until the end
+// of (its ARRIVAL ET DAY + carry days) + a cutoff — lib/drip/admission-window.ts.
+// Carry defaults to 0 (same day only). The candidate query never looks below
+// the earliest arrival any campaign could still admit, and that floor never
+// goes below a widening, so leads freshness already skipped are never
+// evaluated or written to again. Today's arrivals are evaluated before carried
+// ones, and a carried lead only uses cap left after a reserve (routing-eval.ts).
 //
 // ⭐ THROUGHPUT: up to DRIP_ROUTING_BATCH per tick within DRIP_ROUTING_DEADLINE_MS
 // (the route's maxDuration is 60 s). Campaign journey counts are read ONCE per
@@ -89,22 +91,38 @@ export async function runDripRoutingBatch(
     // that also gates the in-use SQL shape, so it is read through one helper.
     if (!(await isDripPostureOn(orgId))) continue;
 
-    // The earliest arrival a campaign could still admit: the largest cutoff in
-    // play (org default or any live/paused campaign's override).
-    const cut = (await db.execute(sql`
-      SELECT GREATEST(
-        COALESCE((SELECT drip_admission_cutoff_minutes FROM org_settings WHERE org_id = ${orgId}::uuid), 0),
-        COALESCE((SELECT max(cfg.admission_cutoff_minutes)
-                  FROM drip_campaign_configs cfg JOIN campaigns c ON c.id = cfg.campaign_id
-                  WHERE c.org_id = ${orgId}::uuid AND c.type = 'drip'
-                    AND c.status IN ('active', 'paused')), 0)
-      )::int AS max_cutoff
-    `)) as unknown as { max_cutoff: number }[];
-    const maxCutoffMin = Number(cut[0]?.max_cutoff ?? 0);
-    const floor = campaignDayBoundsUtc(new Date(now.getTime() - maxCutoffMin * 60_000)).start;
+    // The earliest arrival any live/paused campaign (or the org default) could
+    // still admit. ⭐ scanFloor never goes below a campaign's widened_at (except
+    // today's own arrivals), so leads that expired before a widening — the
+    // Oct-10/11 backlog, anything freshness already skipped — never re-enter.
+    const settingRows = (await db.execute(sql`
+      SELECT cfg.carry_days, cfg.admission_cutoff_minutes, cfg.admission_widened_at,
+             os.drip_carry_days, os.drip_admission_cutoff_minutes, os.drip_admission_widened_at
+      FROM org_settings os
+      LEFT JOIN campaigns c ON c.org_id = os.org_id AND c.type = 'drip' AND c.status IN ('active', 'paused')
+      LEFT JOIN drip_campaign_configs cfg ON cfg.campaign_id = c.id
+      WHERE os.org_id = ${orgId}::uuid
+    `)) as unknown as {
+      carry_days: number | null; admission_cutoff_minutes: number | null; admission_widened_at: string | null;
+      drip_carry_days: number; drip_admission_cutoff_minutes: number; drip_admission_widened_at: string | null;
+    }[];
+    const settingsOf = (r: (typeof settingRows)[number], orgOnly: boolean): AdmissionSettings => ({
+      cfgCarryDays: orgOnly ? null : r.carry_days,
+      cfgCutoffMinutes: orgOnly ? null : r.admission_cutoff_minutes,
+      cfgWidenedAt: orgOnly ? null : r.admission_widened_at,
+      orgCarryDays: r.drip_carry_days, orgCutoffMinutes: r.drip_admission_cutoff_minutes,
+      orgWidenedAt: r.drip_admission_widened_at,
+    });
+    const floorMs = Math.min(
+      // the org default too, as the old GREATEST(org, max(cfg)) did
+      ...(settingRows.length > 0 ? [scanFloor(now, settingsOf(settingRows[0], true)).getTime()] : []),
+      ...settingRows.map((r) => scanFloor(now, settingsOf(r, false)).getTime()),
+      campaignDayBoundsUtc(now).start.getTime(),
+    );
+    const floor = new Date(floorMs);
+    const todayStart = campaignDayBoundsUtc(now).start;
 
     // Candidates: fresh enough, no journey yet, not deferred into the future.
-    // Never-evaluated leads first (oldest first), then due re-checks.
     const leads = (await db.execute(sql`
       SELECT e.id
       FROM lead_events e
@@ -113,7 +131,14 @@ export async function runDripRoutingBatch(
         AND e.received_at >= ${floor.toISOString()}::timestamptz
         AND (e.drip_recheck_at IS NULL OR e.drip_recheck_at <= ${now.toISOString()}::timestamptz)
         AND NOT EXISTS (SELECT 1 FROM drip_journeys j WHERE j.lead_event_id = e.id)
-      ORDER BY (e.drip_recheck_at IS NOT NULL), e.received_at
+      -- ⭐ Fresh leads first (carry-over D1): today's arrivals, never-evaluated
+      -- before re-checks, oldest first (#335, unchanged); then carried leads,
+      -- never-evaluated before re-checks, NEWEST first (day 1 before day 2).
+      ORDER BY (e.received_at < ${todayStart.toISOString()}::timestamptz),
+               (e.drip_recheck_at IS NOT NULL),
+               CASE WHEN e.received_at < ${todayStart.toISOString()}::timestamptz
+                    THEN -extract(epoch FROM e.received_at)
+                    ELSE extract(epoch FROM e.received_at) END
       LIMIT ${batchSize}
     `)) as unknown as { id: string }[];
     if (leads.length === 0) continue;
@@ -147,17 +172,19 @@ export async function runDripRoutingBatch(
         try {
           await db.execute(sql`
             INSERT INTO drip_journeys
-              (org_id, campaign_id, contact_id, lead_event_id, state, routed_at, reason)
+              (org_id, campaign_id, contact_id, lead_event_id, state, routed_at, reason, carried_days)
             VALUES (${orgId}::uuid, ${verdict.winner.campaign_id}, ${verdict.contact_id}::uuid,
                     ${verdict.lead_event_id}::uuid, 'routed', ${now.toISOString()}::timestamptz,
-                    ${JSON.stringify(reason)}::jsonb)
+                    ${JSON.stringify(reason)}::jsonb,
+                    GREATEST(0, (${now.toISOString()}::timestamptz AT TIME ZONE 'America/New_York')::date
+                              - (${verdict.received_at}::timestamptz AT TIME ZONE 'America/New_York')::date))
           `);
           res.routed++;
           const k = String(verdict.winner.campaign_id);
           res.byCampaign[k] = (res.byCampaign[k] ?? 0) + 1;
           // Keep the per-tick cap counts true for the next evaluation.
-          const c = counts.get(verdict.winner.campaign_id) ?? { total: 0, today: 0 };
-          counts.set(verdict.winner.campaign_id, { total: c.total + 1, today: c.today + 1 });
+          const c = counts.get(verdict.winner.campaign_id) ?? { total: 0, today: 0, reserve: 0 };
+          counts.set(verdict.winner.campaign_id, { total: c.total + 1, today: c.today + 1, reserve: c.reserve });
         } catch (e) {
           if (codeOf(e) === "23505") {
             // Lost the race — the invariant did its job. Not an error. The

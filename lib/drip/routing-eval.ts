@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 
+import { admissionCloses, isCarried } from "./admission-window";
 import type { DbOrTx } from "./groups";
 
 // Drip routing eligibility (Drip Phase 4).
@@ -101,14 +102,17 @@ interface RawRow {
   attr_kids: boolean | null;
   attr_married: boolean | null;
   attr_age_band: string | null;
-  arrival_day_end: string;
   org_cutoff_minutes: number | null;
+  org_carry_days: number | null;
+  org_widened_at: string | null;
   campaign_id: number | null;
   campaign_name: string | null;
   campaign_offer_id: number | null;
   campaign_status: string | null;
   campaign_send_paused: boolean | null;
   cfg_cutoff_minutes: number | null;
+  cfg_carry_days: number | null;
+  cfg_widened_at: string | null;
   cfg_tag: string | null;
   cfg_partner_key_id: number | null;
   cfg_start_at: string | null;
@@ -120,6 +124,7 @@ interface RawRow {
   carrier_filter: string[] | null;
   journeys_total: number;
   journeys_today: number;
+  journeys_reserve: number;
   had_offer_exposure: boolean;
   active_creative_ids: (number | null)[] | null;
   seen_creative_ids: (number | null)[] | null;
@@ -136,8 +141,10 @@ function bandFromAge(age: number): string | null {
   return "65_plus";
 }
 
-/** Journeys per campaign (excluding 'unroutable'): all-time and in the current ET day. */
-export type CampaignJourneyCounts = Map<number, { total: number; today: number }>;
+/** Journeys per campaign (excluding 'unroutable'): all-time, current ET day, and
+ *  the carry-over RESERVE — same-day journeys routed yesterday from this time of
+ *  day to midnight, i.e. the fresh volume today's afternoon is expected to bring. */
+export type CampaignJourneyCounts = Map<number, { total: number; today: number; reserve: number }>;
 
 /**
  * The per-campaign journey counts the cap rules read, for every drip campaign
@@ -154,14 +161,19 @@ export async function loadCampaignJourneyCounts(
            count(*)::int AS total,
            count(*) FILTER (
              WHERE j.routed_at >= date_trunc('day', ${now.toISOString()}::timestamptz
-                     AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York')::int AS today
+                     AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York')::int AS today,
+           count(*) FILTER (
+             WHERE j.carried_days = 0
+               AND j.routed_at >= ${now.toISOString()}::timestamptz - interval '24 hours'
+               AND j.routed_at < date_trunc('day', ${now.toISOString()}::timestamptz
+                     AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York')::int AS reserve
     FROM drip_journeys j
     JOIN campaigns c ON c.id = j.campaign_id
     WHERE j.org_id = ${orgId}::uuid AND j.state <> 'unroutable'
       AND c.type = 'drip' AND c.status IN ('active', 'paused')
     GROUP BY j.campaign_id
-  `)) as unknown as { campaign_id: number; total: number; today: number }[];
-  return new Map(rows.map((r) => [Number(r.campaign_id), { total: r.total, today: r.today }]));
+  `)) as unknown as { campaign_id: number; total: number; today: number; reserve: number }[];
+  return new Map(rows.map((r) => [Number(r.campaign_id), { total: r.total, today: r.today, reserve: r.reserve }]));
 }
 
 /**
@@ -210,15 +222,18 @@ export async function evaluateLeadRouting(
            ELSE extract(year from age((${now.toISOString()}::timestamptz
                                        AT TIME ZONE 'America/New_York')::date, ca2.dob))::int
       END AS attr_age_years,
-      -- Freshness (item 3): a lead may be admitted only until the END OF ITS
-      -- ARRIVAL ET DAY plus a cutoff (org default, per-campaign override).
-      (date_trunc('day', le.received_at AT TIME ZONE 'America/New_York') + interval '1 day')
-        AT TIME ZONE 'America/New_York' AS arrival_day_end,
+      -- Freshness (item 3 + carry-over): the window itself is computed in JS
+      -- by lib/drip/admission-window.ts from these settings.
       (SELECT os.drip_admission_cutoff_minutes FROM org_settings os
         WHERE os.org_id = ${orgId}::uuid) AS org_cutoff_minutes,
+      (SELECT os.drip_carry_days FROM org_settings os
+        WHERE os.org_id = ${orgId}::uuid) AS org_carry_days,
+      (SELECT os.drip_admission_widened_at FROM org_settings os
+        WHERE os.org_id = ${orgId}::uuid) AS org_widened_at,
       c.id AS campaign_id, c.name AS campaign_name, c.offer_id AS campaign_offer_id,
       c.status AS campaign_status, c.send_paused AS campaign_send_paused,
       cfg.admission_cutoff_minutes AS cfg_cutoff_minutes,
+      cfg.carry_days AS cfg_carry_days, cfg.admission_widened_at AS cfg_widened_at,
       cfg.interest_tag AS cfg_tag, cfg.partner_key_id AS cfg_partner_key_id,
       cfg.start_at AS cfg_start_at, cfg.end_at AS cfg_end_at,
       cfg.priority AS cfg_priority, cfg.filters AS cfg_filters,
@@ -226,7 +241,7 @@ export async function evaluateLeadRouting(
       cfg.routing_daily_admission_cap AS cfg_admission_cap,
       (c.audience_filters -> 'carrier_filter') AS carrier_filter,
       ${counts
-        ? sql`0 AS journeys_total, 0 AS journeys_today,`
+        ? sql`0 AS journeys_total, 0 AS journeys_today, 0 AS journeys_reserve,`
         : sql`COALESCE((SELECT count(*)::int FROM drip_journeys j2
                 WHERE j2.campaign_id = c.id
                   AND j2.state <> 'unroutable'), 0) AS journeys_total,
@@ -234,7 +249,13 @@ export async function evaluateLeadRouting(
                 WHERE j3.campaign_id = c.id AND j3.state <> 'unroutable'
                   AND j3.routed_at >= date_trunc('day', ${now.toISOString()}::timestamptz
                         AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'), 0)
-        AS journeys_today,`}
+        AS journeys_today,
+      COALESCE((SELECT count(*)::int FROM drip_journeys j4
+                WHERE j4.campaign_id = c.id AND j4.state <> 'unroutable' AND j4.carried_days = 0
+                  AND j4.routed_at >= ${now.toISOString()}::timestamptz - interval '24 hours'
+                  AND j4.routed_at < date_trunc('day', ${now.toISOString()}::timestamptz
+                        AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'), 0)
+        AS journeys_reserve,`}
       EXISTS (SELECT 1 FROM offer_exposures oe
               WHERE oe.org_id = ${orgId}::uuid AND oe.contact_id = le.contact_id
                 AND c.offer_id IS NOT NULL AND oe.offer_id = c.offer_id) AS had_offer_exposure,
@@ -348,13 +369,19 @@ export async function evaluateLeadRouting(
     // Freshness (drip only): admitted only until the end of the lead's arrival
     // ET day plus the cutoff — the campaign's override, else the org default.
     // Past it the lead is skipped for this campaign and nothing is written.
-    const cutoffMin = r.cfg_cutoff_minutes ?? head.org_cutoff_minutes ?? 0;
-    const freshUntil = new Date(head.arrival_day_end).getTime() + cutoffMin * 60_000;
-    rules.freshness = now.getTime() < freshUntil ? "pass" : "mismatch";
+    const adm = admissionCloses(head.received_at, {
+      cfgCarryDays: r.cfg_carry_days, cfgCutoffMinutes: r.cfg_cutoff_minutes, cfgWidenedAt: r.cfg_widened_at,
+      orgCarryDays: head.org_carry_days, orgCutoffMinutes: head.org_cutoff_minutes, orgWidenedAt: head.org_widened_at,
+    });
+    rules.freshness = now.getTime() < adm.closesAt.getTime() ? "pass" : "mismatch";
     if (rules.freshness !== "pass") {
-      detail.freshness =
-        `lead arrived ${head.received_at}; admission closed ${new Date(freshUntil).toISOString()} ` +
-        `(end of arrival ET day + ${cutoffMin} min)`;
+      detail.freshness = adm.preWidening
+        ? `lead arrived ${head.received_at}, before this campaign's admission window was widened ` +
+          `(${adm.widenedAt!.toISOString()}) — same day only; admission closed ${adm.closesAt.toISOString()}`
+        : `lead arrived ${head.received_at}; admission closed ${adm.closesAt.toISOString()} ` +
+          (adm.carryDays === 0
+            ? `(end of arrival ET day + ${adm.cutoffMinutes} min)`
+            : `(end of arrival ET day + ${adm.carryDays} day(s) + ${adm.cutoffMinutes} min)`);
     }
 
     const rec = new Date(head.received_at).getTime();
@@ -473,20 +500,27 @@ export async function evaluateLeadRouting(
     }
 
     // Caps. From the worker's per-tick counts when given, else the per-call SQL.
-    const cached = counts ? (counts.get(Number(r.campaign_id)) ?? { total: 0, today: 0 }) : null;
+    const cached = counts ? (counts.get(Number(r.campaign_id)) ?? { total: 0, today: 0, reserve: 0 }) : null;
     const journeysTotal = cached ? cached.total : r.journeys_total;
     const journeysToday = cached ? cached.today : r.journeys_today;
+    // ⭐ Fresh leads first (carry-over D1): a CARRIED lead may only use the cap
+    // left after holding back yesterday's same-time-onward fresh volume. A fresh
+    // lead ignores the reserve, so with carry off nothing here changes.
+    const carried = isCarried(head.received_at, now);
+    const reserve = carried ? (cached ? cached.reserve : Number(r.journeys_reserve ?? 0)) : 0;
     const capOk = r.cfg_campaign_cap == null || journeysTotal < r.cfg_campaign_cap;
     rules.campaign_cap = capOk ? "pass" : "blocked";
     if (!capOk) {
       detail.campaign_cap = `campaign cap ${r.cfg_campaign_cap} reached (${journeysTotal} journeys)`;
     }
-    const admOk = r.cfg_admission_cap == null || journeysToday < r.cfg_admission_cap;
+    const admOk = r.cfg_admission_cap == null || journeysToday + reserve < r.cfg_admission_cap;
     rules.routing_daily_admission = admOk ? "pass" : "blocked";
     if (!admOk) {
-      detail.routing_daily_admission =
-        `today's routing admission cap ${r.cfg_admission_cap} reached ` +
-        `(${journeysToday} routed today) — this is NOT the send-time daily cap`;
+      detail.routing_daily_admission = carried && journeysToday < r.cfg_admission_cap!
+        ? `carried lead held back for today's fresh arrivals: ${journeysToday} routed today + ` +
+          `reserve ${reserve} >= cap ${r.cfg_admission_cap}`
+        : `today's routing admission cap ${r.cfg_admission_cap} reached ` +
+          `(${journeysToday} routed today) — this is NOT the send-time daily cap`;
     }
 
     const eligible = Object.values(rules).every((v) => v === "pass");

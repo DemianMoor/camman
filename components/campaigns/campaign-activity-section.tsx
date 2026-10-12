@@ -161,6 +161,8 @@ const EVENT_META: Record<string, { label: string; dot: string }> = {
   send_drain: { label: "Sent", dot: "bg-emerald-500" },
   results_imported: { label: "Import", dot: "bg-cyan-500" },
   results_reverted: { label: "Revert", dot: "bg-orange-500" },
+  drip_config_changed: { label: "Drip settings", dot: "bg-fuchsia-500" },
+  drip_stage_changed: { label: "Stage edit", dot: "bg-fuchsia-400" },
 };
 
 function eventMeta(type: string) {

@@ -16,6 +16,11 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
 import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
 import { logCampaignEvent } from "@/lib/campaign-events";
+import {
+  DRIP_STAGE_FIELDS,
+  logDripStageChange,
+  readDripStageSnapshot,
+} from "@/lib/drip/change-events";
 import { can } from "@/lib/permissions";
 import { decideScheduleEdit } from "@/lib/sends/schedule-edit";
 import { isScheduledAtInPast } from "@/lib/sends/schedule-guard";
@@ -606,6 +611,13 @@ export async function PATCH(
   // One transaction so a campaign-tracking-id backfill and the stage update
   // can't half-apply.
   const updated = await db.transaction(async (tx) => {
+    // Drip change log: only when the PATCH touches a logged drip field.
+    // Locked so the diff sees exactly the row this update replaces.
+    const touchesDripField = DRIP_STAGE_FIELDS.some((f) => f in updates);
+    const dripBefore = touchesDripField
+      ? await readDripStageSnapshot(tx, sid, orgId, { forUpdate: true })
+      : null;
+
     if (current.tracking_id == null && effectiveCreativeId != null) {
       let campaignTrackingId = current.campaign_tracking_id;
       if (
@@ -659,6 +671,18 @@ export async function PATCH(
         .where(eq(campaign_stages.id, sid))
         .limit(1);
       if (refreshed) row.total_cost = refreshed.total_cost;
+    }
+    if (row && dripBefore?.isDrip) {
+      const dripAfter = await readDripStageSnapshot(tx, sid, orgId);
+      await logDripStageChange(tx, {
+        orgId,
+        campaignId: cid,
+        stageId: sid,
+        stageNumber: dripBefore.stageNumber,
+        actorUserId: user.id,
+        before: dripBefore.snap,
+        after: dripAfter?.snap ?? null,
+      });
     }
     return row;
   });

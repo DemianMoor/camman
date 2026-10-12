@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { logDripConfigChange, readDripConfigSnapshot } from "@/lib/drip/change-events";
 import { syncCampaignFollowupChildren } from "@/lib/drip/children";
 import { can } from "@/lib/permissions";
 
@@ -91,7 +92,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
   if (!can(role, "campaigns.update")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
@@ -111,11 +112,24 @@ export async function POST(
     });
   }
 
-  const updated = (await db.execute(drizzleSql`
-    UPDATE drip_campaign_configs SET behavioral_enabled = ${enabled}, updated_at = now()
-    WHERE campaign_id = ${cid} AND org_id = ${orgId}::uuid
-    RETURNING campaign_id
-  `)) as unknown as { campaign_id: number }[];
+  const updated = await db.transaction(async (tx) => {
+    const before = await readDripConfigSnapshot(tx, cid, orgId, { forUpdate: true });
+    const rows = (await tx.execute(drizzleSql`
+      UPDATE drip_campaign_configs SET behavioral_enabled = ${enabled}, updated_at = now()
+      WHERE campaign_id = ${cid} AND org_id = ${orgId}::uuid
+      RETURNING campaign_id
+    `)) as unknown as { campaign_id: number }[];
+    if (rows.length > 0) {
+      await logDripConfigChange(tx, {
+        orgId,
+        campaignId: cid,
+        actorUserId: user.id,
+        before,
+        after: await readDripConfigSnapshot(tx, cid, orgId),
+      });
+    }
+    return rows;
+  });
   if (updated.length === 0) {
     return apiError(404, "This campaign has no drip config", API_ERROR_CODES.NOT_FOUND, {
       entity: "drip_campaign_config",

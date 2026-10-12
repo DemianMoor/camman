@@ -1,6 +1,6 @@
 # Campaign Activity Log
 
-_Last updated: 2026-10-06_
+_Last updated: 2026-10-12 (drip settings change log: `drip_config_changed` / `drip_stage_changed`); 2026-10-06_
 
 The **Activity** section at the bottom of a campaign's detail page
 ([app/(protected)/campaigns/[id]/page.tsx](../../app/(protected)/campaigns/[id]/page.tsx))
@@ -42,7 +42,36 @@ never-sent, no-results stage — `stage_id` is NULL on the row itself since the
 stage is gone; see [campaigns-stages-creatives.md](campaigns-stages-creatives.md#deleting-stages))
 · `send_approved` · `send_kickoff` (materialized recipient count) · `send_drain`
 (sent / failed / stop reason; written even for cron-driven runs, actor NULL) ·
-`results_imported` · `results_reverted`.
+`results_imported` · `results_reverted` · `drip_config_changed` ·
+`drip_stage_changed` (below).
+
+### Drip settings change log (2026-10-12)
+
+Drip campaign settings used to be overwritten in place, so nothing could say
+**when** a cap or a window changed. They are the change markers of the drip
+**Daily results** tab ([spec](../superpowers/specs/2026-10-12-drip-daily-results-design.md) §4),
+so they are logged here rather than in a new table.
+[lib/drip/change-events.ts](../../lib/drip/change-events.ts) reads the row
+**locked** (`FOR UPDATE`) before the write and again after it, diffs a fixed
+field list, and appends **one** event only when something actually changed. The
+panel PUTs every field on every save, and a no-op save writes nothing.
+
+| event_type | written by | fields diffed | `metadata` |
+|---|---|---|---|
+| `drip_config_changed` | `PUT /api/campaigns/[id]/drip-config`, `POST …/drip-followups` | `DRIP_CONFIG_FIELDS`: tag, partner key, start, **end (= admission closes)**, daily cap, campaign cap, **daily admission cap**, **admission cutoff**, **carry-over days**, priority, filters, behavioural follow-ups | `{changes: {field: {from, to}}}` |
+| `drip_stage_changed` | `PATCH /api/campaigns/[id]/stages/[stageId]`, **drip campaigns only**, and only when the PATCH touches a listed field | `DRIP_STAGE_FIELDS`: window start/end, creative, **Active** (`drip_active`), follow-up delay | `{stage_number, changes}` |
+
+- Values are compared as `to_jsonb` output on both sides, with jsonb key order
+  ignored. The same instant written as different text, or the same filter
+  object re-serialised, is **not** a change.
+- Pause/resume is **not** duplicated here. It is already recorded by
+  `campaign_status_changed` and `campaign_circuit_events`.
+- **No history before 2026-10-12.** Edits made earlier cannot be reconstructed.
+- The campaign `audience_filters.carrier_filter` (also sent through the
+  drip-config PUT) is not in the diff. It lives on `campaigns`, shared with
+  regular campaigns.
+- Test: `scripts/test-drip-change-events.ts` (preview DB, rolled back, 21 bars);
+  `scripts/test-drip-change-events-api.ts` (the three real routes on a preview deploy).
 
 Generic field edits (renames, notes) are deliberately **not** logged — they'd
 bury the send-relevant signal. Add more types as needed.

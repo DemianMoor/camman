@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { cache } from "react";
 
 import { PartnerReportView } from "@/components/reports/partner-report-view";
 import { getPartnerReport, stripRevenueForPartner } from "@/lib/reporting/partner-report";
@@ -19,10 +20,23 @@ import { resolveReportToken } from "@/lib/reporting/partner-report-token";
 // ⚠️ noindex: a link handed to a partner must not end up in a search index.
 export const dynamic = "force-dynamic";
 
-export const metadata: Metadata = {
-  title: "Partner report",
-  robots: { index: false, follow: false, nocache: true },
-};
+// Memoized per request so generateMetadata and the page share one lookup.
+const resolveToken = cache(resolveReportToken);
+
+// The partner's name leads the tab title. A failed resolve falls back to the
+// generic title — the page itself then renders the one shared 404.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ token: string }>;
+}): Promise<Metadata> {
+  const { token } = await params;
+  const resolved = await resolveToken(token);
+  return {
+    title: resolved ? `${resolved.partnerName} — Partner report` : "Partner report",
+    robots: { index: false, follow: false, nocache: true },
+  };
+}
 
 function etToday(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -52,7 +66,7 @@ export default async function PartnerReportPage({
   searchParams: Promise<{ from?: string; to?: string }>;
 }) {
   const { token } = await params;
-  const resolved = await resolveReportToken(token);
+  const resolved = await resolveToken(token);
   if (!resolved) notFound();
 
   const sp = await searchParams;

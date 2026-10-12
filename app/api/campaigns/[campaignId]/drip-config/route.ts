@@ -43,6 +43,9 @@ export async function GET(
            cfg.admission_cutoff_minutes,
            (SELECT os.drip_admission_cutoff_minutes FROM org_settings os
              WHERE os.org_id = c.org_id) AS org_admission_cutoff_minutes,
+           cfg.carry_days,
+           (SELECT os.drip_carry_days FROM org_settings os
+             WHERE os.org_id = c.org_id) AS org_carry_days,
            cfg.priority, cfg.filters,
            COALESCE((SELECT count(*)::int FROM drip_journeys j
                      WHERE j.campaign_id = c.id AND j.state <> 'unroutable'), 0) AS journeys_total
@@ -105,13 +108,14 @@ export async function PUT(
     await tx.execute(drizzleSql`
       INSERT INTO drip_campaign_configs
         (campaign_id, org_id, interest_tag, partner_key_id, start_at, end_at,
-         daily_cap, campaign_cap, routing_daily_admission_cap, admission_cutoff_minutes,
+         daily_cap, campaign_cap, routing_daily_admission_cap, admission_cutoff_minutes, carry_days,
          priority, filters, updated_at)
       VALUES (${cid}, ${orgId}::uuid, ${input.interest_tag}, ${input.partner_key_id ?? null},
               ${input.start_at ?? null}::timestamptz, ${input.end_at ?? null}::timestamptz,
               ${input.daily_cap ?? null}, ${input.campaign_cap ?? null},
               ${input.routing_daily_admission_cap ?? null},
-              ${input.admission_cutoff_minutes ?? null}, ${input.priority ?? 100},
+              ${input.admission_cutoff_minutes ?? null}, ${input.carry_days ?? null},
+              ${input.priority ?? 100},
               ${JSON.stringify(input.filters ?? {})}::jsonb, now())
       ON CONFLICT (campaign_id) DO UPDATE SET
         interest_tag = EXCLUDED.interest_tag,
@@ -132,6 +136,9 @@ export async function PUT(
         admission_cutoff_minutes = CASE WHEN ${sent("admission_cutoff_minutes")}
                                         THEN EXCLUDED.admission_cutoff_minutes
                                         ELSE drip_campaign_configs.admission_cutoff_minutes END,
+        carry_days = CASE WHEN ${sent("carry_days")}
+                          THEN EXCLUDED.carry_days
+                          ELSE drip_campaign_configs.carry_days END,
         priority = EXCLUDED.priority,
         filters = CASE WHEN ${sent("filters")}
                        THEN EXCLUDED.filters

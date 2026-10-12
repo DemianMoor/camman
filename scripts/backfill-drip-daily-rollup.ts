@@ -44,6 +44,10 @@ async function main() {
   const apply = process.argv.includes("--apply");
   const ci = process.argv.indexOf("--chunk-days");
   const chunkDays = ci > 0 ? Number(process.argv[ci + 1]) : 100_000;
+  // --range a..b limits the backfill to those ET days (a light partial run); the
+  // foot is then skipped, because it compares ALL days before today.
+  const ri = process.argv.indexOf("--range");
+  const only = ri > 0 ? process.argv[ri + 1].split("..") : null;
   const today = formatInCampaignTimezone(new Date(), "yyyy-MM-dd");
   const orgs = (await db.execute(sql`
     SELECT c.org_id,
@@ -61,7 +65,7 @@ async function main() {
 
   for (const o of orgs) {
     if (!o.first_day) { console.log(`org ${o.org_id}: ${o.campaigns} drip campaigns, no activity — skipped`); continue; }
-    const plan = chunks(o.first_day, today, chunkDays);
+    const plan = only ? [{ from: only[0], to: only[1] }] : chunks(o.first_day, today, chunkDays);
     console.log(`org ${o.org_id}: ${o.campaigns} drip campaigns, ${o.first_day}..${today}, ${plan.length} chunk(s)`);
     for (const range of plan) {
       for (const basis of BASES) {
@@ -96,6 +100,7 @@ async function main() {
       }
     }
 
+    if (only) continue;
     // Foot the activity sends against stage_sends, every day before today.
     const foot = (await db.execute(sql`
       SELECT

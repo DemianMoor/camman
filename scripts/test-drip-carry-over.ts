@@ -76,8 +76,12 @@ async function main() {
         RETURNING id`)).id;
       return { id, contactId };
     };
-    const setWidened = (id: number, at: Date) => db.execute(sql`
-      UPDATE drip_campaign_configs SET admission_widened_at = ${at.toISOString()}::timestamptz WHERE campaign_id = ${id}`);
+    // 0205: stamps are forward-only; backdating a fixture needs the test-only hatch.
+    const setWidened = (id: number, at: Date) => db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL camman.allow_widened_backdate = 'on'`);
+      await tx.execute(sql`
+        UPDATE drip_campaign_configs SET admission_widened_at = ${at.toISOString()}::timestamptz WHERE campaign_id = ${id}`);
+    });
     const tick = () => runDripRoutingBatch(new Date(), { onlyOrgId: orgId });
     const journey = (leadId: string) => one<{ state: string; carried_days: number } | undefined>(sql`
       SELECT state, carried_days FROM drip_journeys WHERE lead_event_id = ${leadId}::uuid`);

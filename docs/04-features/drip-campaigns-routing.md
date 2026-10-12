@@ -262,6 +262,20 @@ setting stays expired. Narrowing applies immediately. A raise can drop pending c
 Creating or duplicating a campaign with a cutoff or carry stamps it too, so it never admits leads that
 expired before it existed.
 
+**Forward-only stamps (0205).** The triggers also fire on writes to the `widened_at` columns themselves and
+keep `GREATEST(OLD, NEW)`: setting a stamp to NULL or to an earlier time keeps the old value, so
+already-skipped leads can never become admissible again. Test fixtures that must backdate a stamp set
+the test-only escape hatch `camman.allow_widened_backdate = 'on'` with `SET LOCAL` / `set_config(…, true)`
+inside a transaction ([07-conventions.md](../07-conventions.md)). A stamp set into the FUTURE by mistake is
+accepted and sticks (every lead before it gets window 0 — over-restrictive, never unsafe); correct it with the
+same hatch inside a transaction: `BEGIN; SET LOCAL camman.allow_widened_backdate = 'on'; UPDATE …; COMMIT;`.
+
+**Entering active/paused stamps (0205).** A drip campaign moving INTO active or paused from draft,
+completed or archived gets `admission_widened_at = now()` (trigger `campaigns_drip_status_widened`), because
+the scan only considers active/paused campaigns: a long-idle campaign with carry would otherwise floor
+back to its old stamp. Covers draft → active and archived/completed → active/paused. active ↔ paused
+does not stamp. With window 0 the stamp changes nothing.
+
 **Scan floor** (`scanFloor` in the same file, used by [lib/drip/routing.ts](../../lib/drip/routing.ts)):
 never goes below a widening, except today's own arrivals. The Oct-10 backlog (45,337 leads) and the
 Oct-11 expiries (26,717) can never re-enter under any setting.

@@ -220,20 +220,22 @@ erDiagram
   organizations ||--o{ partner_keys : "drip partner intake keys"
   partner_keys ||--o{ lead_intake_daily : "per ET-day counters"
   partner_keys ||--o{ lead_intake_hourly : "per-hour counters (0199)"
-  campaigns ||--|| drip_campaign_configs : "drip config (carry_days, admission_widened_at: 0204)"
+  campaigns ||--|| drip_campaign_configs : "drip config (carry_days, admission_widened_at: 0204; entering active/paused stamps it: 0205)"
   campaigns ||--o{ drip_journeys : "carried_days (0204)"
   drip_campaign_configs {
     int carry_days "NULL = account default, 0-7 (0204)"
-    timestamptz admission_widened_at "trigger-stamped (0204)"
+    timestamptz admission_widened_at "trigger-stamped (0204), forward-only (0205)"
   }
   drip_journeys {
     smallint carried_days "ET days between arrival and routing, default 0 (0204)"
   }
   org_settings {
     int drip_carry_days "0-7, default 0 (0204)"
-    timestamptz drip_admission_widened_at "trigger-stamped (0204)"
+    timestamptz drip_admission_widened_at "trigger-stamped (0204), forward-only (0205)"
   }
 ```
+
+> **Drip widened-at guard (migration `0205`, no schema change).** The two 0204 BEFORE triggers now also fire on UPDATE OF the `*widened_at` column itself and end with `NEW := GREATEST(OLD, NEW)`: a stamp can only move forward (NULLing or backdating keeps OLD), unless the test-only GUC `camman.allow_widened_backdate = 'on'` is set transaction-locally. New AFTER trigger `campaigns_drip_status_widened` (`AFTER UPDATE OF status ON campaigns`, drip only) stamps `drip_campaign_configs.admission_widened_at = now()` when a campaign ENTERS active/paused (from draft/completed/archived); active ↔ paused does not stamp. First trigger on `campaigns`. See [db/migrations/0205_drip_widened_guard.sql](../db/migrations/0205_drip_widened_guard.sql).
 
 > **Per-recipient sale attribution** (migration 0067): the Keitaro conversions poll
 > stamps `stage_sends.sale_status` / `sale_revenue` / `converted_at` /

@@ -1,13 +1,19 @@
 // One-shot production backfill of drip_daily_rollup (migration 0208). Builds
 // every cell of every drip campaign — the test campaigns too (owner ruling Q6) —
-// from the first drip journey or send to today, one ET week per transaction per
-// basis, through refreshDripDailyRollup: the cron's own write path, so the
+// from the first drip journey or send to today, through refreshDripDailyRollup: the cron's own write path, so the
 // backfill and the 15-minute refresh cannot compute differently.
 //
 //   npx tsx --conditions=react-server scripts/backfill-drip-daily-rollup.ts           # dry run: cells per chunk, rolled back
 //   npx tsx --conditions=react-server scripts/backfill-drip-daily-rollup.ts --apply   # write
 //
 // Idempotent: a re-run rewrites nothing that has not changed.
+//
+// ⚠️ ONE RANGE PER BASIS BY DEFAULT, not weekly chunks. Each chunk's receipt side
+// (terminalCte) is bounded below by the chunk start and UNBOUNDED above, so N
+// chunks re-scan textrequest_dlr_events (2 GB heap, 4.2M rows on 2026-10-12)
+// N times. All history in one range is 2 scans (+2 for the re-diff), ~6 GB cold
+// — still > 1 GB, so run it in the 05:00–06:00 UTC quiet slot. `--chunk-days N`
+// exists only for a range too big for one statement.
 //
 // After --apply it re-reads every chunk against a fresh computation
 // (diffDripDailyRollup, one REPEATABLE READ snapshot per chunk) and fails on any
@@ -25,10 +31,10 @@ import { BASES, diffDripDailyRollup, refreshDripDailyRollup } from "@/lib/report
 
 class DryRun extends Error {}
 
-function weekChunks(first: string, last: string): EtDayRange[] {
+function chunks(first: string, last: string, days: number): EtDayRange[] {
   const out: EtDayRange[] = [];
-  for (let from = first; from <= last; from = addEtDays(from, 7)) {
-    const to = addEtDays(from, 6);
+  for (let from = first; from <= last; from = addEtDays(from, days)) {
+    const to = addEtDays(from, days - 1);
     out.push({ from, to: to < last ? to : last });
   }
   return out;
@@ -36,6 +42,8 @@ function weekChunks(first: string, last: string): EtDayRange[] {
 
 async function main() {
   const apply = process.argv.includes("--apply");
+  const ci = process.argv.indexOf("--chunk-days");
+  const chunkDays = ci > 0 ? Number(process.argv[ci + 1]) : 100_000;
   const today = formatInCampaignTimezone(new Date(), "yyyy-MM-dd");
   const orgs = (await db.execute(sql`
     SELECT c.org_id,
@@ -53,9 +61,9 @@ async function main() {
 
   for (const o of orgs) {
     if (!o.first_day) { console.log(`org ${o.org_id}: ${o.campaigns} drip campaigns, no activity — skipped`); continue; }
-    const chunks = weekChunks(o.first_day, today);
-    console.log(`org ${o.org_id}: ${o.campaigns} drip campaigns, ${o.first_day}..${today}, ${chunks.length} weekly chunks`);
-    for (const range of chunks) {
+    const plan = chunks(o.first_day, today, chunkDays);
+    console.log(`org ${o.org_id}: ${o.campaigns} drip campaigns, ${o.first_day}..${today}, ${plan.length} chunk(s)`);
+    for (const range of plan) {
       for (const basis of BASES) {
         try {
           const r = await db.transaction(async (tx) => {
@@ -75,7 +83,7 @@ async function main() {
     if (!apply) continue;
 
     // Re-check every chunk against a fresh computation, one snapshot each.
-    for (const range of chunks) {
+    for (const range of plan) {
       for (const basis of BASES) {
         const d = await db.transaction(async (tx) => {
           await tx.execute(sql`SET LOCAL statement_timeout = '280s'`);

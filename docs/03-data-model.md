@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-11_
+_Last updated: 2026-10-12_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -526,8 +526,8 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 | `drip_journeys` | PK(`id`), UNIQUE(`lead_event_id`), **partial UNIQUE(`org_id`,`contact_id`) WHERE state IN ('routed','active')** | The partial unique makes "one campaign per contact" a **database invariant**, not a property of the routing code — the worker treats `23505` as "lost the race, skip". `campaign_id` is **NULL only for `unroutable`** (0163). `reason` JSONB records why it won and what was skipped |
 | `org_settings.drip_enabled` / `drip_paused` | — | Posture and latch (G9), mirroring `sends_enabled`/`sends_paused`. **Posture also gates whether the drip branch is emitted into the in-use CTEs**, which is what keeps R14 identical-by-construction. Since 2026-10-11 the **drain** also reads both (stop reason `drip_halted`) |
 | `lead_events.drip_recheck_at` *(0202)* | partial index `lead_events_drip_candidates_idx` (`org_id`, `received_at`) `WHERE sandbox = false` | Set by the routing worker when a lead's only blockers are TEMPORARY (contact in use, week rule, a cap, a paused campaign): not re-evaluated before this time, and never-evaluated leads are always taken first. NULL = never deferred. The index serves the worker's one-ET-day candidate scan |
-| `org_settings.drip_admission_cutoff_minutes` *(0202)* | NOT NULL DEFAULT 0, CHECK ≥ 0 | **Drip freshness**: a lead is admitted to a drip campaign only until the end of its arrival ET day plus this many minutes (0 = midnight ET). Restricts drip admission only — the contact is otherwise untouched |
-| `drip_campaign_configs.admission_cutoff_minutes` *(0202)* | NULL, CHECK NULL or ≥ 0 | Per-campaign override of the freshness cutoff; NULL = the org default |
+| `org_settings.drip_admission_cutoff_minutes` *(0202, 0203)* | NOT NULL DEFAULT 0, CHECK 0–1439 | **Drip freshness**: a lead is admitted to a drip campaign only until the end of its arrival ET day plus this many minutes (0 = midnight ET). Restricts drip admission only — the contact is otherwise untouched |
+| `drip_campaign_configs.admission_cutoff_minutes` *(0202, 0203)* | NULL, CHECK NULL or 0–1439 | Per-campaign override of the freshness cutoff; NULL = the org default |
 
 > **⚠️ "In use" is now defined in one shared builder** ([lib/drip/in-use.ts](../lib/drip/in-use.ts)) used by BOTH `iu_set` (campaign flag) and `applyInUseExclusion` (segment flag). They were independent definitions that agreed only by coincidence.
 

@@ -3522,7 +3522,8 @@ export const org_settings = pgTable("org_settings", {
   // end of its arrival ET day plus this many minutes. 0 = midnight ET.
   // Overridable per campaign (drip_campaign_configs.admission_cutoff_minutes).
   // Restricts drip admission only — the contact is otherwise untouched.
-  // CHECK (>= 0) is org_settings_drip_admission_cutoff_check, in 0202.
+  // CHECK (0..1439) is org_settings_drip_admission_cutoff_check, 0202 / 0203:
+  // a cutoff of a day or more would re-admit already-skipped leads.
   drip_admission_cutoff_minutes: integer("drip_admission_cutoff_minutes").notNull().default(0),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
@@ -5543,7 +5544,7 @@ export const drip_campaign_configs = pgTable(
     ),
     check(
       "drip_campaign_configs_admission_cutoff_check",
-      sql`${table.admission_cutoff_minutes} IS NULL OR ${table.admission_cutoff_minutes} >= 0`,
+      sql`${table.admission_cutoff_minutes} IS NULL OR (${table.admission_cutoff_minutes} >= 0 AND ${table.admission_cutoff_minutes} <= 1439)`,
     ),
     check(
       "drip_campaign_configs_interest_tag_check",

@@ -238,7 +238,59 @@ no durable record — so RAISING the cutoff re-admits leads that already expired
 allowed 10,080 (7 days): setting 2880 on 2026-10-12 would have re-admitted ~72K skipped leads (45,337
 from the Oct-10 backlog + 26,717 Oct-11 expiries). The cap bounds that to the previous ET day; it does
 **not** close it — a raise still re-admits yesterday's expiries up to the new cutoff. The full guard
-(an effective-from time that leads arriving earlier cannot pass) ships with the carry-over setting.
+(an effective-from time that leads arriving earlier cannot pass) now exists — see
+[Carry-over — Send leads](#carry-over--send-leads) below (migration 0204).
+
+## Carry-over — Send leads (2026-10-12, migration 0204)
+
+Lets a drip campaign keep a lead that was not messaged on its arrival day and admit it on the
+following day(s). **Ships OFF**: every config has `carry_days` NULL, the org `drip_carry_days` is 0 and
+`widened_at` is NULL, which behaves exactly as before. Spec:
+[2026-10-12-drip-carry-over-design.md](../superpowers/specs/2026-10-12-drip-carry-over-design.md).
+
+**Formula** ([lib/drip/admission-window.ts](../../lib/drip/admission-window.ts), pure, shared by the
+evaluator, the scan floor and the tests):
+`admission closes = end of (arrival ET day + carry days) + cutoff minutes`, with
+`carry = campaign carry_days ?? org drip_carry_days` (0–7, `MAX_CARRY_DAYS`) and the cutoff as in
+[Freshness](#freshness--drip-admission-closes-at-the-end-of-the-arrival-day).
+
+**⭐ widened-at rule.** `widened_at` is stamped by DB triggers (see
+[03-data-model.md](../03-data-model.md)) whenever the effective window grows. A lead that arrived
+BEFORE `GREATEST(campaign, org) widened_at` gets window 0: the end of its arrival ET day, no carry, no
+cutoff. Window 0 is the smallest window that ever existed, so a lead that expired under any earlier
+setting stays expired. Narrowing applies immediately. A raise can drop pending carries, never revive.
+Creating or duplicating a campaign with a cutoff or carry stamps it too, so it never admits leads that
+expired before it existed.
+
+**Scan floor** (`scanFloor` in the same file, used by [lib/drip/routing.ts](../../lib/drip/routing.ts)):
+never goes below a widening, except today's own arrivals. The Oct-10 backlog (45,337 leads) and the
+Oct-11 expiries (26,717) can never re-enter under any setting.
+
+**Candidate order** (`routing.ts`): today's arrivals first (never-evaluated before re-checks, oldest
+first, unchanged), then carried leads (never-evaluated before re-checks, **newest first**, so day 1
+precedes day 2).
+
+**Reserve** (`loadCampaignJourneyCounts` / the admission cap in
+[lib/drip/routing-eval.ts](../../lib/drip/routing-eval.ts)): a carried lead is admitted only while
+`today's journeys + reserve < routing_daily_admission_cap`. `reserve` = same-day (`carried_days = 0`)
+journeys routed yesterday, counted from now−24h to today's ET midnight. Fresh leads ignore it; a NULL
+cap means no reserve. Carried leads can therefore never crowd out today's fresh volume.
+
+**`carried_days`** is written at journey insert: ET date(routed) − ET date(arrival). Evening same-day
+admissions stay 0. ⚠️ Behaviour change for cutoff-only configs: a config with `admission_cutoff_minutes
+> 0` and no carry now marks after-midnight admissions `carried_days = 1` and applies the reserve to
+them (before, they were admitted under a plain cap). Both live campaigns use cutoff NULL / org 0, so
+nothing changes today.
+
+**UI:** campaign page → Drip settings → **Freshness** box → **"Send leads"** select in
+[components/campaigns/drip-config-panel.tsx](../../components/campaigns/drip-config-panel.tsx):
+Account default / Same day only / Also 1 day later / Also up to N days later (N 2–7, validated
+client-side before save and by Zod in
+[lib/validators/drip-campaigns.ts](../../lib/validators/drip-campaigns.ts)). Helper text: "Leads not
+messaged on their arrival day are dropped from this campaign, or kept and messaged on the following
+day(s)." The account default has no screen. Duplicating a campaign copies `carry_days`
+([duplicate route](../../app/api/campaigns/[campaignId]/duplicate/route.ts)). The same-day vs carried
+funnel split is in [drip-partner-reporting.md](drip-partner-reporting.md#same-day-vs-carried-2026-10-12).
 
 ## Drip settings panel saves are partial (2026-10-11)
 

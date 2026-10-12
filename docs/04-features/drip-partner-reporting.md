@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-09 (partner entity 0200: the signed link, the revenue toggle and the report scope live on `partners`; Partner column on the internal table; lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-12 (drip carry-over: Same day vs carried funnel split, migration 0204); 2026-10-09 (partner entity 0200: the signed link, the revenue toggle and the report scope live on `partners`; Partner column on the internal table; lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -423,6 +423,20 @@ returns `today` (same five keys as `progression`) and `today_count` on each outc
   functional predicate on the timestamp (same rule as the drip monitor).
 
 ---
+
+### Same day vs carried (2026-10-12)
+
+A **"Same day vs carried"** table under the journey funnel
+([components/drip/journey-funnel.tsx](../../components/drip/journey-funnel.tsx), data from
+`getDripFunnel().split` in [lib/drip/funnel.ts](../../lib/drip/funnel.ts)): rows *Same day* and
+*Carried* (`drip_journeys.carried_days > 0`, migration 0204), columns routed, sent, clicked, CTR, sales.
+**Total only** (the Today column is unchanged) and **shown only when the campaign has a carried
+journey** (`split` is null otherwise, so nothing renders while carry-over is off).
+
+Sales are attributed to the contact's **latest journey at or before the sale** (a LATERAL over
+`drip_journeys` itself so `drip_journeys_org_contact_idx` serves it). A sale matching no journey is
+counted as `unmatched_sales` and shown in the table note, so same-day + carried + unmatched = the
+funnel's Converted. The partner-report split is a follow-up (not built).
 
 ## 6. The Ignored lane is terminal (ruling R4)
 

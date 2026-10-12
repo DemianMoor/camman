@@ -2,6 +2,21 @@
 
 _Last updated: 2026-10-12_
 
+## ⭐ Drip admission `widened_at` is trigger-stamped; a raise drops, never revives (2026-10-12)
+
+`drip_campaign_configs.admission_widened_at` and `org_settings.drip_admission_widened_at` are stamped
+by BEFORE triggers in migration `0204` ([db/migrations/0204_drip_carry_over.sql](../db/migrations/0204_drip_carry_over.sql)),
+never by application code — API, SQL and the duplicate route all go through them. They fire when the
+effective window (`carry_days × 1440 + cutoff minutes`, campaign inheriting the org) grows, and on
+INSERT of a config with a window > 0. A lead that arrived before `GREATEST(campaign, org) widened_at`
+gets window 0 (end of its arrival ET day), and the scan floor never goes below a widening, so a lead that
+already expired can never be admitted again, whatever the setting. Do not add a code path that
+re-admits pre-widening leads, and do not stamp `widened_at` from the app. Details:
+[drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#carry-over--send-leads),
+[lib/drip/admission-window.ts](../lib/drip/admission-window.ts). Gotcha: a config with a cutoff > 0
+and no carry now records after-midnight admissions as `carried_days = 1` and applies the carried-lead
+reserve to them.
+
 ## An oldest-first work queue must never keep rows it cannot act on (2026-10-11)
 
 `ORDER BY received_at LIMIT N` is only safe while every row it returns either gets processed or leaves the queue. If a row it can't act on stays in place, it keeps its spot at the head of every batch. N such rows stop the worker completely, and fewer than N quietly cut its throughput, with nothing failing. That is how ~180 opted-out leads starved 44,968 routable ones on 2026-10-10 ([04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#unrouted-leads-permanent-deferred-expired-2026-10-11-card-869ency4b)). For every such queue, decide per outcome: **permanent** → write a terminal state now; **temporary** → move it behind fresh work with a re-check time (`lead_events.drip_recheck_at`); never "no row, retry next tick at the head". The drip enrichment and follow-up batches had the same shape.

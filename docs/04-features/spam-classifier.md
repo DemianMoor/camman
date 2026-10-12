@@ -1,6 +1,6 @@
 # Feature — Spam Classifier
 
-_Last updated: 2026-06-19_
+_Last updated: 2026-08-13_
 
 ## 1. Purpose
 Score SMS creative text 0–100 for spamminess via a pluggable provider abstraction, currently backed by a self-hosted **SMS Spam Classifier** service on Cloud Run. Results are cached append-only and surfaced inline in the creative editor so operators can avoid carrier-filtered copy.
@@ -26,7 +26,8 @@ Providers register in a factory map keyed by `SPAM_PROVIDER` env (only `classifi
 - Request `{ text }` · Response `{ score: 0–100, label?, confidence?, model_version? }`.
 - Per-attempt timeout `CLASSIFIER_TIMEOUT_MS` (default 25000, raised from 10000). On any failure the service layer returns a fallback with `error` set — **it never throws**.
 - **Retry once on transport failures.** A timeout / abort / network error is retried a single time (`MAX_ATTEMPTS = 2`); an HTTP non-2xx or bad payload is **not** retried (the service answered deliberately). The common cause is a Cloud Run instance that scaled to zero: the first attempt warms it, the second lands warm. The route sets `export const maxDuration = 60` so ~2× the per-attempt timeout fits inside the function budget.
-- **Cold-start mitigation.** The root cause of "new creatives fail to score" is Cloud Run scaling the classifier to zero — the first request after idle pays a model-load cold start that blew the old 10s ceiling. Options to eliminate it: run the classifier always-on (self-hosted / `min-instances=1`) so the model stays resident, or keep a warming ping alive. Moving the service to an always-on host is a one-env-var change app-side (`CLASSIFIER_URL`) — the HTTP contract is unchanged.
+- **Cold-start mitigation.** The root cause of "new creatives fail to score" is Cloud Run scaling the classifier to zero — the first request after idle pays a model-load cold start that blew the old 10s ceiling. **Measured 2026-08-13: 9.2 s** end-to-end on a genuinely cold instance (vs ~0.2 s warm) — i.e. a `CLASSIFIER_TIMEOUT_MS=10000` clears it by less than a second, which is why the code default is 25000. Options to eliminate it: run the classifier always-on (self-hosted / `min-instances=1`) so the model stays resident, or keep a warming ping alive. Moving the service to an always-on host is a one-env-var change app-side (`CLASSIFIER_URL`) — the HTTP contract is unchanged.
+- **⚠️ Cloud Run sizing — the service must stay at `--cpu 1`.** At `--cpu 2` Cloud Run could not allocate an instance in `us-central1` and refused every request-driven scale-up with `429 "no available instance"`, surfaced by Google Frontend as the misleading body `Rate exceeded.`. **This failure is latent:** deploys and health checks pass while an instance is warm, and it only breaks the first time the service scales to zero — after which it can never restart. Full diagnosis + isolation recipe in [06-integrations.md](../06-integrations.md). A dead classifier is safe for data (failed scores are never cached, see below) but is silent — nothing currently alerts on it.
 
 ### Two derived classifications (single 0–100 score)
 | Output | Rule | Use |

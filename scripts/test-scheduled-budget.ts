@@ -7,12 +7,19 @@
 // is HELD (skipped this tick, its pending rows untouched so phase B re-drains it
 // next tick), while a different provider gets its own fresh budget. The budget
 // is enforced in the resumable phase-B drain; these stages are pre-seeded with
-// pending stage_sends, so phase A considers none of them.
+// pending stage_sends AND have materialized_at set, so phase A considers none of
+// them and phase B finds them immediately.
 //
 // Everything runs inside a single transaction that is ALWAYS rolled back, so no
 // fixture data persists. The drain is injected (a deterministic fake) — no real
 // TextHub call, and SEND_ENABLED is irrelevant (isEnabled is forced true only
 // for the injected path; nothing live is ever sent).
+//
+// All provA stages share one provider_phone_id, forcing them into a single
+// sequential drain group (ORDER BY scheduled_at). This makes the budget
+// allocation deterministic: A1 reserves first, A2 gets the remainder, A3 is
+// held — without depending on the nondeterministic DB lease resolution order
+// that applies to concurrent singleton groups.
 //
 // Run: npx tsx scripts/test-scheduled-budget.ts
 import "./_env-preload"; // MUST be first — loads .env.local before db/client init
@@ -41,9 +48,12 @@ async function main() {
   // Records the maxRows budget each stage's drain was handed, in call order.
   const drainCalls: { stageId: number; maxRows: number }[] = [];
 
-  // Injected drain: behaves like a real per-stage drain bounded by its budget —
-  // processes min(maxRows, pending) rows. Does NOT touch the DB (claim/hold is
-  // what we're asserting, via campaign_stages.sent_at).
+  // Injected drain: records how many rows each stage was budgeted for and reports
+  // the rows "processed" up to maxRows. remaining is always 0 because the fake
+  // does NOT mutate stage_sends — the real DB state is the source of truth for
+  // the "A3 still has all 4 pending rows" assertion below. Returning remaining>0
+  // would cause the phase-B round-robin to revisit the stage with an exhausted
+  // budget and increment budget_held a second time, defeating the test.
   const fakeDrain = async (stageId: number, maxRows: number): Promise<DrainResult> => {
     drainCalls.push({ stageId, maxRows });
     const processed = Math.min(maxRows, PENDING_PER_STAGE);
@@ -57,7 +67,7 @@ async function main() {
       processed,
       halted: false,
       stuck: 0,
-      remaining: PENDING_PER_STAGE - processed,
+      remaining: 0,
       stopReason: null,
       pausedNow: false,
     };
@@ -67,41 +77,64 @@ async function main() {
     stageA2 = 0,
     stageA3 = 0,
     stageB1 = 0;
-  let providerA = 0;
 
   try {
     await db.transaction(async (tx) => {
-      const sfx = Date.now().toString().slice(-9); // collision-safe unique suffix
-      const orgRows = (await tx.execute(
-        sql`SELECT id FROM organizations LIMIT 1`,
-      )) as unknown as { id: string }[];
-      const orgId = orgRows[0]?.id;
-      if (!orgId) throw new Error("no organization in DB to anchor fixtures");
+      // Throwaway org — never committed, so no teardown needed. Using a dedicated
+      // org isolates org-wide counts (rate ceilings, etc.) from live traffic.
+      const orgRow = (await tx.execute(sql`
+        INSERT INTO organizations (name) VALUES ('budget-throwaway') RETURNING id
+      `)) as unknown as { id: string }[];
+      const orgId = orgRow[0].id;
+
+      // Enable sends for this org so the default real-drain gate passes.
+      await tx.execute(sql`
+        INSERT INTO org_settings (org_id, sends_enabled) VALUES (${orgId}, true)
+        ON CONFLICT (org_id) DO UPDATE SET sends_enabled = true
+      `);
 
       // Two providers, same cap. Provider B proves per-provider independence.
+      // Full-day window (00:00–23:59 ET) so the suite is time-independent: the
+      // injected `now` (noon ET) is always in window regardless of real clock.
       const provA = (await tx.execute(sql`
-        INSERT INTO sms_providers (sms_provider_id, org_id, name, max_sends_per_run, supports_api_send)
-        VALUES (${"budget-A-" + sfx}, ${orgId}, ${"budget-test-A"}, ${CAP}, true)
+        INSERT INTO sms_providers
+          (sms_provider_id, org_id, name, max_sends_per_run, supports_api_send,
+           send_window_weekday_start, send_window_weekday_end,
+           send_window_weekend_start, send_window_weekend_end)
+        VALUES ('budget-A', ${orgId}, ${"budget-test-A"}, ${CAP}, true, 0, 1439, 0, 1439)
         RETURNING id
       `)) as unknown as { id: number }[];
       const provB = (await tx.execute(sql`
-        INSERT INTO sms_providers (sms_provider_id, org_id, name, max_sends_per_run, supports_api_send)
-        VALUES (${"budget-B-" + sfx}, ${orgId}, ${"budget-test-B"}, ${CAP}, true)
+        INSERT INTO sms_providers
+          (sms_provider_id, org_id, name, max_sends_per_run, supports_api_send,
+           send_window_weekday_start, send_window_weekday_end,
+           send_window_weekend_start, send_window_weekend_end)
+        VALUES ('budget-B', ${orgId}, ${"budget-test-B"}, ${CAP}, true, 0, 1439, 0, 1439)
         RETURNING id
       `)) as unknown as { id: number }[];
-      providerA = provA[0].id;
+      const providerA = provA[0].id;
       const providerB = provB[0].id;
+
+      // Shared provider_phone for provA stages: all three share one phone_id, which
+      // makes phase B assign them to ONE sequential drain group (ORDER BY
+      // scheduled_at). Sequential execution ensures A1 reserves budget first, A2
+      // gets the remainder, and A3 is held — deterministically.
+      const phoneA = (await tx.execute(sql`
+        INSERT INTO provider_phones (org_id, provider_id, phone_number)
+        VALUES (${orgId}, ${providerA}, '+15550000001') RETURNING id
+      `)) as unknown as { id: number }[];
+      const phoneIdA = phoneA[0].id;
 
       const cre = (await tx.execute(sql`
         INSERT INTO creatives (slug, org_id, text, status)
-        VALUES (${"budget-cre-" + sfx}, ${orgId}, ${"Budget test creative"}, 'active')
+        VALUES ('budget-cre', ${orgId}, ${"Budget test creative"}, 'active')
         RETURNING id
       `)) as unknown as { id: number }[];
       const creativeId = cre[0].id;
 
       const camp = (await tx.execute(sql`
         INSERT INTO campaigns (org_id, slug, name, status, link_mode)
-        VALUES (${orgId}, ${"budget-camp-" + sfx}, ${"budget-test"}, 'active', 'tracked')
+        VALUES (${orgId}, 'budget-camp', ${"budget-test"}, 'active', 'tracked')
         RETURNING id
       `)) as unknown as { id: number }[];
       const campaignId = camp[0].id;
@@ -112,23 +145,30 @@ async function main() {
       for (let i = 0; i < PENDING_PER_STAGE; i++) {
         const c = (await tx.execute(sql`
           INSERT INTO contacts (org_id, phone_number)
-          VALUES (${orgId}, ${"+1555" + sfx + i})
+          VALUES (${orgId}, ${`+1555100000${i}`})
           RETURNING id
         `)) as unknown as { id: string }[];
         contactIds.push(c[0].id);
       }
 
       // Stages: A1/A2/A3 on provider A (share its budget), B1 on provider B.
-      // Distinct scheduled_at (1s apart) gives the ORDER BY scheduled_at a
-      // deterministic order: A1, A2, A3, B1.
-      async function mkStage(num: number, providerId: number, offsetSec: number) {
+      // Distinct scheduled_at (1s apart) gives ORDER BY scheduled_at a
+      // deterministic order within the provA phone group: A1, A2, A3, then B1.
+      // materialized_at is set so phase A considers none of them (all pre-
+      // materialized) and phase B finds all four immediately.
+      async function mkStage(
+        num: number,
+        providerId: number,
+        providerPhoneId: number | null,
+        offsetSec: number,
+      ) {
         const at = new Date(BASE + offsetSec * 1000).toISOString();
         const r = (await tx.execute(sql`
           INSERT INTO campaign_stages
             (org_id, campaign_id, stage_number, creative_id, sms_provider_id,
-             send_approved, scheduled_at)
+             provider_phone_id, send_approved, scheduled_at, materialized_at)
           VALUES (${orgId}, ${campaignId}, ${num}, ${creativeId}, ${providerId},
-             true, ${at})
+             ${providerPhoneId}, true, ${at}, now())
           RETURNING id
         `)) as unknown as { id: number }[];
         const stageId = r[0].id;
@@ -137,29 +177,29 @@ async function main() {
             INSERT INTO stage_sends
               (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
             VALUES (${orgId}, ${campaignId}, ${stageId}, ${contactId},
-              ${"+1555000"}, ${"Budget test"}, 'pending')
+              ${"+15551000000"}, ${"Budget test"}, 'pending')
           `);
         }
         return stageId;
       }
-      stageA1 = await mkStage(1, providerA, 0);
-      stageA2 = await mkStage(2, providerA, 1);
-      stageA3 = await mkStage(3, providerA, 2);
-      stageB1 = await mkStage(4, providerB, 3);
+      stageA1 = await mkStage(1, providerA, phoneIdA, 0);
+      stageA2 = await mkStage(2, providerA, phoneIdA, 1);
+      stageA3 = await mkStage(3, providerA, phoneIdA, 2);
+      stageB1 = await mkStage(4, providerB, null, 3);
 
       // ── Run ONE tick ────────────────────────────────────────────────────
       const result = await runScheduledSends(tx as unknown as typeof db, {
         now: NOW,
         orgId,
         isEnabled: () => true,
+        isOrgEnabled: async () => true,
         runDrain: fakeDrain,
         maxStages: 50,
       });
 
       // ── Assertions ──────────────────────────────────────────────────────
-      // The stages are pre-seeded with pending stage_sends, so they're already
-      // materialized — phase A considers none of them; the budget lives in the
-      // phase-B drain.
+      // The stages are pre-materialized — phase A considers none of them; the
+      // budget lives in the phase-B drain.
       check("considered 0 (all pre-materialized)", result.considered === 0, `got ${result.considered}`);
       check("drained 3 stages (A1, A2, B1)", result.drained === 3, `got ${result.drained}`);
       check("held 1 stage on budget (A3)", result.budget_held === 1, `got ${result.budget_held}`);

@@ -34,37 +34,54 @@ async function main() {
 
   try {
     await db.transaction(async (tx) => {
-      const sfx = Date.now().toString().slice(-9);
-      const org = (await tx.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as { id: string }[];
-      const orgId = org[0]?.id;
-      if (!orgId) throw new Error("no organization");
+      // Throwaway org — never committed, so no teardown needed.
+      const orgRow = (await tx.execute(sql`
+        INSERT INTO organizations (name) VALUES ('decouple-throwaway') RETURNING id
+      `)) as unknown as { id: string }[];
+      const orgId = orgRow[0].id;
 
+      await tx.execute(sql`
+        INSERT INTO org_settings (org_id, sends_enabled) VALUES (${orgId}, true)
+        ON CONFLICT (org_id) DO UPDATE SET sends_enabled = true
+      `);
+
+      // No explicit window columns: the provider inherits the default 08:00–21:00
+      // ET window. Ticks 1 and 2 inject now=NOON_ET (12:00 ET) which is inside the
+      // default window regardless of the real clock. Tick 3 injects EVENING_ET
+      // (23:30 ET) to test the "outside window → hold" path — the explicit 23:30 is
+      // outside 08:00–21:00, so the window check holds the stage correctly.
       const prov = (await tx.execute(sql`
         INSERT INTO sms_providers (sms_provider_id, org_id, name, supports_api_send)
-        VALUES (${"dec-" + sfx}, ${orgId}, ${"decouple-test"}, true) RETURNING id
+        VALUES ('dec-prov', ${orgId}, ${"decouple-test"}, true)
+        RETURNING id
       `)) as unknown as { id: number }[];
       const providerId = prov[0].id;
+
       const cre = (await tx.execute(sql`
         INSERT INTO creatives (slug, org_id, text, status)
-        VALUES (${"dec-cre-" + sfx}, ${orgId}, ${"x"}, 'active') RETURNING id
+        VALUES ('dec-cre', ${orgId}, ${"x"}, 'active') RETURNING id
       `)) as unknown as { id: number }[];
       const camp = (await tx.execute(sql`
         INSERT INTO campaigns (org_id, slug, name, status, link_mode)
-        VALUES (${orgId}, ${"dec-camp-" + sfx}, ${"d"}, 'active', 'tracked') RETURNING id
+        VALUES (${orgId}, 'dec-camp', ${"d"}, 'active', 'tracked') RETURNING id
       `)) as unknown as { id: number }[];
       const campaignId = camp[0].id;
 
       // A stage ARMED for the future: approved, scheduled_at in 3 days, already
-      // materialized (pending rows), NOT yet released (sent_at NULL).
+      // materialized (materialized_at set + pending rows), NOT yet released
+      // (sent_at NULL). materialized_at IS NOT NULL is required so phase B can
+      // select the stage; phase A skips it (materialized_at IS NULL filter fails).
       const st = (await tx.execute(sql`
         INSERT INTO campaign_stages
-          (org_id, campaign_id, stage_number, creative_id, sms_provider_id, send_approved, scheduled_at)
-        VALUES (${orgId}, ${campaignId}, 1, ${cre[0].id}, ${providerId}, true, ${FUTURE})
+          (org_id, campaign_id, stage_number, creative_id, sms_provider_id,
+           send_approved, scheduled_at, materialized_at)
+        VALUES (${orgId}, ${campaignId}, 1, ${cre[0].id}, ${providerId},
+                true, ${FUTURE}, now())
         RETURNING id
       `)) as unknown as { id: number }[];
       const stageId = st[0].id;
       const contact = (await tx.execute(sql`
-        INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${"+1555" + sfx}) RETURNING id
+        INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${"+15551000001"}) RETURNING id
       `)) as unknown as { id: string }[];
       await tx.execute(sql`
         INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
@@ -93,7 +110,7 @@ async function main() {
 
       // TICK 3 — the stage is now RELEASED (sent_at set from tick 2) and still has
       // a pending row (the injected fake drain doesn't mutate the DB). With now
-      // OUTSIDE the window, its leftovers must be HELD, not drained.
+      // OUTSIDE the window (23:30 ET), its leftovers must be HELD, not drained.
       const before = drainCalls.length;
       const t3 = await runScheduledSends(tx as unknown as typeof db, {
         now: EVENING_ET, orgId, isEnabled: () => true, isOrgEnabled: async () => true, runDrain: fakeDrain, maxStages: 50,

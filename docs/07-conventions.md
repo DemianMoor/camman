@@ -170,6 +170,33 @@ The authoritative source for project conventions is [`CLAUDE.md`](../CLAUDE.md) 
   - **Phase 3b — backstops.** `/api/cron/textrequest-poll` (`4,19,34,49`) runs the messages poll (DLR + inbound STOP backstop), the contacts poll, and the webhook health check. Poll targets are resolved from `provider_phones` bound to a txr credential AND carrying a `dashboard_id` — deliberately NOT "every dashboard on the account", so the poll can never ingest a third party's traffic. A disconnected hook is reactivated via `PUT`; a hook whose `target_url` isn't ours is never touched, and `is_connected: null` (field absent) is NOT treated as broken.
   - **Phase 4 — opt-out intake (compliance-critical).** `processTextrequestOptOut` ([lib/sends/textrequest-optout.ts](../lib/sends/textrequest-optout.ts)) is a deliberate mirror of `processAhoiInboundOptOut`: contact upsert → `opt_outs` → cascade-cancel pending `stage_sends` to `skipped_opted_out`/`opt_out_cancel` → attribution via the shared `latestSendForAttribution` → stage counters + `recomputeStageTotalCost` → `checkOptOutRateBreaker` (Telegram fires post-commit in the caller). Six capture channels feed it, split into two SHAPES — and the distinction is the load-bearing part: **message-shaped** (`webhook_msg_received`, `poll_messages`) must clear the `isOptOutKeyword` gate; **state-shaped** (`webhook_contact_updated`, `poll_contacts`, `dlr`, `send_reject`) skip the keyword gate (TR has already asserted the fact) but act **exactly once per number** — if the number is already suppressed they stop at `already_opted_out`. Without that rule, `has_opted_out=true` would return the same contact on every tick forever and keep re-attributing a months-old opt-out to whatever send happened to be recent. `is_blocked` is NOT an opt-out (TR's abuse control, not consent); `is_suppressed` IS (an operator's "do not text" is as binding as a carrier STOP).
 
+### Cancelling a RELEASED stage — the abort route refuses; there is no UI for it
+`POST /api/campaigns/[campaignId]/stages/[stageId]/send/abort` is the only recall
+affordance, and it accepts **un-released stages only**: it refuses with
+`reason: "already_released"` when `sent_at` is set or any `sent`/`sending` row exists.
+So a stage that started draining and then froze (provider circuit-breaker latch,
+crash, window close) leaving a `pending` backlog **cannot be cancelled from the UI**
+— and that backlog is live: `selectDrainableStages` re-picks the stage the instant
+the latch clears, because its only queue test is `EXISTS (stage_sends.status='pending')`.
+Cancelling one by hand means, in a single transaction:
+- `pending -> 'rejected'` — the abort route's bucket. **Not `'failed'`**: `retry-failed`
+  flips `failed -> pending`, so one click of that button would resurrect the whole backlog.
+- `sending -> 'failed'` — at-most-once, per `reconcileStuckStages`. A claimed row may
+  already have reached the provider, so it is never re-sent. Do this yourself if you also
+  clear `send_approved`, because that reconciler only scans `send_approved = true` stages
+  and would otherwise leave the rows stuck forever.
+- **Keep `materialized_at` set.** The abort route nulls it so the stage can be re-Prepared;
+  here that is backwards — `'rejected'` rows do NOT block recipient re-enumeration
+  ([lib/sends/recipients.ts](../lib/sends/recipients.ts) excludes only `status <> 'rejected'`),
+  so a re-materialize would re-queue exactly the people just cancelled.
+- Latch `campaigns.send_paused` for a campaign-wide stop. It is checked by **both** cron
+  phases and is cleared only by `POST /api/campaigns/[id]/send-circuit {action:"resume"}`.
+
+Worked example: [scripts/cancel-campaign-905-sends.ts](../scripts/cancel-campaign-905-sends.ts)
+(dry-run by default, tracking-id guarded, idempotent). Verify by replaying **both** phase
+WHERE clauses with **every** pause predicate neutralised — if the stage still comes back,
+only the latch was hiding it, not the cancellation.
+
 ## UI
 - `<FormDialog>` for input dialogs (blocks accidental dismissal); `<AlertDialog>` for confirmations; bare `<Dialog>` read-only.
 - Required fields → red asterisk via `<FormLabel required>`; no "(optional)" text.

@@ -2,6 +2,11 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+## 2026-08-21 — Cancelled the frozen send backlog on campaign 143_61_082126_1 (905) — docs: 07-conventions, CHANGELOG
+- The Tells provider (855) auto-latched at 14:36:02Z on `failure_spike: 10 consecutive send failures`, freezing stages 2997/2998 mid-drain with 1,850 `pending` + 40 `sending` rows. Resuming the provider would have fired all 1,850 — `selectDrainableStages`' only queue test is `EXISTS (status='pending')`, and neither stage `status='failed'` nor the latch itself clears that.
+- The product's recall (`.../send/abort`) refuses a released stage (`sent_at` set / `sent` rows present), so this was done by hand via [scripts/cancel-campaign-905-sends.ts](../scripts/cancel-campaign-905-sends.ts): `pending -> 'rejected'`, `sending -> 'failed'` (at-most-once), `send_approved -> false`, `campaigns.send_paused -> true`. `materialized_at` deliberately KEPT and the 1,006 `sent` rows untouched.
+- New convention in 07-conventions §Sending safety: how to cancel a released stage, why `'rejected'` and not `'failed'` (`retry-failed` flips `failed -> pending` and would resurrect the backlog), and why re-verification must neutralise every pause predicate.
+
 ## 2026-08-12 — Segment rule: "Sent from phone number" (0129) — docs: 03-data-model, 04-features/audience-segments, 07-conventions, CHANGELOG
 - New rule type `sent_from_provider_phone`, value `{provider_id, phone_ids[]}`, operators is/is_not. Counts only `stage_sends.status='sent'`, matching the reports. Eval is a single index-only scan of `stage_sends_org_provider_phone_sent_idx` (0129).
 - Backfilled 1,008,689 pre-0112 `stage_sends.provider_phone_id` rows from their stage (100% resolvable, 3 numbers) so the rule sees the full send history rather than only post-2026-07-20 sends.
@@ -904,4 +909,41 @@ A running log of documentation-affecting changes. Add a dated entry whenever a d
 - Replaced the guessed "may approach the 10s timeout" caveat with production measurements: selective number 80.9 ms, worst-case dominant number 1,806 ms (vs. 8,480 ms pre-index) — clears both the 10s preview timeout and the 60s `snapshotAudience` activation budget with wide margin.
 - No schema/behavior change from the docs edits themselves; see the same-commit code fixes (schema.ts check-constraint + index drift, validator id ceiling, eval doc comment, rules-panel incomplete-check alignment, provider-phones org filter, backfill script header/citation/divergence-warning) in the commit this entry ships with.
 
+## 2026-08-13 — Spam classifier outage: Cloud Run could not allocate a 2-vCPU instance — docs: 04-features/spam-classifier, 06-integrations, CHANGELOG
+- **Root cause.** The `sms-spam-classifier` Cloud Run service (`us-central1`) had drifted to `--cpu 2 --memory 1Gi`; its own `deploy.sh` specifies `--cpu 1`. Cloud Run could not allocate a 2-vCPU instance and refused every request-driven scale-up in ~0.2 s with `429 "The request was aborted because there was no available instance"` — handed back by Google Frontend as the misleading 14-byte body `Rate exceeded.`. Fixed with `gcloud run services update sms-spam-classifier --cpu 1 --memory 1Gi` (revision `00004-649`). Verified: spam text → 100/spam, ham → 0/ham, 5/5 requests 200, auth back to 401-without-key, and a **cold-start probe after 17 min idle returned 200 in 9.2 s** (the scale-to-zero path that was actually broken).
+- **The billing lapse was the trigger, not the cause.** It forced the idle scale-to-zero; the 2-vCPU ceiling is what stopped the service ever restarting — which is why restoring billing alone did not fix it. The service had survived for months only because an instance stayed warm. Infrastructure config, not app code.
+- **Isolation recipe** (written up in 06-integrations): deploying a throwaway `cloudrun/container/hello` service into the same project + region returned 200 while the classifier returned 429 — proving the fault was service-specific, after `billingEnabled`, billing-account `open`, project lifecycle, `run.googleapis.com` enablement, image digest, service account and every Cloud Run quota had each been verified healthy. Platform faults and service faults return an **identical** `429 Rate exceeded.` body, so diagnose from `resource.type="cloud_run_revision"` request logs, never the HTTP response.
+- **Corrected a stale documented fact:** `CLASSIFIER_TIMEOUT_MS` was described as "default 10000"; the code default is **25000** (`lib/spam/providers/classifier.ts`). Measured cold start is 9.2 s, so the `10000` currently set in the environment clears it by under a second. Recommend raising to `25000` or unsetting it — **a Vercel env change, not yet applied**.
+- No app code changed. `lib/spam/score.ts` already refuses to cache failed scores, so the outage wrote no bad rows to `spam_scores` and required no cleanup.
+- **Known gap, not addressed:** nothing alerts when the classifier dies. This outage ran for over a day and was found by hand.
+
 > When you change behavior that a doc describes, update the doc **and** add an entry here in the same PR (Part B rule).
+
+## 2026-08-18 — Preview environment isolated onto its own database — docs/preview-environment.md (new), docs/06-integrations.md, docs/CHANGELOG.md
+
+Vercel preview deployments of `camman` now run against the `camman-v2` Supabase
+project (ref `fdzxzxayhknywvmrhjcj`) instead of production. Preview-scoped
+`DATABASE_URL`, `SEND_ENABLED=false`, and dummy `PROVIDER_CREDENTIALS_KEY` /
+`AHOI_API_TOKEN` / `SUPABASE_SERVICE_ROLE_KEY`; production scoping unchanged.
+Schema parity with production verified (74 tables, 8 functions, 13 triggers,
+3 matviews, 129 policies). Sending is blocked three ways: env flag,
+`org_settings.sends_enabled=false` in the preview DB, and empty
+`provider_credentials` with an undecryptable key. The preview DB is disposable and
+is the intended place to apply agent-authored migrations before production.
+
+- **Found while doing this, not fixed:** `public.campaign_circuit_events` has RLS
+  DISABLED in production (8 rows); every other table has it enabled. Needs an
+  org-scoped policy alongside the `ALTER`, or the circuit breaker loses its writes.
+- **Also found:** `phone_carrier_limits` exists in production but has no migration
+  file in `db/migrations/` — it was created out-of-band. Recreated in the preview DB
+  from live DDL introspection.
+
+**Correction (same day):** the preview database is the *existing* `camman-v2`
+Supabase project, which also backs the external demo environment — not a new
+project. Sharing was chosen over $10/month for a dedicated one. Consequence to
+remember: an agent-authored migration applied for a preview stays applied and can
+break the demo. Preview isolation verified at runtime — link code `d100000` (present
+only in camman-v2) resolves on a preview deployment and 404s on production.
+Seven variables were split to preview scope, not five: `NEXT_PUBLIC_SUPABASE_URL`
+and `NEXT_PUBLIC_SUPABASE_ANON_KEY` had to move too, or the preview would read
+camman-v2 while authenticating against production.

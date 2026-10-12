@@ -31,42 +31,63 @@ async function main() {
 
   try {
     await db.transaction(async (tx) => {
-      const sfx = Date.now().toString().slice(-9);
-      const org = (await tx.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as { id: string }[];
-      const orgId = org[0]?.id;
-      if (!orgId) throw new Error("no organization");
-      const brand = (await tx.execute(sql`SELECT id FROM brands WHERE org_id = ${orgId} LIMIT 1`)) as unknown as { id: number }[];
-      if (!brand[0]) { console.log("SKIP: need a brand"); throw ROLLBACK; }
+      // Throwaway org — never committed, so no teardown needed.
+      const orgRow = (await tx.execute(sql`
+        INSERT INTO organizations (name) VALUES ('gate-stamp-throwaway') RETURNING id
+      `)) as unknown as { id: string }[];
+      const orgId = orgRow[0].id;
 
-      // Ensure the DB master switch starts OFF for this org (gate-refused tick).
-      await tx.execute(sql`
-        INSERT INTO org_settings (org_id, sends_enabled) VALUES (${orgId}, false)
-        ON CONFLICT (org_id) DO UPDATE SET sends_enabled = false
-      `);
+      // The gate-stamp test itself inserts and toggles org_settings.sends_enabled,
+      // so we don't pre-seed it here. The first INSERT below (gate off) creates the
+      // row for the throwaway org.
 
+      // Full-day window so the suite is time-independent; NOON_ET is always inside
+      // regardless of the real clock.
       const prov = (await tx.execute(sql`
-        INSERT INTO sms_providers (sms_provider_id, org_id, name, supports_api_send)
-        VALUES (${"gs-" + sfx}, ${orgId}, ${"gate-stamp"}, true) RETURNING id
+        INSERT INTO sms_providers
+          (sms_provider_id, org_id, name, supports_api_send,
+           send_window_weekday_start, send_window_weekday_end,
+           send_window_weekend_start, send_window_weekend_end)
+        VALUES ('gs-prov', ${orgId}, ${"gate-stamp"}, true, 0, 1439, 0, 1439)
+        RETURNING id
       `)) as unknown as { id: number }[];
+      const provId = prov[0].id;
+
+      // Credential with brand_id=NULL: the real drain resolves it as the
+      // provider-default credential, matching the campaign's brand_id=NULL below.
       await tx.execute(sql`
         INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key)
-        VALUES (${orgId}, ${prov[0].id}, NULL, ${"key"})
+        VALUES (${orgId}, ${provId}, NULL, ${"key"})
       `);
+
       const cre = (await tx.execute(sql`
-        INSERT INTO creatives (slug, org_id, text, status) VALUES (${"gs-cre-" + sfx}, ${orgId}, ${"hi"}, 'active') RETURNING id
+        INSERT INTO creatives (slug, org_id, text, status)
+        VALUES ('gs-cre', ${orgId}, ${"hi"}, 'active') RETURNING id
       `)) as unknown as { id: number }[];
+
+      // No brand_id on the campaign: the provider_credentials row above uses
+      // brand_id=NULL, which the real drain resolves as the provider-default key.
       const camp = (await tx.execute(sql`
-        INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id)
-        VALUES (${orgId}, ${"gs-camp-" + sfx}, ${"g"}, 'active', 'tracked', ${brand[0].id}) RETURNING id
+        INSERT INTO campaigns (org_id, slug, name, status, link_mode)
+        VALUES (${orgId}, 'gs-camp', ${"g"}, 'active', 'tracked') RETURNING id
       `)) as unknown as { id: number }[];
       const campaignId = camp[0].id;
-      // Click-armed stage: approved, due, materialized (pending rows), sent_at NULL.
+
+      // Stage pre-materialized (materialized_at set) so phase B finds it
+      // immediately; phase A skips it (materialized_at IS NULL filter fails).
       const st = (await tx.execute(sql`
-        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, sms_provider_id, send_approved, scheduled_at)
-        VALUES (${orgId}, ${campaignId}, 1, ${cre[0].id}, ${prov[0].id}, true, ${SCHEDULED}) RETURNING id
+        INSERT INTO campaign_stages
+          (org_id, campaign_id, stage_number, creative_id, sms_provider_id,
+           send_approved, scheduled_at, materialized_at)
+        VALUES (${orgId}, ${campaignId}, 1, ${cre[0].id}, ${provId},
+                true, ${SCHEDULED}, now())
+        RETURNING id
       `)) as unknown as { id: number }[];
       const stageId = st[0].id;
-      const contact = (await tx.execute(sql`INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${"+1555" + sfx}) RETURNING id`)) as unknown as { id: string }[];
+
+      const contact = (await tx.execute(sql`
+        INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}, ${"+15551000001"}) RETURNING id
+      `)) as unknown as { id: string }[];
       await tx.execute(sql`
         INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
         VALUES (${orgId}, ${campaignId}, ${stageId}, ${contact[0].id}, ${"+15550000"}, ${"hi link"}, 'pending')
@@ -78,6 +99,10 @@ async function main() {
         Number(((await tx.execute(sql`SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${stageId} AND status = 'pending'`)) as unknown as { n: number }[])[0].n);
 
       // ── TICK 1: gate OFF (sends_enabled false). Real drain refuses. ──
+      await tx.execute(sql`
+        INSERT INTO org_settings (org_id, sends_enabled) VALUES (${orgId}, false)
+        ON CONFLICT (org_id) DO UPDATE SET sends_enabled = false
+      `);
       const t1 = await runScheduledSends(tx as unknown as typeof db, {
         now: NOON_ET, orgId, isEnabled: () => true, sendSms: fakeSender, maxStages: 50,
       });

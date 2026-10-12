@@ -17,6 +17,10 @@
 //     Clicks are not compared — different population (Keitaro visits).
 //  L  Lead rows: Σ admitted / carried / leads admitted equal hand counts over
 //     drip_journeys (+ lead_events.received_at), per campaign.
+//  M  Money per campaign (owner Q1/Q3): lookup = admitted × the SAME calibrated
+//     rate the partner report used (asserted equal), profit/ROI including it,
+//     revenue per admitted lead (cohort basis). Every drip campaign is listed,
+//     test campaigns included, with its cell count — the backfill's scope.
 //
 // The live functions read through the module db handle, so the two sides are
 // not one snapshot: run on CLOSED days (ranges ending yesterday or earlier).
@@ -28,6 +32,8 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { addEtDays } from "@/lib/reporting/delivery-rollup";
+import { dailyMoney } from "@/lib/reporting/drip-daily-money";
+import { getCalibratedLookupRate } from "@/lib/reporting/lookup-rate";
 import { getPartnerReport } from "@/lib/reporting/partner-report";
 import { getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 
@@ -145,6 +151,31 @@ async function verifyRange(orgId: string, from: string, to: string) {
     check(`L campaign ${l.campaign_id}: admitted ${l.h_adm} (carried ${l.h_car}), leads admitted ${l.h_la}`,
       l.h_adm === l.r_adm && l.h_car === l.r_car && l.h_la === l.r_la,
       `rollup ${l.r_adm} (${l.r_car}) / ${l.r_la}`);
+  }
+  // ── M: money per campaign, every drip campaign listed ───────────────────
+  const rate = await getCalibratedLookupRate();
+  check(`M lookup rate is the partner report's: $${rate.rate.toFixed(6)} (${rate.source})`, rate.rate === pr.rate.rate);
+  const camps = (await db.execute(sql`
+    SELECT c.id, c.name, c.status,
+           (SELECT count(*)::int FROM drip_daily_rollup r WHERE r.campaign_id = c.id) AS cells_all_time,
+           COALESCE(sum(r.admitted)  FILTER (WHERE r.basis = 'activity'), 0)::int    AS a_admitted,
+           COALESCE(sum(r.send_cost) FILTER (WHERE r.basis = 'activity'), 0)::float8 AS a_cost,
+           COALESCE(sum(r.revenue)   FILTER (WHERE r.basis = 'activity'), 0)::float8 AS a_rev,
+           COALESCE(sum(r.admitted)  FILTER (WHERE r.basis = 'cohort'), 0)::int      AS c_admitted,
+           COALESCE(sum(r.send_cost) FILTER (WHERE r.basis = 'cohort'), 0)::float8   AS c_cost,
+           COALESCE(sum(r.revenue)   FILTER (WHERE r.basis = 'cohort'), 0)::float8   AS c_rev
+    FROM campaigns c
+    LEFT JOIN drip_daily_rollup r ON r.campaign_id = c.id AND r.day_et BETWEEN ${from}::date AND ${to}::date
+    WHERE c.org_id = ${orgId}::uuid AND c.type = 'drip'
+    GROUP BY c.id, c.name, c.status ORDER BY c.id`)) as unknown as Record<string, string | number>[];
+  const usd = (n: number | null) => (n == null ? "—" : `$${n.toFixed(2)}`);
+  const pct = (n: number | null) => (n == null ? "—" : `${(n * 100).toFixed(1)}%`);
+  for (const c of camps) {
+    const a = dailyMoney({ revenue: Number(c.a_rev), send_cost: Number(c.a_cost), admitted: Number(c.a_admitted) }, rate.rate);
+    const k = dailyMoney({ revenue: Number(c.c_rev), send_cost: Number(c.c_cost), admitted: Number(c.c_admitted) }, rate.rate);
+    console.log(`  INFO  campaign ${c.id} "${c.name}" [${c.status}] — ${c.cells_all_time} cells all-time | ` +
+      `activity: admitted ${c.a_admitted}, send ${usd(a.send_cost_usd)}, lookup ${usd(a.lookup_cost_usd)}, revenue ${usd(a.revenue_usd)}, profit ${usd(a.profit_usd)}, ROI ${pct(a.roi)} | ` +
+      `cohort: rev/admitted ${usd(k.revenue_per_admitted_usd)}, profit ${usd(k.profit_usd)}, ROI ${pct(k.roi)}`);
   }
   console.log(`  (${Date.now() - t0} ms)`);
 }

@@ -3,6 +3,7 @@ import { requirePreviewDb } from "./_require-preview-db"; // MUST be second
 import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { dailyMoney } from "@/lib/reporting/drip-daily-money";
 import {
   diffDripDailyRollup,
   histogramMedian,
@@ -54,6 +55,16 @@ function pure() {
   const last = new Array(LATENCY_EDGES_SEC.length + 1).fill(0);
   last[LATENCY_EDGES_SEC.length] = 3;
   bar("P9 open-ended last bucket → its floor (48 h)", histogramMedian(last) === 172800);
+  // Owner Q1/Q3: lookup = admitted × rate; profit and ROI include it; rev/admitted.
+  const m = dailyMoney({ revenue: 30, send_cost: 4, admitted: 100 }, 0.0016);
+  bar("M1 lookup cost = 100 admitted × $0.0016 = $0.16", Math.abs(m.lookup_cost_usd - 0.16) < 1e-12, String(m.lookup_cost_usd));
+  bar("M2 profit = 30 − 4 − 0.16 = 25.84", Math.abs(m.profit_usd - 25.84) < 1e-9, String(m.profit_usd));
+  bar("M3 ROI = 25.84 ÷ 4.16", m.roi !== null && Math.abs(m.roi - 25.84 / 4.16) < 1e-12, String(m.roi));
+  bar("M4 revenue per admitted lead = 30 ÷ 100", m.revenue_per_admitted_usd === 0.3);
+  const z0 = dailyMoney({ revenue: 5, send_cost: 0, admitted: 0 }, 0.0016);
+  bar("M5 zero cost → ROI null (not 0); zero admitted → rev/admitted null", z0.roi === null && z0.revenue_per_admitted_usd === null);
+  const lossy = dailyMoney({ revenue: 0, send_cost: 2, admitted: 50 }, 0.002);
+  bar("M6 no revenue → negative profit, ROI −100%", lossy.profit_usd === -2.1 && lossy.roi === -1, `${lossy.profit_usd} / ${lossy.roi}`);
 }
 
 async function dbBars() {

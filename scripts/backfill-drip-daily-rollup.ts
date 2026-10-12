@@ -101,6 +101,21 @@ async function main() {
     }
 
     if (only) continue;
+    // Every drip campaign — test campaigns included (owner Q6) — that ever had a
+    // journey or a sent message must now own cells.
+    const perCampaign = (await db.execute(sql`
+      SELECT c.id, c.name, c.status,
+             (SELECT count(*)::int FROM drip_daily_rollup r WHERE r.campaign_id = c.id) AS cells,
+             (SELECT count(*)::int FROM stage_sends ss WHERE ss.campaign_id = c.id AND ss.status = 'sent') AS sent,
+             (SELECT count(*)::int FROM drip_journeys j WHERE j.campaign_id = c.id) AS journeys
+      FROM campaigns c WHERE c.org_id = ${o.org_id}::uuid AND c.type = 'drip' ORDER BY c.id`)) as unknown as {
+      id: number; name: string; status: string; cells: number; sent: number; journeys: number;
+    }[];
+    for (const c of perCampaign) {
+      const ok = c.sent + c.journeys === 0 || c.cells > 0;
+      if (!ok) failures++;
+      console.log(`  ${ok ? "✓" : "✗"} campaign ${c.id} "${c.name}" [${c.status}]: ${c.cells} cells (${c.sent} sent, ${c.journeys} journeys)`);
+    }
     // Foot the activity sends against stage_sends, every day before today.
     const foot = (await db.execute(sql`
       SELECT

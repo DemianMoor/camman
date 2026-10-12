@@ -274,7 +274,7 @@ precedes day 2).
 [lib/drip/routing-eval.ts](../../lib/drip/routing-eval.ts)): a carried lead is admitted only while
 `today's journeys + reserve < routing_daily_admission_cap`. `reserve` = same-day (`carried_days = 0`)
 journeys routed yesterday, counted from now−24h to today's ET midnight. Fresh leads ignore it; a NULL
-cap means no reserve. Carried leads can therefore never crowd out today's fresh volume.
+cap means no reserve. The reserve holds back yesterday's same-time-onward fresh volume: an estimate, not a guarantee; a heavy afternoon can still find the cap spent (spec §6).
 
 **`carried_days`** is written at journey insert: ET date(routed) − ET date(arrival). Evening same-day
 admissions stay 0. ⚠️ Behaviour change for cutoff-only configs: a config with `admission_cutoff_minutes

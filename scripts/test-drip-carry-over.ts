@@ -31,6 +31,14 @@ const bar = (name: string, ok: boolean, detail = "") => {
 };
 
 async function main() {
+  {
+    const b = campaignDayBoundsUtc(new Date());
+    const t = Date.now();
+    if (Math.abs(t - b.start.getTime()) < 180_000 || Math.abs(b.end.getTime() - t) < 180_000) {
+      console.error("Aborting: within 3 minutes of ET midnight; day-bound fixtures would be flaky. Re-run shortly.");
+      process.exit(2);
+    }
+  }
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
   const one = async <T>(q: SQL): Promise<T> => ((await db.execute(q)) as unknown as T[])[0];
 
@@ -131,22 +139,32 @@ async function main() {
       const routed = async (ls: { id: string }[]) => {
         let n = 0; for (const l of ls) if ((await journey(l.id))?.state === "routed") n++; return n;
       };
-      return { fresh: await routed(fs), carried: await routed(cs) };
+      return { fresh: await routed(fs), carried: await routed(cs), newestTwoCarried: await routed(cs.slice(-2)) };
     };
     const r0 = await scenario("r0", 0, 8, 5);
-    bar("C4 ⭐ reserve 0: 8 fresh + 2 carried (fresh first)", r0.fresh === 8 && r0.carried === 2, JSON.stringify(r0));
+    bar("C4 ⭐ reserve 0: 8 fresh + 2 carried (the 2 newest; fresh first)", r0.fresh === 8 && r0.carried === 2 && r0.newestTwoCarried === 2, JSON.stringify(r0));
     const r3 = await scenario("r3", 3, 8, 5);
     bar("C5 reserve 3: 8 fresh + 0 carried", r3.fresh === 8 && r3.carried === 0, JSON.stringify(r3));
     const r9 = await scenario("r9", 9, 8, 0);
     bar("C6 fresh leads ignore the reserve: 8 of 8", r9.fresh === 8, JSON.stringify(r9));
 
-    // C7 lowering to 0 stops carries on the next tick
-    const low = await mkCampaign("lo", { carry: 1 });
+    // C7 lowering a PENDING carry to 0: the carried lead is first deferred (cap 1 already
+    // used by a journey routed today), then carry is lowered and the recheck cleared.
+    const low = await mkCampaign("lo", { admissionCap: 1, carry: 1 });
     await setWidened(low, T);
-    await db.execute(sql`UPDATE drip_campaign_configs SET carry_days = 0 WHERE campaign_id = ${low}`);
+    const used = await mkLead("lo", freshAt);
+    await db.execute(sql`
+      INSERT INTO drip_journeys (org_id, campaign_id, contact_id, lead_event_id, state, routed_at, reason, carried_days)
+      VALUES (${orgId}::uuid, ${low}, ${used.contactId}::uuid, ${used.id}::uuid, 'routed',
+              ${now.toISOString()}::timestamptz, '{}'::jsonb, 0)`);
     const lowLead = await mkLead("lo", new Date(T.getTime() + 3600_000));
     await tick();
-    bar("C7 carry lowered to 0: carried lead not admitted", (await journey(lowLead.id)) === undefined);
+    bar("C7 precondition: carried lead deferred by the used cap",
+      (await journey(lowLead.id)) === undefined && (await evaluated(lowLead.id)).n === 1);
+    await db.execute(sql`UPDATE drip_campaign_configs SET carry_days = 0 WHERE campaign_id = ${low}`);
+    await db.execute(sql`UPDATE lead_events SET drip_recheck_at = NULL WHERE id = ${lowLead.id}::uuid`);
+    await tick();
+    bar("C7 carry lowered to 0: pending carried lead not admitted", (await journey(lowLead.id)) === undefined);
   } finally {
     if (orgId) {
       const name = (await one<{ name: string } | undefined>(

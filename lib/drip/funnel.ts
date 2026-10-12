@@ -224,7 +224,13 @@ export async function getDripFunnel(
   // event-based and unsplit. Sales go to the contact's journey in this campaign
   // routed most recently at or before the sale; a sale with none is shown as
   // unmatched rather than dropped, so the halves + unmatched = converted.
-  const splitRows = (await dbc.execute(sql`
+  // Cheap guard first: the split query materialises campaignTierExpr again, so skip
+  // it entirely when the campaign has no carried journeys (the common case).
+  const hasCarried = Boolean(((await dbc.execute(sql`
+    SELECT EXISTS (SELECT 1 FROM drip_journeys
+                   WHERE org_id = ${orgId}::uuid AND campaign_id = ${campaignId} AND carried_days > 0) AS has_carried
+  `)) as unknown as { has_carried: boolean }[])[0]?.has_carried);
+  const splitRows = !hasCarried ? [] : (await dbc.execute(sql`
     WITH jj AS (
       SELECT j.contact_id, j.routed_at, j.first_send_at, (j.carried_days > 0) AS carried,
              COALESCE(t.tier, 0) AS tier
@@ -260,7 +266,7 @@ export async function getDripFunnel(
       (SELECT count(*) FROM sales WHERE carried IS NULL)::int                     AS unmatched_sales
   `)) as unknown as Record<string, number>[];
   const sp = splitRows[0] ?? {};
-  const split: FunnelSplit | null = Number(sp.carried_journeys ?? 0) === 0 ? null : {
+  const split: FunnelSplit | null = !hasCarried || Number(sp.carried_journeys ?? 0) === 0 ? null : {
     same_day: { routed: Number(sp.sd_routed), sent: Number(sp.sd_sent), clicked: Number(sp.sd_clicked), sales: Number(sp.sd_sales) },
     carried: { routed: Number(sp.co_routed), sent: Number(sp.co_sent), clicked: Number(sp.co_clicked), sales: Number(sp.co_sales) },
     unmatched_sales: Number(sp.unmatched_sales),

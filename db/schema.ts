@@ -5673,6 +5673,7 @@ export const drip_journeys = pgTable(
       sql`(${table.state} = 'routed' AND ${table.first_send_at} IS NULL)
           OR (${table.state} <> 'routed')`,
     ),
+    check("drip_journeys_carried_days_check", sql`${table.carried_days} >= 0`),
     index("drip_journeys_due_idx")
       .on(table.org_id, table.campaign_id, table.routed_at)
       .where(sql`state = 'routed' AND first_send_at IS NULL`),

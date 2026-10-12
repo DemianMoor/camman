@@ -11,7 +11,9 @@ ALTER TABLE "drip_campaign_configs" ADD COLUMN IF NOT EXISTS "admission_widened_
 ALTER TABLE "drip_campaign_configs" DROP CONSTRAINT IF EXISTS "drip_campaign_configs_carry_days_check";--> statement-breakpoint
 ALTER TABLE "drip_campaign_configs" ADD CONSTRAINT "drip_campaign_configs_carry_days_check"
   CHECK ("carry_days" IS NULL OR ("carry_days" >= 0 AND "carry_days" <= 7));--> statement-breakpoint
--- Constant default ⇒ metadata-only on PG ≥ 11: drip_journeys is not rewritten.
+-- The ADD COLUMN with a constant default is metadata-only on PG ≥ 11 (no rewrite), but the
+-- CHECK below validates with a full scan of drip_journeys (sub-second at ~63K rows; use
+-- NOT VALID + VALIDATE CONSTRAINT if the table grows).
 ALTER TABLE "drip_journeys" ADD COLUMN IF NOT EXISTS "carried_days" smallint DEFAULT 0 NOT NULL;--> statement-breakpoint
 ALTER TABLE "drip_journeys" DROP CONSTRAINT IF EXISTS "drip_journeys_carried_days_check";--> statement-breakpoint
 ALTER TABLE "drip_journeys" ADD CONSTRAINT "drip_journeys_carried_days_check" CHECK ("carried_days" >= 0);--> statement-breakpoint

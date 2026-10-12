@@ -3540,6 +3540,9 @@ export const org_settings = pgTable("org_settings", {
   // each campaign's oldest journey in turn, so one campaign's backlog cannot
   // starve another's fresh leads. Off = the old org-wide oldest-first order.
   drip_scheduler_fair: boolean("drip_scheduler_fair").notNull().default(false),
+  // Migration 0208: the drip campaign Daily results tab (UI + its API). The
+  // drip_daily_rollup job runs regardless; this only shows/serves the tab.
+  drip_daily_results_enabled: boolean("drip_daily_results_enabled").notNull().default(false),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })
@@ -5693,6 +5696,76 @@ export const drip_journeys = pgTable(
 
 export type DripCampaignConfig = typeof drip_campaign_configs.$inferSelect;
 export type DripJourney = typeof drip_journeys.$inferSelect;
+
+// ---- Drip Daily results rollup (migration 0208) -------------------------------
+// Spec: docs/superpowers/specs/2026-10-12-drip-daily-results-design.md. One row
+// per (campaign, basis, ET day, stage, partner key). stage_id NULL = the
+// campaign-level lead row; partner_key_id NULL on a stage row = sends that reach
+// no non-sandbox lead. Additive counters only — every ratio is computed at read
+// time. Written only by lib/reporting/drip-daily-rollup.ts (cron + backfill).
+// stage_id / partner_key_id are NO ACTION, not SET NULL (see the migration
+// header).
+export const drip_daily_rollup = pgTable(
+  "drip_daily_rollup",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    basis: text("basis").$type<"activity" | "cohort">().notNull(),
+    day_et: date("day_et").notNull(),
+    stage_id: integer("stage_id").references(() => campaign_stages.id, {
+      onDelete: "no action",
+    }),
+    partner_key_id: integer("partner_key_id").references(() => partner_keys.id, {
+      onDelete: "no action",
+    }),
+    leads_admitted: integer("leads_admitted").notNull().default(0),
+    admitted: integer("admitted").notNull().default(0),
+    admitted_carried: integer("admitted_carried").notNull().default(0),
+    first_sends: integer("first_sends").notNull().default(0),
+    followup_sends: integer("followup_sends").notNull().default(0),
+    dlr_sent: integer("dlr_sent").notNull().default(0),
+    delivered: integer("delivered").notNull().default(0),
+    clicks: integer("clicks").notNull().default(0),
+    opt_outs: integer("opt_outs").notNull().default(0),
+    sales: integer("sales").notNull().default(0),
+    revenue: numeric("revenue", { precision: 12, scale: 4 }).notNull().default("0"),
+    send_cost: numeric("send_cost", { precision: 12, scale: 4 }).notNull().default("0"),
+    latency_hist: integer("latency_hist").array(),
+    refreshed_at: timestamp("refreshed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    unique("drip_daily_rollup_cell_uniq")
+      .on(table.campaign_id, table.basis, table.day_et, table.stage_id, table.partner_key_id)
+      .nullsNotDistinct(),
+    index("drip_daily_rollup_stage_idx")
+      .on(table.stage_id)
+      .where(sql`stage_id IS NOT NULL`),
+    index("drip_daily_rollup_partner_key_idx")
+      .on(table.partner_key_id)
+      .where(sql`partner_key_id IS NOT NULL`),
+    check("drip_daily_rollup_basis_check", sql`basis IN ('activity', 'cohort')`),
+    check(
+      "drip_daily_rollup_nonneg",
+      sql`leads_admitted >= 0 AND admitted >= 0 AND admitted_carried >= 0 AND admitted_carried <= admitted AND first_sends >= 0 AND followup_sends >= 0 AND dlr_sent >= 0 AND delivered >= 0 AND delivered <= dlr_sent AND clicks >= 0 AND opt_outs >= 0 AND sales >= 0`,
+    ),
+    check(
+      "drip_daily_rollup_row_kind",
+      sql`CASE WHEN stage_id IS NULL THEN first_sends = 0 AND followup_sends = 0 AND dlr_sent = 0 AND delivered = 0 AND clicks = 0 AND opt_outs = 0 AND sales = 0 AND revenue = 0 AND send_cost = 0 AND latency_hist IS NULL ELSE leads_admitted = 0 AND admitted = 0 AND admitted_carried = 0 END`,
+    ),
+  ],
+);
+
+export type DripDailyRollup = typeof drip_daily_rollup.$inferSelect;
 
 // Per-drip-campaign number selection with a per-number ET-daily limit.
 //

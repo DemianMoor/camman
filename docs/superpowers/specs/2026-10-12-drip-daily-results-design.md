@@ -14,7 +14,7 @@ _2026-10-12. Recon read at `origin/main` 6d8788b8 (#349). Prod measurements are 
 | Q4 | Sends are dated by `sent_at`. |
 | Q5 | Change events in the Activity log: OK. |
 | Q6 | Backfill the test campaigns (994/1006/1604/1605) too. |
-| Schema | `stage_id` / `partner_key_id` are **`ON DELETE RESTRICT`**, not SET NULL. SET NULL would fold a deleted stage's cells into the NULL lead row and a deleted key's cells into the Unattributed bucket under `UNIQUE NULLS NOT DISTINCT`. Checked at `origin/main` ed7e9591: `deleteStage` (`lib/stages/delete-stage.ts`) only hard-deletes a stage with **no** sends on it or its lanes, so any stage that owns cells is already undeletable, and its existing `23503 → 409` mapping covers the backstop. No app path hard-deletes `partner_keys`. |
+| Schema | `stage_id` / `partner_key_id` are **`ON DELETE NO ACTION`** (the owner offered RESTRICT; a probe on the preview DB showed RESTRICT and NO ACTION behave identically here: both refuse a lone stage/key delete and both let a whole-campaign delete cascade. NO ACTION was kept per the 0197 precedent. S13–S15 of `scripts/test-drip-daily-rollup-schema.ts`), not SET NULL. SET NULL would fold a deleted stage's cells into the NULL lead row and a deleted key's cells into the Unattributed bucket under `UNIQUE NULLS NOT DISTINCT`. Checked at `origin/main` ed7e9591: `deleteStage` (`lib/stages/delete-stage.ts`) only hard-deletes a stage with **no** sends on it or its lanes, so any stage that owns cells is already undeletable, and its existing `23503 → 409` mapping covers the backstop. No app path hard-deletes `partner_keys`. |
 | Plan | Start with PR #1 (change logging). **Stop at the reconciliation gate for the owner's OK before PR #4.** |
 
 Note on Q1's "exact": an admitted lead whose number was already in the lookup cache (~1% at last measurement) cost nothing, so the column slightly overstates. The owner's rule is applied as stated; this caveat goes in the column tooltip.
@@ -58,9 +58,9 @@ CREATE TABLE drip_daily_rollup (
   campaign_id     integer NOT NULL REFERENCES campaigns(id)     ON DELETE CASCADE,
   basis           text    NOT NULL CHECK (basis IN ('activity','cohort')),
   day_et          date    NOT NULL,   -- activity: the event's ET day; cohort: the ET day of admission (routed_at)
-  stage_id        integer NULL REFERENCES campaign_stages(id) ON DELETE RESTRICT,
+  stage_id        integer NULL REFERENCES campaign_stages(id) ON DELETE NO ACTION,
                                        -- NULL = the campaign-level lead row (leads/admitted have no stage)
-  partner_key_id  integer NULL REFERENCES partner_keys(id)    ON DELETE RESTRICT,
+  partner_key_id  integer NULL REFERENCES partner_keys(id)    ON DELETE NO ACTION,
                                        -- NULL = sends with no non-sandbox lead (kept so stage totals stay complete)
   -- lead counters (stage_id IS NULL rows only)
   leads_received   integer NOT NULL DEFAULT 0,

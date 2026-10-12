@@ -1457,6 +1457,13 @@
       "when": 1794528000000,
       "tag": "0207_drip_scheduler_fair",
       "breakpoints": true
+    },
+    {
+      "idx": 208,
+      "version": "7",
+      "when": 1794614400000,
+      "tag": "0208_drip_daily_rollup",
+      "breakpoints": true
     }
   ]
 }

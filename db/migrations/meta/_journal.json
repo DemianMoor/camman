@@ -1436,6 +1436,13 @@
       "when": 1794268800000,
       "tag": "0204_drip_carry_over",
       "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1794355200000,
+      "tag": "0205_drip_widened_guard",
+      "breakpoints": true
     }
   ]
 }

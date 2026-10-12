@@ -17,6 +17,13 @@ re-admits pre-widening leads, and do not stamp `widened_at` from the app. Detail
 and no carry now records after-midnight admissions as `carried_days = 1` and applies the carried-lead
 reserve to them.
 
+**Forward-only (0205).** Both stamps can only move forward: the triggers keep `GREATEST(OLD, NEW)`, so an
+UPDATE that NULLs or backdates a stamp silently keeps the old value. A drip campaign entering
+active/paused (from draft/completed/archived) also stamps its config. **Escape hatch — TEST-ONLY:**
+`camman.allow_widened_backdate = 'on'` disables the guard, and must only ever be set transaction-locally
+(`SET LOCAL` or `set_config('camman.allow_widened_backdate', 'on', true)` inside a transaction) by test
+fixtures that backdate a stamp. Never set it in app code, a session, or a migration.
+
 ## An oldest-first work queue must never keep rows it cannot act on (2026-10-11)
 
 `ORDER BY received_at LIMIT N` is only safe while every row it returns either gets processed or leaves the queue. If a row it can't act on stays in place, it keeps its spot at the head of every batch. N such rows stop the worker completely, and fewer than N quietly cut its throughput, with nothing failing. That is how ~180 opted-out leads starved 44,968 routable ones on 2026-10-10 ([04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#unrouted-leads-permanent-deferred-expired-2026-10-11-card-869ency4b)). For every such queue, decide per outcome: **permanent** → write a terminal state now; **temporary** → move it behind fresh work with a re-check time (`lead_events.drip_recheck_at`); never "no row, retry next tick at the head". The drip enrichment and follow-up batches had the same shape.

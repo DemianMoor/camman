@@ -160,11 +160,15 @@ async function main() {
     const campLate = await mkCampaign(`L${sfx}`, "active", { cutoff: minsIntoDay + 60 });
     // Spec §4.2 (0204): an INSERT with window > 0 stamps admission_widened_at = now(),
     // and a lead that arrived before it gets window 0. Backdate the stamp so the
-    // override predates the lead — the case this check is about.
-    await db.execute(sql`
-      UPDATE drip_campaign_configs
-      SET admission_widened_at = ${new Date(yesterday.getTime() - 60 * 60_000).toISOString()}::timestamptz
-      WHERE campaign_id = ${campLate}`);
+    // override predates the lead — the case this check is about. 0205: stamps are
+    // forward-only, so the backdate needs the test-only hatch in a transaction.
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL camman.allow_widened_backdate = 'on'`);
+      await tx.execute(sql`
+        UPDATE drip_campaign_configs
+        SET admission_widened_at = ${new Date(yesterday.getTime() - 60 * 60_000).toISOString()}::timestamptz
+        WHERE campaign_id = ${campLate}`);
+    });
     const staleL = await mkLead(`L${sfx}`, yesterday);
     await tick();
     bar("Q9 a per-campaign cutoff override admits yesterday's lead to that campaign",

@@ -3530,6 +3530,7 @@ export const org_settings = pgTable("org_settings", {
   drip_carry_days: integer("drip_carry_days").notNull().default(0),
   // Stamped by trigger org_settings_drip_admission_widened whenever the org's
   // window (carry×1440 + cutoff) grows. Leads that arrived earlier are same day only.
+  // Forward-only (0205): a NULL or older value is ignored by the trigger.
   drip_admission_widened_at: timestamp("drip_admission_widened_at", { withTimezone: true }),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
@@ -5506,7 +5507,9 @@ export const drip_campaign_configs = pgTable(
     // Carry-over (0204): NULL = the org default (org_settings.drip_carry_days).
     carry_days: integer("carry_days"),
     // Stamped by trigger drip_campaign_configs_admission_widened when this
-    // campaign's effective window grows (never by application code).
+    // campaign's effective window grows (never by application code), and when a
+    // drip campaign enters active/paused. Forward-only (0205): a NULL or older
+    // value is ignored by the trigger (test-only escape hatch: camman.allow_widened_backdate).
     admission_widened_at: timestamp("admission_widened_at", { withTimezone: true }),
     // Lower wins; ties broken by the most recently created campaign.
     priority: integer("priority").notNull().default(100),

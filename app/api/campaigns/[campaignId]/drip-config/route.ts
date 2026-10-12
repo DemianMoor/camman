@@ -5,6 +5,7 @@ import { db } from "@/db/client";
 import { campaigns } from "@/db/schema";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { logDripConfigChange, readDripConfigSnapshot } from "@/lib/drip/change-events";
 import { can } from "@/lib/permissions";
 import { dripConfigSchema } from "@/lib/validators/drip-campaigns";
 
@@ -65,7 +66,7 @@ export async function PUT(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
   if (!can(role, "campaigns.update")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
@@ -105,6 +106,8 @@ export async function PUT(
   }
 
   await db.transaction(async (tx) => {
+    // Locked so the diff below sees exactly the row this save replaced.
+    const before = await readDripConfigSnapshot(tx, cid, orgId, { forUpdate: true });
     await tx.execute(drizzleSql`
       INSERT INTO drip_campaign_configs
         (campaign_id, org_id, interest_tag, partner_key_id, start_at, end_at,
@@ -157,6 +160,15 @@ export async function PUT(
         WHERE id = ${cid} AND org_id = ${orgId}::uuid
       `);
     }
+
+    // Last statement in the transaction (see logCampaignEvent).
+    await logDripConfigChange(tx, {
+      orgId,
+      campaignId: cid,
+      actorUserId: user.id,
+      before,
+      after: await readDripConfigSnapshot(tx, cid, orgId),
+    });
   });
 
   return NextResponse.json({ ok: true, campaign_id: cid });

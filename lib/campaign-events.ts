@@ -27,7 +27,11 @@ export type CampaignEventType =
   // 869et3vm1 Phase 1: the deactivation kill switch un-approved this stage
   // because the user who created it was deactivated. Distinct from a human
   // un-approving it, which is what makes it reviewable.
-  | "stage_auto_paused";
+  | "stage_auto_paused"
+  // Drip settings edits (lib/drip/change-events.ts): the Daily results tab's
+  // change markers. Written only when a value actually changed.
+  | "drip_config_changed"
+  | "drip_stage_changed";
 
 export interface LogCampaignEventInput {
   orgId: string;

@@ -82,7 +82,7 @@ export interface SchedulerResult {
   alreadyQueued: number;
 }
 
-interface DueRow {
+export interface DueRow {
   journey_id: string;
   org_id: string;
   campaign_id: number;
@@ -108,40 +108,19 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
   };
 
   const orgs = (await db.execute(sql`
-    SELECT org_id FROM org_settings WHERE drip_enabled = true AND drip_paused = false
-  `)) as unknown as { org_id: string }[];
+    SELECT org_id, drip_scheduler_fair FROM org_settings
+    WHERE drip_enabled = true AND drip_paused = false
+  `)) as unknown as { org_id: string; drip_scheduler_fair: boolean }[];
   if (orgs.length === 0) return res;
   res.postureOn = true;
 
   const nowMin = etMinutesOfDay(now);
   const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc(now);
 
-  for (const { org_id: orgId } of orgs) {
+  for (const { org_id: orgId, drip_scheduler_fair: fair } of orgs) {
     if (!(await isDripPostureOn(orgId))) continue;
 
-    const due = (await db.execute(sql`
-      SELECT j.id AS journey_id, j.org_id, j.campaign_id, j.contact_id,
-             c.name AS campaign_name, c.link_mode,
-             (c.send_paused IS TRUE) AS campaign_paused,
-             false AS drip_paused,
-             ct.phone_number AS phone,
-             b.name AS brand_name,
-             c.brand_id, c.tracking_id AS campaign_tracking_id,
-             b.landing_host AS brand_landing_host,
-             cfg.daily_cap, cfg.campaign_cap
-      FROM drip_journeys j
-      JOIN campaigns c  ON c.id = j.campaign_id
-      JOIN contacts ct  ON ct.id = j.contact_id
-      LEFT JOIN brands b ON b.id = c.brand_id
-      LEFT JOIN drip_campaign_configs cfg ON cfg.campaign_id = c.id
-      WHERE j.org_id = ${orgId}::uuid
-        AND j.state = 'routed'
-        AND j.first_send_at IS NULL
-        AND c.type = 'drip'
-        AND c.status = 'active'
-      ORDER BY j.routed_at
-      LIMIT ${BATCH}
-    `)) as unknown as DueRow[];
+    const due = await selectDueJourneys(db, { orgId, fair, batch: BATCH });
 
     // Group by campaign — stages, numbers and caps are per campaign, and
     // re-reading them per lead would be N queries for one answer.
@@ -414,6 +393,67 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
   }
 
   return res;
+}
+
+/**
+ * The scheduler's batch of due first sends: routed journeys of ACTIVE drip
+ * campaigns with no first send yet. Exported for scripts/test-drip-scheduler-fairness.ts.
+ */
+export async function selectDueJourneys(
+  dbc: DripTx,
+  { orgId, fair, batch }: { orgId: string; fair: boolean; batch: number },
+): Promise<DueRow[]> {
+  // ⭐ PER-CAMPAIGN FAIRNESS (0207, org_settings.drip_scheduler_fair). The
+  // batch used to be the BATCH oldest routed journeys org-wide, so one
+  // campaign's backlog took every slot: on 2026-10-12, 11.7K journeys of
+  // campaign 1637 released at once held campaign 1683's fresh leads for up to
+  // 20 min. With the flag on, each campaign's journeys are ranked oldest first
+  // and the batch takes rank 1 of every campaign, then rank 2, … — so a
+  // campaign with 5 fresh leads gets all 5 in the very next batch, whatever
+  // another campaign has queued. Within a campaign the order is unchanged.
+  // Flag off = the old order, byte for byte.
+  const pick = fair
+    ? sql`
+    FROM (
+      SELECT j0.id,
+             row_number() OVER (PARTITION BY j0.campaign_id ORDER BY j0.routed_at, j0.id) AS fair_rank
+      FROM drip_journeys j0
+      JOIN campaigns c0 ON c0.id = j0.campaign_id
+      WHERE j0.org_id = ${orgId}::uuid
+        AND j0.state = 'routed'
+        AND j0.first_send_at IS NULL
+        AND c0.type = 'drip'
+        AND c0.status = 'active'
+      ORDER BY fair_rank, j0.routed_at, j0.id
+      LIMIT ${batch}
+    ) f
+    JOIN drip_journeys j ON j.id = f.id`
+    : sql`
+    FROM drip_journeys j`;
+  const order = fair ? sql`ORDER BY f.fair_rank, j.routed_at, j.id` : sql`ORDER BY j.routed_at`;
+  return (await dbc.execute(sql`
+    SELECT j.id AS journey_id, j.org_id, j.campaign_id, j.contact_id,
+           c.name AS campaign_name, c.link_mode,
+           (c.send_paused IS TRUE) AS campaign_paused,
+           false AS drip_paused,
+           ct.phone_number AS phone,
+           b.name AS brand_name,
+           c.brand_id, c.tracking_id AS campaign_tracking_id,
+           b.landing_host AS brand_landing_host,
+           cfg.daily_cap, cfg.campaign_cap
+    ${pick}
+    JOIN campaigns c  ON c.id = j.campaign_id
+    JOIN contacts ct  ON ct.id = j.contact_id
+    LEFT JOIN brands b ON b.id = c.brand_id
+    LEFT JOIN drip_campaign_configs cfg ON cfg.campaign_id = c.id
+    WHERE j.org_id = ${orgId}::uuid
+      AND j.state = 'routed'
+      AND j.first_send_at IS NULL
+      AND c.type = 'drip'
+      AND c.status = 'active'
+    ${order}
+    LIMIT ${batch}
+  `)) as unknown as DueRow[];
 }
 
 async function notifyDailyCapNear(

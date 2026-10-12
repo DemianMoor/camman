@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-12 (0206 drip poke chain)_
+_Last updated: 2026-10-12 (0206 drip poke chain, 0207 scheduler fairness)_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -233,6 +233,7 @@ erDiagram
     int drip_carry_days "0-7, default 0 (0204)"
     timestamptz drip_admission_widened_at "trigger-stamped (0204), forward-only (0205)"
     boolean drip_poke_enabled "poke chain switch, default false (0206)"
+    boolean drip_scheduler_fair "round-robin first-send batch, default false (0207)"
   }
 ```
 
@@ -549,6 +550,7 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 | `drip_campaign_configs.carry_days` *(0204)* | NULL, CHECK NULL or 0–7 | Per-campaign "Send leads" override; NULL = the account default |
 | `drip_campaign_configs.admission_widened_at` *(0204)* | timestamptz NULL | Stamped by trigger `drip_campaign_configs_admission_widened` (function `drip_cfg_admission_widened()`) |
 | `org_settings.drip_poke_enabled` *(0206)* | NOT NULL DEFAULT false | **Drip poke chain switch.** On (for an org with `drip_enabled`): each pipeline step wakes the next when it finishes, instead of waiting for its cron tick. Off = cron ticks only, exactly as before. Rollback = set false. See [drip-poke-chain.md](04-features/drip-poke-chain.md) |
+| `org_settings.drip_scheduler_fair` *(0207)* | NOT NULL DEFAULT false | **Scheduler per-campaign fairness.** On: the first-send batch is filled round-robin across campaigns (each campaign's oldest routed journey, then the next…), so one campaign's backlog cannot starve another's fresh leads. Off = org-wide oldest first. See [drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#scheduler-batch-per-campaign-fairness-2026-10-12-migration-0207) |
 | `cron_locks.poke_requested_at` / `poke_dispatched_at` / `last_run_started_at` *(0206)* | timestamptz NULL | Poke coalescing state per job (`cron_locks` is SQL-only, not in `db/schema.ts`). A request newer than the last run start earns the lease holder a re-run; at most one wake-up in flight per job; runs spaced 5 s apart. Written only by [lib/drip/poke.ts](../lib/drip/poke.ts), only while the switch is on |
 | `drip_journeys.carried_days` *(0204)* | smallint NOT NULL DEFAULT 0, CHECK ≥ 0 | ET date(routed) − ET date(arrival) at insert. `> 0` = **carried**. Constant default ⇒ metadata-only add, no table rewrite |
 

@@ -3536,6 +3536,10 @@ export const org_settings = pgTable("org_settings", {
   // (lib/drip/poke.ts). Off = cron ticks only, exactly as before; the crons
   // run unchanged either way. Rollback = set false.
   drip_poke_enabled: boolean("drip_poke_enabled").notNull().default(false),
+  // Drip scheduler per-campaign fairness (0207): the first-send batch takes
+  // each campaign's oldest journey in turn, so one campaign's backlog cannot
+  // starve another's fresh leads. Off = the old org-wide oldest-first order.
+  drip_scheduler_fair: boolean("drip_scheduler_fair").notNull().default(false),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })

@@ -115,7 +115,9 @@ export function OfferPicker({
             variant="outline"
             disabled={triggerDisabled}
             className={cn(
-              "w-full justify-between font-normal",
+              // min-w-0: without it the grid track grows to the full offer
+              // name and the label never truncates.
+              "w-full min-w-0 justify-between font-normal",
               !selected && "text-muted-foreground",
             )}
           >

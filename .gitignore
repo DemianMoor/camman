@@ -54,6 +54,7 @@ next-env.d.ts
 # Claude Code per-user settings
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 
 # Playwright MCP local artifacts
 .playwright-mcp/

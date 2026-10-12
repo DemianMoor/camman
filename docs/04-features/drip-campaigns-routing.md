@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-12_
+_Last updated: 2026-10-12 (scheduler per-campaign fairness, 0207)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -354,6 +354,30 @@ leaves lanes out of the sibling set, the editor shows a lane a note instead of w
 lane's creative is set from its Stages-table row with no window involved), and the Stages table shows
 a lane's own state (`Needs a creative` / `Lane on` / `Lane off`) instead of the first-send readiness
 badge, which would call every lane "No window".
+
+## Scheduler batch: per-campaign fairness (2026-10-12, migration 0207)
+
+The scheduler ([lib/drip/scheduler.ts](../../lib/drip/scheduler.ts)) turns at most 200 routed journeys
+per run into pending first sends. `selectDueJourneys` picks them in one of two orders:
+
+- **`org_settings.drip_scheduler_fair = false` (default, the old order):** the 200 **oldest** routed
+  journeys org-wide. One campaign's backlog takes every slot. On 2026-10-12, campaign 1637 was
+  un-paused with ~11.7K routed journeys, and campaign 1683's fresh leads waited up to **20 min**
+  (p90 routed→queued 1,259 s) behind them.
+- **`true`:** round-robin across campaigns. Each campaign's journeys are ranked oldest first
+  (`row_number() OVER (PARTITION BY campaign_id ORDER BY routed_at, id)`), and the batch takes
+  rank 1 of every campaign, then rank 2, and so on. A campaign with 5 fresh leads gets all 5 in the
+  next batch, whatever another campaign has queued.
+  - Within a campaign the order is unchanged.
+  - A paused or window-closed campaign still takes its share and skips it in the per-campaign loop,
+    but it can no longer hold the others back.
+  - The ranking reads only narrow `drip_journeys` rows and then joins the 200 it keeps: 166 ms on a
+    79K-row proxy, ~50 ms on prod's current (empty) queue.
+
+Proof: `scripts/test-drip-scheduler-fairness.ts` (preview DB). It reproduces the starvation with the
+flag off (B gets 0 of 200), then checks that all of B's 5 make the batch with it on. Pairs with the
+[poke chain](drip-poke-chain.md), which removes tick waits; this removes queueing behind another
+campaign.
 
 ## Routed leads (campaign page)
 

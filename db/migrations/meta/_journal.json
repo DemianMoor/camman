@@ -1450,6 +1450,13 @@
       "when": 1794441600000,
       "tag": "0206_drip_poke_chain",
       "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1794528000000,
+      "tag": "0207_drip_scheduler_fair",
+      "breakpoints": true
     }
   ]
 }

@@ -35,6 +35,16 @@ because the INSERT beside it still commits. `stage_sends_active_contact_uniq` do
 case: it only sees pending/sending rows of the same stage, and the other run may have used a
 different stage or already sent.
 
+## ⭐ A shared work queue is filled per OWNER, not oldest-first, when owners compete (2026-10-12)
+
+The drip scheduler's batch was "the 200 oldest routed journeys org-wide". That is fair to journeys,
+but not to campaigns: one un-paused campaign's ~11.7K backlog held another campaign's fresh leads for
+20 min. With `org_settings.drip_scheduler_fair` (0207), `selectDueJourneys` ranks per campaign and
+takes rank 1 of each, then rank 2. Any future batch that several campaigns, partners or numbers share
+should rank per owner the same way (`row_number() OVER (PARTITION BY owner …)`, then
+`ORDER BY rank, age`) rather than oldest-first across all of them. Compute the rank on narrow rows,
+then join only what you keep.
+
 ## ⭐ Lead-to-send has ONE definition: routed on arrival (2026-10-12)
 
 `leadToSendLatency` ([lib/drip/lead-latency.ts](../lib/drip/lead-latency.ts)) feeds the alert, the

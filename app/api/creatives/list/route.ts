@@ -158,7 +158,7 @@ export async function GET(req: NextRequest) {
   const metricsAgg = drizzleSql`(
     SELECT * FROM jsonb_to_recordset(${JSON.stringify(metricsRows)}::jsonb)
       AS m(creative_id int, offer_id int, delivered int, checkouts int, sales int,
-           payout numeric, manual_clean int, tracked_clean int,
+           payout numeric, manual_clean int, tracked_clean int, visit_clickers int,
            lifetime_payout numeric, lifetime_clean int, lifetime_sales int,
            ctr_sent_7d int, ctr_clicks_7d int, ctr_sent_30d int, ctr_clicks_30d int,
            ctr_sent_lifetime int, ctr_clicks_lifetime int,
@@ -166,13 +166,17 @@ export async function GET(req: NextRequest) {
   ) AS metrics_agg`;
 
   const cleanExpr = drizzleSql`(coalesce(metrics_agg.manual_clean, 0) + coalesce(metrics_agg.tracked_clean, 0))`;
+  // Checkout Rate / Sales CR divide by clickers counted the Overview tab's way
+  // (Keitaro clean visits, CamMan substitute on a tracking gap); EPC keeps the
+  // counted-clicker denominator, as Overview's EPC does.
+  const visitClickersExpr = drizzleSql`coalesce(metrics_agg.visit_clickers, 0)`;
   const ctrSentExpr = drizzleSql`coalesce(metrics_agg.ctr_sent_30d, 0)`;
   // CASE without ELSE yields NULL when the denominator is 0, so "no data"
   // sorts/renders as "—" rather than a misleading 0%.
   const RATIO_SQL = {
     ctr: drizzleSql`CASE WHEN ${ctrSentExpr} > 0 THEN coalesce(metrics_agg.ctr_clicks_30d, 0)::numeric / ${ctrSentExpr} END`,
-    checkout_rate: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.checkouts, 0)::numeric / ${cleanExpr} END`,
-    sales_cr: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.sales, 0)::numeric / ${cleanExpr} END`,
+    checkout_rate: drizzleSql`CASE WHEN ${visitClickersExpr} > 0 THEN coalesce(metrics_agg.checkouts, 0)::numeric / ${visitClickersExpr} END`,
+    sales_cr: drizzleSql`CASE WHEN ${visitClickersExpr} > 0 THEN coalesce(metrics_agg.sales, 0)::numeric / ${visitClickersExpr} END`,
     epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.payout, 0)::numeric / ${cleanExpr} END`,
     // Not a ratio — the all-time sales count — but it sorts the same way: from the
     // cached metrics, so only when they are joined in.
@@ -278,6 +282,7 @@ export async function GET(req: NextRequest) {
           m_payout: drizzleSql<string>`metrics_agg.payout`.as("m_payout"),
           m_manual_clean: drizzleSql<number>`metrics_agg.manual_clean`.as("m_manual_clean"),
           m_tracked_clean: drizzleSql<number>`metrics_agg.tracked_clean`.as("m_tracked_clean"),
+          m_visit_clickers: drizzleSql<number>`metrics_agg.visit_clickers`.as("m_visit_clickers"),
           m_lifetime_payout: drizzleSql<number>`metrics_agg.lifetime_payout`.as("m_lifetime_payout"),
           m_lifetime_clean: drizzleSql<number>`metrics_agg.lifetime_clean`.as("m_lifetime_clean"),
           m_lifetime_sales: drizzleSql<number>`metrics_agg.lifetime_sales`.as("m_lifetime_sales"),
@@ -423,6 +428,7 @@ export async function GET(req: NextRequest) {
             m_payout: string | null;
             m_manual_clean: number | null;
             m_tracked_clean: number | null;
+            m_visit_clickers: number | null;
             m_lifetime_payout: number | null;
             m_lifetime_clean: number | null;
             m_lifetime_sales: number | null;
@@ -442,6 +448,7 @@ export async function GET(req: NextRequest) {
           const payout = Number(row.m_payout ?? 0);
           const cleanClicks =
             Number(row.m_manual_clean ?? 0) + Number(row.m_tracked_clean ?? 0);
+          const clickers = Number(row.m_visit_clickers ?? 0);
           const sent = Number(row.m_ctr_sent_30d ?? 0);
           const ctrClickers = Number(row.m_ctr_clicks_30d ?? 0);
           const sent7d = Number(row.m_ctr_sent_7d ?? 0);
@@ -454,10 +461,12 @@ export async function GET(req: NextRequest) {
               // delivered_count, so it is NOT the CTR denominator.
               delivered,
               clean_clicks: cleanClicks,
+              // Overview-style clickers: the Checkout Rate / Sales CR denominator.
+              clickers,
               checkouts,
               sales,
               payout,
-              // CTR = counted clickers ÷ messages sent, from the hourly snapshot
+              // CTR = Overview-style clickers ÷ messages sent, from the hourly snapshot
               // (lib/creatives/ctr-rollup.ts): last 30 days, last 7 days, all time.
               sent,
               ctr_clickers: ctrClickers,
@@ -468,8 +477,8 @@ export async function GET(req: NextRequest) {
               sent_lifetime: sentLifetime,
               ctr_clickers_lifetime: ctrClickersLifetime,
               ctr_lifetime: sentLifetime > 0 ? ctrClickersLifetime / sentLifetime : null,
-              checkout_rate: cleanClicks > 0 ? checkouts / cleanClicks : null,
-              sales_cr: cleanClicks > 0 ? sales / cleanClicks : null,
+              checkout_rate: clickers > 0 ? checkouts / clickers : null,
+              sales_cr: clickers > 0 ? sales / clickers : null,
               epc: cleanClicks > 0 ? payout / cleanClicks : null,
               // LIFETIME pair, shown ALONGSIDE the 30-day figure. The list and
               // picker still SORT by the 30-day EPC — recency is the better

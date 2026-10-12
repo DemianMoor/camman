@@ -358,7 +358,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
             </div>
             <p className="text-muted-foreground text-xs">
               A lead can join this campaign only until midnight ET at the end of the day it arrived,
-              plus these minutes. Leave empty to use the org default (0 = midnight). Leads that miss
+              plus these minutes (0–1439). Leave empty to use the org default (0 = midnight). Leads that miss
               the window stay ordinary contacts, usable in regular campaigns, groups and segments.
             </p>
           </div>

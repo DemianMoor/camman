@@ -64,7 +64,9 @@ export const dripConfigSchema = z
     // Freshness override (0202): minutes after the end of the lead's arrival ET
     // day that this campaign may still admit it. NULL = the org default.
     // OMITTED = leave the stored value alone (the campaign editor never sends it).
-    admission_cutoff_minutes: z.number().int().min(0).max(10080).nullable().optional(),
+    // At most 1439 (0203): a day or more would move the routing floor back and
+    // re-admit leads freshness already skipped.
+    admission_cutoff_minutes: z.number().int().min(0).max(1439).nullable().optional(),
     priority: z.number().int().min(1).max(10000).optional(),
     filters: filtersSchema.optional(),
     // Drip reuses the regular campaign carrier filter representation.

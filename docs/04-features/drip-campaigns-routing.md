@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-11_
+_Last updated: 2026-10-12_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -231,6 +231,14 @@ cleanup). They are below the floor, so routing skips them.
 **Where it is set:** the campaign page's Drip settings → **Freshness** box ("Admission closes (minutes
 after midnight ET)"), placeholder showing the org default. Empty = org default. The org default
 (`org_settings.drip_admission_cutoff_minutes`) has no screen yet; it is 0.
+
+**⚠️ The cutoff is capped at 1439 minutes (migration 0203, 2026-10-12).** The routing worker's
+candidate floor is recomputed from the largest cutoff in play on every tick, and an expired lead has
+no durable record — so RAISING the cutoff re-admits leads that already expired. Before 0203 the API
+allowed 10,080 (7 days): setting 2880 on 2026-10-12 would have re-admitted ~72K skipped leads (45,337
+from the Oct-10 backlog + 26,717 Oct-11 expiries). The cap bounds that to the previous ET day; it does
+**not** close it — a raise still re-admits yesterday's expiries up to the new cutoff. The full guard
+(an effective-from time that leads arriving earlier cannot pass) ships with the carry-over setting.
 
 ## Drip settings panel saves are partial (2026-10-11)
 

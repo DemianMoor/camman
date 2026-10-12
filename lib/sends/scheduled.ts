@@ -163,9 +163,9 @@ export interface DrainableRow {
 // The in-window gate is applied in JS in runScheduledSends (sender-zone, ET).
 export async function selectDrainableStages(
   dbc: typeof db,
-  opts: { now: Date; orgId?: string; maxStages: number },
+  opts: { now: Date; orgId?: string; maxStages: number; dripOnly?: boolean },
 ): Promise<DrainableRow[]> {
-  const { now, orgId, maxStages } = opts;
+  const { now, orgId, maxStages, dripOnly } = opts;
   const nowIso = now.toISOString();
   return (await dbc.execute(sql`
     SELECT s.id              AS stage_id,
@@ -225,6 +225,7 @@ export async function selectDrainableStages(
         WHERE ss.stage_id = s.id AND ss.status = 'pending'
       )
       ${orgId ? sql`AND c.org_id = ${orgId}` : sql``}
+      ${dripOnly ? sql`AND c.type = 'drip'` : sql``}
     -- ⚠️ DRIP STAGES HAVE NO scheduled_at. They are released by sent_at
     -- (stampDripStageDrainable), so ordering on scheduled_at alone put every
     -- drip stage LAST, and with maxStages regular stages pending a drip stage was
@@ -546,6 +547,13 @@ export async function runScheduledSends(
     // stage's remaining slice of its provider's per-tick send budget; maxDurationMs
     // is its wall-clock fairness slice (see PER_STAGE_DRAIN_MS).
     runDrain?: (stageId: number, maxRows: number, maxDurationMs?: number) => Promise<DrainResult>;
+    // Drip poke chain (0206): drain DRIP stages only and skip Phase A. A poked
+    // drain must never touch a regular stage — each run gets a fresh per-provider
+    // budget (max_sends_per_run), so draining regular stages more often would
+    // raise their send rate. Phase A never sees drip stages (they are created
+    // materialized), so skipping it loses nothing. Per-row dispatch
+    // (runStageDrain) and every gate are unchanged.
+    dripOnly?: boolean;
   },
 ): Promise<ScheduledRunResult> {
   const now = opts?.now ?? new Date();
@@ -573,7 +581,8 @@ export async function runScheduledSends(
   const nowIso = now.toISOString(); // raw execute can't bind a JS Date
 
   // ─── Phase A: materialize due stages ───────────────────────────────────────
-  const due = await selectDueScheduledStages(dbc, { now, orgId, maxStages });
+  const dripOnly = opts?.dripOnly === true;
+  const due = dripOnly ? [] : await selectDueScheduledStages(dbc, { now, orgId, maxStages });
   result.considered = due.length;
 
   for (const row of due) {
@@ -778,7 +787,7 @@ export async function runScheduledSends(
   // Each group additionally runs under a PER-PHONE `cron_locks` lease so an
   // OVERLAPPING invocation (an overrun tick meeting the next one) can never put
   // two drain loops on the same NUMBER at once — see PHONE_DRAIN_LEASE_MS.
-  const drainable = await selectDrainableStages(dbc, { now, orgId, maxStages });
+  const drainable = await selectDrainableStages(dbc, { now, orgId, maxStages, dripOnly });
 
   const budget = makeProviderBudget();
   const drainedStageIds = new Set<number>();

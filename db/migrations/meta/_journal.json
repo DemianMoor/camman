@@ -1443,6 +1443,13 @@
       "when": 1794355200000,
       "tag": "0205_drip_widened_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1794441600000,
+      "tag": "0206_drip_poke_chain",
+      "breakpoints": true
     }
   ]
 }

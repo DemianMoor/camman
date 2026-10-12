@@ -3,9 +3,12 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
+import { clearAlert, notifyOnTransition, transitionAlert } from "@/lib/alerts/alert-state";
+import { notifyTelegram } from "@/lib/alerts/telegram";
 import { telnyxBalance } from "@/lib/telnyx/client";
+import { formatLatency, leadToSendLatency, type LeadLatency } from "./lead-latency";
 import { checkTelnyxBalance } from "./lookup-guard";
+import { isPokeEnabled } from "./poke";
 import { runDripOptOutMonitor } from "./optout-monitor";
 import { sweepJourneyLifecycle } from "./lifecycle-sweep";
 
@@ -31,6 +34,19 @@ const BACKLOG_THRESHOLD = 1; // any lead older than the window is worth surfacin
 export const BACKLOG_ALERT_KEY = "drip:inbox_backlog";
 export const AWAITING_ALERT_KEY = "drip:awaiting_lookup_stalled";
 
+// Lead-to-send regression (drip poke chain, 0206). Owner-approved 2026-10-12:
+// the median over the last 15 min above 3 min fires, below 2 min resolves (the
+// gap between is hysteresis — no flapping), at least 20 leads, state changes
+// only. It runs only while the poke chain is ON: with it off the cron-only
+// baseline is ~4–7 min by construction, and an alert red by construction
+// trains people to ignore it. Multi-minute with the chain on means the chain
+// is silently broken and the leads are riding the cron ticks.
+export const LEAD_TO_SEND_WINDOW_MIN = 15;
+export const LEAD_TO_SEND_FIRE_SEC = 180;
+export const LEAD_TO_SEND_RESOLVE_SEC = 120;
+export const LEAD_TO_SEND_MIN_LEADS = 20;
+export const leadToSendAlertKey = (orgId: string) => `drip:lead_to_send_slow:${orgId}`;
+
 export interface DripMonitorResult {
   optOut: Awaited<ReturnType<typeof runDripOptOutMonitor>>;
   backlogReceived: number;
@@ -42,6 +58,8 @@ export interface DripMonitorResult {
   balanceFiring: boolean;
   /** Journey terminal transitions closed on this tick (Drip Phase 6). */
   lifecycle: Awaited<ReturnType<typeof sweepJourneyLifecycle>>;
+  /** Per org, last LEAD_TO_SEND_WINDOW_MIN minutes. Empty while pokes are off. */
+  leadToSend: { orgId: string; latency: LeadLatency; verdict: "fire" | "resolve" | "hold" | "too_few" }[];
   alerts: string[];
 }
 
@@ -133,6 +151,12 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
   // archive close at their source instead.
   const lifecycle = await sweepJourneyLifecycle();
 
+  // Best-effort: a latency query that fails must not stop the monitors below.
+  const leadToSend = await checkLeadToSend(alerts).catch((err) => {
+    console.error("[drip-monitors] lead-to-send check failed (swallowed):", err);
+    return [] as DripMonitorResult["leadToSend"];
+  });
+
   const optOut = await runDripOptOutMonitor();
   for (const v of optOut) {
     if (v.level !== "ok") alerts.push(`optout_${v.level}:${v.campaign_id}`);
@@ -148,6 +172,58 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
     balanceThreshold,
     balanceFiring,
     lifecycle,
+    leadToSend,
     alerts,
   };
+}
+
+async function checkLeadToSend(alerts: string[]): Promise<DripMonitorResult["leadToSend"]> {
+  const out: DripMonitorResult["leadToSend"] = [];
+  if (!(await isPokeEnabled())) return out;
+  const orgs = (await db.execute(sql`
+    SELECT org_id FROM org_settings WHERE drip_enabled = true AND drip_poke_enabled = true
+  `)) as unknown as { org_id: string }[];
+  const to = new Date();
+  const from = new Date(to.getTime() - LEAD_TO_SEND_WINDOW_MIN * 60_000);
+  for (const { org_id: orgId } of orgs) {
+    const latency = await leadToSendLatency(db, { orgId, from, to });
+    const key = leadToSendAlertKey(orgId);
+    const p50 = latency.p50Sec;
+    if (latency.n < LEAD_TO_SEND_MIN_LEADS || p50 == null) {
+      out.push({ orgId, latency, verdict: "too_few" });
+      continue;
+    }
+    const s = latency.stepP50Sec;
+    const steps =
+      `lookup ${formatLatency(s.lookup)} · route ${formatLatency(s.route)} · ` +
+      `queue ${formatLatency(s.queue)} · send ${formatLatency(s.send)}`;
+    if (p50 > LEAD_TO_SEND_FIRE_SEC) {
+      alerts.push("lead_to_send_slow");
+      out.push({ orgId, latency, verdict: "fire" });
+      await notifyOnTransition(db, {
+        alertKey: key,
+        orgId,
+        text:
+          `🐢 Drip lead-to-send is slow: median ${formatLatency(p50)} (p95 ${formatLatency(latency.p95Sec)}) ` +
+          `over the last ${LEAD_TO_SEND_WINDOW_MIN} min, ${latency.n} leads. Hops: ${steps}. ` +
+          `The poke chain may be broken — leads are riding the cron ticks. Check the [poke] and ` +
+          `[lead-latency] log lines; turning drip_poke_enabled off changes nothing but speed.`,
+      });
+    } else if (p50 < LEAD_TO_SEND_RESOLVE_SEC) {
+      out.push({ orgId, latency, verdict: "resolve" });
+      // Announce recovery only when it actually was firing.
+      const prior = (await db.execute(sql`
+        SELECT state FROM alert_state WHERE alert_key = ${key}
+      `)) as unknown as { state: string }[];
+      if (prior[0]?.state === "firing" && (await transitionAlert(db, { alertKey: key, orgId, state: "ok" }))) {
+        await notifyTelegram(
+          `✅ Drip lead-to-send recovered: median ${formatLatency(p50)} over the last ` +
+            `${LEAD_TO_SEND_WINDOW_MIN} min (${latency.n} leads).`,
+        );
+      }
+    } else {
+      out.push({ orgId, latency, verdict: "hold" });
+    }
+  }
+  return out;
 }

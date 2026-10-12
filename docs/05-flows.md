@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-11_
+_Last updated: 2026-10-12_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -576,6 +576,48 @@ sequenceDiagram
     R->>TG: digest (compact or table; split by partner if long)<br/>+ warning line if the invariant broke
   end
   R->>DB: watches (stall / unjoinable / missed)
+```
+
+## L3. Drip lead → first message, poke chain (0206)
+
+With `org_settings.drip_poke_enabled` on, each step wakes the next instead of
+waiting for its cron tick. Every arrow marked *poke* is optional: if it is lost
+or refused, that step's own cron tick (unchanged, right column) does the same
+work later. Every run takes the job's existing `cron_locks` lease, so a poked
+run and a cron run never overlap. See
+[04-features/drip-poke-chain.md](04-features/drip-poke-chain.md).
+
+```mermaid
+sequenceDiagram
+  participant P as Partner
+  participant I as intake API
+  participant E as lead-enrichment<br/>(cron * * * * *)
+  participant L as lookup-worker<br/>(cron */2)
+  participant R as drip-routing<br/>(cron * * * * *)
+  participant S as drip-scheduler<br/>(cron * * * * *)
+  participant D as drip-drain = send-scheduled<br/>(cron */5)
+  participant DB as cron_locks
+  participant TX as SMS provider
+
+  P->>I: POST lead
+  I->>I: store lead_inbox (received_at)
+  I-->>P: 202
+  I->>DB: requestPoke(lead-enrichment)<br/>stamp poke_requested_at; dispatch only if lease free<br/>and no wake-up already in flight
+  I-)E: poke (GET + CRON_SECRET + x-camman-poke) → 202, work in after()
+  E->>E: withCronLease: pass 1 — cache miss → enqueue lookup
+  E-)L: poke (lookupsEnqueued > 0)
+  L->>L: runLookupWorker (own lease, rps pacing, caps)
+  L-)E: poke (processed > 0)
+  E->>E: pass 2 — contact + lead_events (processed_at)
+  E-)R: poke (processed > 0)
+  R->>R: runDripRoutingBatch → drip_journeys (routed_at)
+  R-)S: poke (routed > 0)
+  S->>S: runDripSchedulerBatch → mint + gate + pending stage_sends<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)
+  S-)D: poke (inserted > 0)
+  D->>D: runScheduledSends dripOnly (no Phase A, drip stages only)<br/>per-phone lease, pending→sending claim, 1-h dedup
+  D->>TX: send (sent_at)
+  Note over E,D: A poke that meets a held lease only records poke_requested_at —<br/>the holder re-runs (≥ 5 s after its last start) before releasing.
+  Note over S: cron run only: [lead-latency] per-minute line,<br/>heartbeats (pokes never stamp them)
 ```
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)

@@ -2,6 +2,48 @@
 
 _Last updated: 2026-10-12_
 
+## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
+
+The drip poke chain ([04-features/drip-poke-chain.md](04-features/drip-poke-chain.md), migration
+`0206`) wakes pipeline steps early. Its rules hold for any future "wake X sooner" work:
+
+- **Same lease key as the cron.** A poked run goes through `runLeasedJob(job, …)`, i.e. `withCronLease`
+  on the cron's own `cron_locks` key, so it can never overlap a cron run. Never add a poke path that
+  calls the step's lib function without that lease. The unleased path is the manual operator trigger
+  only, and pokes never use it.
+- **Same function, same arguments.** A poked routing or scheduler run is `runDripRoutingBatch` /
+  `runDripSchedulerBatch` itself. No "fast path", no skipped gate, no cached campaign list. Only the
+  trigger and the time budget (`deadlineMs`) may differ.
+- **The cron tick is the safety net.** `requestPoke` never throws and nothing waits on it. If a poke
+  fails, the only cost is latency. Do not change a cron schedule on the strength of pokes.
+- **Pokes never stamp heartbeats.** Heartbeats prove the CRON is alive. A poke stamping one would
+  hide a dead schedule behind live traffic.
+- **A poked drain is drip-only (`runScheduledSends({ dripOnly: true })`).** `max_sends_per_run` is a
+  per-RUN budget, so draining regular stages more often silently raises their send rate. A regular
+  stage is drained by the 5-minute tick only.
+- **Spaced and coalesced.** At most one wake-up in flight per job (`poke_dispatched_at`), and runs at
+  least `POKE_MIN_GAP_MS` apart (`last_run_started_at`). A request that meets a held lease is a
+  re-run request for the holder, not a second run.
+
+## ⭐ A first-send stamp that updates zero rows rolls the send back (2026-10-12)
+
+In `runDripSchedulerBatch` the `UPDATE drip_journeys … WHERE first_send_at IS NULL RETURNING id` is
+the commit point of a lead's first message. Zero rows means another run already queued it.
+`JourneyAlreadyQueued` is then thrown inside the transaction, so the minted link and the
+`stage_sends` row roll back with it. A conditional UPDATE whose row count is ignored is not a guard,
+because the INSERT beside it still commits. `stage_sends_active_contact_uniq` does not cover this
+case: it only sees pending/sending rows of the same stage, and the other run may have used a
+different stage or already sent.
+
+## ⭐ Lead-to-send has ONE definition: routed on arrival (2026-10-12)
+
+`leadToSendLatency` ([lib/drip/lead-latency.ts](../lib/drip/lead-latency.ts)) feeds the alert, the
+per-minute `[lead-latency]` line, the hourly digest line and `scripts/lead-to-send-latency.ts`. It
+counts only leads with `carried_days = 0` and `lead_events.drip_recheck_at IS NULL`. A lead that
+waited on a paused or capped campaign waited by design, and counting it would make an
+infrastructure alert fire on a business setting. Reuse this function; don't write a second
+lead-to-send query.
+
 ## ⭐ Drip admission `widened_at` is trigger-stamped; a raise drops, never revives (2026-10-12)
 
 `drip_campaign_configs.admission_widened_at` and `org_settings.drip_admission_widened_at` are stamped

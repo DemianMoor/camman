@@ -229,6 +229,7 @@ Auto-generated, **immutable**, structured identifiers separate from the internal
 - When asked to build a new entity (e.g., "build Offers"), look at the existing Brands implementation and follow its patterns exactly. Do not invent new patterns without asking.
 - When a request is ambiguous, ASK rather than guess.
 - Never modify files outside `/c/AFF/camman` (i.e., `C:\AFF\camman`).
+- Never create folders outside C:\AFF\camman. Worktrees go only in C:\AFF\camman\.claude\worktrees\.
 - Never commit `.env.local` or any file containing secrets.
 - Never log secrets. Never include secrets in error messages.
 - Before any destructive operation (DROP TABLE, hard DELETE, force-push), ask for explicit confirmation.

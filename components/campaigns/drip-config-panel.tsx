@@ -211,6 +211,16 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   const num = (v: string) => (v.trim() === "" ? null : Number(v));
 
   const save = async () => {
+    let carryDays: number | null = carryMode === "" ? null : Number(carryMode);
+    if (carryMode === "n") {
+      const t = carryN.trim();
+      const n = Number(t);
+      if (!/^\d+$/.test(t) || n < 2 || n > MAX_CARRY_DAYS) {
+        toast.error(`N must be a whole number from 2 to ${MAX_CARRY_DAYS}`);
+        return;
+      }
+      carryDays = n;
+    }
     const r = await saveApi.execute(`/api/campaigns/${campaignId}/drip-config`, {
       method: "PUT",
       body: JSON.stringify({
@@ -222,7 +232,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
         routing_daily_admission_cap: num(admissionCap),
         daily_cap: num(dailyCap),
         admission_cutoff_minutes: cutoff.trim() === "" ? null : Number(cutoff),
-        carry_days: carryMode === "" ? null : carryMode === "n" ? Number(carryN) : Number(carryMode),
+        carry_days: carryDays,
       }),
     });
     if (!r.ok) return toastApiError(r);

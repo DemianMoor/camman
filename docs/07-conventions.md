@@ -22,7 +22,8 @@ UPDATE that NULLs or backdates a stamp silently keeps the old value. A drip camp
 active/paused (from draft/completed/archived) also stamps its config. **Escape hatch — TEST-ONLY:**
 `camman.allow_widened_backdate = 'on'` disables the guard, and must only ever be set transaction-locally
 (`SET LOCAL` or `set_config('camman.allow_widened_backdate', 'on', true)` inside a transaction) by test
-fixtures that backdate a stamp. Never set it in app code, a session, or a migration.
+fixtures that backdate a stamp. Never set it in app code, a session, or a migration. It is an accident
+barrier, not a security control: any role that can UPDATE the table can also set a custom GUC.
 
 ## An oldest-first work queue must never keep rows it cannot act on (2026-10-11)
 

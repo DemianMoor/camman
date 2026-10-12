@@ -266,7 +266,9 @@ expired before it existed.
 keep `GREATEST(OLD, NEW)`: setting a stamp to NULL or to an earlier time keeps the old value, so
 already-skipped leads can never become admissible again. Test fixtures that must backdate a stamp set
 the test-only escape hatch `camman.allow_widened_backdate = 'on'` with `SET LOCAL` / `set_config(…, true)`
-inside a transaction ([07-conventions.md](../07-conventions.md)).
+inside a transaction ([07-conventions.md](../07-conventions.md)). A stamp set into the FUTURE by mistake is
+accepted and sticks (every lead before it gets window 0 — over-restrictive, never unsafe); correct it with the
+same hatch inside a transaction: `BEGIN; SET LOCAL camman.allow_widened_backdate = 'on'; UPDATE …; COMMIT;`.
 
 **Entering active/paused stamps (0205).** A drip campaign moving INTO active or paused from draft,
 completed or archived gets `admission_widened_at = now()` (trigger `campaigns_drip_status_widened`), because

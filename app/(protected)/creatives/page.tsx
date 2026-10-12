@@ -117,11 +117,15 @@ type Creative = {
   // (messages sent for CTR; clean clicks for the rest) is 0.
   metrics: {
     delivered: number;
-    // CTR's own counts — counted clickers ÷ messages sent, from the hourly
+    // CTR's own counts — clickers (the Overview tab's count) ÷ messages sent, from the hourly
     // snapshot (lib/creatives/ctr-rollup.ts), not clean_clicks / delivered.
     sent: number;
     ctr_clickers: number;
     clean_clicks: number;
+    // Clickers counted the Overview tab's way (Keitaro clean visits, CamMan
+    // substitute on a tracking gap): the Checkout Rate / Sales CR denominator.
+    // clean_clicks (counted clickers) stays the EPC denominator.
+    clickers: number;
     checkouts: number;
     sales: number;
     payout: number;
@@ -953,7 +957,7 @@ export default function CreativesPage() {
             <MetricCell
               value={m.checkout_rate}
               format={formatPercent}
-              title={`${numberFmt.format(m.checkouts)} checkouts / ${numberFmt.format(m.clean_clicks)} clean clicks (30d)`}
+              title={`${numberFmt.format(m.checkouts)} checkouts / ${numberFmt.format(m.clickers)} clickers (30d)`}
             />
           );
         },
@@ -1025,7 +1029,7 @@ export default function CreativesPage() {
             <MetricCell
               value={m.sales_cr}
               format={formatPercent}
-              title={`${numberFmt.format(m.sales)} sales / ${numberFmt.format(m.clean_clicks)} clean clicks (30d)`}
+              title={`${numberFmt.format(m.sales)} sales / ${numberFmt.format(m.clickers)} clickers (30d)`}
             />
           );
         },

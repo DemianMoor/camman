@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { readCreativeCtr } from "@/lib/creatives/ctr-rollup";
+import { overviewStageClickersSql, readCreativeCtr } from "@/lib/creatives/ctr-rollup";
 import { eventNum, type DbOrTx, type EventCountMap } from "@/lib/reporting/event-columns";
 
 // Per-creative 30-day performance metrics, cached in memory.
@@ -43,6 +43,12 @@ export interface CreativeMetricsRow {
   sales: number;
   payout: number;
   manual_clean: number;
+  // The Checkout Rate / Sales CR denominator: clickers counted the way the
+  // Overview tab counts them — per stage, Keitaro clean landing visits, or
+  // CamMan's counted clickers for a tracked stage Keitaro has no visits for
+  // (overviewStageClickersSql); manual stages' click_count. Same 30-day stage
+  // set as checkouts/sales. EPC keeps manual_clean + tracked_clean, as Overview.
+  visit_clickers: number;
   tracked_clean: number;
   // LIFETIME pair — no 30-day bound. Shown alongside the 30-day figure so a
   // creative's full history is visible when choosing one, WITHOUT changing the
@@ -110,6 +116,7 @@ const noActivity = (
   sales: 0,
   payout: 0,
   manual_clean: 0,
+  visit_clickers: 0,
   tracked_clean: 0,
   lifetime_payout: 0,
   lifetime_clean: 0,
@@ -190,7 +197,9 @@ export async function computeCreativeMetrics(
              -- It rides k_stage rather than a CTE of its own so it is bounded by
              -- whichever window the consuming CTE applies — the residual can
              -- never describe a different period from the counts it qualifies.
-             sum(unmapped_conversions)::int AS unmapped
+             sum(unmapped_conversions)::int AS unmapped,
+             sum(visit_clicks_raw)::int   AS visits_raw,
+             sum(visit_clicks_clean)::int AS visits_clean
         FROM keitaro_stage_results
        WHERE org_id = ${orgId}
        GROUP BY stage_id
@@ -253,6 +262,15 @@ export async function computeCreativeMetrics(
         ) x
        GROUP BY x.creative_id, x.ok
     ),
+    -- Counted clickers per stage, all time: the substitute in visit_clickers
+    -- for a tracked stage Keitaro has no visits for. (stage_id, contact_id) is
+    -- the table's PK, so count(*) is distinct.
+    cc_stage AS (
+      SELECT stage_id, count(*)::int AS n
+        FROM counted_clickers
+       WHERE org_id = ${orgId}
+       GROUP BY stage_id
+    ),
     stage_agg AS (
       SELECT cs.creative_id, ${OK_SELECT},
              coalesce(sum(cs.delivered_count), 0)::int AS delivered,
@@ -270,10 +288,14 @@ export async function computeCreativeMetrics(
              -- two cannot describe different stages. No second pass: the same
              -- row carries the manual tally and the tracker count.
              coalesce(sum(greatest(cs.sales_count - coalesce(ks.sales, 0), 0)), 0)::int AS manual_topup,
-             coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS manual_clean
+             coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS manual_clean,
+             coalesce(sum(CASE WHEN c.link_mode = 'tracked'
+                               THEN ${overviewStageClickersSql({ visitsRaw: "ks.visits_raw", visitsClean: "ks.visits_clean", counted: "ccs.n", sentAt: "cs.sent_at" })}
+                               ELSE cs.click_count END), 0)::int AS visit_clickers
         FROM campaign_stages cs
         JOIN campaigns c ON c.id = cs.campaign_id
         LEFT JOIN k_stage ks ON ks.stage_id = cs.id
+        LEFT JOIN cc_stage ccs ON ccs.stage_id = cs.id
        WHERE cs.org_id = ${orgId}
          AND cs.creative_id IS NOT NULL
          AND cs.created_at >= now() - interval '30 days'
@@ -334,6 +356,7 @@ export async function computeCreativeMetrics(
            coalesce(s.sales, 0)          AS sales,
            coalesce(s.payout, 0)         AS payout,
            coalesce(s.manual_clean, 0)   AS manual_clean,
+           coalesce(s.visit_clickers, 0) AS visit_clickers,
            coalesce(k.tracked_clean, 0)  AS tracked_clean,
            coalesce(sl.lifetime_payout, 0) AS lifetime_payout,
            (coalesce(sl.lifetime_manual, 0) + coalesce(kl.lifetime_tracked, 0)) AS lifetime_clean,
@@ -370,6 +393,7 @@ export async function computeCreativeMetrics(
       sales: Number(r.sales ?? 0),
       payout: Number(r.payout ?? 0),
       manual_clean: Number(r.manual_clean ?? 0),
+      visit_clickers: Number(r.visit_clickers ?? 0),
       tracked_clean: Number(r.tracked_clean ?? 0),
       lifetime_payout: Number(r.lifetime_payout ?? 0),
       lifetime_clean: Number(r.lifetime_clean ?? 0),

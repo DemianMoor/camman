@@ -18,6 +18,13 @@ import { computeCreativeMetrics, type CreativeMetricsRow } from "@/lib/creatives
 //   - a 40-day-old X stage feeds only X's and the total's lifetime numbers.
 // Creative M runs only on Y, so it has no X row (→ "—" under an X filter).
 //
+// Clickers for CTR / Checkout Rate / Sales CR are the Overview tab's: per stage,
+// Keitaro clean visits, or CamMan counted clickers for a tracked stage with no
+// Keitaro visits that is past the 6-hour maturity gate. sY has no visits (→ its
+// 1 counted clicker); sYoung has none either but was sent 1 hour ago (→ 0);
+// sOld's visits are dated 40 days ago (lifetime only). EPC stays on counted
+// clickers (tracked_clean / lifetime_clean).
+//
 // Run: npx tsx --env-file=C:/AFF/camman/.env.demo scripts/test-creative-metrics-per-offer-db.ts
 
 const ORG_ID = "ad37fb88-497f-4cd1-89d1-bd3dfec1ddbc"; // CamMan Demo (preview)
@@ -67,21 +74,28 @@ async function main() {
       const stage = async (a: {
         campaignId: number; creativeId: number; ageDays: number; checkouts: number;
         manualSales: number; kSales: number; kRevenue: number;
+        visitsRaw?: number; visitsClean?: number;
       }) => {
+        const ageHours = a.ageDays * 24;
         const id = await one(tx, sql`
           INSERT INTO campaign_stages
             (org_id, campaign_id, stage_number, creative_id, created_at, sent_at,
              checkout_click_count, sales_count)
           VALUES (${ORG_ID}::uuid, ${a.campaignId}, ${++stageNo}, ${a.creativeId},
-                  now() - (${a.ageDays} || ' days')::interval,
-                  now() - (${a.ageDays} || ' days')::interval,
+                  now() - (${ageHours} || ' hours')::interval,
+                  now() - (${ageHours} || ' hours')::interval,
                   ${a.checkouts}, ${a.manualSales})
           RETURNING id`);
+        // stat_date = the stage's own ET send day, so an old stage's visits fall
+        // outside the 7/30-day windows.
         await tx.execute(sql`
           INSERT INTO keitaro_stage_results
-            (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, sales, revenue, events)
+            (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, sales, revenue, events,
+             visit_clicks_raw, visit_clicks_clean)
           VALUES (${ORG_ID}::uuid, ${a.campaignId}, ${id}, ${`${PROBE}-s${id}`},
-                  current_date, ${a.kSales}, ${String(a.kRevenue)}, '{}'::jsonb)`);
+                  ((now() - (${ageHours} || ' hours')::interval) AT TIME ZONE 'America/New_York')::date,
+                  ${a.kSales}, ${String(a.kRevenue)}, '{}'::jsonb,
+                  ${a.visitsRaw ?? 0}, ${a.visitsClean ?? 0})`);
         return { id, campaignId: a.campaignId, ageDays: a.ageDays };
       };
       type St = Awaited<ReturnType<typeof stage>>;
@@ -104,16 +118,19 @@ async function main() {
       const M = await creative("m");
       const [a, b, c, d] = [await contact(1), await contact(2), await contact(3), await contact(4)];
 
-      const sX = await stage({ campaignId: cX, creativeId: K, ageDays: 2, checkouts: 5, manualSales: 1, kSales: 2, kRevenue: 40 });
+      const sX = await stage({ campaignId: cX, creativeId: K, ageDays: 2, checkouts: 5, manualSales: 1, kSales: 2, kRevenue: 40, visitsRaw: 12, visitsClean: 10 });
       const sY = await stage({ campaignId: cY, creativeId: K, ageDays: 2, checkouts: 3, manualSales: 0, kSales: 1, kRevenue: 10 });
-      const sN = await stage({ campaignId: cN, creativeId: K, ageDays: 2, checkouts: 2, manualSales: 0, kSales: 4, kRevenue: 100 });
-      const sOld = await stage({ campaignId: cX, creativeId: K, ageDays: 40, checkouts: 100, manualSales: 0, kSales: 7, kRevenue: 70 });
+      const sN = await stage({ campaignId: cN, creativeId: K, ageDays: 2, checkouts: 2, manualSales: 0, kSales: 4, kRevenue: 100, visitsRaw: 6, visitsClean: 5 });
+      const sOld = await stage({ campaignId: cX, creativeId: K, ageDays: 40, checkouts: 100, manualSales: 0, kSales: 7, kRevenue: 70, visitsRaw: 3, visitsClean: 3 });
+      const sYoung = await stage({ campaignId: cX, creativeId: K, ageDays: 1 / 24, checkouts: 0, manualSales: 0, kSales: 0, kRevenue: 0 });
       await stage({ campaignId: cY, creativeId: M, ageDays: 2, checkouts: 1, manualSales: 0, kSales: 0, kRevenue: 0 });
 
       for (const x of [a, b, c]) await send(sX, x);
       for (const x of [a, d]) await send(sY, x);
       await send(sN, b);
       await send(sOld, a);
+      await send(sYoung, d);
+      await click(sYoung, d);
       await click(sX, a);
       await click(sX, b);
       await click(sY, a);
@@ -134,16 +151,20 @@ async function main() {
         });
       };
       expectRow("K all offers: 30d sums over X+Y+no-offer, clickers a,b counted once", get(K, null), {
-        checkouts: 10, sales: 7, payout: 150, tracked_clean: 2,
-        lifetime_clean: 3, lifetime_sales: 14, lifetime_payout: 220,
+        checkouts: 10, sales: 7, payout: 150, tracked_clean: 3,
+        lifetime_clean: 4, lifetime_sales: 14, lifetime_payout: 220,
+        // sX 10 visits + sY 1 substitute + sN 5 visits + sYoung 0 (too new)
+        visit_clickers: 16,
       });
       expectRow("K offer X: only X stages; lifetime includes the 40-day stage", get(K, OFFER_X), {
-        checkouts: 5, sales: 2, payout: 40, tracked_clean: 2,
-        lifetime_clean: 3, lifetime_sales: 9, lifetime_payout: 110,
+        checkouts: 5, sales: 2, payout: 40, tracked_clean: 3,
+        lifetime_clean: 4, lifetime_sales: 9, lifetime_payout: 110,
+        visit_clickers: 10,
       });
       expectRow("K offer Y: only Y stages", get(K, OFFER_Y), {
         checkouts: 3, sales: 1, payout: 10, tracked_clean: 1,
         lifetime_clean: 1, lifetime_sales: 1, lifetime_payout: 10,
+        visit_clickers: 1,
       });
       check(
         "K: exactly three grains (all, X, Y) — the no-offer campaign has no row of its own",
@@ -166,13 +187,15 @@ async function main() {
         const diffs = Object.entries(want).filter(([k, v]) => got?.[k] !== v);
         check(label, got !== undefined && diffs.length === 0, { got, want });
       };
-      expectCtr("K all offers: 6 sent in 30d (7 all time), clickers a,b once (2; 3 all time)", K, null, {
-        sent_7d: 6, clicks_7d: 2, sent_30d: 6, clicks_30d: 2, sent_lifetime: 7, clicks_lifetime: 3,
+      // Overview clickers per stage: sX 10 · sY 1 (substitute) · sN 5 · sYoung 0
+      // (too new to substitute) · sOld 3 visits dated 40 days ago (lifetime only).
+      expectCtr("K all offers: 7 sent / 16 clickers in 30d; 8 sent / 19 all time", K, null, {
+        sent_7d: 7, clicks_7d: 16, sent_30d: 7, clicks_30d: 16, sent_lifetime: 8, clicks_lifetime: 19,
       });
-      expectCtr("K offer X: 3 sent in 30d (4 all time), clickers a,b (+c all time)", K, OFFER_X, {
-        sent_7d: 3, clicks_7d: 2, sent_30d: 3, clicks_30d: 2, sent_lifetime: 4, clicks_lifetime: 3,
+      expectCtr("K offer X: 4 sent / 10 clickers in 30d; 5 / 13 all time", K, OFFER_X, {
+        sent_7d: 4, clicks_7d: 10, sent_30d: 4, clicks_30d: 10, sent_lifetime: 5, clicks_lifetime: 13,
       });
-      expectCtr("K offer Y: 2 sent, 1 clicker", K, OFFER_Y, {
+      expectCtr("K offer Y: 2 sent, 1 clicker (CamMan substitute — no Keitaro visits)", K, OFFER_Y, {
         sent_7d: 2, clicks_7d: 1, sent_30d: 2, clicks_30d: 1, sent_lifetime: 2, clicks_lifetime: 1,
       });
       check(

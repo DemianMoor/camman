@@ -56,14 +56,16 @@ async function main() {
       const stages = (await tx.execute(sql`
         SELECT cs.id, cs.creative_id, cs.sms_count, cs.click_count, c.link_mode,
                coalesce(c.offer_id, 0) AS offer_key,
-               coalesce(cs.sent_at >= now() - interval '7 days', false) AS in_7d,
-               coalesce(cs.sent_at >= now() - interval '30 days', false) AS in_30d,
+               coalesce(cs.sent_at <= now() - interval '6 hours', false) AS mature,
+               coalesce(cs.sent_at >= (((now() AT TIME ZONE 'America/New_York')::date - 6)::timestamp AT TIME ZONE 'America/New_York'), false) AS in_7d,
+               coalesce(cs.sent_at >= (((now() AT TIME ZONE 'America/New_York')::date - 29)::timestamp AT TIME ZONE 'America/New_York'), false) AS in_30d,
                (cs.sent_at IS NOT NULL AND cs.archived_at IS NULL) AS in_report
         FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
         WHERE cs.org_id = ${orgId}::uuid`)) as unknown as {
         id: number;
         creative_id: number | null;
         offer_key: number;
+        mature: boolean;
         sms_count: number;
         click_count: number;
         link_mode: string;
@@ -73,22 +75,35 @@ async function main() {
       }[];
       const sendRows = (await tx.execute(sql`
         SELECT stage_id,
-               count(*) FILTER (WHERE sent_at >= now() - interval '7 days')::int AS d7,
-               count(*) FILTER (WHERE sent_at >= now() - interval '30 days')::int AS d30,
+               count(*) FILTER (WHERE sent_at >= (((now() AT TIME ZONE 'America/New_York')::date - 6)::timestamp AT TIME ZONE 'America/New_York'))::int AS d7,
+               count(*) FILTER (WHERE sent_at >= (((now() AT TIME ZONE 'America/New_York')::date - 29)::timestamp AT TIME ZONE 'America/New_York'))::int AS d30,
                count(*)::int AS life
         FROM stage_sends
         WHERE org_id = ${orgId}::uuid AND status = 'sent'
         GROUP BY stage_id`)) as unknown as { stage_id: number; d7: number; d30: number; life: number }[];
       const clickRows = (await tx.execute(sql`
         SELECT stage_id, contact_id,
-               coalesce(first_click_at >= now() - interval '7 days', false) AS in_7d,
-               coalesce(first_click_at >= now() - interval '30 days', false) AS in_30d
+               coalesce(first_click_at >= (((now() AT TIME ZONE 'America/New_York')::date - 6)::timestamp AT TIME ZONE 'America/New_York'), false) AS in_7d,
+               coalesce(first_click_at >= (((now() AT TIME ZONE 'America/New_York')::date - 29)::timestamp AT TIME ZONE 'America/New_York'), false) AS in_30d
         FROM counted_clickers
         WHERE org_id = ${orgId}::uuid`)) as unknown as {
         stage_id: number;
         contact_id: string;
         in_7d: boolean;
         in_30d: boolean;
+      }[];
+      // Keitaro clean/raw landing visits per stage and window (stat_date = ET day).
+      const visitRows = (await tx.execute(sql`
+        SELECT stage_id, stat_date > (now() AT TIME ZONE 'America/New_York')::date - 7 AS in_7d,
+               stat_date > (now() AT TIME ZONE 'America/New_York')::date - 30 AS in_30d,
+               visit_clicks_raw AS raw, visit_clicks_clean AS clean
+        FROM keitaro_stage_results
+        WHERE org_id = ${orgId}::uuid`)) as unknown as {
+        stage_id: number;
+        in_7d: boolean;
+        in_30d: boolean;
+        raw: number;
+        clean: number;
       }[];
       console.log(
         `    ${stages.length} stages, ${sendRows.length} stages with sends, ${clickRows.length} counted-clicker rows`,
@@ -136,27 +151,44 @@ async function main() {
           }
         }
       }
-      const contacts = new Map<string, [Set<string>, Set<string>, Set<string>]>();
-      for (const r of clickRows) {
-        const s = stageById.get(r.stage_id);
-        if (!s?.creative_id) continue;
-        for (const k of keysOf({ creative_id: s.creative_id, offer_key: s.offer_key })) {
-          acc(k);
-          let sets = contacts.get(k);
-          if (!sets) {
-            sets = [new Set(), new Set(), new Set()];
-            contacts.set(k, sets);
-          }
-          if (r.in_7d) sets[0].add(r.contact_id);
-          if (r.in_30d) sets[1].add(r.contact_id);
-          sets[2].add(r.contact_id);
-        }
+      // Tracked stages: the Overview tab's clickers, per stage and window —
+      // Keitaro clean visits, or the stage's counted clickers when Keitaro has
+      // no visits (raw AND clean 0) and the stage is past the 6 h maturity gate.
+      type W = { raw: number; clean: number; counted: number };
+      const zero = (): [W, W, W] => [
+        { raw: 0, clean: 0, counted: 0 },
+        { raw: 0, clean: 0, counted: 0 },
+        { raw: 0, clean: 0, counted: 0 },
+      ];
+      const perStage = new Map<number, [W, W, W]>(); // [7d, 30d, lifetime]
+      const slot = (id: number) => {
+        let w = perStage.get(id);
+        if (!w) perStage.set(id, (w = zero()));
+        return w;
+      };
+      for (const r of visitRows) {
+        const w = slot(r.stage_id);
+        const add = (x: W) => { x.raw += Number(r.raw); x.clean += Number(r.clean); };
+        if (r.in_7d) add(w[0]);
+        if (r.in_30d) add(w[1]);
+        add(w[2]);
       }
-      for (const [creativeId, [d7, d30, life]] of contacts) {
-        const c = truth.get(creativeId)!;
-        c.clicks_7d += d7.size;
-        c.clicks_30d += d30.size;
-        c.clicks_lifetime += life.size;
+      for (const r of clickRows) {
+        const w = slot(r.stage_id);
+        if (r.in_7d) w[0].counted++;
+        if (r.in_30d) w[1].counted++;
+        w[2].counted++;
+      }
+      for (const [stageId, [w7, w30, wl]] of perStage) {
+        const s = stageById.get(stageId);
+        if (!s?.creative_id || s.link_mode !== "tracked") continue;
+        const pick = (w: W) => (w.raw === 0 && w.clean === 0 && s.mature ? w.counted : w.clean);
+        for (const k of keysOf({ creative_id: s.creative_id, offer_key: s.offer_key })) {
+          const c = acc(k);
+          c.clicks_7d += pick(w7);
+          c.clicks_30d += pick(w30);
+          c.clicks_lifetime += pick(wl);
+        }
       }
 
       const snapById = new Map(
@@ -199,7 +231,7 @@ async function main() {
         SELECT coalesce(sum(delivered_count), 0)::int AS delivered
         FROM campaign_stages
         WHERE org_id = ${orgId}::uuid AND creative_id IS NOT NULL
-          AND created_at >= now() - interval '30 days'`)) as unknown as { delivered: number }[];
+          AND created_at >= (((now() AT TIME ZONE 'America/New_York')::date - 29)::timestamp AT TIME ZONE 'America/New_York')`)) as unknown as { delivered: number }[];
       const sum = (f: keyof Counts) => snapshot.reduce((n, r) => n + r[f], 0);
       console.log(`    old 30-day denominator, Σ delivered_count: ${delivered}`);
       console.log(

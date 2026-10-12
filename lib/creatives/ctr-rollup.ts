@@ -2,8 +2,9 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import type { DbOrTx } from "@/lib/audience/pools";
+import { TRACKING_GAP_MATURITY_HOURS } from "@/lib/reporting/tracking-gap-rules";
 
-// Per-creative CTR — counted clickers ÷ messages sent — over the last 7 days,
+// Per-creative CTR — clickers ÷ messages sent — over the last 7 days,
 // the last 30 days and all time. Stored in operator_rollups and refreshed hourly
 // by /api/cron/refresh-creative-lifetime; read by lib/creatives/metrics-cache.ts
 // for the creatives list and the stage creative picker.
@@ -25,13 +26,51 @@ import type { DbOrTx } from "@/lib/audience/pools";
 // denominator climbs between refreshes and snaps back on each one, which reads
 // as a real trend. Both sides come from the same statement.
 //
-// Grain: the STAGE's creative on both sides. Windows: sends by
-// stage_sends.sent_at, clickers by counted_clickers.first_click_at, a contact
-// counted once per creative per window. Manual-mode stages write no stage_sends,
+// CLICKERS ARE THE OVERVIEW TAB'S (2026-10-12): per stage, Keitaro's clean
+// landing visits (keitaro_stage_results.visit_clicks_clean), summed over stages
+// — with CamMan's counted clickers standing in for a tracked stage Keitaro has
+// no visits for at all, once it is past the tracking-gap maturity gate. That is
+// shouldSubstituteClickers() in lib/reporting/tracking-gap-rules.ts, expressed
+// in SQL by overviewStageClickersSql() below. Until then this was CamMan's
+// counted clickers alone, which read ~1.35x higher than Overview's column.
+//
+// Grain: the STAGE's creative on both sides. Windows are the last 7 / 30 ET
+// calendar days including today, like an Overview date range: sends by
+// stage_sends.sent_at, Keitaro visits by stat_date, substitute clickers by
+// first_click_at. Manual-mode stages write no stage_sends,
 // so their sends are sms_count and their clicks the Keitaro click_count, dated by
 // the stage's sent_at — the same rule as lib/reporting/grading.ts.
 
 export const CREATIVE_CTR_ROLLUP_KEY = "creative_ctr";
+
+/**
+ * One stage's clicker count as the Overview tab shows it: Keitaro clean visits,
+ * or CamMan's counted clickers when Keitaro recorded no visits (raw AND clean
+ * zero) on a stage sent at least TRACKING_GAP_MATURITY_HOURS ago. SQL twin of
+ * shouldSubstituteClickers(); callers apply it to tracked stages only (manual
+ * campaigns mint no links). Args are SQL expressions; NULLs read as 0.
+ */
+export function overviewStageClickersSql(a: {
+  visitsRaw: string;
+  visitsClean: string;
+  counted: string;
+  sentAt: string;
+}) {
+  return sql.raw(`CASE
+      WHEN coalesce(${a.visitsRaw}, 0) = 0 AND coalesce(${a.visitsClean}, 0) = 0
+       AND ${a.sentAt} <= now() - interval '${TRACKING_GAP_MATURITY_HOURS} hours'
+      THEN coalesce(${a.counted}, 0)
+      ELSE coalesce(${a.visitsClean}, 0)
+    END`);
+}
+
+// ET day boundary for the Keitaro windows: stat_date is an ET calendar day.
+const ET_TODAY = `(now() AT TIME ZONE 'America/New_York')::date`;
+// Start of the window of the last n ET days including today, as a timestamptz —
+// so sends and clicks use the same calendar-day windows as stat_date (and as
+// the Overview tab's date range).
+const ET_WINDOW_START = (n: number) =>
+  sql.raw(`((${ET_TODAY} - ${n - 1})::timestamp AT TIME ZONE 'America/New_York')`);
 
 export interface CreativeCtrRow {
   creative_id: number;
@@ -68,30 +107,55 @@ export async function computeCreativeCtr(exec: DbOrTx, orgId: string): Promise<C
     ),
     sends AS (
       SELECT st.creative_id, ${OK_SELECT},
-             count(*) FILTER (WHERE ss.sent_at >= now() - interval '7 days') AS sent_7d,
-             count(*) FILTER (WHERE ss.sent_at >= now() - interval '30 days') AS sent_30d,
+             count(*) FILTER (WHERE ss.sent_at >= ${ET_WINDOW_START(7)}) AS sent_7d,
+             count(*) FILTER (WHERE ss.sent_at >= ${ET_WINDOW_START(30)}) AS sent_30d,
              count(*) AS sent_lifetime
         FROM stage_sends ss
         JOIN st ON st.id = ss.stage_id AND st.tracked
        WHERE ss.org_id = ${orgId}::uuid AND ss.status = 'sent'
        ${GROUP_BY}
     ),
+    -- Keitaro visits per stage and window (stat_date = ET day).
+    kv AS (
+      SELECT stage_id,
+             sum(visit_clicks_raw)   FILTER (WHERE stat_date > ${sql.raw(ET_TODAY)} - 7)  AS raw_7d,
+             sum(visit_clicks_clean) FILTER (WHERE stat_date > ${sql.raw(ET_TODAY)} - 7)  AS clean_7d,
+             sum(visit_clicks_raw)   FILTER (WHERE stat_date > ${sql.raw(ET_TODAY)} - 30) AS raw_30d,
+             sum(visit_clicks_clean) FILTER (WHERE stat_date > ${sql.raw(ET_TODAY)} - 30) AS clean_30d,
+             sum(visit_clicks_raw)   AS raw_life,
+             sum(visit_clicks_clean) AS clean_life
+        FROM keitaro_stage_results
+       WHERE org_id = ${orgId}::uuid
+       GROUP BY stage_id
+    ),
+    -- CamMan counted clickers per stage and window: the substitute only.
+    -- (stage_id, contact_id) is the table's PK, so count(*) is distinct.
+    ccs AS (
+      SELECT stage_id,
+             count(*) FILTER (WHERE first_click_at >= ${ET_WINDOW_START(7)})  AS n_7d,
+             count(*) FILTER (WHERE first_click_at >= ${ET_WINDOW_START(30)}) AS n_30d,
+             count(*) AS n_life
+        FROM counted_clickers
+       WHERE org_id = ${orgId}::uuid
+       GROUP BY stage_id
+    ),
     clicks AS (
       SELECT st.creative_id, ${OK_SELECT},
-             count(DISTINCT cc.contact_id) FILTER (WHERE cc.first_click_at >= now() - interval '7 days') AS clicks_7d,
-             count(DISTINCT cc.contact_id) FILTER (WHERE cc.first_click_at >= now() - interval '30 days') AS clicks_30d,
-             count(DISTINCT cc.contact_id) AS clicks_lifetime
-        FROM counted_clickers cc
-        JOIN st ON st.id = cc.stage_id
-       WHERE cc.org_id = ${orgId}::uuid
+             sum(${overviewStageClickersSql({ visitsRaw: "kv.raw_7d", visitsClean: "kv.clean_7d", counted: "ccs.n_7d", sentAt: "st.sent_at" })}) AS clicks_7d,
+             sum(${overviewStageClickersSql({ visitsRaw: "kv.raw_30d", visitsClean: "kv.clean_30d", counted: "ccs.n_30d", sentAt: "st.sent_at" })}) AS clicks_30d,
+             sum(${overviewStageClickersSql({ visitsRaw: "kv.raw_life", visitsClean: "kv.clean_life", counted: "ccs.n_life", sentAt: "st.sent_at" })}) AS clicks_lifetime
+        FROM st
+        LEFT JOIN kv ON kv.stage_id = st.id
+        LEFT JOIN ccs ON ccs.stage_id = st.id
+       WHERE st.tracked AND (kv.stage_id IS NOT NULL OR ccs.stage_id IS NOT NULL)
        ${GROUP_BY}
     ),
     manual AS (
       SELECT st.creative_id, ${OK_SELECT},
-             coalesce(sum(sms_count) FILTER (WHERE sent_at >= now() - interval '7 days'), 0) AS sent_7d,
-             coalesce(sum(click_count) FILTER (WHERE sent_at >= now() - interval '7 days'), 0) AS clicks_7d,
-             coalesce(sum(sms_count) FILTER (WHERE sent_at >= now() - interval '30 days'), 0) AS sent_30d,
-             coalesce(sum(click_count) FILTER (WHERE sent_at >= now() - interval '30 days'), 0) AS clicks_30d,
+             coalesce(sum(sms_count) FILTER (WHERE sent_at >= ${ET_WINDOW_START(7)}), 0) AS sent_7d,
+             coalesce(sum(click_count) FILTER (WHERE sent_at >= ${ET_WINDOW_START(7)}), 0) AS clicks_7d,
+             coalesce(sum(sms_count) FILTER (WHERE sent_at >= ${ET_WINDOW_START(30)}), 0) AS sent_30d,
+             coalesce(sum(click_count) FILTER (WHERE sent_at >= ${ET_WINDOW_START(30)}), 0) AS clicks_30d,
              coalesce(sum(sms_count), 0) AS sent_lifetime,
              coalesce(sum(click_count), 0) AS clicks_lifetime
         FROM st

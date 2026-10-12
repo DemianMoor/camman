@@ -509,24 +509,25 @@ async function getClickerDenominators(
 //
 // Keyed by the drip stages with a send or an opt-out in the window; the caller
 // seeds those that have no Keitaro row and no in-range sent_at.
-async function dripCostByStageInRange(
-  orgId: string,
+export async function dripCostByStageInRange(
+  orgId: string | null,
   fromUtc: Date,
   toExclusiveUtc: Date,
 ): Promise<Map<number, number>> {
+  // null = every org (the Telegram report has no session; see report-snapshot.ts).
+  const inOrg = (col: string) => (orgId ? sql`AND ${sql.raw(col)} = ${orgId}::uuid` : sql``);
   const rows = (await db.execute(sql`
     WITH ds AS (
       SELECT cs.id
       FROM campaign_stages cs
       JOIN campaigns c ON c.id = cs.campaign_id AND c.type = 'drip'
-      WHERE cs.org_id = ${orgId}::uuid AND cs.archived_at IS NULL
+      WHERE cs.archived_at IS NULL ${inOrg("cs.org_id")}
     ),
     sends AS (
       SELECT ss.stage_id, sum(COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0)) AS cost
       FROM stage_sends ss
       LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
-      WHERE ss.org_id = ${orgId}::uuid
-        AND ss.stage_id IN (SELECT id FROM ds)
+      WHERE ss.stage_id IN (SELECT id FROM ds) ${inOrg("ss.org_id")}
         AND ss.status = 'sent'
         AND ss.sent_at >= ${fromUtc.toISOString()}::timestamptz
         AND ss.sent_at < ${toExclusiveUtc.toISOString()}::timestamptz
@@ -537,8 +538,7 @@ async function dripCostByStageInRange(
       FROM opt_out_attributions oa
       JOIN stage_sends ss ON ss.id = oa.stage_send_id
       LEFT JOIN provider_phones pp ON pp.id = ss.provider_phone_id
-      WHERE oa.org_id = ${orgId}::uuid
-        AND oa.stage_id IN (SELECT id FROM ds)
+      WHERE oa.stage_id IN (SELECT id FROM ds) ${inOrg("oa.org_id")}
         AND oa.created_at >= ${fromUtc.toISOString()}::timestamptz
         AND oa.created_at < ${toExclusiveUtc.toISOString()}::timestamptz
       GROUP BY 1

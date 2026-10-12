@@ -1429,6 +1429,13 @@
       "when": 1794182400000,
       "tag": "0203_drip_admission_cutoff_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1794268800000,
+      "tag": "0204_drip_carry_over",
+      "breakpoints": true
     }
   ]
 }

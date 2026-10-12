@@ -24,11 +24,11 @@
 -- FKs. stage_id and partner_key_id are NO ACTION (owner asked for "not SET
 -- NULL": a SET NULL would fold a deleted stage's cells into the NULL lead row
 -- and a deleted key's into the Unattributed bucket under NULLS NOT DISTINCT).
--- NO ACTION rather than RESTRICT because RESTRICT is checked immediately and
--- would refuse a whole-campaign cascade that reaches a stage before its cells;
--- NO ACTION checks at end of statement, after campaign_id's CASCADE has removed
--- them. A lone stage/key delete that would orphan cells is still refused
--- (deleteStage already maps that 23503 to its 409). Same choice as 0197.
+-- NO ACTION (checked at end of statement) gives the refusal the owner asked
+-- for; a probe on the preview DB showed RESTRICT behaves identically here
+-- (a whole-campaign cascade succeeds under both, a lone stage/key delete is
+-- refused under both), so the repo's 0197 precedent was kept. deleteStage
+-- already maps that 23503 to its 409.
 --
 -- WRITER. Only the drip-daily-rollup cron and the one-off backfill script.
 --

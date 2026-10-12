@@ -5703,8 +5703,8 @@ export type DripJourney = typeof drip_journeys.$inferSelect;
 // campaign-level lead row; partner_key_id NULL on a stage row = sends that reach
 // no non-sandbox lead. Additive counters only — every ratio is computed at read
 // time. Written only by lib/reporting/drip-daily-rollup.ts (cron + backfill).
-// stage_id / partner_key_id are NO ACTION (see the migration header for why not
-// SET NULL and not RESTRICT).
+// stage_id / partner_key_id are NO ACTION, not SET NULL (see the migration
+// header).
 export const drip_daily_rollup = pgTable(
   "drip_daily_rollup",
   {

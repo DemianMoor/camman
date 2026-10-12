@@ -199,7 +199,7 @@ async function main() {
         });
 
         // ── THE READER UNDER TEST, on this transaction's connection ───────────
-        const rows = await computeCreativeMetrics(ORG_ID, tx);
+        const rows = (await computeCreativeMetrics(ORG_ID, tx)).filter((r) => r.offer_id === null);
         const byId = new Map<number, CreativeMetricsRow>(rows.map((r) => [r.creative_id, r]));
         const a = byId.get(crA);
         const b = byId.get(crB);
@@ -322,7 +322,7 @@ async function main() {
         let after: CreativeMetricsRow[] | null = null;
         let raised = "";
         try {
-          after = await computeCreativeMetrics(ORG_ID, tx);
+          after = (await computeCreativeMetrics(ORG_ID, tx)).filter((r) => r.offer_id === null);
         } catch (e) {
           raised = (e as { cause?: { code?: string } })?.cause?.code ?? String(e);
         }
@@ -368,7 +368,7 @@ async function main() {
         let afterVal: CreativeMetricsRow[] | null = null;
         let raisedVal = "";
         try {
-          afterVal = await computeCreativeMetrics(ORG_ID, tx);
+          afterVal = (await computeCreativeMetrics(ORG_ID, tx)).filter((r) => r.offer_id === null);
         } catch (e) {
           const c = (e as { cause?: { code?: string } })?.cause;
           raisedVal = c?.code ?? String(e);

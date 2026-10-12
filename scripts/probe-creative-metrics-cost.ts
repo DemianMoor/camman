@@ -8,7 +8,7 @@ async function main(){
   const c=postgres(process.env.DATABASE_URL!,{prepare:false,max:3}); const d=drizzle(c);
   const org=(await d.execute(sql`SELECT id FROM organizations LIMIT 1`)) as unknown as {id:string}[];
   const t=[] as number[];
-  for (let i=0;i<3;i++){ const s=Date.now(); const rows=await computeCreativeMetrics(org[0].id); t.push(Date.now()-s);
+  for (let i=0;i<3;i++){ const s=Date.now(); const rows=(await computeCreativeMetrics(org[0].id)).filter(r=>r.offer_id===null); t.push(Date.now()-s);
     if(i===0){ const withLife=rows.filter(r=>r.lifetime_clean>0);
       console.log(`rows=${rows.length}, with lifetime clickers=${withLife.length}`);
       const ex=rows.filter(r=>r.lifetime_clean>r.tracked_clean+r.manual_clean).slice(0,4);

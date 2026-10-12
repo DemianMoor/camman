@@ -33,6 +33,11 @@ import { eventNum, type DbOrTx, type EventCountMap } from "@/lib/reporting/event
 // better than today, where EVERY request pays it.
 export interface CreativeMetricsRow {
   creative_id: number;
+  // null = the creative across ALL offers; a number = only the stages whose
+  // campaign ran that offer (campaigns.offer_id). Both grains come out of one
+  // GROUPING SETS pass, so a clicker who saw the creative under two offers is
+  // counted once in the null row and once in each offer row — never summed.
+  offer_id: number | null;
   delivered: number;
   checkouts: number;
   sales: number;
@@ -94,8 +99,12 @@ export interface CreativeMetricsRow {
 // `events` on it, every zero row would alias the SAME map and one consumer's
 // mutation would silently become everyone's (exactly the aliasing bug
 // EMPTY_TALLY's freeze exists to stop — lib/reporting/event-columns.ts).
-const noActivity = (creative_id: number): CreativeMetricsRow => ({
+const noActivity = (
+  creative_id: number,
+  offer_id: number | null,
+): CreativeMetricsRow => ({
   creative_id,
+  offer_id,
   delivered: 0,
   checkouts: 0,
   sales: 0,
@@ -145,6 +154,20 @@ const cache = new Map<string, Entry>();
 // In-flight computes, so N concurrent requests on one instance trigger ONE query
 // instead of N. Cleared in a finally so a failure can be retried immediately.
 const inFlight = new Map<string, Promise<CreativeMetricsRow[]>>();
+
+// Per-offer grain. A stage's offer is its campaign's offer (alias `c` in every
+// CTE below). `ok` is the offer key every CTE carries: -1 for the all-offers
+// row, the offer id otherwise, and 0 for a campaign with no offer (dropped at
+// the end — no filter selects it). -1 rather than NULL so the joins between
+// CTEs stay plain hashable equalities.
+const OFFER_EXPR = sql.raw(`coalesce(c.offer_id, 0)`);
+const OK_SELECT = sql`CASE WHEN GROUPING(${OFFER_EXPR}) = 1 THEN -1 ELSE ${OFFER_EXPR} END AS ok`;
+const groupByCreativeAndOffer = (creativeCol: string, extra = "") => {
+  const cols = extra ? `${creativeCol}, ${extra}` : creativeCol;
+  return sql.raw(
+    `GROUP BY GROUPING SETS ((${cols}), (${cols}, coalesce(c.offer_id, 0)))`,
+  );
+};
 
 // The two aggregates the list endpoint used to LEFT JOIN inline, combined into a
 // single round trip. FULL OUTER JOIN because a creative can have stage activity
@@ -217,20 +240,21 @@ export async function computeCreativeMetrics(
     -- checkouts. If the two windows differ the columns describe different
     -- periods and the comparison they exist to enable is meaningless. Bar C3.
     creative_ev AS (
-      SELECT x.creative_id, jsonb_object_agg(x.event_key, x.n) AS events
+      SELECT x.creative_id, x.ok, jsonb_object_agg(x.event_key, x.n) AS events
         FROM (
-          SELECT cs.creative_id, ke.event_key, sum(ke.n)::int AS n
+          SELECT cs.creative_id, ${OK_SELECT}, ke.event_key, sum(ke.n)::int AS n
             FROM k_stage_ev ke
             JOIN campaign_stages cs ON cs.id = ke.stage_id
+            JOIN campaigns c ON c.id = cs.campaign_id
            WHERE cs.org_id = ${orgId}
              AND cs.creative_id IS NOT NULL
              AND cs.created_at >= now() - interval '30 days'
-           GROUP BY 1, 2
+           ${groupByCreativeAndOffer("cs.creative_id", "ke.event_key")}
         ) x
-       GROUP BY x.creative_id
+       GROUP BY x.creative_id, x.ok
     ),
     stage_agg AS (
-      SELECT cs.creative_id,
+      SELECT cs.creative_id, ${OK_SELECT},
              coalesce(sum(cs.delivered_count), 0)::int AS delivered,
              coalesce(sum(cs.checkout_click_count), 0)::int AS checkouts,
              -- A stage's sales = max(manual tally, Keitaro conversions): the
@@ -253,7 +277,7 @@ export async function computeCreativeMetrics(
        WHERE cs.org_id = ${orgId}
          AND cs.creative_id IS NOT NULL
          AND cs.created_at >= now() - interval '30 days'
-       GROUP BY cs.creative_id
+       ${groupByCreativeAndOffer("cs.creative_id")}
     ),
     -- The EPC denominator: counted clickers at CREATIVE grain, from the shared
     -- cache (lib/reporting/counted-clickers.ts) - the same definition every
@@ -271,7 +295,7 @@ export async function computeCreativeMetrics(
     -- displayed so an operator can see the full history and override
     -- deliberately. Sort by recent, show both.
     stage_life AS (
-      SELECT cs.creative_id,
+      SELECT cs.creative_id, ${OK_SELECT},
              coalesce(sum(ks.revenue), 0)::numeric AS lifetime_payout,
              coalesce(sum(greatest(cs.sales_count, coalesce(ks.sales, 0))), 0)::int AS lifetime_sales,
              coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS lifetime_manual
@@ -279,28 +303,32 @@ export async function computeCreativeMetrics(
         JOIN campaigns c ON c.id = cs.campaign_id
         LEFT JOIN k_stage ks ON ks.stage_id = cs.id
        WHERE cs.org_id = ${orgId} AND cs.creative_id IS NOT NULL
-       GROUP BY cs.creative_id
+       ${groupByCreativeAndOffer("cs.creative_id")}
     ),
+    -- Clickers reach the offer through counted_clickers.campaign_id.
     click_life AS (
-      SELECT cc.creative_id, count(DISTINCT cc.contact_id)::int AS lifetime_tracked
+      SELECT cc.creative_id, ${OK_SELECT}, count(DISTINCT cc.contact_id)::int AS lifetime_tracked
         FROM counted_clickers cc
+        JOIN campaigns c ON c.id = cc.campaign_id
        WHERE cc.org_id = ${orgId} AND cc.creative_id IS NOT NULL
-       GROUP BY cc.creative_id
+       ${groupByCreativeAndOffer("cc.creative_id")}
     ),
     click_agg AS (
-      SELECT cc.creative_id,
+      SELECT cc.creative_id, ${OK_SELECT},
              count(DISTINCT cc.contact_id)::int AS tracked_clean
         FROM counted_clickers cc
+        JOIN campaigns c ON c.id = cc.campaign_id
        WHERE cc.org_id = ${orgId}
          AND cc.creative_id IS NOT NULL
          AND cc.first_click_at >= now() - interval '30 days'
-       GROUP BY cc.creative_id
+       ${groupByCreativeAndOffer("cc.creative_id")}
     )
     -- Driven by the LIFETIME aggregates, with the 30-day ones LEFT JOINed (each is
     -- a subset of its lifetime counterpart). It used to be driven by the 30-day
     -- aggregates, so a creative with no activity in the last 30 days got no row
     -- and its all-time columns read 0 or a dash (60 of 405 creatives, 2026-09-15).
     SELECT coalesce(sl.creative_id, kl.creative_id) AS creative_id,
+           coalesce(sl.ok, kl.ok)        AS ok,
            coalesce(s.delivered, 0)      AS delivered,
            coalesce(s.checkouts, 0)      AS checkouts,
            coalesce(s.sales, 0)          AS sales,
@@ -318,17 +346,25 @@ export async function computeCreativeMetrics(
            -- entirely rather than reading 0. Bar C2.
            coalesce(ce.events, '{}'::jsonb) AS events
       FROM stage_life sl
-      FULL OUTER JOIN click_life kl ON kl.creative_id = sl.creative_id
-      LEFT JOIN stage_agg s ON s.creative_id = coalesce(sl.creative_id, kl.creative_id)
-      LEFT JOIN click_agg k ON k.creative_id = coalesce(sl.creative_id, kl.creative_id)
-      LEFT JOIN creative_ev ce ON ce.creative_id = coalesce(sl.creative_id, kl.creative_id)
+      FULL OUTER JOIN click_life kl
+        ON kl.creative_id = sl.creative_id AND kl.ok = sl.ok
+      LEFT JOIN stage_agg s
+        ON s.creative_id = coalesce(sl.creative_id, kl.creative_id) AND s.ok = coalesce(sl.ok, kl.ok)
+      LEFT JOIN click_agg k
+        ON k.creative_id = coalesce(sl.creative_id, kl.creative_id) AND k.ok = coalesce(sl.ok, kl.ok)
+      LEFT JOIN creative_ev ce
+        ON ce.creative_id = coalesce(sl.creative_id, kl.creative_id) AND ce.ok = coalesce(sl.ok, kl.ok)
+     WHERE coalesce(sl.ok, kl.ok) <> 0
   `)) as unknown as Record<string, unknown>[];
 
-  const byId = new Map<number, CreativeMetricsRow>();
+  const key = (creativeId: number, offerId: number | null) =>
+    `${creativeId}:${offerId ?? "all"}`;
+  const byKey = new Map<string, CreativeMetricsRow>();
   for (const r of rows) {
-    byId.set(Number(r.creative_id), {
-      ...noActivity(Number(r.creative_id)),
-      creative_id: Number(r.creative_id),
+    const ok = Number(r.ok);
+    const offerId = ok === -1 ? null : ok;
+    byKey.set(key(Number(r.creative_id), offerId), {
+      ...noActivity(Number(r.creative_id), offerId),
       delivered: Number(r.delivered ?? 0),
       checkouts: Number(r.checkouts ?? 0),
       sales: Number(r.sales ?? 0),
@@ -347,8 +383,9 @@ export async function computeCreativeMetrics(
   // the 30-day stage/click windows) — it gets a zeroed row rather than losing
   // its all-time and 7-day CTR.
   for (const c of await readCreativeCtr(orgId, dbc)) {
-    byId.set(c.creative_id, {
-      ...(byId.get(c.creative_id) ?? noActivity(c.creative_id)),
+    const k = key(c.creative_id, c.offer_id);
+    byKey.set(k, {
+      ...(byKey.get(k) ?? noActivity(c.creative_id, c.offer_id)),
       ctr_sent_7d: c.sent_7d,
       ctr_clicks_7d: c.clicks_7d,
       ctr_sent_30d: c.sent_30d,
@@ -357,12 +394,22 @@ export async function computeCreativeMetrics(
       ctr_clicks_lifetime: c.clicks_lifetime,
     });
   }
-  return [...byId.values()];
+  return [...byKey.values()];
 }
 
-// Read path. Serves the cached rows when fresh, otherwise computes once and
-// shares that single promise with any concurrent caller on this instance.
+// Read path: one grain of the cached rows — `offerId` null for all offers, or
+// one offer's numbers. A creative never sent on that offer has no row (→ "—").
 export async function getCreativeMetrics(
+  orgId: string,
+  offerId: number | null,
+): Promise<CreativeMetricsRow[]> {
+  const rows = await getAllCreativeMetrics(orgId);
+  return rows.filter((r) => r.offer_id === offerId);
+}
+
+// Serves the cached rows when fresh, otherwise computes once and shares that
+// single promise with any concurrent caller on this instance.
+async function getAllCreativeMetrics(
   orgId: string,
 ): Promise<CreativeMetricsRow[]> {
   const hit = cache.get(orgId);

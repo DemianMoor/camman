@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-12 (0206 drip poke chain, 0207 scheduler fairness)_
+_Last updated: 2026-10-12 (0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -222,6 +222,17 @@ erDiagram
   partner_keys ||--o{ lead_intake_hourly : "per-hour counters (0199)"
   campaigns ||--|| drip_campaign_configs : "drip config (carry_days, admission_widened_at: 0204; entering active/paused stamps it: 0205)"
   campaigns ||--o{ drip_journeys : "carried_days (0204)"
+  campaigns ||--o{ drip_daily_rollup : "Daily results cells (0208, cascade)"
+  campaign_stages |o--o{ drip_daily_rollup : "stage (NULL = lead row; NO ACTION)"
+  partner_keys |o--o{ drip_daily_rollup : "partner key (NULL = unattributed; NO ACTION)"
+  drip_daily_rollup {
+    text basis "activity | cohort"
+    date day_et "event ET day | admission ET day"
+    int admitted "lead row; + leads_admitted, admitted_carried"
+    int first_sends "stage rows; + followup_sends, dlr_sent, delivered, clicks, opt_outs, sales"
+    numeric revenue "approved; + send_cost"
+    int_array latency_hist "lead-to-send histogram (first sends)"
+  }
   drip_campaign_configs {
     int carry_days "NULL = account default, 0-7 (0204)"
     timestamptz admission_widened_at "trigger-stamped (0204), forward-only (0205)"
@@ -234,6 +245,7 @@ erDiagram
     timestamptz drip_admission_widened_at "trigger-stamped (0204), forward-only (0205)"
     boolean drip_poke_enabled "poke chain switch, default false (0206)"
     boolean drip_scheduler_fair "round-robin first-send batch, default false (0207)"
+    boolean drip_daily_results_enabled "Daily results tab, default false (0208)"
   }
 ```
 
@@ -460,6 +472,7 @@ erDiagram
 | Table | Grain / keys | Notes |
 |---|---|---|
 | `stage_delivery_rollup` | `id` bigserial; UNIQUE **NULLS NOT DISTINCT** (`stage_id`, `provider_phone_id`, `sent_date_et`); INDEX (`org_id`, `sent_date_et`) | The live delivery query's four counts — `sent`, `delivered`, `undelivered`, `no_receipt` — per (stage, number, **SEND's ET calendar day**), plus `refreshed_at` (last time the cell's counts moved) and `created_at`. **CHECK `stage_delivery_rollup_foots`**: all ≥ 0 and `delivered + undelivered + no_receipt = sent`. The day is in the key because 6 of 2,110 stages have sent across ET midnight; summing a day range reproduces the live query's (stage, number) rows exactly. `stage_id` cascades; `provider_phone_id` is **SET NULL**, mirroring `stage_sends.provider_phone_id`. Counts are stored for every provider; the `DLR_SOURCES` null-gate stays in the read layer. **Only writer:** `refreshDeliveryRollup` ([lib/reporting/delivery-rollup.ts](../lib/reporting/delivery-rollup.ts)), called by `/api/cron/delivery-rollup` and the one-off [scripts/backfill-delivery-rollup.ts](../scripts/backfill-delivery-rollup.ts). It computes cells with the live query's own `terminalCte` + `DELIVERY_COUNTS` and rewrites only cells whose counts changed. Cells older than 7 ET days are final. ~2.1K rows for all history. RLS: own-org `SELECT` only. See [04-features/delivery-report.md §5b](04-features/delivery-report.md). |
+| `drip_daily_rollup` *(0208)* | `id` bigserial; UNIQUE **NULLS NOT DISTINCT** (`campaign_id`, `basis`, `day_et`, `stage_id`, `partner_key_id`), which is also the read path; partial indexes on `stage_id` / `partner_key_id` for the FK checks | The drip campaign **Daily results** tab's cells ([spec](superpowers/specs/2026-10-12-drip-daily-results-design.md)). `basis` **`activity`** = `day_et` is the ET day each event happened; **`cohort`** = the ET day the lead was admitted (`routed_at`), and the row holds everything those leads did since. **`stage_id` NULL = the campaign-level lead row** (`leads_admitted` by received day, `admitted`, `admitted_carried`). On a stage row, **`partner_key_id` NULL = sends that reach no non-sandbox lead**, kept so a stage's cells sum to all of its sends. Stage counters: `first_sends`, `followup_sends`, `dlr_sent`, `delivered`, `clicks` (clean click rows), `opt_outs`, `sales`, `revenue` (approved), `send_cost` (sends at rate + opt-outs at the answered send's rate), `latency_hist int[]`. **Additive counters only**: every ratio, the median and lookup cost (admitted × calibrated rate) are computed at read time. CHECKs: `basis`, non-negative with `admitted_carried <= admitted` and `delivered <= dlr_sent`, and **`row_kind`** (a lead row carries only lead counters, a stage row only stage counters). Tier is not a key; it is a function of the stage. FKs: `campaign_id` / `org_id` **CASCADE**; `stage_id` / `partner_key_id` **NO ACTION**. Not SET NULL, which would fold cells into the NULL lead row / Unattributed bucket. Not RESTRICT, which is checked immediately and would refuse a whole-campaign cascade. RLS: own-org `SELECT` only. Test: `scripts/test-drip-daily-rollup-schema.ts`. |
 
 ### Contact lifecycle / engagement (migration 0187)
 
@@ -551,6 +564,7 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 | `drip_campaign_configs.admission_widened_at` *(0204)* | timestamptz NULL | Stamped by trigger `drip_campaign_configs_admission_widened` (function `drip_cfg_admission_widened()`) |
 | `org_settings.drip_poke_enabled` *(0206)* | NOT NULL DEFAULT false | **Drip poke chain switch.** On (for an org with `drip_enabled`): each pipeline step wakes the next when it finishes, instead of waiting for its cron tick. Off = cron ticks only, exactly as before. Rollback = set false. See [drip-poke-chain.md](04-features/drip-poke-chain.md) |
 | `org_settings.drip_scheduler_fair` *(0207)* | NOT NULL DEFAULT false | **Scheduler per-campaign fairness.** On: the first-send batch is filled round-robin across campaigns (each campaign's oldest routed journey, then the next…), so one campaign's backlog cannot starve another's fresh leads. Off = org-wide oldest first. See [drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#scheduler-batch-per-campaign-fairness-2026-10-12-migration-0207) |
+| `org_settings.drip_daily_results_enabled` *(0208)* | NOT NULL DEFAULT false | **Drip Daily results tab** dark-ship flag: shows the tab on drip campaign pages and serves its API. The `drip_daily_rollup` job runs regardless, so the cells can be reconciled before anyone sees them. |
 | `cron_locks.poke_requested_at` / `poke_dispatched_at` / `last_run_started_at` *(0206)* | timestamptz NULL | Poke coalescing state per job (`cron_locks` is SQL-only, not in `db/schema.ts`). A request newer than the last run start earns the lease holder a re-run; at most one wake-up in flight per job; runs spaced 5 s apart. Written only by [lib/drip/poke.ts](../lib/drip/poke.ts), only while the switch is on |
 | `drip_journeys.carried_days` *(0204)* | smallint NOT NULL DEFAULT 0, CHECK ≥ 0 | ET date(routed) − ET date(arrival) at insert. `> 0` = **carried**. Constant default ⇒ metadata-only add, no table rewrite |
 

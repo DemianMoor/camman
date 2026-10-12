@@ -33,6 +33,7 @@ const base = (rows: DigestRow[], over: Partial<DigestInput> = {}): DigestInput =
   invariant: { day: "2026-10-07", breaks: [] },
   firstDigestNote: null,
   manual: false,
+  leadToSend: null,
   ...over,
 });
 
@@ -133,6 +134,25 @@ check("large cost 2 decimals", formatUsd(12.3456) === "$12.35");
   check("giant partner → split", m.length > 1 && m.every((x) => x.length <= MAX_DIGEST_CHARS), m.map((x) => x.length).join(","));
   const tags = m.join("\n").match(/^pml +tag\d+/gm) ?? [];
   check("giant partner → no row lost", tags.length === 150, String(tags.length));
+}
+
+// 10. Lead-to-send line (drip poke chain, 0206).
+{
+  const lat = (n: number, p50: number | null, p95: number | null) => ({
+    n, p50Sec: p50, p95Sec: p95, stepP50Sec: { lookup: null, route: null, queue: null, send: null },
+  });
+  const none = formatIntakeDigest(base([row("pml", "aca", 10)]));
+  check("no lead-to-send line when null", !none[0].includes("Lead→send"));
+  const empty = formatIntakeDigest(base([row("pml", "aca", 10)], { leadToSend: { hour: lat(0, null, null), day: lat(0, null, null) } }));
+  check("no lead-to-send line when the day has no sends", !empty[0].includes("Lead→send"));
+  const m = formatIntakeDigest(base([row("pml", "aca", 10)], { leadToSend: { hour: lat(230, 45, 72), day: lat(4120, 258, 366) } }));
+  check(
+    "lead-to-send line: hour in seconds, day in minutes",
+    m[0].includes("Lead→send (routed on arrival): hour p50 45s · p95 72s (230) · ET day p50 4.3m · p95 6.1m (4120)"),
+    m[0],
+  );
+  const quiet = formatIntakeDigest(base([row("pml", "aca", 10)], { leadToSend: { hour: lat(0, null, null), day: lat(12, 50, 60) } }));
+  check("hour with no sends prints n/a", quiet[0].includes("hour p50 n/a · p95 n/a (0)"), quiet[0]);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
+_Last updated: 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -24,7 +24,11 @@ claims from `lookup_queue` and calls Telnyx inline ([lib/telnyx/worker.ts](../..
 | 2 | `status='awaiting_lookup'` **whose lookup is complete** | finalize |
 
 Latency: **same pass on a cache hit**, ~2–5 min on a miss, degraded while a bulk upload is in the
-queue (mitigated below).
+queue (mitigated below). Only ~1 % of pml leads are cache hits (2026-10-06..12). With the **poke
+chain** on (0206, [drip-poke-chain.md](drip-poke-chain.md)), intake pokes this sweeper, the sweeper
+pokes the lookup worker when it queues lookups, and the worker pokes the sweeper back when lookups
+finish. A miss then resolves in seconds instead of on the next `*/2` + `* * * * *` ticks.
+Lookups stay queue-based.
 
 ## Line-type policy — only landline is discarded
 

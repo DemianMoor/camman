@@ -1,7 +1,8 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { after, NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { notifyOnTransition } from "@/lib/alerts/alert-state";
+import { requestPoke } from "@/lib/drip/poke";
 import { captureLeads, prepareLead } from "@/lib/intake/capture";
 import { MAX_LEADS_PER_CALL } from "@/lib/intake/fields";
 import { resolvePartnerKey, secretMatches, touchLastSeen } from "@/lib/intake/partner-key";
@@ -249,6 +250,12 @@ export async function POST(
   const accepted = results.filter((r) => r.status === "received" && !r.duplicate).length;
   const duplicates = results.filter((r) => r.duplicate).length;
   const rejected = results.filter((r) => r.status === "rejected").length;
+
+  // Drip poke chain (0206): wake the enrichment sweeper instead of leaving the
+  // lead for its next cron tick. After the response, never blocking the
+  // partner, and a no-op while drip_poke_enabled is off. requestPoke never
+  // throws and coalesces: one wake-up in flight however many requests arrive.
+  if (accepted > 0) after(() => requestPoke("lead-enrichment", "intake"));
 
   return NextResponse.json(
     {

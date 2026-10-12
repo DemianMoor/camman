@@ -22,6 +22,10 @@ import { isDripPostureOn } from "./in-use";
 /** Rolls back the send transaction when the opt-out footer cannot be verified. */
 class GateRefused extends Error {}
 
+/** Rolls back the send transaction when the journey already has its first send
+ *  — another run got there first, so this lead's message must not be queued. */
+class JourneyAlreadyQueued extends Error {}
+
 class MintRefused extends Error {
   constructor(
     readonly reason: string,
@@ -74,6 +78,8 @@ export interface SchedulerResult {
   capBlocked: number;
   numbersExhausted: number;
   pausedSkipped: number;
+  /** Journeys another run had already given their first send — rolled back. */
+  alreadyQueued: number;
 }
 
 interface DueRow {
@@ -98,6 +104,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
   const res: SchedulerResult = {
     postureOn: false, considered: 0, inserted: 0, waitingForWindow: 0,
     gateRefused: 0, mintRefused: 0, capBlocked: 0, numbersExhausted: 0, pausedSkipped: 0,
+    alreadyQueued: 0,
   };
 
   const orgs = (await db.execute(sql`
@@ -347,12 +354,20 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
 
             await stampDripStageDrainable(tx, { stageId: stage.stage_id, orgId });
 
-            await tx.execute(sql`
+            // ⭐ ZERO ROWS ⇒ ROLL BACK. The guard `first_send_at IS NULL` alone
+            // would let this transaction COMMIT its stage_sends row even when
+            // another run already gave the journey its first send (a different
+            // stage after a window boundary, or the same stage once the other
+            // row left 'pending' — the (stage, contact) unique only covers
+            // live rows). Throwing undoes the link, the row and the stamp.
+            const claimed = (await tx.execute(sql`
               UPDATE drip_journeys
               SET state = 'active', first_send_at = now(),
                   first_stage_id = ${stage.stage_id}, first_send_id = ${ins[0].id}::uuid
               WHERE id = ${lead.journey_id}::uuid AND first_send_at IS NULL
-            `);
+              RETURNING id
+            `)) as unknown as { id: string }[];
+            if (claimed.length === 0) throw new JourneyAlreadyQueued();
           });
           res.inserted++;
           todayCount++;
@@ -366,6 +381,10 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
                 `(campaign ${campaignId}, stage ${stage.stage_id}): ${e.reason} — ${e.message}`,
             );
             res.mintRefused++;
+            continue;
+          }
+          if (e instanceof JourneyAlreadyQueued) {
+            res.alreadyQueued++;
             continue;
           }
           if (e instanceof GateRefused) {

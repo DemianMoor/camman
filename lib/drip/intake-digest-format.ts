@@ -1,4 +1,5 @@
 import { escapeHtml } from "@/lib/alerts/telegram";
+import { formatLatency, type LeadLatency } from "./lead-latency";
 
 // Pure formatter for the hourly partner-intake Telegram digest. No DB, no
 // network — scripts/test-intake-digest-format.ts drives it directly. The data
@@ -42,6 +43,12 @@ export interface DigestInput {
   firstDigestNote: string | null;
   /** Prefix for a re-run triggered by hand, so it isn't mistaken for a new hour. */
   manual: boolean;
+  /**
+   * Lead-to-send for leads routed on arrival (lib/drip/lead-latency.ts): the
+   * digested hour, and its ET day up to the end of that hour. Null = no drip
+   * first sends that day (no line is printed).
+   */
+  leadToSend: { hour: LeadLatency; day: LeadLatency } | null;
 }
 
 /** Telegram rejects >4096; stay well under, like the performance report. */
@@ -77,6 +84,14 @@ function footer(i: DigestInput): string[] {
         shown.join("; ") +
         (more > 0 ? `; +${more} more` : "") +
         ". Hourly numbers above may be wrong; daily partner report is the reference.",
+    );
+  }
+  if (i.leadToSend && i.leadToSend.day.n > 0) {
+    const { hour, day } = i.leadToSend;
+    lines.push(
+      `Lead→send (routed on arrival): hour p50 ${formatLatency(hour.p50Sec)} · ` +
+        `p95 ${formatLatency(hour.p95Sec)} (${hour.n}) · ET day p50 ${formatLatency(day.p50Sec)} · ` +
+        `p95 ${formatLatency(day.p95Sec)} (${day.n})`,
     );
   }
   // No rate-derivation line: the owner dropped it (2026-10-07) as noise. Cost

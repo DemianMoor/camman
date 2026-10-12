@@ -3532,6 +3532,10 @@ export const org_settings = pgTable("org_settings", {
   // window (carry×1440 + cutoff) grows. Leads that arrived earlier are same day only.
   // Forward-only (0205): a NULL or older value is ignored by the trigger.
   drip_admission_widened_at: timestamp("drip_admission_widened_at", { withTimezone: true }),
+  // Drip poke chain (0206): each pipeline step wakes the next on completion
+  // (lib/drip/poke.ts). Off = cron ticks only, exactly as before; the crons
+  // run unchanged either way. Rollback = set false.
+  drip_poke_enabled: boolean("drip_poke_enabled").notNull().default(false),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })

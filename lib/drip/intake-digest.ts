@@ -8,6 +8,7 @@ import { getCalibratedLookupRate } from "@/lib/reporting/lookup-rate";
 import { telnyxBalance } from "@/lib/telnyx/client";
 
 import { hourStart } from "./counters";
+import { leadToSendLatency } from "./lead-latency";
 import type { DbOrTx } from "./groups";
 import {
   formatIntakeDigest,
@@ -206,6 +207,12 @@ export async function buildIntakeDigest(opts: {
     }
     const rows = await hourRows(dbc, org.org_id, hour);
     const invariant = await checkDaySumInvariant(dbc, org.org_id, hour, firstHour);
+    // Lead-to-send: the digested hour, and its ET day up to that hour's end.
+    const hourEnd = new Date(hour.getTime() + 3_600_000);
+    const [ltsHour, ltsDay] = await Promise.all([
+      leadToSendLatency(dbc, { orgId: org.org_id, from: hour, to: hourEnd }),
+      leadToSendLatency(dbc, { orgId: org.org_id, from: campaignDayBoundsUtc(hour).start, to: hourEnd }),
+    ]);
     const messages = formatIntakeDigest({
       windowLabel: orgs.length > 1 ? `${windowLabel(hour)} · ${org.name}` : windowLabel(hour),
       rows,
@@ -214,6 +221,7 @@ export async function buildIntakeDigest(opts: {
       invariant,
       firstDigestNote: opts.manual ? null : await firstDigestNote(dbc, org.org_id, hour, firstHour),
       manual: !!opts.manual,
+      leadToSend: ltsDay.n > 0 ? { hour: ltsHour, day: ltsDay } : null,
     });
     result.messages.push(...messages);
     result.orgs.push({

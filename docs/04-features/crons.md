@@ -1,6 +1,6 @@
 # Feature — Cron Jobs
 
-_Last updated: 2026-10-12_
+_Last updated: 2026-10-12 (drip poke chain, 0206)_
 
 ## 1. Purpose
 All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md §12). Endpoints authenticated with `Authorization: Bearer <CRON_SECRET>`.
@@ -77,6 +77,7 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
   - **Applies to the manual (POST/session) trigger too**, unlike the job-wide `withCronLease` convention (which manual triggers deliberately bypass): two drain loops on one number is an MPS violation regardless of who started them.
   - Verified by [scripts/test-phone-drain-lease.ts](../../scripts/test-phone-drain-lease.ts) (concurrent same-phone → exactly one proceeds; different phones still parallel; released + expired leases reacquirable; held lease skips cleanly).
 - **`SEND_ENABLED` is OFF** in production — the live send path has not fired.
+- **Drip pokes (0206).** A CRON_SECRET request with header `x-camman-poke: 1` answers 202 and runs a **drip-only** drain (`runScheduledSends({ dripOnly: true })`: no Phase A, drip stages only) under the `drip-drain` `cron_locks` lease. It skips `reconcileStuckStages` / `refreshDripStageCosts`. The 5-minute path above is unchanged. See [drip-poke-chain.md](drip-poke-chain.md).
 
 ### `/api/keitaro/poll` (Keitaro results poll)
 - Calls `pollKeitaro()` ([`lib/keitaro/poll.ts`](../../lib/keitaro/poll.ts)): `POST /admin_api/v1/report/build` over a rolling **3-day** ET window (`?windowDays=N` overrides, ≤30), grouped by `day` + `sub_id_3` + `campaign_id`.
@@ -142,6 +143,10 @@ All scheduled/deferred work runs via **Vercel Cron** (no job queue — CLAUDE.md
 - **Guards in order:** `lookup_paused` → daily cap (SUM of `lookup_queue.attempts` since Warsaw midnight, so failed calls + retries consume cap) → Telnyx balance (`available_credit`; if it can't cover the next chunk → Telegram alert + skip, auto-resumes when topped up; a 402/feature-gate mid-run halts the run).
 - **Claim:** `FOR UPDATE SKIP LOCKED`, incrementing `attempts` + stamping `updated_at` at claim (each claim = one Telnyx call). A 429'd row is left `pending` and skipped by a 60 s cooldown until it ages out (backoff); terminal failures (bad number / 3 attempts) mark the queue row `failed` and write **no** `phone_lookups` row (the contact stays `Unidentified`). Paced to `lookup_concurrency_rps`/sec.
 - On each completed lookup, contact sync copies line_type/carrier down and, for landlines, cancels **pending** `stage_sends` + removes the contact from `campaign_audience_pool`. A drained batch is finalized (actual cost from the line-type mix) with a Telegram summary.
+- **Drip pokes (0206).** With `drip_poke_enabled` on, the drip sweeper pokes this route when it queues lookups, and a run that finished lookups pokes `lead-enrichment`. A poked run is the same `runLookupWorker` (same lease, pacing and caps) under an extra `lookup-worker` `cron_locks` lease that coalesces pokes. No extra Telnyx calls. The `*/2` tick is unchanged.
+
+### Drip pipeline crons and the poke chain (0206)
+`lead-enrichment`, `drip-routing` and `drip-scheduler` (each `* * * * *`), `lookup-worker` and the drip half of `send-scheduled` also run when **poked** by the step before them, while `org_settings.drip_poke_enabled` is on (default off). A poke runs the same function under the same `cron_locks` lease as the cron, answers 202 and works in `after()`. A lease holder that was poked mid-run re-runs at least 5 s after its last start. Poked runs never stamp heartbeats. Every summary log line carries `trigger: "cron" | "poke"`. The cron `drip-scheduler` run also logs the per-minute `[lead-latency]` line. Schedules are unchanged. See [drip-poke-chain.md](drip-poke-chain.md).
 
 ## 4. Data
 - Reads/writes `clicks`, `geoip_cache`; `opt_outs`, `texthub_inbound_events`; `stage_sends`, `links`, `campaign_stages`, `send_circuit_events`; `keitaro_stage_results` (reads `campaign_stages`/`campaigns` for sub_id_3 mapping).

@@ -72,13 +72,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OfferPicker } from "@/components/offers/offer-picker";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
@@ -254,7 +248,6 @@ const DEFAULT_FILTERS: Filters = {
 };
 
 const SEARCH_DEBOUNCE_MS = 300;
-const FILTER_ALL = "__all__";
 
 const QUALITY_LABEL: Record<CreativeQuality, string> = {
   high: "High",
@@ -1250,8 +1243,6 @@ export default function CreativesPage() {
 
   const isAuthLoading = !auth;
   const confirmBusy = archiveApi.isLoading || restoreApi.isLoading;
-  const offerFilterValue =
-    filters.offer_id === null ? FILTER_ALL : String(filters.offer_id);
 
   function toggleQuality(q: CreativeQuality) {
     const set = new Set(filters.qualities);
@@ -1287,27 +1278,14 @@ export default function CreativesPage() {
           placeholder="Search by text, creative ID, or slug…"
           className="h-9 w-full max-w-sm"
         />
-        <Select
-          value={offerFilterValue}
-          onValueChange={(v) =>
-            updateFilters({
-              offer_id: v === FILTER_ALL ? null : Number(v),
-              page: 0,
-            })
-          }
-        >
-          <SelectTrigger className="h-9 w-[200px]">
-            <SelectValue placeholder="Any offer" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={FILTER_ALL}>Any offer</SelectItem>
-            {offers.map((o) => (
-              <SelectItem key={o.id} value={String(o.id)}>
-                {o.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <OfferPicker
+          offers={offers}
+          value={filters.offer_id}
+          onChange={(next) => updateFilters({ offer_id: next, page: 0 })}
+          isLoading={offersApi.isLoading && offers.length === 0}
+          placeholder="Any offer"
+          className="w-[240px] [&>button]:h-9"
+        />
         <div className="flex flex-wrap items-center gap-1.5">
           {QUALITY_VALUES.map((q) => {
             const active = filters.qualities.includes(q);

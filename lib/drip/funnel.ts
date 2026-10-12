@@ -232,10 +232,19 @@ export async function getDripFunnel(
       LEFT JOIN (${campaignTierExpr(campaignId, orgId)}) t ON t.contact_id = j.contact_id
       WHERE j.org_id = ${orgId}::uuid AND j.campaign_id = ${campaignId}
     ), sales AS (
-      SELECT (SELECT x.carried FROM jj x
-               WHERE x.contact_id = ce.contact_id AND x.routed_at <= ce.occurred_at
-               ORDER BY x.routed_at DESC LIMIT 1) AS carried
+      -- LATERAL over drip_journeys itself (not jj) so drip_journeys_org_contact_idx
+      -- (org_id, contact_id, routed_at DESC) serves the per-sale lookup; id DESC
+      -- makes a routed_at tie deterministic.
+      SELECT m.carried
       FROM conversion_events ce
+      LEFT JOIN LATERAL (
+        SELECT (j.carried_days > 0) AS carried
+        FROM drip_journeys j
+        WHERE j.org_id = ce.org_id AND j.campaign_id = ${campaignId}
+          AND j.contact_id = ce.contact_id AND j.routed_at <= ce.occurred_at
+        ORDER BY j.routed_at DESC, j.id DESC
+        LIMIT 1
+      ) m ON true
       WHERE ce.org_id = ${orgId}::uuid AND ce.campaign_id = ${campaignId} AND ${purchasedClause()}
     )
     SELECT

@@ -101,7 +101,7 @@ ones that don't exist yet. The guarantee in D7 must not depend on each writer re
   `org.drip_admission_widened_at` alongside the cutoff columns already read.
 - `freshness` uses §4.1. Detail string names carry days, cutoff, and — when the lead predates the
   widening — "arrived before the window was widened at …; same day only".
-- Expose on each candidate `carried: boolean` = now's ET day > arrival ET day (used by §6).
+- The cap rule computes `carried` = now's ET day > arrival ET day (`isCarried`) to apply the reserve (§5.4).
 
 ### 5.2 Scan floor (D7 — mandatory)
 Per live/paused drip campaign (plus the org default for completeness):

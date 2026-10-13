@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { displayedRoi } from "@/lib/reporting/drip-daily-money";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import type { DripDailyResults, ResultRow } from "@/lib/reporting/drip-daily-results";
 
@@ -70,19 +71,19 @@ interface Column {
 }
 
 const COLUMNS: Column[] = [
-  { key: "la", label: "Leads admitted", title: "Leads admitted to this campaign, counted on the ET day they were received.", cell: (r) => int(r.leads_admitted), activityOnly: true },
+  { key: "la", label: "Leads arrived", title: "Leads admitted to this campaign, counted on the day they arrived.", cell: (r) => int(r.leads_admitted), activityOnly: true },
   { key: "adm", label: "Admitted (same / carried)", title: "Leads admitted on this day: same-day vs carried over from an earlier day.", cell: (r) => (r.admitted == null ? "—" : `${int(r.admitted)} (${int(r.admitted_same_day)} / ${int(r.admitted_carried)})`) },
   { key: "first", label: "First sends", title: "First messages sent.", cell: (r) => int(r.first_sends) },
   { key: "fu", label: "Follow-ups", title: "Follow-up messages sent (and sends with no lead).", cell: (r) => int(r.followup_sends) },
   { key: "dlv", label: "Delivered %", title: "Delivered ÷ sends on numbers whose provider reports delivery. — when none do.", cell: (r) => pct(r.delivered_pct) },
-  { key: "clk", label: "Clicks · per send", title: "Clean clicks (repeats count), and clicks per send.", cell: (r) => `${int(r.clicks)} · ${pct(r.ctr)}` },
+  { key: "clk", label: "Clicks · per send", title: "Clean clicks (repeats count), and clicks per send. In Activity, clicks on this day can come from earlier sends, so it can exceed 100%.", cell: (r) => `${int(r.clicks)} · ${pct(r.ctr)}` },
   { key: "opt", label: "Opt-outs %", title: "STOP replies ÷ sends, dated by the reply.", cell: (r) => `${int(r.opt_outs)} · ${pct(r.opt_out_pct)}` },
   { key: "sal", label: "Sales · conv %", title: "Sales detected on this day; conversion = sales ÷ clicks.", cell: (r) => `${int(r.sales)} · ${pct(r.conv_pct)}` },
   { key: "cost", label: "Send cost", title: "Each send at its recorded rate, plus each opt-out reply at the rate of the send it answered.", cell: (r) => usd(r.send_cost) },
   { key: "look", label: "Lookup cost", title: "Admitted leads × the calibrated lookup rate (the partner report's). Slightly overstates: a cache hit cost nothing. Not attributable to a stage — on the campaign total only.", cell: (r) => usd(r.lookup_cost) },
   { key: "rev", label: "Revenue", title: "Approved revenue, dated by detection.", cell: (r) => usd(r.revenue) },
   { key: "pro", label: "Profit", title: "Revenue − send cost − lookup cost. On a stage row, before lookup cost.", cell: (r) => usd(r.profit) },
-  { key: "roi", label: "ROI", title: "Profit ÷ (send cost + lookup cost), from summed money. — when there was no cost.", cell: (r) => pct(r.roi) },
+  { key: "roi", label: "ROI", title: "Profit ÷ (send cost + lookup cost), from summed money. — when send cost is under $1 (too little spend for a meaningful ratio).", cell: (r) => pct(displayedRoi(r.roi, r.send_cost)) },
   { key: "rpa", label: "Rev / admitted", title: "Revenue ÷ admitted leads in this cohort.", cell: (r) => usdFine(r.revenue_per_admitted), cohortOnly: true },
   { key: "lat", label: "Median lead→send", title: "Median time from the lead's arrival to its first message, leads routed on arrival only (≈, from a histogram).", cell: (r) => dur(r.median_latency_sec) },
 ];
@@ -213,12 +214,13 @@ export function DripDailyResults({ campaignId }: { campaignId: number }) {
 
       {shown ? (
         <div className="overflow-x-auto rounded-md border">
-          <table className="w-full text-sm tabular-nums">
+          {/* w-max: columns keep their width and the wrapper scrolls; the Day column stays put. */}
+          <table className="w-max min-w-full text-sm tabular-nums">
             <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
               <tr>
                 <th className="sticky left-0 z-10 bg-muted px-3 py-2 font-medium">Day (ET)</th>
-                {cols.map((c) => (
-                  <th key={c.key} title={c.title} className="whitespace-nowrap px-3 py-2 text-right font-medium">
+                {cols.map((c, i) => (
+                  <th key={c.key} title={c.title} className={"whitespace-nowrap px-3 py-2 text-right font-medium" + (i === cols.length - 1 ? " pr-6" : "")}>
                     {c.label}
                   </th>
                 ))}
@@ -281,8 +283,9 @@ function Row({
           </span>
         ) : null}
       </td>
-      {cols.map((c) => (
-        <td key={c.key} className="whitespace-nowrap px-3 py-1.5 text-right">
+      {cols.map((c, i) => (
+        // pr-6 on the last column: at full scroll a sub-pixel scrollLeft clipped it.
+        <td key={c.key} className={"whitespace-nowrap px-3 py-1.5 text-right" + (i === cols.length - 1 ? " pr-6" : "")}>
           {c.cell(row)}
         </td>
       ))}

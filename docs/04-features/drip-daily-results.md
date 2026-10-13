@@ -16,7 +16,7 @@ table view is PR 4, and the chart is PR 5. Both sit behind
 
 | basis | a row's ET day is… | a row holds… |
 |---|---|---|
-| **activity** | the day each event **happened** | sends by `sent_at`, clean clicks by `clicked_at`, opt-outs by the STOP's arrival (`opt_outs.created_at`), sales and approved revenue by **detection** (`conversion_events.created_at`), admissions by `routed_at`, "Leads admitted" by the lead's `lead_events.received_at` |
+| **activity** | the day each event **happened** | sends by `sent_at`, clean clicks by `clicked_at`, opt-outs by the STOP's arrival (`opt_outs.created_at`), sales and approved revenue by **detection** (`conversion_events.created_at`), admissions by `routed_at`, "Leads arrived" by the lead's `lead_events.received_at` |
 | **cohort** | the day the lead was **admitted** (`drip_journeys.routed_at`) | everything those leads did since: late sales, follow-ups, opt-outs |
 
 Activity uses the **partner report's** dating rules (owner ruling Q1), so partner
@@ -118,11 +118,14 @@ The tab shows **"older days updated nightly"**, plus "as of HH:MM ET" for today 
 - **Totals row** is pinned first. Day rows run newest first.
 - **"Since launch"** is clamped to the campaign's first rollup day.
 - **Admissions have no stage.** Under **By stage**:
-  - Leads admitted, Admitted and Lookup cost show "—" on stage rows;
+  - Leads arrived, Admitted and Lookup cost show "—" on stage rows;
   - stage-row Profit and ROI are before lookup cost;
   - lookup cost sits on the campaign total and day rows.
 - **Under By partner** lookup cost is attributable, so partner rows carry it. Sends that reach no non-sandbox lead are grouped last as **Unattributed**. On prod on 2026-10-13 there were none: the 5 sends on campaign 994 belong to the `internal-test` key.
-- **"Leads admitted"** (received-day dating) is Activity-only. **Rev / admitted** is Cohort-only and shows 4 decimals under $1.
+- **"Leads arrived"** (leads admitted to this campaign, counted on the day they arrived) is Activity-only. **Rev / admitted** is Cohort-only and shows 4 decimals under $1.
+- **ROI shows "—" when the row's send cost is under $1**, on any row (`displayedRoi()`, `ROI_MIN_SEND_COST_USD`). It is a display rule only: the API still returns the computed ROI.
+- **Clicks per send can exceed 100% in Activity.** A day's clicks can come from earlier sends, and the tooltip says so.
+- **The Day column is sticky** and the table sizes to its content (`w-max min-w-full`), so it scrolls horizontally instead of squeezing or cutting columns.
 - **Maturing.** A Cohort row is marked ⧖ until day + `ceil(max drip_followup_minutes / 1440) + 3` days have passed. Follow-up delay is capped at 1,440 min, so that is 3 or 4 days.
 - **Change markers (⚑)**, with a tooltip listing each change in ET, come from:
   - `campaign_events`: `drip_config_changed`, `drip_stage_changed`, `campaign_status_changed`;

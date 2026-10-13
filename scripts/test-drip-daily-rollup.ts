@@ -3,7 +3,7 @@ import { requirePreviewDb } from "./_require-preview-db"; // MUST be second
 import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { dailyMoney } from "@/lib/reporting/drip-daily-money";
+import { dailyMoney, displayedRoi } from "@/lib/reporting/drip-daily-money";
 import {
   diffDripDailyRollup,
   histogramMedian,
@@ -64,6 +64,7 @@ function pure() {
   const z0 = dailyMoney({ revenue: 5, send_cost: 0, admitted: 0 }, 0.0016);
   bar("M5 zero cost → ROI null (not 0); zero admitted → rev/admitted null", z0.roi === null && z0.revenue_per_admitted_usd === null);
   const lossy = dailyMoney({ revenue: 0, send_cost: 2, admitted: 50 }, 0.002);
+  bar("M7 ROI shown as — under $1 of send cost, shown at $1+", displayedRoi(141.86, 0.21) === null && displayedRoi(2.6, 1) === 2.6 && displayedRoi(null, 50) === null);
   bar("M6 no revenue → negative profit, ROI −100%", lossy.profit_usd === -2.1 && lossy.roi === -1, `${lossy.profit_usd} / ${lossy.roi}`);
 }
 

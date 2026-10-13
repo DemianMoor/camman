@@ -3540,6 +3540,9 @@ export const org_settings = pgTable("org_settings", {
   // each campaign's oldest journey in turn, so one campaign's backlog cannot
   // starve another's fresh leads. Off = the old org-wide oldest-first order.
   drip_scheduler_fair: boolean("drip_scheduler_fair").notNull().default(false),
+  // Hourly send cap kill switch (0209). false = the scheduler ignores every
+  // drip_campaign_configs.hourly_cap/hourly_carry and clears hour assignments.
+  drip_hourly_cap_enabled: boolean("drip_hourly_cap_enabled").notNull().default(false),
   // Migration 0208: the drip campaign Daily results tab (UI + its API). The
   // drip_daily_rollup job runs regardless; this only shows/serves the tab.
   drip_daily_results_enabled: boolean("drip_daily_results_enabled").notNull().default(false),
@@ -5517,6 +5520,12 @@ export const drip_campaign_configs = pgTable(
     admission_cutoff_minutes: integer("admission_cutoff_minutes"),
     // Carry-over (0204): NULL = the org default (org_settings.drip_carry_days).
     carry_days: integer("carry_days"),
+    // Hourly send cap (0209): FIRST sends per ET clock hour, inside daily_cap.
+    // NULL = no hourly limit. Follow-ups never count. Ignored unless
+    // org_settings.drip_hourly_cap_enabled.
+    hourly_cap: integer("hourly_cap"),
+    // true = unsent leads queue into later hours; false = dropped at hour end.
+    hourly_carry: boolean("hourly_carry").notNull().default(false),
     // Stamped by trigger drip_campaign_configs_admission_widened when this
     // campaign's effective window grows (never by application code), and when a
     // drip campaign enters active/paused. Forward-only (0205): a NULL or older
@@ -5638,6 +5647,10 @@ export const drip_journeys = pgTable(
       },
     ),
     first_send_at: timestamp("first_send_at", { withTimezone: true }),
+    // Hourly cap (0209): the clock hour this unsent lead is on (UTC hour start);
+    // NULL = waiting. hour_fresh: true = its own routing hour, false = released backlog.
+    hour_start: timestamp("hour_start", { withTimezone: true }),
+    hour_fresh: boolean("hour_fresh"),
     // Carry-over (0204): ET days between the lead's arrival and its admission.
     // 0 = same day (incl. an evening admission texted next morning). > 0 = carried.
     carried_days: smallint("carried_days").notNull().default(0),

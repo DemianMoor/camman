@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 
+import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { admissionCloses, isCarried } from "./admission-window";
+import { dripDailySendsPredicate, sendCapacity } from "./daily-sends";
 import type { DbOrTx } from "./groups";
 
 // Drip routing eligibility (Drip Phase 4).
@@ -68,6 +70,16 @@ export interface CandidateVerdict {
   detail: Record<string, string>;
 }
 
+/** A higher-priority campaign the lead was eligible for in every way except
+ *  today's capacity — so the lead went to the next candidate instead (0210). */
+export interface OverflowSkip {
+  campaign_id: number;
+  campaign_name: string | null;
+  priority: number;
+  /** "campaign full (X/Y today: …)" or the admission-cap detail. */
+  detail: string;
+}
+
 export interface LeadRoutingEvaluation {
   lead_event_id: string;
   contact_id: string;
@@ -80,6 +92,11 @@ export interface LeadRoutingEvaluation {
   globalDetail: Record<string, string>;
   candidates: CandidateVerdict[];
   winner: CandidateVerdict | null;
+  /** Whether the send-capacity rule (0210, org_settings.drip_routing_send_capacity) ran. */
+  send_capacity_on: boolean;
+  /** Candidates ranked above the winner that were skipped only for being full
+   *  today. Empty with no winner, and always empty while the flag is off. */
+  overflowed_from: OverflowSkip[];
 }
 
 interface RawRow {
@@ -105,6 +122,7 @@ interface RawRow {
   org_cutoff_minutes: number | null;
   org_carry_days: number | null;
   org_widened_at: string | null;
+  org_send_capacity: boolean | null;
   campaign_id: number | null;
   campaign_name: string | null;
   campaign_offer_id: number | null;
@@ -121,10 +139,13 @@ interface RawRow {
   cfg_filters: Record<string, unknown> | null;
   cfg_campaign_cap: number | null;
   cfg_admission_cap: number | null;
+  cfg_daily_cap: number | null;
   carrier_filter: string[] | null;
   journeys_total: number;
   journeys_today: number;
   journeys_reserve: number;
+  sends_today: number;
+  journeys_unsent: number;
   had_offer_exposure: boolean;
   active_creative_ids: (number | null)[] | null;
   seen_creative_ids: (number | null)[] | null;
@@ -141,10 +162,21 @@ function bandFromAge(age: number): string | null {
   return "65_plus";
 }
 
-/** Journeys per campaign (excluding 'unroutable'): all-time, current ET day, and
+/** Per campaign: journeys (excluding 'unroutable') all-time, current ET day, and
  *  the carry-over RESERVE — same-day journeys routed yesterday from this time of
- *  day to midnight, i.e. the fresh volume today's afternoon is expected to bring. */
-export type CampaignJourneyCounts = Map<number, { total: number; today: number; reserve: number }>;
+ *  day to midnight, i.e. the fresh volume today's afternoon is expected to bring.
+ *  Plus the send-capacity operands (0210): `sendsToday` (S, today's drip sends)
+ *  and `unsent` (U, routed journeys with no first send, from any day). */
+export interface CampaignCounts {
+  total: number;
+  today: number;
+  reserve: number;
+  sendsToday: number;
+  unsent: number;
+}
+export type CampaignJourneyCounts = Map<number, CampaignCounts>;
+
+export const ZERO_COUNTS: CampaignCounts = { total: 0, today: 0, reserve: 0, sendsToday: 0, unsent: 0 };
 
 /**
  * The per-campaign journey counts the cap rules read, for every drip campaign
@@ -166,14 +198,34 @@ export async function loadCampaignJourneyCounts(
              WHERE j.carried_days = 0
                AND j.routed_at >= ${now.toISOString()}::timestamptz - interval '24 hours'
                AND j.routed_at < date_trunc('day', ${now.toISOString()}::timestamptz
-                     AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York')::int AS reserve
+                     AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York')::int AS reserve,
+           count(*) FILTER (WHERE j.state = 'routed' AND j.first_send_at IS NULL)::int AS unsent
     FROM drip_journeys j
     JOIN campaigns c ON c.id = j.campaign_id
     WHERE j.org_id = ${orgId}::uuid AND j.state <> 'unroutable'
       AND c.type = 'drip' AND c.status IN ('active', 'paused')
     GROUP BY j.campaign_id
-  `)) as unknown as { campaign_id: number; total: number; today: number; reserve: number }[];
-  return new Map(rows.map((r) => [Number(r.campaign_id), { total: r.total, today: r.today, reserve: r.reserve }]));
+  `)) as unknown as { campaign_id: number; total: number; today: number; reserve: number; unsent: number }[];
+  // S for the send-capacity rule — the scheduler's own daily-cap count.
+  const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc(now);
+  const sends = (await dbc.execute(sql`
+    SELECT c.id AS campaign_id, s.n
+    FROM campaigns c
+    CROSS JOIN LATERAL (
+      SELECT count(*)::int AS n FROM stage_sends ss
+      WHERE ss.campaign_id = c.id AND ${dripDailySendsPredicate(dayStart, dayEnd)}
+    ) s
+    WHERE c.org_id = ${orgId}::uuid AND c.type = 'drip' AND c.status IN ('active', 'paused')
+  `)) as unknown as { campaign_id: number; n: number }[];
+  const out: CampaignJourneyCounts = new Map();
+  for (const r of rows) {
+    out.set(Number(r.campaign_id), { ...ZERO_COUNTS, total: r.total, today: r.today, reserve: r.reserve, unsent: r.unsent });
+  }
+  for (const r of sends) {
+    const id = Number(r.campaign_id);
+    out.set(id, { ...(out.get(id) ?? ZERO_COUNTS), sendsToday: r.n });
+  }
+  return out;
 }
 
 /**
@@ -190,6 +242,7 @@ export async function evaluateLeadRouting(
   { orgId, leadEventId, now = new Date(), counts }:
     { orgId: string; leadEventId: string; now?: Date; counts?: CampaignJourneyCounts },
 ): Promise<LeadRoutingEvaluation | null> {
+  const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc(now);
   const rows = (await dbc.execute(sql`
     WITH le AS (
       SELECT e.id, e.contact_id, e.partner_key_id, e.interest_tag, e.received_at,
@@ -230,6 +283,8 @@ export async function evaluateLeadRouting(
         WHERE os.org_id = ${orgId}::uuid) AS org_carry_days,
       (SELECT os.drip_admission_widened_at FROM org_settings os
         WHERE os.org_id = ${orgId}::uuid) AS org_widened_at,
+      (SELECT os.drip_routing_send_capacity FROM org_settings os
+        WHERE os.org_id = ${orgId}::uuid) AS org_send_capacity,
       c.id AS campaign_id, c.name AS campaign_name, c.offer_id AS campaign_offer_id,
       c.status AS campaign_status, c.send_paused AS campaign_send_paused,
       cfg.admission_cutoff_minutes AS cfg_cutoff_minutes,
@@ -239,9 +294,11 @@ export async function evaluateLeadRouting(
       cfg.priority AS cfg_priority, cfg.filters AS cfg_filters,
       cfg.campaign_cap AS cfg_campaign_cap,
       cfg.routing_daily_admission_cap AS cfg_admission_cap,
+      cfg.daily_cap AS cfg_daily_cap,
       (c.audience_filters -> 'carrier_filter') AS carrier_filter,
       ${counts
-        ? sql`0 AS journeys_total, 0 AS journeys_today, 0 AS journeys_reserve,`
+        ? sql`0 AS journeys_total, 0 AS journeys_today, 0 AS journeys_reserve,
+               0 AS sends_today, 0 AS journeys_unsent,`
         : sql`COALESCE((SELECT count(*)::int FROM drip_journeys j2
                 WHERE j2.campaign_id = c.id
                   AND j2.state <> 'unroutable'), 0) AS journeys_total,
@@ -255,7 +312,12 @@ export async function evaluateLeadRouting(
                   AND j4.routed_at >= ${now.toISOString()}::timestamptz - interval '24 hours'
                   AND j4.routed_at < date_trunc('day', ${now.toISOString()}::timestamptz
                         AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York'), 0)
-        AS journeys_reserve,`}
+        AS journeys_reserve,
+      (SELECT count(*)::int FROM stage_sends ss
+        WHERE ss.campaign_id = c.id AND ${dripDailySendsPredicate(dayStart, dayEnd)}) AS sends_today,
+      (SELECT count(*)::int FROM drip_journeys j5
+        WHERE j5.campaign_id = c.id AND j5.state = 'routed' AND j5.first_send_at IS NULL)
+        AS journeys_unsent,`}
       EXISTS (SELECT 1 FROM offer_exposures oe
               WHERE oe.org_id = ${orgId}::uuid AND oe.contact_id = le.contact_id
                 AND c.offer_id IS NOT NULL AND oe.offer_id = c.offer_id) AS had_offer_exposure,
@@ -500,7 +562,7 @@ export async function evaluateLeadRouting(
     }
 
     // Caps. From the worker's per-tick counts when given, else the per-call SQL.
-    const cached = counts ? (counts.get(Number(r.campaign_id)) ?? { total: 0, today: 0, reserve: 0 }) : null;
+    const cached = counts ? (counts.get(Number(r.campaign_id)) ?? ZERO_COUNTS) : null;
     const journeysTotal = cached ? cached.total : r.journeys_total;
     const journeysToday = cached ? cached.today : r.journeys_today;
     // ⭐ Fresh leads first (carry-over D1): a CARRIED lead may only use the cap
@@ -523,6 +585,23 @@ export async function evaluateLeadRouting(
           `(${journeysToday} routed today) — this is NOT the send-time daily cap`;
     }
 
+    // ⭐ SEND CAPACITY (0210, flag org_settings.drip_routing_send_capacity).
+    // Full when today's sends + the routed-unsent backlog already reach the
+    // daily SEND cap: admitting more would only queue leads the campaign cannot
+    // text today. A full campaign is just ineligible, so the lead goes to the
+    // next candidate by priority, and is deferred only when every candidate is
+    // full. Flag off ⇒ the rule is ABSENT, not "pass", so stored reasons and the
+    // debugging tool are identical to before.
+    if (head.org_send_capacity === true) {
+      const cap = sendCapacity(
+        r.cfg_daily_cap,
+        cached ? cached.sendsToday : Number(r.sends_today ?? 0),
+        cached ? cached.unsent : Number(r.journeys_unsent ?? 0),
+      );
+      rules.send_capacity = cap.full ? "blocked" : "pass";
+      if (cap.detail) detail.send_capacity = cap.detail;
+    }
+
     const eligible = Object.values(rules).every((v) => v === "pass");
     candidates.push({
       campaign_id: r.campaign_id,
@@ -538,9 +617,8 @@ export async function evaluateLeadRouting(
   // Winner: priority ASC, tie -> newest campaign (highest id).
   const winner = globallyBlocked
     ? null
-    : (candidates
-        .filter((c) => c.eligible)
-        .sort((a, b) => a.priority - b.priority || b.campaign_id - a.campaign_id)[0] ?? null);
+    : (candidates.filter((c) => c.eligible).sort(byRoutingRank)[0] ?? null);
+  const sendCapacityOn = head.org_send_capacity === true;
 
   return {
     lead_event_id: head.lead_event_id,
@@ -553,7 +631,37 @@ export async function evaluateLeadRouting(
     globalDetail,
     candidates,
     winner,
+    send_capacity_on: sendCapacityOn,
+    overflowed_from: sendCapacityOn && winner ? overflowSkips(candidates, winner) : [],
   };
+}
+
+/** Routing order: priority ASC, tie -> newest campaign (highest id). */
+function byRoutingRank(a: CandidateVerdict, b: CandidateVerdict): number {
+  return a.priority - b.priority || b.campaign_id - a.campaign_id;
+}
+
+/** Day-level capacity rules: the ones a lead overflows past. The lifetime
+ *  campaign_cap is not "full for today", so it is not one of them. */
+const DAY_CAPACITY_RULES: readonly string[] = ["send_capacity", "routing_daily_admission"];
+
+/** Candidates ranked above the winner whose ONLY failing rules are day-level
+ *  capacity: the lead would have gone there had it not been full. Exported for
+ *  the pure test. */
+export function overflowSkips(candidates: CandidateVerdict[], winner: CandidateVerdict): OverflowSkip[] {
+  return [...candidates]
+    .sort(byRoutingRank)
+    .filter((c) => byRoutingRank(c, winner) < 0)
+    .filter((c) => {
+      const failed = Object.entries(c.rules).filter(([, v]) => v !== "pass").map(([k]) => k);
+      return failed.length > 0 && failed.every((k) => DAY_CAPACITY_RULES.includes(k));
+    })
+    .map((c) => ({
+      campaign_id: c.campaign_id,
+      campaign_name: c.campaign_name,
+      priority: c.priority,
+      detail: DAY_CAPACITY_RULES.map((k) => c.detail[k]).filter(Boolean).join("; "),
+    }));
 }
 
 // ── what the routing worker does with a verdict (card 869ency4b item 1) ──────
@@ -576,7 +684,9 @@ export async function evaluateLeadRouting(
 /** Global rules that clear on their own (the contact leaves a campaign, the week passes). */
 const TEMPORARY_GLOBAL_RULES = new Set(["in_use", "week_rule"]);
 /** Per-campaign rules that can clear within the day. */
-const TEMPORARY_CANDIDATE_RULES = new Set(["campaign_paused", "campaign_cap", "routing_daily_admission"]);
+const TEMPORARY_CANDIDATE_RULES = new Set([
+  "campaign_paused", "campaign_cap", "routing_daily_admission", "send_capacity",
+]);
 
 export type RoutingOutcome = "route" | "permanent" | "defer" | "expired";
 

@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-13 (hourly send cap; stage-off reverts; the edit screen is type-gated)_
+_Last updated: 2026-10-13 (capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -142,8 +142,10 @@ campaign; the rest are per candidate.
 | carrier | reuses `campaigns.audience_filters.carrier_filter` |
 | same offer | offer half only — **the creative half is `deferred_p5`** |
 | caps | `campaign_cap` and `routing_daily_admission_cap` |
+| send capacity | only while `org_settings.drip_routing_send_capacity` is on (0210): sends today + routed-unsent backlog < `daily_cap`. See [Capacity overflow](#capacity-overflow-2026-10-13-migration-0210) |
 
-Winner: **priority ASC, tie → newest campaign.**
+Winner: **priority ASC, tie → newest campaign.** A candidate failing any rule (paused, full,
+filtered out) is simply not eligible, so the next eligible candidate wins.
 
 **⚠️ skip-if-missing is reported as `missing`, not `mismatch`.** They need different fixes: one is a
 partner sending incomplete data, the other is targeting working correctly.
@@ -181,7 +183,7 @@ receive the same creative" has no operand. The journey `reason` records
 |---|---|---|---|
 | `campaign_cap` | journeys, lifetime | routing | **live** |
 | `routing_daily_admission_cap` | journeys, per ET day | routing | **live**, NULL = unlimited |
-| `daily_cap` | **sends**, per ET day | send time | **not enforced until P5** |
+| `daily_cap` | **sends** (first sends + follow-ups), per ET day | send time; also routing while 0210's flag is on | **live** |
 
 They cannot be one number: a journey routed at 23:50 ET sends the next day. Enforcing a send cap
 against journeys now and against sends later would give two caps fighting over one field. The UI
@@ -195,7 +197,7 @@ Every verdict without a winner is classified by `classifyRoutingOutcome`
 | Outcome | When | What is written |
 |---|---|---|
 | **permanent** | opted out; or every candidate fails a rule that cannot change today (tag, partner, window, demographic/carrier filter, same offer + creative, no config); or no live-or-paused drip campaign exists | a terminal `unroutable` row on the **first** evaluation, `reason.permanent = true` with every rule |
-| **defer** | only TEMPORARY rules fail somewhere: contact in use, week rule, campaign cap, daily admission cap, campaign paused (status `paused` **or** `send_paused`) | `lead_events.drip_recheck_at = now + 15 min`; nothing else |
+| **defer** | only TEMPORARY rules fail somewhere: contact in use, week rule, campaign cap, daily admission cap, send capacity (0210), campaign paused (status `paused` **or** `send_paused`) | `lead_events.drip_recheck_at = now + 15 min`; nothing else |
 | **expired** | the only candidates left are past their freshness cutoff | the same re-check stamp; nothing terminal |
 
 **Candidate order:** never-evaluated leads first (oldest first), then deferred leads whose re-check
@@ -448,6 +450,55 @@ leaves lanes out of the sibling set, the editor shows a lane a note instead of w
 lane's creative is set from its Stages-table row with no window involved), and the Stages table shows
 a lane's own state (`Needs a creative` / `Lane on` / `Lane off`) instead of the first-send readiness
 badge, which would call every lane "No window".
+
+## Capacity overflow (2026-10-13, migration 0210)
+
+**Problem.** Routing never read the daily SEND cap, so a campaign without an admission cap kept
+taking leads it could not text. On 2026-10-13 campaign 8_155 (cap 7,000/day) had 7,000 sent and
+15,647 routed-unsent, while its same-tag sibling sat below its cap.
+
+**Rule** (`org_settings.drip_routing_send_capacity`, default **off**). A campaign is **full for
+today** when either:
+
+- its admission cap is reached (`routing_daily_admission`, unchanged), or
+- **S + U ≥ `daily_cap`** (new rule `send_capacity`), where
+  - **S** = today's drip sends on the campaign (sent / sending / pending, first sends **and**
+    follow-ups) — the exact count the scheduler enforces, from the shared
+    `dripDailySendsPredicate` in [lib/drip/daily-sends.ts](../../lib/drip/daily-sends.ts);
+  - **U** = journeys in `routed` with no first send yet, from **any** day (the backlog).
+
+A full campaign is just ineligible, so the existing priority order picks the next same-tag
+candidate. **The overflow campaign's own rules all apply** (tag, partner, filters, dates,
+freshness, caps): overflow is "next candidate", never a bypass. When **every** candidate is full
+the lead is **deferred**; past its freshness cutoff it leaves drip. `carry_days` is the knob for
+keeping such leads alive overnight. There is no fallback to over-cap routing.
+
+- **Day-level only.** A full *hour* (the hourly cap) never triggers overflow: with hourly carry off
+  that would quietly undo the missed-hour drop rule. **With carry OFF and an hourly cap, leads can
+  drop while a same-tag sibling still has hourly room — overflow is day-level only. Prefer carry ON
+  when running multiple same-tag campaigns.** (Owner-accepted as designed, 2026-10-13; the same line
+  is shown under the hourly cap in the drip settings panel.)
+- **Paused is unchanged.** A paused campaign is skipped for the next eligible one and is **not**
+  recorded as an overflow; a lead is deferred only when every candidate is paused.
+- **Prospective only.** Existing routed journeys are never re-routed; a backlog drains at its
+  campaign's daily cap.
+- **No window test.** A campaign whose windows have closed for today is not "full": an evening
+  arrival is still routed and sends tomorrow.
+- **Per-tick counts.** `loadCampaignJourneyCounts` reads S and U once per routing tick; each
+  routed lead adds 1 to its campaign's U, so one tick cannot overfill. A send moves a journey from
+  U to S (the first `stage_sends` row and `first_send_at` are written in one transaction), so S + U
+  stays true while the scheduler runs alongside.
+- **Flag off ⇒ the `send_capacity` rule is absent**, not "pass": stored reasons and the debugging
+  tool read exactly as before.
+
+**Recorded.** A lead that overflowed gets `drip_journeys.reason.overflowed_from` — every
+higher-ranked candidate skipped **only** for day-level capacity (`send_capacity` or
+`routing_daily_admission`; never paused, filtered or lifetime-capped) — plus `reason.campaign_name`.
+"Why not routed" shows `<campaign>: campaign full (X/Y today: S sent + U queued), overflowed to
+<winner>` under the arrival, and the same line for the live evaluation.
+
+Proof: `scripts/test-drip-send-capacity.ts` (pure) and `scripts/test-drip-routing-overflow.ts`
+(preview DB, including the 8_155 / 8_154 replay scaled 1:100).
 
 ## Scheduler batch: per-campaign fairness (2026-10-12, migration 0207)
 

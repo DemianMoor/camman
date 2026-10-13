@@ -3,9 +3,11 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { campaignTierExpr } from "@/lib/campaign-tier";
 import { isCampaignPaused, isDripSendingHalted } from "@/lib/sends/circuit-breakers";
 import { resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
+import { dripDailySendsPredicate } from "./daily-sends";
 import { followupDueAt, OFFER_REACH_POLL_CYCLE_MINUTES, type FollowupTier } from "./followup-timing";
 import { isDripPostureOn } from "./in-use";
 import { closeJourneyUnengaged } from "./lifecycle";
@@ -257,12 +259,11 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
       // Daily cap counts EVERY drip send on the campaign, first-sends included —
       // a follow-up costs the same money and the same carrier reputation.
       if (r.daily_cap != null) {
+        const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc(now);
         const c = (await db.execute(sql`
           SELECT count(*)::int AS n FROM stage_sends ss
           WHERE ss.campaign_id = ${r.campaign_id}
-            AND ss.status IN ('sent','sending','pending')
-            AND ss.created_at >= date_trunc('day', now() AT TIME ZONE 'America/New_York')
-                                  AT TIME ZONE 'America/New_York'
+            AND ${dripDailySendsPredicate(dayStart, dayEnd)}
         `)) as unknown as { n: number }[];
         if (c[0].n >= r.daily_cap) { res.capBlocked++; continue; }
       }

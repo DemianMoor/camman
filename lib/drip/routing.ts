@@ -10,6 +10,7 @@ import {
   classifyRoutingOutcome,
   evaluateLeadRouting,
   loadCampaignJourneyCounts,
+  ZERO_COUNTS,
 } from "./routing-eval";
 
 // The drip routing worker (Drip Phase 4). ZERO SENDS.
@@ -167,6 +168,12 @@ export async function runDripRoutingBatch(
           skipped: verdict.candidates
             .filter((c) => c.campaign_id !== verdict.winner!.campaign_id)
             .map((c) => ({ campaign_id: c.campaign_id, eligible: c.eligible, detail: c.detail })),
+          // Higher-priority campaigns passed over only because they were full
+          // today (0210). Absent unless the lead actually overflowed.
+          ...(verdict.overflowed_from.length > 0 && {
+            overflowed_from: verdict.overflowed_from,
+            campaign_name: verdict.winner.campaign_name,
+          }),
           evaluated_at: now.toISOString(),
         };
         try {
@@ -183,8 +190,12 @@ export async function runDripRoutingBatch(
           const k = String(verdict.winner.campaign_id);
           res.byCampaign[k] = (res.byCampaign[k] ?? 0) + 1;
           // Keep the per-tick cap counts true for the next evaluation.
-          const c = counts.get(verdict.winner.campaign_id) ?? { total: 0, today: 0, reserve: 0 };
-          counts.set(verdict.winner.campaign_id, { total: c.total + 1, today: c.today + 1, reserve: c.reserve });
+          // `unsent` too: the new journey is routed and unsent, so it is U in the
+          // send-capacity rule (0210) — without it one tick could overfill.
+          const c = counts.get(verdict.winner.campaign_id) ?? ZERO_COUNTS;
+          counts.set(verdict.winner.campaign_id, {
+            ...c, total: c.total + 1, today: c.today + 1, unsent: c.unsent + 1,
+          });
         } catch (e) {
           if (codeOf(e) === "23505") {
             // Lost the race — the invariant did its job. Not an error. The

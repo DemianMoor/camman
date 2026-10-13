@@ -5,6 +5,8 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { campaignTierExpr } from "@/lib/campaign-tier";
+import { etDayStartBack } from "./admission-window";
+import { HOUR_MS, hourStartOf } from "./hourly-cap";
 import { purchasedClause } from "@/lib/sale-attribution";
 
 // The journey funnel for one drip campaign (Drip Phase 7, ruling R4).
@@ -75,6 +77,18 @@ export interface FunnelStageRow {
 export interface FunnelSplitRow { routed: number; sent: number; clicked: number; sales: number }
 export interface FunnelSplit { same_day: FunnelSplitRow; carried: FunnelSplitRow; unmatched_sales: number }
 
+export interface FunnelHourly {
+  cap: number;
+  carry: boolean;
+  hour_start: string; // current hour (UTC ISO)
+  sent_this_hour: number;
+  assigned_unsent_this_hour: number;
+  queued_from_earlier_hours: number;
+  waiting: number;
+  oldest_unsent_age_min: number | null; // queued or waiting, by routed_at
+  drops_by_day: { day: string; cap: number; closed: number; blocked: number }[]; // last 7 ET days, newest first
+}
+
 export interface DripFunnel {
   progression: FunnelProgression;
   /** Events during the current ET day, any journey. NOT nested — see above. */
@@ -83,6 +97,8 @@ export interface DripFunnel {
   stages: FunnelStageRow[];
   /** Same-day vs carried (carry-over spec §8). null ⇔ no carried journey in this campaign. */
   split: FunnelSplit | null;
+  /** Hourly send cap panel (0209). null ⇔ no cap on this campaign or org flag off. */
+  hourly: FunnelHourly | null;
 }
 
 type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -96,6 +112,9 @@ const OUTCOME_LABELS: Record<string, string> = {
   "completed|unengaged": "Completed — unengaged",
   "expired|campaign_ended": "Expired — campaign ended",
   "exited|campaign_archived": "Exited — campaign archived",
+  "expired|missed_hour_cap": "Dropped — hourly cap full",
+  "expired|missed_hour_closed": "Dropped — window closed / daily cap before its turn",
+  "expired|missed_hour_blocked": "Dropped — send blocked (gate/mint) ⚠️",
 };
 
 const LIVE_STATES = new Set(["routed", "active"]);
@@ -279,8 +298,52 @@ export async function getDripFunnel(
     reached_offer: Number(p.reached_offer ?? 0),
     converted: Number(p.converted ?? 0),
   });
+  // ── hourly cap panel (0209) — only for a capped campaign with the org flag on ──
+  const hcfg = (await dbc.execute(sql`
+    SELECT cfg.hourly_cap, cfg.hourly_carry FROM drip_campaign_configs cfg
+    JOIN org_settings os ON os.org_id = cfg.org_id
+    WHERE cfg.campaign_id = ${campaignId} AND cfg.org_id = ${orgId}::uuid
+      AND cfg.hourly_cap IS NOT NULL AND os.drip_hourly_cap_enabled
+  `)) as unknown as { hourly_cap: number; hourly_carry: boolean }[];
+  let hourly: FunnelHourly | null = null;
+  if (hcfg[0]) {
+    const now = new Date();
+    const hour = hourStartOf(now);
+    const hourEnd = new Date(hour.getTime() + HOUR_MS);
+    const weekStart = etDayStartBack(now, 6); // start of the ET day 6 days ago
+    const hr = (await dbc.execute(sql`
+      SELECT
+        (SELECT count(*)::int FROM drip_journeys WHERE campaign_id = ${campaignId}
+           AND first_send_at >= ${hour.toISOString()}::timestamptz AND first_send_at < ${hourEnd.toISOString()}::timestamptz) AS sent,
+        count(*) FILTER (WHERE hour_start = ${hour.toISOString()}::timestamptz)::int AS assigned,
+        count(*) FILTER (WHERE hour_start < ${hour.toISOString()}::timestamptz)::int AS queued,
+        count(*) FILTER (WHERE hour_start IS NULL)::int AS waiting,
+        (extract(epoch FROM (now() - min(routed_at) FILTER (WHERE hour_start IS NULL OR hour_start < ${hour.toISOString()}::timestamptz))) / 60)::int AS oldest_min
+      FROM drip_journeys
+      WHERE campaign_id = ${campaignId} AND state = 'routed' AND first_send_at IS NULL
+    `)) as unknown as { sent: number; assigned: number; queued: number; waiting: number; oldest_min: number | null }[];
+    const days = (await dbc.execute(sql`
+      SELECT to_char((closed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS day,
+             count(*) FILTER (WHERE close_reason = 'missed_hour_cap')::int AS cap,
+             count(*) FILTER (WHERE close_reason = 'missed_hour_closed')::int AS closed,
+             count(*) FILTER (WHERE close_reason = 'missed_hour_blocked')::int AS blocked
+      FROM drip_journeys
+      WHERE campaign_id = ${campaignId} AND close_reason LIKE 'missed_hour%'
+        AND closed_at >= ${weekStart.toISOString()}::timestamptz
+      GROUP BY 1 ORDER BY 1 DESC
+    `)) as unknown as { day: string; cap: number; closed: number; blocked: number }[];
+    hourly = {
+      cap: Number(hcfg[0].hourly_cap), carry: hcfg[0].hourly_carry, hour_start: hour.toISOString(),
+      sent_this_hour: Number(hr[0]?.sent ?? 0), assigned_unsent_this_hour: Number(hr[0]?.assigned ?? 0),
+      queued_from_earlier_hours: Number(hr[0]?.queued ?? 0), waiting: Number(hr[0]?.waiting ?? 0),
+      oldest_unsent_age_min: hr[0]?.oldest_min == null ? null : Number(hr[0].oldest_min),
+      drops_by_day: days.map((d) => ({ day: d.day, cap: Number(d.cap), closed: Number(d.closed), blocked: Number(d.blocked) })),
+    };
+  }
+
   return {
     split,
+    hourly,
     progression: toProgression(prog[0]),
     today: toProgression(today[0]),
     outcomes: outcomes.map((o) => ({

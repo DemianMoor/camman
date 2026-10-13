@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-13 (the edit screen is type-gated)_
+_Last updated: 2026-10-13 (hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -315,6 +315,100 @@ empty**. Those three fields (and `admission_cutoff_minutes`, which the campaign 
 now **kept when omitted**; an explicit `null` still clears them. The admission cap
 ("Routing per day") was already on this panel and in the editor ("Daily admission"); it limits drip
 admission only, which the panel now says in plain words.
+
+## Hourly send cap (2026-10-13, migration 0209)
+
+Caps how many **first sends** a drip campaign makes per ET clock hour, so a burst of leads is paced
+instead of sent at once. **Ships OFF**: `hourly_cap` NULL on every config, `hourly_carry` false and
+`org_settings.drip_hourly_cap_enabled` false behave exactly as before. Spec:
+[2026-10-13-drip-hourly-send-cap-design.md](../superpowers/specs/2026-10-13-drip-hourly-send-cap-design.md).
+Code: pure rules in [lib/drip/hourly-cap.ts](../../lib/drip/hourly-cap.ts), the per-run pass in
+[lib/drip/hourly-maintenance.ts](../../lib/drip/hourly-maintenance.ts), the room gate in
+[lib/drip/scheduler.ts](../../lib/drip/scheduler.ts).
+
+**Setting.** Two fields in the Caps box, shown only while the org flag is on: **Hourly send cap**
+(positive integer or empty = unlimited; saved by `PUT /api/campaigns/[campaignId]/drip-config`, omitted =
+keep the stored value) and **Carry unsent leads to the next hour** (default OFF). The daily send cap still
+applies; both bind. **Follow-ups are not subject to the cap** and never count toward it: it is lead
+pacing, and per-number headroom covers provider throughput.
+
+**Hour semantics.** The hour key is `date_trunc('hour', <utc instant>)`
+([hourStartOf](../../lib/drip/hourly-cap.ts)), never a local-time truncation: ET boundaries are whole-hour
+offsets, so UTC hours are ET hours and the DST fall-back 01:00 ET stays two distinct hours. Each unsent
+routed journey carries `hour_start` + `hour_fresh` (both NULL = **waiting**, on no clock):
+
+- **Fresh** (`hour_fresh = true`): routed while one of the campaign's first-send windows
+  (`parent_stage_id IS NULL`, `drip_active`, half-open `[start, end)`) covered its routed ET minute,
+  during the current hour. Assigned regardless of room; its clock starts when it became sendable.
+- **Waiting**: routed outside every window, or reverted. Released into the current hour only into spare
+  room, as `hour_fresh = false` (backlog).
+- `sentH` = the campaign's journeys with `first_send_at` in `[H, H+1h)`, counted from the DB every run
+  (restart-proof). Sends this hour never exceed `min(cap - sentH, daily room)`.
+
+**Per-run pass** (`prepareHourly`, inside the scheduler lease, before the due query). First, org-wide,
+`clearIneligibleHourAssignments`: org drip off/paused, flag off, campaign not `active` / `send_paused`, or
+cap removed => assignments revert to waiting. Then per capped campaign:
+
+1. **Assign fresh** to the current hour, then revert fresh leads whose window no longer exists (stage-off / archived / window edited).
+2. **Able to send?** `send_paused`, org drip halt, lifetime `campaign_cap` reached, or no number with
+   headroom. If not: revert the campaign's assignments to waiting, room 0, **skip step 3**.
+3. **Close past hours (OFF only).** Released backlog reverts to waiting (never dropped). Fresh unsent leads
+   of a past hour H: a send refusal recorded in H => dropped `blocked`; otherwise, with `B` = backlog first
+   sends in H and `U` = the remaining fresh unsent, the **newest** `min(U, B)` are demoted to waiting (the
+   backlog took their slots) and the oldest `U - B` dropped: `cap` if H's first sends reached the cap, else
+   `closed`.
+4. **Release backlog** (only while a window is open), oldest `routed_at` first. OFF:
+   `min(cap - sentH - freshUnsent - backlogUnsent, ceil(cap x max(minutesIntoHour, 1) / 60) - sentH - backlogUnsent)`
+   (fresh-first, backlog paced over the hour; the 1-minute floor means the first minute releases
+   `ceil(cap / 60)`). ON: `cap - sentH - freshUnsent - backlogUnsent - queuedUnsent`. All unsent counts are
+   this campaign's assigned-unsent journeys (`backlogRoom` in [lib/drip/hourly-cap.ts](../../lib/drip/hourly-cap.ts)).
+5. **Room** = `cap - sentH`. For a capped campaign `selectDueJourneys` takes only assigned journeys
+   (`hour_start <= current hour`), ordered ON `hour_start, routed_at` (queue first) / OFF
+   `hour_fresh DESC, routed_at`; the send loop stops at the room. A full campaign contributes no rows, so
+   it never takes batch slots.
+
+> **The code differs from the spec on two points (documented here on purpose).** (1) The spec's section 4
+> listed "close past hours" before the "able to send?" check; the code checks first and skips the close when
+> unable, because a stop control must never cause a drop, even at the hour boundary (owner invariant).
+> (2) "Backlog sent in hour H" counts first sends in `[H, H+1h)` of journeys with `hour_fresh = false` with
+> **no condition on their `hour_start`**, so a send loop straddling :00 is credited correctly.
+
+**Combinations** ("daily carry" = `carry_days`, routing admission on later days):
+
+| Hourly carry | Daily carry | Behaviour |
+|---|---|---|
+| OFF | 0 | Routed on the arrival ET day only. A fresh lead must send within its hour, else dropped (cap / closed / blocked). Waiting leads (evening arrivals, reverts) are released into spare room, paced, fresh-first, never dropped. |
+| OFF | N > 0 | Also routed on later days. A carried lead routed inside a window is a fresh lead of its routed hour: the day admits it, the hour can still drop it. |
+| ON | 0 | Nothing dropped by the hour; unsent leads queue into later hours (queue first, oldest first, fresh behind), spilling into later days when windows close. No age limit. |
+| ON | N > 0 | As above, plus carried routing. |
+
+**Drop.** `state = 'expired'`, `closed_at = now()`, `close_reason` = `missed_hour_cap` (hourly cap full) /
+`missed_hour_closed` (window closed / daily cap before its turn) / `missed_hour_blocked` (send refused by
+gate or mint), and `reason.missed_hour = {hour_start, cap, cause, sent_in_hour, backlog_sent_in_hour}`.
+Closing frees the one-live-per-contact slot, so the contact is usable in regular campaigns again; the
+contact row is never touched and the lead event is not re-offered to another drip campaign.
+`blocked` is told apart from `cap`: when the per-lead transaction rolls back on `MintRefused` /
+`GateRefused` for a capped campaign, `recordSendRefusal` writes `reason.last_send_refusal = {kind, at}`
+outside it (no write for uncapped campaigns). Any `blocked` drop fires the alert
+`drip:missed_hour_blocked:<campaign>:<hour>`.
+
+**Stop controls never drop.** Pause, org drip halt/off, flag off, cap removed, lifetime cap, no number
+headroom: assignments revert to waiting and resume later with zero drops. **Carry ON -> OFF** on save
+reverts every assigned unsent journey to waiting (`applyHourlyCarryTransition`, in the
+same transaction as the PUT): all unsent assigned leads revert to waiting and become backlog, not a mass drop.
+An open first-send stage without a creative (or with empty text) also counts as not able — the scheduler
+skips it, so the hour must not close on it. A lowered cap needs no handling;
+the lower room applies from the next run.
+
+**Stage-off is a stop control (owner ruling 2026-10-13).** A first-send stage deactivated, archived or its window edited so it no longer covers a lead's routed minute => that lead reverts to waiting, never dropped as `missed_hour_closed` (`revertOrphanedFresh`, step 1b, every capped campaign, ON and OFF; same half-open ET-minute test as assignment). A window that merely *ended* naturally still closes the hour.
+
+**Reporting.** Funnel outcomes get three labels ("Dropped — hourly cap full", "... window closed / daily
+cap before its turn", "... send blocked (gate/mint)"), in [lib/drip/funnel.ts](../../lib/drip/funnel.ts). The
+**Hourly cap panel** ([components/drip/hourly-cap-panel.tsx](../../components/drip/hourly-cap-panel.tsx),
+only for a capped campaign with the org flag on) shows sent this hour / cap, due this hour, queued from
+earlier hours, waiting, oldest unsent age, and 7 ET days of drops by cause. **Why not routed**
+([app/api/drip/why-not-routed/route.ts](../../app/api/drip/why-not-routed/route.ts)) returns `close_reason`
+and `reason.missed_hour` and renders "missed its hour". Not in the Daily results rollup in v1.
 
 ## Per-tick journey counts
 

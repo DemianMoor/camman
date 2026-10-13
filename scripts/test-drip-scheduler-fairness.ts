@@ -73,8 +73,8 @@ async function main() {
     await journeys(B, 5, 1); // fresh
     await journeys(C, 3, 60); // paused campaign, oldest of all
 
-    const off = await selectDueJourneys(db, { orgId, fair: false, batch: 200 });
-    const on = await selectDueJourneys(db, { orgId, fair: true, batch: 200 });
+    const off = await selectDueJourneys(db, { orgId, fair: false, batch: 200, hourly: new Map() });
+    const on = await selectDueJourneys(db, { orgId, fair: true, batch: 200, hourly: new Map() });
     const count = (rows: { campaign_id: number }[], id: number) =>
       rows.filter((r) => Number(r.campaign_id) === id).length;
 
@@ -103,11 +103,39 @@ async function main() {
       (await routedOrder(aIds(off))) && (await routedOrder(aIds(on))));
     bar("F5 the paused campaign is never selected, both ways", count(off, C) === 0 && count(on, C) === 0);
 
-    const allOff = await selectDueJourneys(db, { orgId, fair: false, batch: 1000 });
-    const allOn = await selectDueJourneys(db, { orgId, fair: true, batch: 1000 });
+    const allOff = await selectDueJourneys(db, { orgId, fair: false, batch: 1000, hourly: new Map() });
+    const allOn = await selectDueJourneys(db, { orgId, fair: true, batch: 1000, hourly: new Map() });
     const ids = (rows: { journey_id: string }[]) => rows.map((r) => r.journey_id).sort().join(",");
     bar("F6 no backlog (batch > queue): the same 255 journeys both ways",
       allOff.length === 255 && ids(allOff) === ids(allOn), `off ${allOff.length}, on ${allOn.length}`);
+
+    // H1 — no cap: an empty map is byte-identical to the old order.
+    const legacy = await selectDueJourneys(db, { orgId, fair: true, batch: 200, hourly: new Map() });
+    bar("H1 empty hourly map = F2's batch exactly", legacy.map((r) => r.journey_id).join() === on.map((r) => r.journey_id).join());
+
+    // H9 — A is hourly-capped and its hour is full: A contributes no rows; B gets all 5.
+    const hourStart = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000);
+    await db.execute(sql`UPDATE drip_journeys SET hour_start = ${hourStart.toISOString()}::timestamptz, hour_fresh = true
+                         WHERE campaign_id = ${A}`);
+    const full = await selectDueJourneys(db, { orgId, fair: true, batch: 200,
+      hourly: new Map([[A, { hourStart, room: 0, carry: false }]]) });
+    bar("H9a a full hour takes no batch slots", count(full, A) === 0 && count(full, B) === 5, `A ${count(full, A)}, B ${count(full, B)}`);
+    const some = await selectDueJourneys(db, { orgId, fair: true, batch: 200,
+      hourly: new Map([[A, { hourStart, room: 7, carry: false }]]) });
+    bar("H9b room 7 => exactly 7 of A", count(some, A) === 7, `A ${count(some, A)}`);
+    const unassigned = await selectDueJourneys(db, { orgId, fair: false, batch: 200,
+      hourly: new Map([[B, { hourStart, room: 50, carry: false }]]) });
+    bar("H9c waiting (unassigned) journeys of a capped campaign are never due", count(unassigned, B) === 0);
+
+    // H3 — ON order: a queued past-hour lead precedes a backlog lead released into this hour.
+    const prev = new Date(hourStart.getTime() - 3_600_000);
+    const aRows = (await db.execute(sql`SELECT id FROM drip_journeys WHERE campaign_id = ${A} ORDER BY routed_at LIMIT 2`)) as unknown as { id: string }[];
+    await db.execute(sql`UPDATE drip_journeys SET hour_start = ${hourStart.toISOString()}::timestamptz, hour_fresh = false WHERE id = ${aRows[0].id}::uuid`);
+    await db.execute(sql`UPDATE drip_journeys SET hour_start = ${prev.toISOString()}::timestamptz, hour_fresh = true WHERE id = ${aRows[1].id}::uuid`);
+    const onOrder = await selectDueJourneys(db, { orgId, fair: true, batch: 200,
+      hourly: new Map([[A, { hourStart, room: 2, carry: true }]]) });
+    const aOnly = onOrder.filter((r) => Number(r.campaign_id) === A).map((r) => r.journey_id);
+    bar("H3 ON: queued (earlier hour) first", aOnly[0] === aRows[1].id, JSON.stringify(aOnly));
   } finally {
     if (orgId) {
       const name = (await one<{ name: string } | undefined>(

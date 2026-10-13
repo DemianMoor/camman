@@ -66,7 +66,7 @@ export async function GET(req: NextRequest) {
 
   const events = await db.execute(drizzleSql`
     SELECT e.id, e.received_at, e.interest_tag, e.partner_slug, e.sandbox, e.line_type,
-           j.id AS journey_id, j.state AS journey_state, j.campaign_id, j.reason
+           j.id AS journey_id, j.state AS journey_state, j.close_reason, j.campaign_id, j.reason
     FROM lead_events e
     LEFT JOIN drip_journeys j ON j.lead_event_id = e.id
     WHERE e.org_id = ${orgId}::uuid AND e.contact_id = ${contact[0].id}

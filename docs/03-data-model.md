@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-12 (0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
+_Last updated: 2026-10-13 (0209 drip hourly send cap; 0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -236,9 +236,13 @@ erDiagram
   drip_campaign_configs {
     int carry_days "NULL = account default, 0-7 (0204)"
     timestamptz admission_widened_at "trigger-stamped (0204), forward-only (0205)"
+    int hourly_cap "first sends per ET clock hour, NULL = no limit, CHECK > 0 (0209)"
+    boolean hourly_carry "queue unsent leads into later hours, default false (0209)"
   }
   drip_journeys {
     smallint carried_days "ET days between arrival and routing, default 0 (0204)"
+    timestamptz hour_start "UTC hour the unsent lead is on, NULL = waiting (0209)"
+    boolean hour_fresh "true = own routing hour, false = released backlog (0209)"
   }
   org_settings {
     int drip_carry_days "0-7, default 0 (0204)"
@@ -246,6 +250,7 @@ erDiagram
     boolean drip_poke_enabled "poke chain switch, default false (0206)"
     boolean drip_scheduler_fair "round-robin first-send batch, default false (0207)"
     boolean drip_daily_results_enabled "Daily results tab, default false (0208)"
+    boolean drip_hourly_cap_enabled "hourly cap kill switch, default false (0209)"
   }
 ```
 
@@ -566,6 +571,11 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 | `org_settings.drip_scheduler_fair` *(0207)* | NOT NULL DEFAULT false | **Scheduler per-campaign fairness.** On: the first-send batch is filled round-robin across campaigns (each campaign's oldest routed journey, then the next…), so one campaign's backlog cannot starve another's fresh leads. Off = org-wide oldest first. See [drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#scheduler-batch-per-campaign-fairness-2026-10-12-migration-0207) |
 | `org_settings.drip_daily_results_enabled` *(0208)* | NOT NULL DEFAULT false | **Drip Daily results tab** dark-ship flag: shows the tab on drip campaign pages and serves its API. The `drip_daily_rollup` job runs regardless, so the cells can be reconciled before anyone sees them. |
 | `cron_locks.poke_requested_at` / `poke_dispatched_at` / `last_run_started_at` *(0206)* | timestamptz NULL | Poke coalescing state per job (`cron_locks` is SQL-only, not in `db/schema.ts`). A request newer than the last run start earns the lease holder a re-run; at most one wake-up in flight per job; runs spaced 5 s apart. Written only by [lib/drip/poke.ts](../lib/drip/poke.ts), only while the switch is on |
+| `drip_campaign_configs.hourly_cap` *(0209)* | integer NULL, CHECK NULL or > 0 | **Hourly send cap**: first sends per ET clock hour; NULL = no hourly limit. Ignored unless `org_settings.drip_hourly_cap_enabled`. See [Hourly send cap](04-features/drip-campaigns-routing.md#hourly-send-cap-2026-10-13-migration-0209) |
+| `drip_campaign_configs.hourly_carry` *(0209)* | boolean NOT NULL DEFAULT false | ON = unsent leads queue into later hours; OFF = fresh leads that miss their hour are dropped (`missed_hour_*`) |
+| `org_settings.drip_hourly_cap_enabled` *(0209)* | boolean NOT NULL DEFAULT false | **Hourly cap kill switch.** false: the scheduler ignores every hourly setting, the UI hides both fields, and every assignment is cleared every minute |
+| `drip_journeys.hour_start` / `hour_fresh` *(0209)* | timestamptz NULL / boolean NULL, CHECK `(hour_start IS NULL) = (hour_fresh IS NULL)` | The clock hour an **unsent** routed lead is on (UTC instant = ET hour boundary) and whether it was assigned by its own routing time (`true`) or released from waiting (`false`). Both NULL = **waiting**. `hour_start` is kept on dropped journeys for audit. New `close_reason` values `missed_hour_cap` / `missed_hour_closed` / `missed_hour_blocked` (free text, no CHECK change) |
+| Hourly cap indexes *(0209)* | — | `drip_journeys_campaign_first_send_idx (campaign_id, first_send_at) WHERE first_send_at IS NOT NULL` (hourly sent count; no state filter); `drip_journeys_hourly_queue_idx (campaign_id, hour_start, routed_at) WHERE state='routed' AND first_send_at IS NULL`; `drip_journeys_missed_hour_idx (campaign_id, closed_at) WHERE close_reason LIKE 'missed_hour%'` |
 | `drip_journeys.carried_days` *(0204)* | smallint NOT NULL DEFAULT 0, CHECK ≥ 0 | ET date(routed) − ET date(arrival) at insert. `> 0` = **carried**. Constant default ⇒ metadata-only add, no table rewrite |
 
 > **⭐ Two BEFORE triggers stamp `widened_at` (migration [0204](../db/migrations/0204_drip_carry_over.sql)).** Effective window = `carry_days × 1440 + cutoff minutes` (campaign value, else the org's). The stamp is `now()` whenever that window GROWS on UPDATE, and on INSERT of a config/org row whose window is already > 0 — so a new or duplicated campaign with a cutoff or carry never admits leads that expired before it existed. The org trigger fires on `drip_carry_days` / `drip_admission_cutoff_minutes`; the config trigger on `carry_days` / `admission_cutoff_minutes` (it reads the org row for inherited values).

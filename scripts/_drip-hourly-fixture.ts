@@ -1,4 +1,6 @@
 // scripts/_drip-hourly-fixture.ts — throwaway org for hourly-cap tests. Preview DB only.
+import "./_env-preload";
+import "./_require-preview-db"; // second — refuses any target but the preview DB, even if imported on its own
 import { sql, type SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import { createPartnerWithKey } from "./_partner-fixture";

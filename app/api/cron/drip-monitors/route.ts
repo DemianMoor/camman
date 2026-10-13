@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
+import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { runDripMonitors } from "@/lib/drip/monitors";
@@ -47,7 +48,21 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       HEARTBEAT_JOBS.dripScheduler,
       HEARTBEAT_JOBS.dripFollowups,
     ]);
-    return { ...monitors, heartbeats };
+    // Drip Daily results rollup (0208): the one job here that ALERTS, latched —
+    // its refresh would otherwise have no watcher outside itself.
+    const [dailyRollup] = await checkHeartbeats(db, [HEARTBEAT_JOBS.dripDailyRollup]);
+    if (dailyRollup.stale) {
+      await notifyOnTransition(db, {
+        alertKey: "drip-daily-rollup-stale",
+        text:
+          `⚠️ Drip Daily results: the rollup refresh has not run for ` +
+          `${dailyRollup.age_hours == null ? "ever (no heartbeat)" : `${dailyRollup.age_hours} h`} ` +
+          `(limit ${dailyRollup.max_age_hours} h). The tab is showing stale days. Check /api/cron/drip-daily-rollup in Vercel.`,
+      });
+    } else {
+      await clearAlert(db, { alertKey: "drip-daily-rollup-stale" });
+    }
+    return { ...monitors, heartbeats: [...heartbeats, dailyRollup] };
   });
 
   if (!leased.ran) {

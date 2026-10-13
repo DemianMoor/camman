@@ -8,6 +8,7 @@ import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { purchasesBySendSelect } from "@/lib/sale-attribution";
 import { getCalibratedLookupRate, lookupCostUsd, type LookupRate } from "./lookup-rate";
 import { profitAndRoi } from "./partner-profit";
+import { journeyForSend } from "@/lib/reporting/drip-send-journey";
 
 // Partner reporting (Drip Phase 7) — partner key x interest tag x ET-day range.
 //
@@ -179,16 +180,7 @@ export async function getPartnerReport(
   // one journey per send, never many. See header.
   const viaLead = sql`
       JOIN campaigns c ON c.id = ss.campaign_id AND c.type = 'drip'
-      JOIN LATERAL (
-        SELECT j.lead_event_id
-        FROM drip_journeys j
-        WHERE j.org_id = ss.org_id
-          AND j.contact_id = ss.contact_id
-          AND j.campaign_id = ss.campaign_id
-          AND (j.first_send_at IS NULL OR j.first_send_at <= ss.created_at)
-        ORDER BY j.routed_at DESC
-        LIMIT 1
-      ) jj ON true
+      JOIN LATERAL (${journeyForSend("ss")}) jj ON true
       JOIN lead_events le ON le.id = jj.lead_event_id AND le.sandbox = false`;
 
   const rows = (await db.execute(sql`

@@ -474,7 +474,10 @@ the lead is **deferred**; past its freshness cutoff it leaves drip. `carry_days`
 keeping such leads alive overnight. There is no fallback to over-cap routing.
 
 - **Day-level only.** A full *hour* (the hourly cap) never triggers overflow: with hourly carry off
-  that would quietly undo the missed-hour drop rule.
+  that would quietly undo the missed-hour drop rule. **With carry OFF and an hourly cap, leads can
+  drop while a same-tag sibling still has hourly room — overflow is day-level only. Prefer carry ON
+  when running multiple same-tag campaigns.** (Owner-accepted as designed, 2026-10-13; the same line
+  is shown under the hourly cap in the drip settings panel.)
 - **Paused is unchanged.** A paused campaign is skipped for the next eligible one and is **not**
   recorded as an overflow; a lead is deferred only when every candidate is paused.
 - **Prospective only.** Existing routed journeys are never re-routed; a backlog drains at its

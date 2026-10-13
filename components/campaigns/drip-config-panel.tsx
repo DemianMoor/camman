@@ -398,6 +398,11 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
                       Leads that miss their hour are dropped from this campaign (they stay normal contacts).
                     </p>
                   )}
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    With carry OFF and an hourly cap, leads can drop while a same-tag sibling still has
+                    hourly room — overflow is day-level only. Prefer carry ON when running multiple
+                    same-tag campaigns.
+                  </p>
                 </div>
               )}
             </div>

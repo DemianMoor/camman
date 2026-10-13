@@ -21,8 +21,9 @@ import { checkHeartbeats, HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reportin
 // the existing drain does, unmodified (G1).
 //
 // ⚠️ Gated on drip POSTURE. With org_settings.drip_enabled false (its production
-// value) runDripSchedulerBatch returns after ONE read, so this ships live and
-// completely inert. That is the point of the flag.
+// value) runDripSchedulerBatch does only the posture read plus one cheap
+// clearIneligibleHourAssignments UPDATE (partial index, usually 0 rows) and returns, so this ships live and
+// effectively inert. That is the point of the flag.
 //
 // ⚠️ It also CLOSES THE P3 GAP: drip-monitors watches the sweeper and the
 // routing worker but was itself unwatched. This job checks its heartbeat, giving

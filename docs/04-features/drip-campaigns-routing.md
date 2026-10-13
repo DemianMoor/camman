@@ -394,8 +394,10 @@ outside it (no write for uncapped campaigns). Any `blocked` drop fires the alert
 
 **Stop controls never drop.** Pause, org drip halt/off, flag off, cap removed, lifetime cap, no number
 headroom: assignments revert to waiting and resume later with zero drops. **Carry ON -> OFF** on save
-reverts unsent journeys with `hour_start` before the current hour (`applyHourlyCarryTransition`, in the
-same transaction as the PUT): the queue becomes backlog, not a mass drop. A lowered cap needs no handling;
+reverts every assigned unsent journey to waiting (`applyHourlyCarryTransition`, in the
+same transaction as the PUT): all unsent assigned leads revert to waiting and become backlog, not a mass drop.
+An open first-send stage without a creative (or with empty text) also counts as not able — the scheduler
+skips it, so the hour must not close on it. A lowered cap needs no handling;
 the lower room applies from the next run.
 
 > **Open owner question.** A stage whose `drip_active` is turned off mid-hour is **not** treated as a stop

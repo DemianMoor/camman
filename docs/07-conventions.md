@@ -4787,7 +4787,7 @@ Feature doc: [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-
 - **Only first sends count** (`drip_journeys.first_send_at`). Follow-ups are neither counted nor blocked. The count is read from the DB every run, never held in memory.
 - **A stop control never causes a drop.** Pause, org halt, flag off, cap removed, lifetime cap and no number headroom revert assignments to waiting. In `prepareHourly` the "able to send?" check runs BEFORE closing past hours, so this holds at the hour boundary too. Any new stop condition must be added to that check and to `clearIneligibleHourAssignments`.
 - **Released backlog (`hour_fresh = false`) is never dropped**, and a fresh lead is never dropped in favour of backlog (the newest `min(U, B)` are demoted instead).
-- **Carry ON -> OFF reverts the queue** to waiting in the same transaction as the config save, so it becomes backlog rather than a mass drop.
+- **Carry ON -> OFF reverts every assigned unsent journey** to waiting in the same transaction as the config save, so it becomes backlog rather than a mass drop.
 - **Selection inputs are required** (CLAUDE.md 11b): `selectDueJourneys`' `hourly` argument and the maintenance inputs have no default.
 - **⚠️ Deploy order.** The scheduler reads `hour_start` / `hour_fresh` and runs `clearIneligibleHourAssignments` on every tick (every minute, even with the feature off). Migration `0209` MUST be on production BEFORE this code deploys, or every drip send fails. Run `npm run db:migrate` against production first, then `scripts/verify-migration-integrity.ts`, then merge.
 

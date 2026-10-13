@@ -4,7 +4,10 @@
 --                                        or are dropped at hour end (false, default).
 --   drip_journeys.hour_start/hour_fresh — the clock hour a lead is on; NULL = waiting.
 --   org_settings.drip_hourly_cap_enabled — kill switch; false = every hourly setting ignored.
--- Re-runnable. Constant defaults: no rewrite. CHECK on a new all-NULL column validates instantly.
+-- Re-runnable. Constant defaults: no rewrite. ADD CONSTRAINT ... CHECK scans
+-- drip_journeys under ACCESS EXCLUSIVE, held for the rest of the migration transaction
+-- (including the three index builds). At current table size that is seconds, and it blocks
+-- routing/scheduler writes while it runs.
 SET LOCAL lock_timeout = '5s';--> statement-breakpoint
 ALTER TABLE public.drip_campaign_configs
   ADD COLUMN IF NOT EXISTS hourly_cap integer,

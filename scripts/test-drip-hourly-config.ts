@@ -19,12 +19,14 @@ async function main() {
     const on = await fx.campaign("cfg", 2, true);
     const ids = await fx.journeys(on, 3, new Date("2026-10-13T18:05:00Z"));
     const { sql } = await import("drizzle-orm");
-    await db.execute(sql`UPDATE drip_journeys SET hour_start = '2026-10-13T18:00:00Z', hour_fresh = true WHERE campaign_id = ${on}`);
+    const cur = await fx.journeys(on, 2, new Date("2026-10-13T19:02:00Z")); // current-hour fresh leads
+    await db.execute(sql`UPDATE drip_journeys SET hour_start = '2026-10-13T18:00:00Z', hour_fresh = true WHERE id = ANY(${`{${ids.join(",")}}`}::uuid[])`);
+    await db.execute(sql`UPDATE drip_journeys SET hour_start = '2026-10-13T19:00:00Z', hour_fresh = true WHERE id = ANY(${`{${cur.join(",")}}`}::uuid[])`);
     const n = await db.transaction((tx) => applyHourlyCarryTransition(tx, {
       campaignId: on, before: true, after: false, now: new Date("2026-10-13T19:10:00Z") }));
-    const s = await fx.states(ids);
-    bar("H13 carry ON→OFF reverts the queue to waiting, nothing dropped",
-      n === 3 && s.every((x) => x.state === "routed" && x.hour_start === null), `reverted ${n}`);
+    const s = await fx.states([...ids, ...cur]);
+    bar("H13 carry ON→OFF reverts ALL assigned (past + current hour) to waiting, nothing dropped",
+      n === 5 && s.every((x) => x.state === "routed" && x.hour_start === null), `reverted ${n}`);
     const m = await db.transaction((tx) => applyHourlyCarryTransition(tx, {
       campaignId: on, before: false, after: false, now: new Date("2026-10-13T19:10:00Z") }));
     bar("H13b no transition ⇒ no write", m === 0);

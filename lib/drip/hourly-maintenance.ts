@@ -58,18 +58,6 @@ export async function revertCampaign(dbc: DripTx, campaignId: number): Promise<n
   return rows.length;
 }
 
-/** Carry ON → OFF: the existing queue becomes backlog instead of a mass drop (spec §5). */
-export async function revertQueuedPastHours(
-  dbc: DripTx, { campaignId, now }: { campaignId: number; now: Date },
-): Promise<number> {
-  const rows = (await dbc.execute(sql`
-    UPDATE drip_journeys j SET hour_start = NULL, hour_fresh = NULL
-    WHERE j.campaign_id = ${campaignId} AND ${LIVE_UNSENT}
-      AND j.hour_start < ${hourStartOf(now).toISOString()}::timestamptz
-    RETURNING j.id`)) as unknown as { id: string }[];
-  return rows.length;
-}
-
 /**
  * Stamp a refused send on a still-unsent journey (feeds the `blocked` drop cause).
  * Callers MUST only call this for hourly-capped campaigns (spec: zero writes otherwise).
@@ -225,10 +213,11 @@ export async function prepareHourly(
     const campaignId = Number(c.id);
     const cap = Number(c.hourly_cap);
     const windows = (await dbc.execute(sql`
-      SELECT s.id AS stage_id, s.window_start_min, s.window_end_min FROM campaign_stages s
+      SELECT s.id AS stage_id, s.window_start_min, s.window_end_min, cr.text AS creative_text
+      FROM campaign_stages s LEFT JOIN creatives cr ON cr.id = s.creative_id
       WHERE s.campaign_id = ${campaignId} AND s.drip_active IS TRUE AND s.archived_at IS NULL
         AND s.parent_stage_id IS NULL AND s.window_start_min IS NOT NULL AND s.window_end_min IS NOT NULL
-    `)) as unknown as StageWindow[];
+    `)) as unknown as (StageWindow & { creative_text: string | null })[];
 
     // Step 1 — assign this hour's fresh leads.
     await assignFresh(dbc, campaignId, hour, windows);
@@ -236,7 +225,13 @@ export async function prepareHourly(
     // Step 2 — can this campaign send right now? Checked BEFORE closing past hours: a stop
     // control (pause / halt / lifetime cap / no number headroom) never causes a drop, even at
     // the hour boundary. Not able ⇒ revert to waiting, room 0, and closePastHours is skipped.
-    const able = !c.send_paused &&
+    // An open first-send stage with no creative text is skipped by the scheduler (`if
+    // (!stage.creative_text) continue;`) — that must not turn into a drop either.
+    const openPick = windows.length > 0 ? pickStage(windows, etMinutesOfDay(now)) : null;
+    const openStage = openPick != null && openPick.opens_at_min === null
+      ? windows.find((w) => w.stage_id === openPick.stage_id) : null;
+    const hasCreative = openStage == null || !!openStage.creative_text;
+    const able = !c.send_paused && hasCreative &&
       !(await isDripSendingHalted(dbc, campaignId)) &&
       !(c.campaign_cap != null && Number(c.lifetime) >= Number(c.campaign_cap)) &&
       (await deps.hasHeadroom(campaignId));
@@ -279,11 +274,15 @@ export async function realHasHeadroom(campaignId: number, now: Date): Promise<bo
   return pickNumber(await numbersWithHeadroom(db, { campaignId, now })) != null;
 }
 
-/** Carry ON → OFF on save: the existing queue becomes backlog, never a mass drop (spec §5). */
+/**
+ * Carry ON → OFF on save: EVERY assigned unsent journey reverts to waiting (spec §5). Under ON
+ * the queue's sends are hour_fresh = true and not counted as backlog, so a current-hour fresh
+ * lead would be judged with B = 0 and could be dropped; reverting all makes it backlog instead.
+ */
 export async function applyHourlyCarryTransition(
   dbc: DripTx,
-  { campaignId, before, after, now }: { campaignId: number; before: boolean; after: boolean; now: Date },
+  { campaignId, before, after }: { campaignId: number; before: boolean; after: boolean; now: Date },
 ): Promise<number> {
   if (!(before && !after)) return 0;
-  return revertQueuedPastHours(dbc, { campaignId, now });
+  return revertCampaign(dbc, campaignId);
 }

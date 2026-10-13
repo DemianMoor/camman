@@ -134,6 +134,14 @@ async function main() {
     const s5c = (await fx.states([f5c[3]]))[0];
     bar("H5c fresh lead demoted (backlog sent at :00 counted), not dropped", s5c.state === "routed", `${s5c.state}/${s5c.close_reason}`);
 
+    // H14 — R4: an OFF campaign whose open stage has no creative: skipped by the scheduler, so the hour must not close on it.
+    const nc = await fx.campaign("nc", 5, false, false);
+    const j14 = await fx.journeys(nc, 3, Z("2026-10-16T14:05:00Z"));
+    await run(Z("2026-10-16T14:11:00Z"));
+    await run(Z("2026-10-16T15:00:30Z"));
+    bar("H14 open stage without creative: none dropped, reverted to waiting",
+      (await fx.states(j14)).every((s) => s.state === "routed" && s.hour_start === null));
+
     // H12 — gate/mint refusal inside the hour ⇒ missed_hour_blocked + one alert per hour.
     const bl = await fx.campaign("bl", 5, false);
     const j12 = await fx.journeys(bl, 2, Z("2026-10-13T20:10:00Z"));

@@ -34,16 +34,21 @@ export async function makeFixture() {
     let seq = 0;
 
     /** Active drip campaign with one first-send stage 09:00–18:00 ET. */
-    async function campaign(tag: string, cap: number | null, carry: boolean) {
+    async function campaign(tag: string, cap: number | null, carry: boolean, withCreative = true) {
       const id = (await one<{ id: number }>(sql`
         INSERT INTO campaigns (org_id, slug, name, status, type, link_mode)
         VALUES (${orgId}::uuid, ${`hc-${sfx}-${tag}`}, ${`HC ${tag}`}, 'active', 'drip', 'tracked') RETURNING id`)).id;
       await db.execute(sql`
         INSERT INTO drip_campaign_configs (campaign_id, org_id, interest_tag, hourly_cap, hourly_carry)
         VALUES (${id}, ${orgId}::uuid, ${"hc" + tag}, ${cap}, ${carry})`);
+      const creativeId = withCreative
+        ? (await one<{ id: number }>(sql`
+            INSERT INTO creatives (org_id, slug, text, status)
+            VALUES (${orgId}::uuid, ${`hc-cr-${sfx}-${tag}`}, 'Hi from the hourly-cap test', 'active') RETURNING id`)).id
+        : null;
       await db.execute(sql`
-        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, drip_active, window_start_min, window_end_min)
-        VALUES (${orgId}::uuid, ${id}, 1, true, 540, 1080)`);
+        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, drip_active, window_start_min, window_end_min, creative_id)
+        VALUES (${orgId}::uuid, ${id}, 1, true, 540, 1080, ${creativeId})`);
       return id;
     }
 

@@ -366,7 +366,8 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
 
             await stampDripStageDrainable(tx, { stageId: stage.stage_id, orgId });
 
-            // ⭐ ZERO ROWS ⇒ ROLL BACK. The guard `first_send_at IS NULL` alone
+            // ⭐ ZERO ROWS ⇒ ROLL BACK. The guards `first_send_at IS NULL AND state = 'routed'`
+            // (a journey closed meanwhile is never resurrected); `first_send_at IS NULL` alone
             // would let this transaction COMMIT its stage_sends row even when
             // another run already gave the journey its first send (a different
             // stage after a window boundary, or the same stage once the other
@@ -376,7 +377,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
               UPDATE drip_journeys
               SET state = 'active', first_send_at = now(),
                   first_stage_id = ${stage.stage_id}, first_send_id = ${ins[0].id}::uuid
-              WHERE id = ${lead.journey_id}::uuid AND first_send_at IS NULL
+              WHERE id = ${lead.journey_id}::uuid AND first_send_at IS NULL AND state = 'routed'
               RETURNING id
             `)) as unknown as { id: string }[];
             if (claimed.length === 0) throw new JourneyAlreadyQueued();

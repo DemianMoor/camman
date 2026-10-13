@@ -86,7 +86,7 @@ Every combination: sends this hour ≤ `min(hourly room, daily room)`.
 ### Mid-flight setting changes
 
 - Cap set → NULL, flag off, org paused: step 0 reverts. Nothing dropped.
-- **Carry ON → OFF**: the drip-config PUT, in the same transaction, reverts unsent journeys with `hour_start < current hour` — the existing queue becomes backlog, not a mass drop.
+- **Carry ON → OFF**: the drip-config PUT, in the same transaction, reverts every assigned unsent journey — all unsent assigned leads revert to waiting and become backlog, not a mass drop.
 - Cap lowered: no special handling; the lower room applies from the next run.
 
 ## 6. Scheduler, poke chain (#350), fairness (#351)

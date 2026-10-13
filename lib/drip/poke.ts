@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { appOrigin } from "@/lib/app-origin";
 import { withCronLease, type CronLeaseOutcome } from "@/lib/cron/lease";
+import { runDripSchedulerBatch, type SchedulerResult } from "@/lib/drip/scheduler";
 
 // The drip POKE CHAIN (lead-to-send speed-up, migration 0206). Ships dark.
 //
@@ -199,6 +200,19 @@ export async function runLeasedJob(
     if (await requestedSinceLastRun(job)) await requestPoke(job, `${job}:tail`);
   }
   return leased;
+}
+
+/**
+ * The member-triggered (session-auth) scheduler run: ONE batch under the same
+ * 'drip-scheduler' lease cron and pokes hold. No poke loop, no heartbeat.
+ * Single-flight is what makes the hourly cap's remaining room correct — an
+ * overlapping run would compute the same room twice. Lease held => ran:false.
+ */
+export async function runDripSchedulerManual(): Promise<
+  { ran: true; result: SchedulerResult } | { ran: false }
+> {
+  const leased = await withCronLease("drip-scheduler", () => runDripSchedulerBatch());
+  return leased.ran ? { ran: true, result: leased.result } : { ran: false };
 }
 
 async function pokeLoop(job: PokeJob, opts: LeasedJobOptions): Promise<number> {

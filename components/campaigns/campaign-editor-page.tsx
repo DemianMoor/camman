@@ -18,6 +18,7 @@ import {
   EMPTY_DRIP_AUDIENCE,
   type DripAudienceValue,
 } from "./drip-audience-fields";
+import { DripConfigPanel } from "./drip-config-panel";
 import { CopyableId } from "@/components/ui/copyable-id";
 import {
   Form,
@@ -65,6 +66,13 @@ type Status = "draft" | "active" | "paused" | "completed" | "archived";
 type CampaignDetail = {
   id: number;
   slug: string;
+  // ⚠️ THE SAME COLUMN, THE SECOND HAND-WRITTEN COPY OF THIS TYPE. The detail
+  // page declares its own `CampaignDetail` and gained `type` in #301; this one
+  // is the editor's, and did not — which is why the #301 fix did not reach
+  // /campaigns/<id>/edit. Both are projections of CAMPAIGN_DETAIL_SELECT,
+  // whose compile-time assertion only checks keys ⊆ select, so a column
+  // present in the select and absent from a copy of the type is silent.
+  type: "regular" | "drip";
   human_id: string | null;
   name: string;
   notes: string | null;
@@ -334,6 +342,7 @@ function EditModeLoader({ campaignId }: { campaignId: number }) {
       currentStatus={data.status}
       trackingId={data.tracking_id}
       lifecycleRules={data.lifecycle_rules === true}
+      initialType={data.type === "drip" ? "drip" : "regular"}
       initialValues={initialValues}
     />
   );
@@ -349,6 +358,13 @@ interface InnerProps {
   // campaigns.lifecycle_rules, edit mode only. Undefined in create mode, where
   // the form asks the engine gate instead.
   lifecycleRules?: boolean;
+  /**
+   * The loaded campaign's type, in edit mode. The editor renders a
+   * different half of itself per type, so this is what makes /edit show a
+   * drip campaign its own blocks. Absent in create mode, where the
+   * Regular/Drip control owns the value instead.
+   */
+  initialType?: "regular" | "drip";
   currentStatus?: Status;
   trackingId?: string | null;
   initialValues?: CampaignFormValues;
@@ -362,6 +378,7 @@ function Inner({
   currentStatus,
   trackingId,
   lifecycleRules,
+  initialType,
   initialValues,
 }: InnerProps) {
   const router = useRouter();
@@ -385,10 +402,22 @@ function Inner({
   //
   // Not editable after creation: flipping an existing campaign would leave it
   // with the other type's semantics mid-flight, and the drip settings live in a
-  // separate table. Defaults 'regular', the same fail-toward-existing-behaviour
-  // direction the column default takes.
+  // separate table. PATCH cannot change it either — `type` is absent from
+  // campaignUpdateSchema.
+  //
+  // ⭐ SEEDED FROM THE LOADED CAMPAIGN, NOT A LITERAL. Hiding the Regular/Drip
+  // control on /edit (see SetupCard's `!isEdit`) is not the same as knowing
+  // which type is being edited. While this read a bare "regular", the edit
+  // screen showed a drip campaign the whole regular audience block — contact
+  // groups, segments, lifecycle, audience cap — and never rendered its drip
+  // config. The same stale value also reached campaign-form-state, so the
+  // Activate gate demanded "at least one contact group" for a campaign that
+  // has no audience by design. One unseeded useState, nine consumers.
+  //
+  // `?? "regular"` keeps the create-mode default and is the
+  // fail-toward-existing-behaviour direction the column default takes (R13).
   const [campaignType, setCampaignType] = useState<"regular" | "drip">(
-    "regular",
+    initialType ?? "regular",
   );
   const [dripAudience, setDripAudience] =
     useState<DripAudienceValue>(EMPTY_DRIP_AUDIENCE);
@@ -505,7 +534,16 @@ function Inner({
   async function handleEditSubmit(values: CampaignFormValues) {
     if (!campaignId) return;
     const body = buildPatchBody(values);
-    if (currentStatus && currentStatus !== "draft") {
+    // Two independent reasons to drop the nine audience keys, same nine keys:
+    //   - a non-draft campaign's audience is frozen (the API agrees and
+    //     rejects them — see `touchesAudience` in the PATCH route), and
+    //   - a DRIP campaign has no frozen audience at any status. Nothing in
+    //     lib/drip/ reads audience_segment_ids / audience_contact_group_ids /
+    //     audience_cap, so sending them writes a row that describes an
+    //     audience this type never takes. Only a `draft` drip campaign could
+    //     reach the API with them, and that is the one case it would accept.
+    const audienceFrozen = !!currentStatus && currentStatus !== "draft";
+    if (audienceFrozen || campaignType === "drip") {
       delete body.audience_segment_ids;
       delete body.audience_exclude_segment_ids;
       delete body.audience_contact_group_ids;
@@ -688,6 +726,7 @@ function Inner({
               campaignType={campaignType}
               dripAudience={dripAudience}
               setDripAudience={setDripAudience}
+              editingCampaignId={isEdit ? (campaignId ?? null) : null}
             />
           </div>
           <aside className="grid gap-3">
@@ -1193,11 +1232,14 @@ function AudienceCard({
   campaignType,
   dripAudience,
   setDripAudience,
+  editingCampaignId,
 }: {
   state: CampaignFormState;
   campaignType: "regular" | "drip";
   dripAudience: DripAudienceValue;
   setDripAudience: (v: DripAudienceValue) => void;
+  /** The campaign being edited; null in create mode. See the drip branch. */
+  editingCampaignId: number | null;
 }) {
   const {
     form,
@@ -1268,11 +1310,27 @@ function AudienceCard({
               they match the tag and filters below. There is no contact list to
               choose — the audience builds itself over time.
             </p>
-            <DripAudienceFields
-              value={dripAudience}
-              onChange={setDripAudience}
-              disabled={anySubmitting}
-            />
+            {/* ⚠️ TWO EDITORS, ONE CONFIG — deliberately, because the config
+                has nowhere to live before the campaign does.
+                  create: DripAudienceFields holds the values in local state;
+                    they are PUT by persistDripConfig AFTER the POST returns
+                    an id (there is no row to PUT to any earlier).
+                  edit: DripConfigPanel — THE SAME COMPONENT THE DETAIL PAGE
+                    RENDERS. It is self-contained: it GETs the existing config,
+                    converts start/end to ET itself, and PUTs its own save.
+                Reusing it is what makes /edit agree with the detail page by
+                construction rather than by a second mapping kept in step.
+                Binding DripAudienceFields here instead would show
+                EMPTY_DRIP_AUDIENCE — blank fields over a live config. */}
+            {editingCampaignId !== null ? (
+              <DripConfigPanel campaignId={editingCampaignId} canEdit />
+            ) : (
+              <DripAudienceFields
+                value={dripAudience}
+                onChange={setDripAudience}
+                disabled={anySubmitting}
+              />
+            )}
           </>
         ) : (
           <>

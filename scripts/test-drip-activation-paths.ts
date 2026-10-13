@@ -86,6 +86,89 @@ function main() {
   check("the create validator still skips the group requirement for drip",
         /const\s+isDrip\s*=\s*data\.type\s*===\s*["']drip["']/.test(validator), true);
 
+  // ──────────────────────────────────────────────────────────────────────
+  // THE EDIT SCREEN. The fourth sighting of one bug: a surface that must
+  // branch on campaigns.type and does not.
+  //
+  //   #128  the create VALIDATOR required contact groups for a drip campaign
+  //   #302  the create ROUTE's launch branch snapshotted an audience for one
+  //   #301  the DETAIL page -- `type` was missing from CAMPAIGN_DETAIL_SELECT,
+  //         so the whole Drip settings section rendered for NOBODY
+  //   this  the EDIT screen -- `campaignType` was useState("regular"), a
+  //         literal, so /campaigns/<id>/edit showed a drip campaign the entire
+  //         regular audience block and never its drip config
+  //
+  // Each miss had a different shape, so a gate-shaped check would not have
+  // caught this one: the type was never READ at all. What they share is that
+  // the campaign's own type has to REACH the surface. That is what is asserted
+  // below -- the read, and the two things it silently depends on.
+  console.log("\n⭐ the EDIT screen reads the campaign's type:");
+  const editor = readFileSync(
+    "components/campaigns/campaign-editor-page.tsx",
+    "utf8",
+  );
+  check("the editor file was found (the scan is not vacuous)", editor.length > 0, true);
+
+  // THE REGRESSION ITSELF: a bare literal here is the bug.
+  check(
+    "⭐ campaignType is NOT initialised from a bare literal",
+    /useState<"regular"\s*\|\s*"drip">\(\s*["'](?:regular|drip)["']\s*,?\s*\)/.test(editor),
+    false,
+  );
+  check(
+    "⭐ campaignType seeds from the loaded campaign (initialType)",
+    /useState<"regular"\s*\|\s*"drip">\(\s*initialType/.test(editor),
+    true,
+  );
+
+  // POSITIVE read of 'drip' (R13): a NULL or some future type must keep the
+  // regular editor rather than fall into the drip branch.
+  check(
+    "⭐ initialType is a positive read of data.type",
+    /initialType=\{data\.type\s*===\s*["']drip["']\s*\?\s*["']drip["']\s*:\s*["']regular["']\}/.test(editor),
+    true,
+  );
+
+  // DEPENDENCY 1. `data.type` is defined only because the shared select ships
+  // the column -- the #301 root cause. Drop it again and the read above
+  // evaluates to "regular" for every campaign, with no type error (the type is
+  // hand-written) and nothing visibly failing.
+  const detailSelect = readFileSync("lib/api/campaign-detail.ts", "utf8");
+  check(
+    "⭐ CAMPAIGN_DETAIL_SELECT still ships campaigns.type",
+    /\btype:\s*campaigns\.type\b/.test(detailSelect),
+    true,
+  );
+
+  // DEPENDENCY 2. There are TWO hand-written CampaignDetail types -- the
+  // detail page's and the editor's. #301 added `type` to the first only, which
+  // is why its fix did not reach this screen. The select's compile-time
+  // assertion is keys-of-type subset-of select, so the reverse gap is silent.
+  check(
+    "⭐ the editor's own CampaignDetail declares type",
+    /type:\s*"regular"\s*\|\s*"drip";/.test(editor),
+    true,
+  );
+
+  // The drip config has two editors by necessity (no row exists before the
+  // POST). Edit mode MUST use the self-loading panel: binding the create-mode
+  // component there would render EMPTY_DRIP_AUDIENCE over a live config, which
+  // is a blank-overwrite shape, not merely a display bug.
+  check(
+    "⭐ edit mode renders the self-loading DripConfigPanel",
+    /editingCampaignId\s*!==\s*null\s*\?\s*\(\s*<DripConfigPanel/.test(editor),
+    true,
+  );
+
+  // A drip campaign has no frozen audience at ANY status, so the edit save
+  // must not send the nine audience keys. `draft` is the one status at which
+  // the API would accept them.
+  check(
+    "⭐ the edit save strips audience keys for drip, not only when frozen",
+    /if\s*\(audienceFrozen\s*\|\|\s*campaignType\s*===\s*["']drip["']\)/.test(editor),
+    true,
+  );
+
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
   if (failures > 0) process.exitCode = 1;
 }

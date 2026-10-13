@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-12 (scheduler per-campaign fairness, 0207)_
+_Last updated: 2026-10-13 (the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.

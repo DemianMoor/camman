@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-12_
+_Last updated: 2026-10-13_
 
 ## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
 
@@ -4589,6 +4589,71 @@ gates on `!== 'drip'`. It runs in `vercel-build`.
 
 ⚠️ It is a source scan: it proves the gate exists, not that the button works.
 Both were verified in a browser against a real session before merge.
+
+## A type-gated surface needs the type to REACH it — four misses, four shapes
+
+`campaigns.type` decides what half of the campaign UI exists. Four separate PRs
+have now shipped a surface that failed to branch on it, and **no two failed the
+same way** — which is why "add a gate" is not the lesson:
+
+| PR | surface | how it failed |
+|---|---|---|
+| #128 | create validator | required contact groups for a drip campaign |
+| #302 | create route's launch branch | snapshotted an audience for one |
+| #301 | detail page | `type` absent from `CAMPAIGN_DETAIL_SELECT` — the whole Drip section rendered for nobody |
+| #305 | **edit screen** | `campaignType` was `useState("regular")` — a literal; the type was never read |
+
+The edit screen is the instructive one, because every gate downstream of it was
+already correct. `campaign-form-state.ts` had branched on `campaignType` since
+#302; `AudienceCard` had a `=== "drip"` branch; the Regular/Drip control was
+correctly hidden with `{!isEdit && …}`. **The author reasoned about edit mode
+for the control and left the state at its create-mode default.** One unseeded
+`useState` fed nine consumers: the regular audience block rendered on every
+drip campaign, the drip config never did, and the Activate gate demanded "at
+least one contact group" for a type that has no audience by design.
+
+⚠️ **`CampaignDetail` is hand-written TWICE** — once in
+[app/(protected)/campaigns/[id]/page.tsx](<../app/(protected)/campaigns/[id]/page.tsx>)
+and once in
+[components/campaigns/campaign-editor-page.tsx](../components/campaigns/campaign-editor-page.tsx).
+Both project `CAMPAIGN_DETAIL_SELECT`, whose compile-time assertion checks
+*keys-of-type ⊆ select* — one direction only. #301 added `type` to the detail
+page's copy; the editor's copy did not have it, and nothing failed. **That
+asymmetry is why the #301 fix did not reach /edit.** Adding a column to the
+select propagates to no consumer on its own.
+
+**The drip config has two editors, deliberately.** There is no row to PUT to
+before the campaign exists, so create holds the values in local state
+(`DripAudienceFields`, persisted by `persistDripConfig` after the POST returns
+an id) while edit renders `DripConfigPanel` — *the same component the detail
+page uses*, self-contained: it GETs the config, converts ET itself, and owns
+its own save. Reuse is what makes /edit agree with the detail page by
+construction. Binding `DripAudienceFields` on /edit instead would show
+`EMPTY_DRIP_AUDIENCE` — **blank fields over a live config**, a
+blank-overwrite shape rather than a display bug.
+
+**A drip campaign has no frozen audience at any status**, so the edit save
+strips the nine audience keys for `type='drip'` as well as for a non-draft
+campaign. The API only *accepts* them at `draft` (`touchesAudience` in
+[app/api/campaigns/[campaignId]/route.ts](<../app/api/campaigns/[campaignId]/route.ts>)
+rejects every other status), and nothing under `lib/drip/` reads
+`audience_segment_ids` / `audience_contact_group_ids` / `audience_cap` — so
+sending them described an audience the type never takes. Dropping
+`audience_filters` also removes the one real hazard: `carrier_filter` is the
+single key in it the drip router *does* read
+([lib/drip/routing-eval.ts](../lib/drip/routing-eval.ts)), and
+`PUT …/drip-config` owns that key by merging it.
+
+`scripts/test-drip-activation-paths.ts` covers the edit screen too: that
+`campaignType` is **not** initialised from a bare literal, that it seeds from
+`initialType`, that `initialType` is a positive `data.type === 'drip'` read,
+that the select still ships the column, that the editor's own `CampaignDetail`
+declares it, that edit mode renders `DripConfigPanel`, and that the save strips
+the audience keys for drip. Every one was confirmed to go **red** when the
+corresponding line was reverted.
+
+⚠️ Still a source scan. Both a drip and a regular campaign were round-tripped
+through /edit in a browser before merge.
 
 ## "Active number" is a TWO-LEVEL test: the phone AND its provider
 

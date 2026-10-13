@@ -49,6 +49,22 @@
 }
 
 :root {
+  /* Drip Daily results chart (components/drip/daily-results-chart.tsx).
+     Categorical slots 1–4 + profit/loss pair from the dataviz reference palette,
+     validated light (CVD ΔE 9.1) and dark (8.4); light contrast relief = the
+     table view. Neutral = Other / Lookup cost; line = ink, not a series hue. */
+  --ddr-1: #2a78d6;
+  --ddr-2: #eb6834;
+  --ddr-3: #1baf7a;
+  --ddr-4: #eda100;
+  --ddr-profit: #2a78d6;
+  --ddr-loss: #e34948;
+  --ddr-neutral: #a3a29d;
+  --ddr-line: #52514e;
+  --ddr-ink: #52514e;
+  --ddr-grid: #e4e3df;
+  --ddr-marker: #b45309;
+  --ddr-surface: #ffffff;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -84,6 +100,18 @@
 }
 
 .dark {
+  --ddr-1: #3987e5;
+  --ddr-2: #d95926;
+  --ddr-3: #199e70;
+  --ddr-4: #c98500;
+  --ddr-profit: #3987e5;
+  --ddr-loss: #e66767;
+  --ddr-neutral: #6d6c67;
+  --ddr-line: #c3c2b7;
+  --ddr-ink: #c3c2b7;
+  --ddr-grid: #383835;
+  --ddr-marker: #f59e0b;
+  --ddr-surface: #1a1a19;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);

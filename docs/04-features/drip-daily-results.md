@@ -1,13 +1,13 @@
 # Drip — Daily results
 
-_Last updated: 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
 [spec](../superpowers/specs/2026-10-12-drip-daily-results-design.md).
 
 **Status.** Data layer live (PR 3, backfilled and reconciled 2026-10-13). The
-table view is PR 4, and the chart is PR 5. Both sit behind
+table view (PR 4) and the chart view (PR 5) are both built, and both sit behind
 `org_settings.drip_daily_results_enabled` (migration 0208, default **off**).
 
 ---
@@ -136,6 +136,25 @@ The tab shows **"older days updated nightly"**, plus "as of HH:MM ET" for today 
 **Local review against real data:** `DRIP_DAILY_RESULTS_LOCAL_PREVIEW=1 npx next dev` opens the gate on a **local** dev server only. It is ignored whenever `NODE_ENV=production`, which every Vercel deployment uses, previews included. PR previews run on camman-v2, which has no drip campaigns, so this is the only way to see the tab on real campaigns while the org flag is off.
 
 Test: `scripts/test-drip-daily-results.ts` (preview DB, rolled back, 28 bars).
+
+## 4d. Chart view (PR 5) — [components/drip/daily-results-chart.tsx](../../components/drip/daily-results-chart.tsx)
+
+The chart is drawn from the **same API response** as the table; there is no second
+endpoint. **Show: Table | Chart** is remembered per browser along with the other
+filters. Recharts is loaded through `next/dynamic` only when the chart is chosen,
+and the line-metric list lives in `daily-results-metrics.ts` so the picker never
+imports it.
+
+| element | rule |
+|---|---|
+| Bars | Profit per ET day on the **left axis**. With no breakdown, blue = profit and red = loss. Under **By stage** or **By partner** the bar is stacked by group in a **fixed colour order**: the group's stable order (stage number with lanes under their parent, or partner name, Unattributed last), never its rank. Groups past 4 fold into **Other**. Under **By stage** a gray **Lookup cost** segment makes each stack add up to the day's profit. `stackOffset="sign"`, so losses and lookup cost stack **down** from zero |
+| Line | ONE metric on the **right axis**, picked from ROI / Clicks per send / Conv % / Opt-out % / Sends. Straight segments between days (`linear`, not a smoothed curve). ROI uses `displayedRoi()`, so the line has a **gap** wherever send cost is under $1, the same rule as the table |
+| Change markers | A dashed vertical line with ⚑ on each day that had a change. The tooltip lists every change for that day in ET |
+| Maturing | Cohort bars still maturing are drawn faded (45%) |
+| Legend / text | A custom legend: the swatch carries the colour, and the text stays in ink |
+| Colours | `--ddr-*` tokens in [app/globals.css](../../app/globals.css): categorical slots 1–4 plus a blue/red profit/loss pair from the dataviz reference palette, with their own dark-mode steps. Validated with the palette checker: light worst colour-blind ΔE 9.1 and normal-vision 22.9, dark 8.4 and 19.8. Two light hues fall below 3:1 contrast; the table view is the relief |
+
+⚠️ **Dual axis is a deliberate owner choice.** The brief asks for "one line metric on a second axis". The dataviz guidance prefers two stacked charts sharing the x-axis. If the dual axis ever confuses readers, that is the alternative to switch to.
 
 ## 5. Retention (card 869enz8ge)
 

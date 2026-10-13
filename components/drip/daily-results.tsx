@@ -1,7 +1,10 @@
 "use client";
 
 import { Flag, Hourglass } from "lucide-react";
+import dynamic from "next/dynamic";
 import { Fragment, useEffect, useMemo, useState } from "react";
+
+import { LINE_METRICS, type LineMetric } from "@/components/drip/daily-results-metrics";
 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,12 +15,20 @@ import { displayedRoi } from "@/lib/reporting/drip-daily-money";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import type { DripDailyResults, ResultRow } from "@/lib/reporting/drip-daily-results";
 
-// Drip campaign "Daily results" — table view (spec 2026-10-12, PR 4). The chart
-// view is PR 5. All numbers come from /api/campaigns/[id]/daily-results, which
+// Drip campaign "Daily results" — table (PR 4) and chart (PR 5) views of the same
+// API response. All numbers come from /api/campaigns/[id]/daily-results, which
 // reads only the rollup; every ratio is computed server-side from summed cells.
+
+// Recharts is ~360 KB: loaded only when the chart view is chosen.
+const DripDailyResultsChart = dynamic(
+  () => import("@/components/drip/daily-results-chart").then((m) => m.DripDailyResultsChart),
+  { ssr: false, loading: () => <p className="text-sm text-muted-foreground">Loading chart…</p> },
+);
 
 type Preset = "7d" | "30d" | "all" | "custom";
 type Filters = {
+  view: "table" | "chart";
+  metric: LineMetric;
   basis: "activity" | "cohort";
   breakdown: "none" | "stage" | "partner";
   preset: Preset;
@@ -89,7 +100,10 @@ const COLUMNS: Column[] = [
 ];
 
 export function DripDailyResults({ campaignId }: { campaignId: number }) {
+  // Per browser (usePersistedFilters wraps every storage access in try/catch).
   const [filters, update] = usePersistedFilters<Filters>("campaign.dailyResults", {
+    view: "table",
+    metric: "roi",
     basis: "activity",
     breakdown: "none",
     preset: "7d",
@@ -126,6 +140,24 @@ export function DripDailyResults({ campaignId }: { campaignId: number }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-4">
+        <div className="grid gap-1.5">
+          <Label>Show</Label>
+          <div className="flex h-9 items-center rounded-md border p-0.5">
+            {(["table", "chart"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => update({ view: v })}
+                className={
+                  "h-8 rounded px-3 text-sm capitalize transition-colors " +
+                  (filters.view === v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")
+                }
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="grid gap-1.5">
           <Label>View</Label>
           <div className="flex h-9 items-center rounded-md border p-0.5">
@@ -190,6 +222,21 @@ export function DripDailyResults({ campaignId }: { campaignId: number }) {
             </SelectContent>
           </Select>
         </div>
+        {filters.view === "chart" ? (
+          <div className="grid gap-1.5">
+            <Label>Line</Label>
+            <Select value={filters.metric} onValueChange={(v) => update({ metric: v as LineMetric })}>
+              <SelectTrigger className="h-9 w-[160px]" aria-label="Line metric">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(LINE_METRICS) as LineMetric[]).map((k) => (
+                  <SelectItem key={k} value={k}>{LINE_METRICS[k].label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ) : null}
       </div>
 
       <p className="text-xs text-muted-foreground" title={BASIS_HELP[filters.basis]}>
@@ -212,7 +259,9 @@ export function DripDailyResults({ campaignId }: { campaignId: number }) {
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       {!shown && !error ? <p className="text-sm text-muted-foreground">Loading…</p> : null}
 
-      {shown ? (
+      {shown && filters.view === "chart" ? <DripDailyResultsChart data={shown} metric={filters.metric} /> : null}
+
+      {shown && filters.view === "table" ? (
         <div className="overflow-x-auto rounded-md border">
           {/* w-max: columns keep their width and the wrapper scrolls; the Day column stays put. */}
           <table className="w-max min-w-full text-sm tabular-nums">

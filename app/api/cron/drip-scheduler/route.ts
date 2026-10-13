@@ -8,6 +8,7 @@ import {
   isPokeEnabled,
   isPokeRequest,
   requestPoke,
+  runDripSchedulerManual,
   runLeasedJob,
   type PokeTrigger,
 } from "@/lib/drip/poke";
@@ -34,6 +35,12 @@ import { checkHeartbeats, HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reportin
 // the same 'drip-scheduler' lease — the identical mint, render, opt-out gate and
 // stop controls. Heartbeats (stamp + check) and the per-minute latency line stay
 // on the cron run.
+//
+// ⭐ MANUAL RUNS TAKE THE LEASE TOO (runDripSchedulerManual): the session-auth
+// path used to call runDripSchedulerBatch bare. The hourly cap computes each
+// campaign's remaining room from the DB at the start of a run and assumes
+// single-flight, so an overlapping manual run would double-count the room and
+// overshoot the cap. A held lease answers 409 prior_run_in_progress.
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
@@ -88,7 +95,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     if (!can(auth.role, "campaigns.update")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
-    return NextResponse.json(await runDripSchedulerBatch());
+    const manual = await runDripSchedulerManual();
+    if (!manual.ran) {
+      return NextResponse.json({ skipped: true, reason: "prior_run_in_progress" }, { status: 409 });
+    }
+    return NextResponse.json(manual.result);
   }
 
   if (isPokeRequest(req)) {

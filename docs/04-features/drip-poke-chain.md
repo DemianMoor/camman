@@ -1,6 +1,6 @@
 # Feature — Drip poke chain (lead-to-send speed-up)
 
-_Last updated: 2026-10-12_
+_Last updated: 2026-10-13_
 
 Migration **0206**. Code: [lib/drip/poke.ts](../../lib/drip/poke.ts), [lib/drip/lead-latency.ts](../../lib/drip/lead-latency.ts). **Ships dark**: `org_settings.drip_poke_enabled = false`. Rollback = set it back to false; nothing else changes.
 
@@ -106,6 +106,7 @@ One definition, `leadToSendLatency` ([lib/drip/lead-latency.ts](../../lib/drip/l
 
 ## 6. Operating it
 
+- **Manual (session-auth) scheduler runs** take the same `drip-scheduler` lease via `runDripSchedulerManual` ([lib/drip/poke.ts](../../lib/drip/poke.ts)): one batch, no poke loop, no heartbeat. A held lease answers HTTP 409 `{skipped:true, reason:"prior_run_in_progress"}`. Single-flight is what keeps the hourly cap's remaining room correct. Test: `scripts/test-drip-scheduler-manual-lease.ts`.
 - **On:** `UPDATE org_settings SET drip_poke_enabled = true WHERE org_id = …` (owner decision; the column lives on prod only after 0206 is applied). Takes effect within 5 s (per-instance flag cache).
 - **Off / rollback:** set it false. Pokes stop within 5 s; in-flight poked runs finish normally under their lease.
 - **Preview:** a preview deployment is behind Vercel deployment protection. Pokes add `x-vercel-protection-bypass` when `VERCEL_AUTOMATION_BYPASS_SECRET` is set (Vercel's "Protection Bypass for Automation").

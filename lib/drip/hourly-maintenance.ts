@@ -73,14 +73,33 @@ export async function recordSendRefusal(
     WHERE id = ${journeyId}::uuid AND state = 'routed' AND first_send_at IS NULL`);
 }
 
-async function assignFresh(dbc: DripTx, campaignId: number, hour: Date, windows: StageWindow[]) {
-  if (windows.length === 0) return;
+/** One definition of "this journey's routed ET minute is inside a first-send window" (half-open [start,end)). */
+function routedInAnyWindow(windows: StageWindow[]) {
   const etMin = sql`(extract(hour FROM j.routed_at AT TIME ZONE 'America/New_York') * 60
                      + extract(minute FROM j.routed_at AT TIME ZONE 'America/New_York'))`;
-  const inWindow = sql.join(
+  return sql.join(
     windows.map((w) => sql`(${etMin} >= ${w.window_start_min} AND ${etMin} < ${w.window_end_min})`),
     sql` OR `,
   );
+}
+
+/**
+ * Owner ruling 2026-10-13: an operator action must never drop leads. A fresh lead whose routed
+ * minute is no longer covered by any CURRENTLY active first-send window (stage deactivated,
+ * archived, or its window edited away) reverts to waiting instead of being dropped at hour end.
+ */
+async function revertOrphanedFresh(dbc: DripTx, campaignId: number, windows: StageWindow[]): Promise<number> {
+  const covered = windows.length > 0 ? sql`NOT (${routedInAnyWindow(windows)})` : sql`true`;
+  const rows = (await dbc.execute(sql`
+    UPDATE drip_journeys j SET hour_start = NULL, hour_fresh = NULL
+    WHERE j.campaign_id = ${campaignId} AND ${LIVE_UNSENT} AND j.hour_fresh IS TRUE AND ${covered}
+    RETURNING j.id`)) as unknown as { id: string }[];
+  return rows.length;
+}
+
+async function assignFresh(dbc: DripTx, campaignId: number, hour: Date, windows: StageWindow[]) {
+  if (windows.length === 0) return;
+  const inWindow = routedInAnyWindow(windows);
   await dbc.execute(sql`
     UPDATE drip_journeys j SET hour_start = ${hour.toISOString()}::timestamptz, hour_fresh = true
     WHERE j.campaign_id = ${campaignId} AND ${LIVE_UNSENT} AND j.hour_start IS NULL
@@ -221,6 +240,9 @@ export async function prepareHourly(
 
     // Step 1 — assign this hour's fresh leads.
     await assignFresh(dbc, campaignId, hour, windows);
+
+    // Step 1b — stop control: fresh leads whose window an operator removed revert, never drop.
+    res.reverted += await revertOrphanedFresh(dbc, campaignId, windows);
 
     // Step 2 — can this campaign send right now? Checked BEFORE closing past hours: a stop
     // control (pause / halt / lifetime cap / no number headroom) never causes a drop, even at

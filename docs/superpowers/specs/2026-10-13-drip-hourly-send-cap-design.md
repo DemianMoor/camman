@@ -33,7 +33,7 @@ Two new journey columns: `hour_start timestamptz` (the UTC instant of the clock 
 
 - **Fresh lead** — routed while one of its campaign's first-send windows covered the routed ET minute (half-open `[start, end)`, `parent_stage_id IS NULL` stages only). `hour_start = date_trunc('hour', routed_at)`, `hour_fresh = true`, assigned regardless of room. Its clock starts when it became sendable.
 - **Waiting lead** — routed outside every window, or reverted (below). Not accumulating. Released into the **current** hour only into spare room (§5), `hour_fresh = false`.
-- **Revert to waiting** (clear both columns on unsent routed journeys) when the campaign cannot send for a reason that is not the lead's: org drip paused/off, hourly flag off, campaign not `active`, `send_paused`, hourly cap removed, campaign lifetime cap reached, no number with headroom. Stop controls never cause a drop.
+- **Revert to waiting** (clear both columns on unsent routed journeys) when the campaign cannot send for a reason that is not the lead's: org drip paused/off, hourly flag off, campaign not `active`, `send_paused`, hourly cap removed, campaign lifetime cap reached, no number with headroom, **or a first-send stage deactivated / archived / its window edited so it no longer covers the lead's routed minute** (owner ruling 2026-10-13). Stop controls never cause a drop.
 - **Window closes or daily cap fills mid-hour** — assignments stay. Under OFF the unsent fresh ones are processed at hour end (R3: "stricter wins").
 
 ## 4. Per-run algorithm (scheduler, before the due query)

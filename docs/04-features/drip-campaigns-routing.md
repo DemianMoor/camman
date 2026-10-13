@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-13 (hourly send cap; the edit screen is type-gated)_
+_Last updated: 2026-10-13 (hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -349,7 +349,7 @@ routed journey carries `hour_start` + `hour_fresh` (both NULL = **waiting**, on 
 `clearIneligibleHourAssignments`: org drip off/paused, flag off, campaign not `active` / `send_paused`, or
 cap removed => assignments revert to waiting. Then per capped campaign:
 
-1. **Assign fresh** to the current hour.
+1. **Assign fresh** to the current hour, then revert fresh leads whose window no longer exists (stage-off / archived / window edited).
 2. **Able to send?** `send_paused`, org drip halt, lifetime `campaign_cap` reached, or no number with
    headroom. If not: revert the campaign's assignments to waiting, room 0, **skip step 3**.
 3. **Close past hours (OFF only).** Released backlog reverts to waiting (never dropped). Fresh unsent leads
@@ -400,9 +400,7 @@ An open first-send stage without a creative (or with empty text) also counts as 
 skips it, so the hour must not close on it. A lowered cap needs no handling;
 the lower room applies from the next run.
 
-> **Open owner question.** A stage whose `drip_active` is turned off mid-hour is **not** treated as a stop
-> control: windows are built from `drip_active` stages only, so its unsent fresh leads can later drop as
-> `missed_hour_closed`. Whether stage-off should revert instead is undecided.
+**Stage-off is a stop control (owner ruling 2026-10-13).** A first-send stage deactivated, archived or its window edited so it no longer covers a lead's routed minute => that lead reverts to waiting, never dropped as `missed_hour_closed` (`revertOrphanedFresh`, step 1b, every capped campaign, ON and OFF; same half-open ET-minute test as assignment). A window that merely *ended* naturally still closes the hour.
 
 **Reporting.** Funnel outcomes get three labels ("Dropped — hourly cap full", "... window closed / daily
 cap before its turn", "... send blocked (gate/mint)"), in [lib/drip/funnel.ts](../../lib/drip/funnel.ts). The

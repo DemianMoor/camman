@@ -165,6 +165,34 @@ async function main() {
     bar("H11a ON keeps the queue on its old hour", s11.every((s) => s.state === "routed" && new Date(s.hour_start!).toISOString() === "2026-10-13T21:00:00.000Z"));
     bar("H11b ON room this hour = cap", r.rooms.get(on)?.room === 2);
 
+
+    // H15 — Stage Active off mid-hour (owner ruling 2026-10-13): revert to waiting, never drop.
+    for (const [tag, mutate] of [
+      ["H15", sql`drip_active = false`],
+      ["H15b", sql`archived_at = now()`],
+    ] as const) {
+      const c15 = await fx.campaign(tag.toLowerCase(), 2, false);
+      const day = tag === "H15" ? "2026-10-19" : "2026-10-20";
+      const j15 = await fx.journeys(c15, 4, Z(`${day}T14:05:00Z`));
+      await run(Z(`${day}T14:10:00Z`));
+      bar(`${tag}-0 fresh assigned`, (await fx.states(j15)).every((s) => s.hour_fresh === true && s.hour_start !== null));
+      await db.execute(sql`UPDATE campaign_stages SET ${mutate} WHERE campaign_id = ${c15}`);
+      await run(Z(`${day}T15:00:30Z`));
+      const s15 = await fx.states(j15);
+      bar(`${tag} stage deactivated: all 4 routed, waiting, none dropped`, s15.every((s) => s.state === "routed" && s.hour_start === null && s.close_reason == null));
+      const m15 = (await db.execute(sql`SELECT count(*)::int AS n FROM drip_journeys WHERE campaign_id = ${c15} AND close_reason LIKE 'missed_hour_%'`)) as unknown as { n: number }[];
+      bar(`${tag} zero missed_hour_* rows`, m15[0].n === 0);
+    }
+
+    // H15c — non-regression: window simply ended (stage still active) ⇒ still dropped.
+    const c15c = await fx.campaign("h15c", 2, false);
+    const j15c = await fx.journeys(c15c, 4, Z("2026-10-21T21:50:00Z")); // 17:50 ET
+    await run(Z("2026-10-21T21:55:00Z"));
+    await fx.markSent(j15c.slice(0, 2), Z("2026-10-21T21:56:00Z")); // cap full
+    await run(Z("2026-10-21T22:00:30Z")); // 18:00:30 ET, window closed
+    const s15c = await fx.states(j15c.slice(2));
+    bar("H15c window naturally ended: unsent dropped (cap/closed)", s15c.every((s) => s.state === "expired" && /^missed_hour_(cap|closed)$/.test(s.close_reason ?? "")), JSON.stringify(s15c.map((s) => s.close_reason)));
+
     // R — Task 6: funnel outcome labels + hourly panel.
     const { getDripFunnel } = await import("@/lib/drip/funnel");
     const fun = await getDripFunnel(fx.orgId, off);

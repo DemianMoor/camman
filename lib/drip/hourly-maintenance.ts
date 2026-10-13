@@ -278,3 +278,12 @@ export async function prepareHourly(
 export async function realHasHeadroom(campaignId: number, now: Date): Promise<boolean> {
   return pickNumber(await numbersWithHeadroom(db, { campaignId, now })) != null;
 }
+
+/** Carry ON → OFF on save: the existing queue becomes backlog, never a mass drop (spec §5). */
+export async function applyHourlyCarryTransition(
+  dbc: DripTx,
+  { campaignId, before, after, now }: { campaignId: number; before: boolean; after: boolean; now: Date },
+): Promise<number> {
+  if (!(before && !after)) return 0;
+  return revertQueuedPastHours(dbc, { campaignId, now });
+}

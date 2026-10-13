@@ -54,6 +54,9 @@ type Config = {
   org_admission_cutoff_minutes: number | null;
   carry_days: number | null;
   org_carry_days: number | null;
+  hourly_cap: number | null;
+  hourly_carry: boolean;
+  hourly_cap_enabled: boolean;
   priority: number | null;
   journeys_total: number;
 };
@@ -108,6 +111,8 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
   // "" = account default; "0" | "1" = fixed; "n" = up to N (carryN holds 2..7)
   const [carryMode, setCarryMode] = useState("");
   const [carryN, setCarryN] = useState("2");
+  const [hourlyCap, setHourlyCap] = useState("");
+  const [hourlyCarry, setHourlyCarry] = useState(false);
 
   const loadCfg = cfgApi.execute;
   const loadJ = journeysApi.execute;
@@ -130,6 +135,8 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
         const cd = r.data.carry_days;
         setCarryMode(cd == null ? "" : cd <= 1 ? String(cd) : "n");
         setCarryN(cd != null && cd >= 2 ? String(cd) : "2");
+        setHourlyCap(r.data.hourly_cap == null ? "" : String(r.data.hourly_cap));
+        setHourlyCarry(r.data.hourly_carry === true);
       }
     })();
   }, [loadCfg, campaignId, tick]);
@@ -233,6 +240,10 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
         daily_cap: num(dailyCap),
         admission_cutoff_minutes: cutoff.trim() === "" ? null : Number(cutoff),
         carry_days: carryDays,
+        // Omitted when the org flag is off so a save never touches them.
+        ...(cfg?.hourly_cap_enabled
+          ? { hourly_cap: num(hourlyCap), hourly_carry: hourlyCarry }
+          : {}),
       }),
     });
     if (!r.ok) return toastApiError(r);
@@ -310,7 +321,7 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
             <p className="text-muted-foreground text-xs">
               Three different limits over three different things. They are not interchangeable.
             </p>
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className={`grid gap-3 ${cfg?.hourly_cap_enabled ? "sm:grid-cols-4" : "sm:grid-cols-3"}`}>
               <div>
                 <Label htmlFor="cap-lifetime" className="text-xs">
                   Campaign cap <Badge variant="secondary">live</Badge>
@@ -356,6 +367,39 @@ export function DripConfigPanel({ campaignId, canEdit }: { campaignId: number; c
                   Sends per ET day. Warns at 90%; leads beyond it wait for tomorrow.
                 </p>
               </div>
+              {cfg?.hourly_cap_enabled && (
+                <div>
+                  <Label htmlFor="cap-hourly" className="text-xs">
+                    Hourly send cap <Badge variant="secondary">live</Badge>
+                  </Label>
+                  <Input
+                    id="cap-hourly"
+                    value={hourlyCap}
+                    onChange={(e) => setHourlyCap(e.target.value)}
+                    placeholder="unlimited"
+                    disabled={!canEdit}
+                  />
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    First sends per ET clock hour, inside the daily cap. Follow-ups don&apos;t count.
+                  </p>
+                  <div className="mt-2 flex items-center gap-2 text-xs">
+                    <input
+                      id="cap-hourly-carry"
+                      type="checkbox"
+                      checked={hourlyCarry}
+                      onChange={(e) => setHourlyCarry(e.target.checked)}
+                      disabled={!canEdit || hourlyCap.trim() === ""}
+                      className="size-4 cursor-pointer"
+                    />
+                    <label htmlFor="cap-hourly-carry">Carry unsent leads to the next hour</label>
+                  </div>
+                  {!hourlyCarry && hourlyCap.trim() !== "" && (
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Leads that miss their hour are dropped from this campaign (they stay normal contacts).
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
             <p className="text-muted-foreground text-xs">
               Routing per day only limits who enters this campaign. Leads above it are still

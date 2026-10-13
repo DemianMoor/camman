@@ -72,6 +72,11 @@ export const dripConfigSchema = z
     // Carry-over (0204): extra ET days a lead stays admissible. NULL = account
     // default. OMITTED = keep (the campaign editor never sends it).
     carry_days: z.number().int().min(0).max(MAX_CARRY_DAYS).nullable().optional(),
+    // Hourly send cap (0209): first sends per ET clock hour. NULL = no hourly
+    // limit. OMITTED = keep (the campaign editor never sends it).
+    hourly_cap: z.number().int().positive().max(100000).nullable().optional(),
+    // OMITTED = keep.
+    hourly_carry: z.boolean().optional(),
     priority: z.number().int().min(1).max(10000).optional(),
     filters: filtersSchema.optional(),
     // Drip reuses the regular campaign carrier filter representation.

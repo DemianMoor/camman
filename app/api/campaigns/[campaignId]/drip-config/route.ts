@@ -6,6 +6,7 @@ import { campaigns } from "@/db/schema";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { logDripConfigChange, readDripConfigSnapshot } from "@/lib/drip/change-events";
+import { applyHourlyCarryTransition } from "@/lib/drip/hourly-maintenance";
 import { can } from "@/lib/permissions";
 import { dripConfigSchema } from "@/lib/validators/drip-campaigns";
 
@@ -47,6 +48,9 @@ export async function GET(
            cfg.carry_days,
            (SELECT os.drip_carry_days FROM org_settings os
              WHERE os.org_id = c.org_id) AS org_carry_days,
+           cfg.hourly_cap, cfg.hourly_carry,
+           (SELECT os.drip_hourly_cap_enabled FROM org_settings os
+             WHERE os.org_id = c.org_id) AS hourly_cap_enabled,
            cfg.priority, cfg.filters,
            COALESCE((SELECT count(*)::int FROM drip_journeys j
                      WHERE j.campaign_id = c.id AND j.state <> 'unroutable'), 0) AS journeys_total
@@ -108,16 +112,18 @@ export async function PUT(
   await db.transaction(async (tx) => {
     // Locked so the diff below sees exactly the row this save replaced.
     const before = await readDripConfigSnapshot(tx, cid, orgId, { forUpdate: true });
+    const carryBefore = before?.hourly_carry === true;
     await tx.execute(drizzleSql`
       INSERT INTO drip_campaign_configs
         (campaign_id, org_id, interest_tag, partner_key_id, start_at, end_at,
          daily_cap, campaign_cap, routing_daily_admission_cap, admission_cutoff_minutes, carry_days,
-         priority, filters, updated_at)
+         hourly_cap, hourly_carry, priority, filters, updated_at)
       VALUES (${cid}, ${orgId}::uuid, ${input.interest_tag}, ${input.partner_key_id ?? null},
               ${input.start_at ?? null}::timestamptz, ${input.end_at ?? null}::timestamptz,
               ${input.daily_cap ?? null}, ${input.campaign_cap ?? null},
               ${input.routing_daily_admission_cap ?? null},
               ${input.admission_cutoff_minutes ?? null}, ${input.carry_days ?? null},
+              ${input.hourly_cap ?? null}, ${input.hourly_carry ?? false},
               ${input.priority ?? 100},
               ${JSON.stringify(input.filters ?? {})}::jsonb, now())
       ON CONFLICT (campaign_id) DO UPDATE SET
@@ -142,12 +148,23 @@ export async function PUT(
         carry_days = CASE WHEN ${sent("carry_days")}
                           THEN EXCLUDED.carry_days
                           ELSE drip_campaign_configs.carry_days END,
+        hourly_cap = CASE WHEN ${sent("hourly_cap")}
+                          THEN EXCLUDED.hourly_cap
+                          ELSE drip_campaign_configs.hourly_cap END,
+        hourly_carry = CASE WHEN ${sent("hourly_carry")}
+                            THEN EXCLUDED.hourly_carry
+                            ELSE drip_campaign_configs.hourly_carry END,
         priority = EXCLUDED.priority,
         filters = CASE WHEN ${sent("filters")}
                        THEN EXCLUDED.filters
                        ELSE drip_campaign_configs.filters END,
         updated_at = now()
     `);
+    if (sent("hourly_carry")) {
+      await applyHourlyCarryTransition(tx, {
+        campaignId: cid, before: carryBefore, after: input.hourly_carry === true, now: new Date(),
+      });
+    }
 
     // The carrier filter lives on the campaign, shared with regular campaigns.
     // Merged rather than replaced so the other audience_filters keys survive.

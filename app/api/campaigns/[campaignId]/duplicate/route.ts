@@ -199,10 +199,10 @@ export async function POST(
             INSERT INTO drip_campaign_configs
               (campaign_id, org_id, interest_tag, partner_key_id, start_at, end_at,
                daily_cap, campaign_cap, routing_daily_admission_cap, admission_cutoff_minutes, carry_days,
-               priority, filters)
+               hourly_cap, hourly_carry, priority, filters)
             SELECT ${inserted.id}, org_id, interest_tag, partner_key_id, start_at, end_at,
                    daily_cap, campaign_cap, routing_daily_admission_cap, admission_cutoff_minutes, carry_days,
-                   priority, filters
+                   hourly_cap, hourly_carry, priority, filters
             FROM drip_campaign_configs WHERE campaign_id = ${cid}
           `);
         }

@@ -4779,6 +4779,18 @@ A budgeted or page-capped walk that restarts from the newest page next time sile
 
 It repeats the same 50 rows over and over (5,000 rows held 50 distinct log ids, all inside 1.7 s), and `--status-code` returned nothing even for real traffic. Use it only to ask "was there ANY request in this window?" — logs come back newest-first — and always run a control window known to have traffic. Count from your own tables, or log one summary line per run (the txr poll's `txr_poll_run`) and keep each query under 50 runs.
 
+## ⭐ Drip hourly send cap: rules and the deploy-order gotcha (2026-10-13, migration 0209)
+
+Feature doc: [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#hourly-send-cap-2026-10-13-migration-0209).
+
+- **The hour key is the UTC hour** (`hourStartOf()` in [lib/drip/hourly-cap.ts](../lib/drip/hourly-cap.ts)), never a local-time truncation. ET offsets are whole hours, so ET clock-hour boundaries are UTC hour boundaries, and the DST fall-back night's two 01:xx ET hours stay distinct.
+- **Only first sends count** (`drip_journeys.first_send_at`). Follow-ups are neither counted nor blocked. The count is read from the DB every run, never held in memory.
+- **A stop control never causes a drop.** Pause, org halt, flag off, cap removed, lifetime cap and no number headroom revert assignments to waiting. In `prepareHourly` the "able to send?" check runs BEFORE closing past hours, so this holds at the hour boundary too. Any new stop condition must be added to that check and to `clearIneligibleHourAssignments`.
+- **Released backlog (`hour_fresh = false`) is never dropped**, and a fresh lead is never dropped in favour of backlog (the newest `min(U, B)` are demoted instead).
+- **Carry ON -> OFF reverts the queue** to waiting in the same transaction as the config save, so it becomes backlog rather than a mass drop.
+- **Selection inputs are required** (CLAUDE.md 11b): `selectDueJourneys`' `hourly` argument and the maintenance inputs have no default.
+- **⚠️ Deploy order.** The scheduler reads `hour_start` / `hour_fresh` and runs `clearIneligibleHourAssignments` on every tick (every minute, even with the feature off). Migration `0209` MUST be on production BEFORE this code deploys, or every drip send fails. Run `npm run db:migrate` against production first, then `scripts/verify-migration-integrity.ts`, then merge.
+
 ## Only the lease holder owns poll state
 
 The txr poll's owed ranges and pass stamps are written by the CRON run only (`stateful: true`). A manual "poll now" run bypasses the lease and can overlap a cron run; if it deleted an owed range or stamped a pass from what it read at its own start, it could clear a range the cron wrote meanwhile. Any state a job keeps between runs belongs to whoever holds the lease — a manual trigger reads its own window and leaves the state alone.

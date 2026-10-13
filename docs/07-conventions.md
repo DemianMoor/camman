@@ -54,6 +54,21 @@ waited on a paused or capped campaign waited by design, and counting it would ma
 infrastructure alert fire on a business setting. Reuse this function; don't write a second
 lead-to-send query.
 
+## ⭐ "A send that counts against the drip daily cap" has ONE definition (2026-10-13)
+
+`dripDailySendsPredicate` in [lib/drip/daily-sends.ts](../lib/drip/daily-sends.ts) is the only
+place that says which `stage_sends` rows count against a drip campaign's `daily_cap`: status
+sent / sending / pending, `created_at` inside the ET day as a range, first sends and follow-ups
+alike. The scheduler, the follow-up runner and the router's send-capacity rule (0210) all call it.
+If the router counted differently from the scheduler, it would admit leads the scheduler then
+refuses (a growing backlog) or defer leads the scheduler could have sent. Don't write a fourth
+daily-send count; extend this one.
+
+The router's "full" test is **S + U ≥ daily_cap** (U = routed journeys with no first send, any
+day). Read U from `drip_journeys` (`state = 'routed' AND first_send_at IS NULL`), never from
+`stage_sends`: the first send row and the `first_send_at` stamp land in one transaction, so S and
+U never overlap and a send leaves S + U unchanged.
+
 ## ⭐ Drip admission `widened_at` is trigger-stamped; a raise drops, never revives (2026-10-12)
 
 `drip_campaign_configs.admission_widened_at` and `org_settings.drip_admission_widened_at` are stamped

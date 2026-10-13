@@ -47,6 +47,7 @@ type Result = {
     globalDetail: Record<string, string>;
     candidates: Candidate[];
     winner: Candidate | null;
+    overflowed_from?: OverflowSkip[];
   } | null;
 };
 
@@ -59,6 +60,22 @@ function missedHourText(e: Record<string, unknown>): string {
     ? `, cap ${mh.cap}/h, hour ${formatCampaignDateTime(mh.hour_start)}`
     : "";
   return ` — missed its hour (${cr.replace("missed_hour_", "")}${detail})`;
+}
+
+/** A higher-priority campaign skipped only because it was full today (0210). */
+type OverflowSkip = { campaign_id: number; campaign_name: string | null; detail: string };
+
+/** "<name> campaign full (X/Y today …), overflowed to <winner>" — one per skip. */
+function overflowLines(skips: OverflowSkip[], to: string): string[] {
+  return skips.map((s) => `${s.campaign_name ?? `#${s.campaign_id}`}: ${s.detail}, overflowed to ${to}`);
+}
+
+function storedOverflow(e: Record<string, unknown>): string[] {
+  const reason = e.reason as
+    | { overflowed_from?: OverflowSkip[]; campaign_name?: string | null; campaign_id?: number }
+    | null;
+  if (!reason?.overflowed_from?.length) return [];
+  return overflowLines(reason.overflowed_from, reason.campaign_name ?? `#${reason.campaign_id}`);
 }
 
 const VERDICT_STYLE: Record<RuleVerdict, string> = {
@@ -154,6 +171,14 @@ export function WhyNotRouted() {
                       <Badge variant="outline">no campaign would take it</Badge>
                     )}
                   </p>
+                  {result.live_evaluation.winner &&
+                    overflowLines(
+                      result.live_evaluation.overflowed_from ?? [],
+                      result.live_evaluation.winner.campaign_name ??
+                        `#${result.live_evaluation.winner.campaign_id}`,
+                    ).map((line) => (
+                      <p key={line} className="mb-1 text-xs text-amber-600">{line}</p>
+                    ))}
                   {result.live_evaluation.candidates.length === 0 ? (
                     <p className="text-muted-foreground text-sm">
                       There are no active drip campaigns at all.
@@ -205,6 +230,9 @@ export function WhyNotRouted() {
                       {e.journey_state
                         ? ` · journey ${String(e.journey_state)}${missedHourText(e)}`
                         : " · no journey"}
+                      {storedOverflow(e).map((line) => (
+                        <span key={line} className="block pl-4 text-amber-600">{line}</span>
+                      ))}
                     </li>
                   ))}
                 </ul>

@@ -19,6 +19,7 @@ import {
   clearIneligibleHourAssignments, prepareHourly, realHasHeadroom, recordSendRefusal,
   type HourlyRoomMap,
 } from "./hourly-maintenance";
+import { dripDailySendsPredicate } from "./daily-sends";
 import { mintDripLeadLink } from "./mint";
 import { isDripPostureOn } from "./in-use";
 
@@ -222,9 +223,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
         SELECT
           COALESCE((SELECT count(*)::int FROM stage_sends ss
                     WHERE ss.campaign_id = ${campaignId}
-                      AND ss.status IN ('sent','sending','pending')
-                      AND ss.created_at >= ${dayStart.toISOString()}::timestamptz
-                      AND ss.created_at <  ${dayEnd.toISOString()}::timestamptz), 0) AS today,
+                      AND ${dripDailySendsPredicate(dayStart, dayEnd)}), 0) AS today,
           COALESCE((SELECT count(*)::int FROM drip_journeys dj
                     WHERE dj.campaign_id = ${campaignId}
                       AND dj.first_send_at IS NOT NULL), 0) AS lifetime

@@ -3546,6 +3546,11 @@ export const org_settings = pgTable("org_settings", {
   // Migration 0208: the drip campaign Daily results tab (UI + its API). The
   // drip_daily_rollup job runs regardless; this only shows/serves the tab.
   drip_daily_results_enabled: boolean("drip_daily_results_enabled").notNull().default(false),
+  // Migration 0210: drip routing send capacity. On: a campaign whose sends
+  // today + routed-unsent backlog reach its daily send cap is full, and the
+  // lead overflows to the next same-tag candidate (deferred if all are full).
+  // Off = routing ignores the send cap, exactly as before. Rollback = set false.
+  drip_routing_send_capacity: boolean("drip_routing_send_capacity").notNull().default(false),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })

@@ -9,6 +9,7 @@ import {
   backlogRoom, hourStartOf, HOUR_MS, minutesIntoHour, MISSED_HOUR_CLOSE_REASON,
   planHourEnd, type FreshUnsent, type HourCounts, type MissedHourCause,
 } from "./hourly-cap";
+import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { pickStage, etMinutesOfDay, type StageWindow } from "./windows";
 
@@ -20,6 +21,11 @@ import { pickStage, etMinutesOfDay, type StageWindow } from "./windows";
 // NULL), "on an hour", and — OFF only — the terminal expired/missed_hour_*.
 // ⭐ A STOP CONTROL NEVER CAUSES A DROP. Pause / halt / flag off / no headroom
 // revert assignments to waiting; only a campaign that could send drops leads.
+//   Per-campaign order in prepareHourly: assign fresh → "able to send?" check →
+//   if NOT able, revert + room 0 and STOP (closePastHours is not run, so a stop
+//   control never causes a drop, even at the hour boundary) → if able, close past
+//   hours (OFF only) → release backlog → room. This deliberately overrides the
+//   spec's §4 step order (owner invariant).
 
 export type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 export interface HourlyRoom { hourStart: Date; room: number; carry: boolean }
@@ -64,6 +70,10 @@ export async function revertQueuedPastHours(
   return rows.length;
 }
 
+/**
+ * Stamp a refused send on a still-unsent journey (feeds the `blocked` drop cause).
+ * Callers MUST only call this for hourly-capped campaigns (spec: zero writes otherwise).
+ */
 export async function recordSendRefusal(
   dbc: DripTx, { journeyId, kind, now }: { journeyId: string; kind: "mint" | "gate"; now: Date },
 ): Promise<void> {
@@ -97,7 +107,7 @@ async function sentBetween(dbc: DripTx, campaignId: number, from: Date, backlogO
     WHERE j.campaign_id = ${campaignId}
       AND j.first_send_at >= ${from.toISOString()}::timestamptz
       AND j.first_send_at <  ${new Date(from.getTime() + HOUR_MS).toISOString()}::timestamptz
-      ${backlogOnly ? sql`AND j.hour_fresh IS FALSE AND j.hour_start = ${from.toISOString()}::timestamptz` : sql``}
+      ${backlogOnly ? sql`AND j.hour_fresh IS FALSE` : sql``}
   `)) as unknown as { n: number }[];
   return Number(r[0]?.n ?? 0);
 }
@@ -135,7 +145,7 @@ async function closePastHours(
     if (plan.demote.length > 0) {
       await dbc.execute(sql`
         UPDATE drip_journeys SET hour_start = NULL, hour_fresh = NULL
-        WHERE id = ANY(${uuidArr(plan.demote)}::uuid[]) AND state = 'routed' AND first_send_at IS NULL`);
+        WHERE id = ANY(${uuidArr(plan.demote)}::uuid[]) AND campaign_id = ${campaignId} AND state = 'routed' AND first_send_at IS NULL`);
       out.demoted += plan.demote.length;
     }
     for (const cause of ["cap", "closed", "blocked"] as const) {
@@ -147,7 +157,7 @@ async function closePastHours(
             reason = COALESCE(reason, '{}'::jsonb) || jsonb_build_object('missed_hour', jsonb_build_object(
               'hour_start', ${H.toISOString()}::text, 'cap', ${cap}::int, 'cause', ${cause}::text,
               'sent_in_hour', ${sentInHour}::int, 'backlog_sent_in_hour', ${backlogSentInHour}::int))
-        WHERE id = ANY(${uuidArr(ids)}::uuid[]) AND state = 'routed' AND first_send_at IS NULL`);
+        WHERE id = ANY(${uuidArr(ids)}::uuid[]) AND campaign_id = ${campaignId} AND state = 'routed' AND first_send_at IS NULL`);
       out.dropped[cause] += ids.length;
       if (cause === "blocked") out.blockedHours.set(H.toISOString(), ids.length);
     }
@@ -177,7 +187,7 @@ async function releaseBacklog(dbc: DripTx, campaignId: number, hour: Date, n: nu
   if (n <= 0) return 0;
   const rows = (await dbc.execute(sql`
     UPDATE drip_journeys SET hour_start = ${hour.toISOString()}::timestamptz, hour_fresh = false
-    WHERE id IN (
+    WHERE campaign_id = ${campaignId} AND id IN (
       SELECT j.id FROM drip_journeys j
       WHERE j.campaign_id = ${campaignId} AND ${LIVE_UNSENT} AND j.hour_start IS NULL
       ORDER BY j.routed_at, j.id
@@ -200,7 +210,9 @@ export async function prepareHourly(
   const hour = hourStartOf(now);
   const camps = (await dbc.execute(sql`
     SELECT c.id, c.name, c.send_paused, cfg.hourly_cap, cfg.hourly_carry, cfg.campaign_cap,
-           (SELECT count(*)::int FROM drip_journeys dj WHERE dj.campaign_id = c.id AND dj.first_send_at IS NOT NULL) AS lifetime
+           CASE WHEN cfg.campaign_cap IS NULL THEN 0
+                ELSE (SELECT count(*)::int FROM drip_journeys dj WHERE dj.campaign_id = c.id AND dj.first_send_at IS NOT NULL)
+           END AS lifetime
     FROM campaigns c
     JOIN drip_campaign_configs cfg ON cfg.campaign_id = c.id
     JOIN org_settings os ON os.org_id = c.org_id
@@ -218,20 +230,12 @@ export async function prepareHourly(
         AND s.parent_stage_id IS NULL AND s.window_start_min IS NOT NULL AND s.window_end_min IS NOT NULL
     `)) as unknown as StageWindow[];
 
-    // Step 1 then step 2 — step 2 closes only hours a live campaign could send in.
+    // Step 1 — assign this hour's fresh leads.
     await assignFresh(dbc, campaignId, hour, windows);
-    if (!c.hourly_carry) {
-      const closed = await closePastHours(dbc, campaignId, cap, hour);
-      for (const k of ["cap", "closed", "blocked"] as const) res.dropped[k] += closed.dropped[k];
-      res.demoted += closed.demoted;
-      for (const [h, n] of closed.blockedHours) {
-        await notify(`drip:missed_hour_blocked:${campaignId}:${h}`, orgId,
-          `⚠️ Drip campaign "${c.name ?? campaignId}": ${n} lead(s) dropped for hour ${h} because their send was ` +
-          `refused (opt-out gate / link mint). This is a system fault, not lead staleness — check the stage's link and footer.`);
-      }
-    }
 
-    // Step 3 — a campaign that cannot send right now reverts, so nothing is dropped for it.
+    // Step 2 — can this campaign send right now? Checked BEFORE closing past hours: a stop
+    // control (pause / halt / lifetime cap / no number headroom) never causes a drop, even at
+    // the hour boundary. Not able ⇒ revert to waiting, room 0, and closePastHours is skipped.
     const able = !c.send_paused &&
       !(await isDripSendingHalted(dbc, campaignId)) &&
       !(c.campaign_cap != null && Number(c.lifetime) >= Number(c.campaign_cap)) &&
@@ -240,6 +244,18 @@ export async function prepareHourly(
       res.reverted += await revertCampaign(dbc, campaignId);
       res.rooms.set(campaignId, { hourStart: hour, room: 0, carry: c.hourly_carry });
       continue;
+    }
+
+    // Step 3 (OFF only) — close every past hour; only a campaign that could send gets here.
+    if (!c.hourly_carry) {
+      const closed = await closePastHours(dbc, campaignId, cap, hour);
+      for (const k of ["cap", "closed", "blocked"] as const) res.dropped[k] += closed.dropped[k];
+      res.demoted += closed.demoted;
+      for (const [h, n] of closed.blockedHours) {
+        await notify(`drip:missed_hour_blocked:${campaignId}:${h}`, orgId,
+          `⚠️ Drip campaign "${c.name ?? campaignId}": ${n} lead(s) dropped for the ${formatCampaignDateTime(h)} hour because their send was ` +
+          `refused (opt-out gate / link mint). This is a system fault, not lead staleness — check the stage's link and footer.`);
+      }
     }
 
     // Step 4 — release waiting leads into spare room, only while a window is open.

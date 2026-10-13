@@ -358,8 +358,10 @@ cap removed => assignments revert to waiting. Then per capped campaign:
    backlog took their slots) and the oldest `U - B` dropped: `cap` if H's first sends reached the cap, else
    `closed`.
 4. **Release backlog** (only while a window is open), oldest `routed_at` first. OFF:
-   `min(cap - sentH - freshUnsent, ceil(cap x minutesIntoHour / 60) - sentH)` (fresh-first, backlog paced
-   over the hour). ON: `cap - sentH - assignedUnsent`.
+   `min(cap - sentH - freshUnsent - backlogUnsent, ceil(cap x max(minutesIntoHour, 1) / 60) - sentH - backlogUnsent)`
+   (fresh-first, backlog paced over the hour; the 1-minute floor means the first minute releases
+   `ceil(cap / 60)`). ON: `cap - sentH - freshUnsent - backlogUnsent - queuedUnsent`. All unsent counts are
+   this campaign's assigned-unsent journeys (`backlogRoom` in [lib/drip/hourly-cap.ts](../../lib/drip/hourly-cap.ts)).
 5. **Room** = `cap - sentH`. For a capped campaign `selectDueJourneys` takes only assigned journeys
    (`hour_start <= current hour`), ordered ON `hour_start, routed_at` (queue first) / OFF
    `hour_fresh DESC, routed_at`; the send loop stops at the room. A full campaign contributes no rows, so

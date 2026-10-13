@@ -17,6 +17,18 @@ import { profitAndRoi } from "./partner-profit";
 //   ROI          = Profit ÷ (send cost + lookup cost); null when that is 0
 //   Revenue per admitted lead (Cohort) = Σ revenue ÷ Σ admitted; null over 0
 
+/**
+ * ROI is shown as "—" when the row's send cost is under this (owner, 2026-10-13):
+ * a few dollars of revenue over a few cents of cost reads as 14,000% and means
+ * nothing. Display rule only — the API still returns the computed ROI.
+ */
+export const ROI_MIN_SEND_COST_USD = 1;
+
+/** The ROI a row DISPLAYS: null ("—") under ROI_MIN_SEND_COST_USD of send cost. */
+export function displayedRoi(roi: number | null, sendCostUsd: number): number | null {
+  return sendCostUsd < ROI_MIN_SEND_COST_USD ? null : roi;
+}
+
 export interface DailyMoneyInput {
   revenue: number;
   send_cost: number;

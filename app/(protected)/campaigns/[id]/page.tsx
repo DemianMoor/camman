@@ -30,7 +30,7 @@ import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { type AudienceFilters } from "@/components/campaigns/campaign-form";
-import { DripConfigPanel } from "@/components/campaigns/drip-config-panel";
+import { DripSectionTabs } from "@/components/drip/drip-section-tabs";
 import { dripStageReadiness } from "@/lib/drip/stage-readiness";
 import { minutesToLabel } from "@/lib/drip/windows";
 import { CampaignSendMode } from "@/components/campaigns/campaign-send-mode";
@@ -2071,7 +2071,7 @@ export default function CampaignDetailPage() {
               message.
             </p>
           </div>
-          <DripConfigPanel
+          <DripSectionTabs
             campaignId={campaign.id}
             canEdit={can("campaigns.update")}
           />

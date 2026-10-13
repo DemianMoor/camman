@@ -1,14 +1,14 @@
 # Drip — Daily results
 
-_Last updated: 2026-10-12 (PR 3: the rollup job, backfill and reconciliation; the tab itself is not built yet)_
+_Last updated: 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
 [spec](../superpowers/specs/2026-10-12-drip-daily-results-design.md).
 
-**Status.** Data layer only. The tab and its API arrive in PR 4–5 behind
-`org_settings.drip_daily_results_enabled` (migration 0208, default off). PR 4 waits
-for the owner's OK on the reconciliation evidence.
+**Status.** Data layer live (PR 3, backfilled and reconciled 2026-10-13). The
+table view is PR 4, and the chart is PR 5. Both sit behind
+`org_settings.drip_daily_results_enabled` (migration 0208, default **off**).
 
 ---
 
@@ -16,7 +16,7 @@ for the owner's OK on the reconciliation evidence.
 
 | basis | a row's ET day is… | a row holds… |
 |---|---|---|
-| **activity** | the day each event **happened** | sends by `sent_at`, clean clicks by `clicked_at`, opt-outs by the STOP's arrival (`opt_outs.created_at`), sales and approved revenue by **detection** (`conversion_events.created_at`), admissions by `routed_at`, "Leads admitted" by the lead's `lead_events.received_at` |
+| **activity** | the day each event **happened** | sends by `sent_at`, clean clicks by `clicked_at`, opt-outs by the STOP's arrival (`opt_outs.created_at`), sales and approved revenue by **detection** (`conversion_events.created_at`), admissions by `routed_at`, "Leads arrived" by the lead's `lead_events.received_at` |
 | **cohort** | the day the lead was **admitted** (`drip_journeys.routed_at`) | everything those leads did since: late sales, follow-ups, opt-outs |
 
 Activity uses the **partner report's** dating rules (owner ruling Q1), so partner
@@ -105,6 +105,37 @@ Read-time arithmetic over SUMMED cells (owner rulings Q1/Q3, 2026-10-12). One fu
 None of these are stored. The rate moves and the partner report reprices with it, so this does too.
 
 The tab shows **"older days updated nightly"**, plus "as of HH:MM ET" for today and yesterday.
+
+## 4c. The tab (PR 4)
+
+| piece | where |
+|---|---|
+| Read layer | [lib/reporting/drip-daily-results.ts](../../lib/reporting/drip-daily-results.ts) `getDripDailyResults()`. It reads **only** `drip_daily_rollup`, plus stage and partner names, change events and two heartbeats. `rowFrom()` builds every row (day, breakdown, totals) from summed cells |
+| API | `GET /api/campaigns/[campaignId]/daily-results?basis=&breakdown=&from=&to=` (`campaigns.view`). `?probe=1` returns `{enabled}`. When the flag is off it returns 404 `feature_disabled` |
+| UI | [components/drip/daily-results.tsx](../../components/drip/daily-results.tsx), mounted by [components/drip/drip-section-tabs.tsx](../../components/drip/drip-section-tabs.tsx) as **Settings / Daily results** tabs in the campaign page's drip section. When the flag is off the section renders exactly as before |
+
+**Rules the table follows:**
+- **Totals row** is pinned first. Day rows run newest first.
+- **"Since launch"** is clamped to the campaign's first rollup day.
+- **Admissions have no stage.** Under **By stage**:
+  - Leads arrived, Admitted and Lookup cost show "—" on stage rows;
+  - stage-row Profit and ROI are before lookup cost;
+  - lookup cost sits on the campaign total and day rows.
+- **Under By partner** lookup cost is attributable, so partner rows carry it. Sends that reach no non-sandbox lead are grouped last as **Unattributed**. On prod on 2026-10-13 there were none: the 5 sends on campaign 994 belong to the `internal-test` key.
+- **"Leads arrived"** (leads admitted to this campaign, counted on the day they arrived) is Activity-only. **Rev / admitted** is Cohort-only and shows 4 decimals under $1.
+- **ROI shows "—" when the row's send cost is under $1**, on any row (`displayedRoi()`, `ROI_MIN_SEND_COST_USD`). It is a display rule only: the API still returns the computed ROI.
+- **Clicks per send can exceed 100% in Activity.** A day's clicks can come from earlier sends, and the tooltip says so.
+- **The Day column is sticky** and the table sizes to its content (`w-max min-w-full`), so it scrolls horizontally instead of squeezing or cutting columns.
+- **Maturing.** A Cohort row is marked ⧖ until day + `ceil(max drip_followup_minutes / 1440) + 3` days have passed. Follow-up delay is capped at 1,440 min, so that is 3 or 4 days.
+- **Change markers (⚑)**, with a tooltip listing each change in ET, come from:
+  - `campaign_events`: `drip_config_changed`, `drip_stage_changed`, `campaign_status_changed`;
+  - `campaign_circuit_events`: pause / resume.
+- **Note line:** "Older days updated nightly · today and yesterday as of HH:MM ET", taken from the `drip-daily-rollup` heartbeat.
+- **Persistence:** view, range, preset and breakdown are kept per browser (`usePersistedFilters("campaign.dailyResults")`, try/catch inside).
+
+**Local review against real data:** `DRIP_DAILY_RESULTS_LOCAL_PREVIEW=1 npx next dev` opens the gate on a **local** dev server only. It is ignored whenever `NODE_ENV=production`, which every Vercel deployment uses, previews included. PR previews run on camman-v2, which has no drip campaigns, so this is the only way to see the tab on real campaigns while the org flag is off.
+
+Test: `scripts/test-drip-daily-results.ts` (preview DB, rolled back, 28 bars).
 
 ## 5. Retention (card 869enz8ge)
 

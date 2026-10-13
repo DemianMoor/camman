@@ -14,6 +14,11 @@ import {
   resolveOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
 import { buildStageSms } from "@/lib/sends/stage-sms";
+import { orderForHour } from "./hourly-cap";
+import {
+  clearIneligibleHourAssignments, prepareHourly, realHasHeadroom, recordSendRefusal,
+  type HourlyRoomMap,
+} from "./hourly-maintenance";
 import { mintDripLeadLink } from "./mint";
 import { isDripPostureOn } from "./in-use";
 
@@ -80,6 +85,10 @@ export interface SchedulerResult {
   pausedSkipped: number;
   /** Journeys another run had already given their first send — rolled back. */
   alreadyQueued: number;
+  /** Leads left for a later run because their campaign's hour was already full. */
+  hourlyCapBlocked: number;
+  /** Assigned leads dropped by the hourly-cap maintenance (cap / closed / blocked). */
+  hourlyDropped: number;
 }
 
 export interface DueRow {
@@ -98,14 +107,22 @@ export interface DueRow {
   brand_id: number | null;
   campaign_tracking_id: string | null;
   brand_landing_host: string | null;
+  hour_start: string | null;
+  hour_fresh: boolean | null;
+  routed_at: string;
 }
 
 export async function runDripSchedulerBatch(now: Date = new Date()): Promise<SchedulerResult> {
   const res: SchedulerResult = {
     postureOn: false, considered: 0, inserted: 0, waitingForWindow: 0,
     gateRefused: 0, mintRefused: 0, capBlocked: 0, numbersExhausted: 0, pausedSkipped: 0,
-    alreadyQueued: 0,
+    alreadyQueued: 0, hourlyCapBlocked: 0, hourlyDropped: 0,
   };
+
+  // ⭐ HOURLY CAP step 0 (spec §4): org paused/off, flag off, campaign paused or
+  // cap removed ⇒ assignments revert to waiting. Runs even when no org is live,
+  // which is exactly when it matters (a paused org must not wake up to drops).
+  await clearIneligibleHourAssignments(db);
 
   const orgs = (await db.execute(sql`
     SELECT org_id, drip_scheduler_fair FROM org_settings
@@ -120,7 +137,16 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
   for (const { org_id: orgId, drip_scheduler_fair: fair } of orgs) {
     if (!(await isDripPostureOn(orgId))) continue;
 
-    const due = await selectDueJourneys(db, { orgId, fair, batch: BATCH });
+    const hourly = await prepareHourly(db, {
+      orgId, now,
+      notify: async (alertKey, oid, text) => {
+        const { notifyOnTransition } = await import("@/lib/alerts/alert-state");
+        await notifyOnTransition(db, { alertKey, orgId: oid, text });
+      },
+      deps: { hasHeadroom: (campaignId) => realHasHeadroom(campaignId, now) },
+    });
+    res.hourlyDropped += hourly.dropped.cap + hourly.dropped.closed + hourly.dropped.blocked;
+    const due = await selectDueJourneys(db, { orgId, fair, batch: BATCH, hourly: hourly.rooms });
 
     // Group by campaign — stages, numbers and caps are per campaign, and
     // re-reading them per lead would be N queries for one answer.
@@ -134,6 +160,9 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
 
     for (const [campaignId, leads] of byCampaign) {
       const head = leads[0];
+      const hourRoom = hourly.rooms.get(campaignId);
+      if (hourRoom) leads.splice(0, leads.length, ...orderForHour(leads, hourRoom.carry));
+      let hourSent = 0;
 
       // ⚠️ The campaign latch is checked BEFORE any insert, not after. A paused
       // campaign accumulates journeys; it must not accumulate pending sends,
@@ -223,6 +252,10 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       for (const lead of leads) {
         if (dailyCap != null && todayCount >= dailyCap) {
           res.capBlocked++;
+          continue;
+        }
+        if (hourRoom && hourSent >= hourRoom.room) {
+          res.hourlyCapBlocked++;
           continue;
         }
         const number = pickNumber(await numbersWithHeadroom(db, { campaignId, now }));
@@ -350,6 +383,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
           });
           res.inserted++;
           todayCount++;
+          hourSent++;
         } catch (e) {
           // ⚠️ FAIL CLOSED, ONE LEAD AT A TIME. Every refusal below leaves the
           // journey 'routed', so fixing the configuration lets the next tick
@@ -360,6 +394,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
                 `(campaign ${campaignId}, stage ${stage.stage_id}): ${e.reason} — ${e.message}`,
             );
             res.mintRefused++;
+            if (hourRoom) await recordSendRefusal(db, { journeyId: lead.journey_id, kind: "mint", now });
             continue;
           }
           if (e instanceof JourneyAlreadyQueued) {
@@ -373,6 +408,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
                 `provider ${pr?.adapter_code ?? "?"}): ${e.message}`,
             );
             res.gateRefused++;
+            if (hourRoom) await recordSendRefusal(db, { journeyId: lead.journey_id, kind: "gate", now });
             continue;
           }
           const code = (e as { cause?: { code?: string } })?.cause?.code;
@@ -401,7 +437,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
  */
 export async function selectDueJourneys(
   dbc: DripTx,
-  { orgId, fair, batch }: { orgId: string; fair: boolean; batch: number },
+  { orgId, fair, batch, hourly }: { orgId: string; fair: boolean; batch: number; hourly: HourlyRoomMap },
 ): Promise<DueRow[]> {
   // ⭐ PER-CAMPAIGN FAIRNESS (0207, org_settings.drip_scheduler_fair). The
   // batch used to be the BATCH oldest routed journeys org-wide, so one
@@ -412,8 +448,52 @@ export async function selectDueJourneys(
   // campaign with 5 fresh leads gets all 5 in the very next batch, whatever
   // another campaign has queued. Within a campaign the order is unchanged.
   // Flag off = the old order, byte for byte.
+  //
+  // ⭐ HOURLY CAP (0209). `hourly` holds every hourly-capped campaign with its
+  // current hour and the room it has left THIS run. For those campaigns only
+  // journeys already on an hour are due (waiting ones are not accumulating), the
+  // per-campaign rank follows the hour order, and rank > room never enters the
+  // batch — a full hour takes no slots from other campaigns. An EMPTY map takes
+  // the pre-0209 query text (plus three selected columns).
+  const recs = JSON.stringify([...hourly].map(([id, v]) => ({
+    campaign_id: id, hour_start: v.hourStart.toISOString(), room: v.room, carry: v.carry,
+  })));
+  const hRecordset = sql`jsonb_to_recordset(${recs}::jsonb) AS h(campaign_id int, hour_start timestamptz, room int, carry boolean)`;
+  const capped = hourly.size > 0;
+  // Hourly-capped campaign ⇒ assigned journeys up to the current hour only.
+  // sql.raw: `j` is always a hard-coded alias here ("j0" / "j"), never input.
+  const dueFilter = (j: string) => sql.raw(
+    `AND (h.campaign_id IS NULL OR (${j}.hour_start IS NOT NULL AND ${j}.hour_start <= h.hour_start AND h.room > 0))`);
+  // ON: earlier hour first. OFF: fresh before backlog. Non-capped rows: both keys constant.
+  const hourKeys = (j: string) => sql.raw(
+    `CASE WHEN h.carry THEN ${j}.hour_start END ASC NULLS FIRST,
+     CASE WHEN h.carry IS FALSE AND ${j}.hour_fresh IS FALSE THEN 1 ELSE 0 END,`);
+
   const pick = fair
-    ? sql`
+    ? capped
+      ? sql`
+    FROM (
+      SELECT r.id, r.fair_rank FROM (
+        SELECT j0.id, h.room,
+               row_number() OVER (PARTITION BY j0.campaign_id
+                                  ORDER BY ${hourKeys("j0")} j0.routed_at, j0.id) AS fair_rank,
+               j0.routed_at
+        FROM drip_journeys j0
+        JOIN campaigns c0 ON c0.id = j0.campaign_id
+        LEFT JOIN ${hRecordset} ON h.campaign_id = j0.campaign_id
+        WHERE j0.org_id = ${orgId}::uuid
+          AND j0.state = 'routed'
+          AND j0.first_send_at IS NULL
+          AND c0.type = 'drip'
+          AND c0.status = 'active'
+          ${dueFilter("j0")}
+      ) r
+      WHERE r.room IS NULL OR r.fair_rank <= r.room
+      ORDER BY r.fair_rank, r.routed_at, r.id
+      LIMIT ${batch}
+    ) f
+    JOIN drip_journeys j ON j.id = f.id`
+      : sql`
     FROM (
       SELECT j0.id,
              row_number() OVER (PARTITION BY j0.campaign_id ORDER BY j0.routed_at, j0.id) AS fair_rank
@@ -433,6 +513,7 @@ export async function selectDueJourneys(
   const order = fair ? sql`ORDER BY f.fair_rank, j.routed_at, j.id` : sql`ORDER BY j.routed_at`;
   return (await dbc.execute(sql`
     SELECT j.id AS journey_id, j.org_id, j.campaign_id, j.contact_id,
+           j.hour_start, j.hour_fresh, j.routed_at,
            c.name AS campaign_name, c.link_mode,
            (c.send_paused IS TRUE) AS campaign_paused,
            false AS drip_paused,
@@ -446,11 +527,13 @@ export async function selectDueJourneys(
     JOIN contacts ct  ON ct.id = j.contact_id
     LEFT JOIN brands b ON b.id = c.brand_id
     LEFT JOIN drip_campaign_configs cfg ON cfg.campaign_id = c.id
+    ${capped && !fair ? sql`LEFT JOIN ${hRecordset} ON h.campaign_id = j.campaign_id` : sql``}
     WHERE j.org_id = ${orgId}::uuid
       AND j.state = 'routed'
       AND j.first_send_at IS NULL
       AND c.type = 'drip'
       AND c.status = 'active'
+      ${capped && !fair ? dueFilter("j") : sql``}
     ${order}
     LIMIT ${batch}
   `)) as unknown as DueRow[];

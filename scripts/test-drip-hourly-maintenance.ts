@@ -156,6 +156,16 @@ async function main() {
     const s11 = await fx.states(j11.slice(2));
     bar("H11a ON keeps the queue on its old hour", s11.every((s) => s.state === "routed" && new Date(s.hour_start!).toISOString() === "2026-10-13T21:00:00.000Z"));
     bar("H11b ON room this hour = cap", r.rooms.get(on)?.room === 2);
+
+    // R — Task 6: funnel outcome labels + hourly panel.
+    const { getDripFunnel } = await import("@/lib/drip/funnel");
+    const fun = await getDripFunnel(fx.orgId, off);
+    bar("R1 funnel outcome row for missed_hour_cap with its label",
+      fun.outcomes.some((o) => o.close_reason === "missed_hour_cap" && o.label === "Dropped — hourly cap full" && o.count === 6));
+    bar("R2 funnel hourly panel present for a capped campaign", fun.hourly?.cap === 3);
+    bar("R3 drops_by_day has the cap drops", (fun.hourly?.drops_by_day ?? []).reduce((s, d) => s + d.cap, 0) === 6);
+    const plain = await fx.campaign("plain", null, false);
+    bar("R4 no cap ⇒ hourly null", (await getDripFunnel(fx.orgId, plain)).hourly === null);
   } finally {
     const left = await fx.teardown();
     console.log(`\nTeardown: ${left} row(s) left`);

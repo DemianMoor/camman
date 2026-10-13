@@ -50,6 +50,17 @@ type Result = {
   } | null;
 };
 
+// A journey dropped by the hourly cap (0209) says so, with the cap and the hour it missed.
+function missedHourText(e: Record<string, unknown>): string {
+  const cr = e.close_reason;
+  if (typeof cr !== "string" || !cr.startsWith("missed_hour")) return "";
+  const mh = (e.reason as { missed_hour?: { cap?: number; hour_start?: string } } | null)?.missed_hour;
+  const detail = mh?.hour_start
+    ? `, cap ${mh.cap}/h, hour ${formatCampaignDateTime(mh.hour_start)}`
+    : "";
+  return ` — missed its hour (${cr.replace("missed_hour_", "")}${detail})`;
+}
+
 const VERDICT_STYLE: Record<RuleVerdict, string> = {
   pass: "text-emerald-600",
   mismatch: "text-amber-600",
@@ -191,7 +202,9 @@ export function WhyNotRouted() {
                     <li key={String(e.id)}>
                       {formatCampaignDateTime(String(e.received_at))} · tag{" "}
                       {String(e.interest_tag ?? "—")} · partner {String(e.partner_slug)}
-                      {e.journey_state ? ` · journey ${String(e.journey_state)}` : " · no journey"}
+                      {e.journey_state
+                        ? ` · journey ${String(e.journey_state)}${missedHourText(e)}`
+                        : " · no journey"}
                     </li>
                   ))}
                 </ul>

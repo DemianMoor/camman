@@ -1,5 +1,6 @@
 "use client";
 
+import { HourlyCapPanel } from "@/components/drip/hourly-cap-panel";
 import { Badge } from "@/components/ui/badge";
 import type { DripFunnel, FunnelSplit, FunnelSplitRow } from "@/lib/drip/funnel";
 
@@ -147,6 +148,8 @@ export function JourneyFunnel({ funnel }: { funnel: DripFunnel }) {
           ))}
         </ul>
       </div>
+
+      {funnel.hourly && <HourlyCapPanel hourly={funnel.hourly} />}
 
       {funnel.stages.length > 0 && (
         <div>

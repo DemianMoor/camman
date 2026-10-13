@@ -48,7 +48,7 @@ function cutoffOf(s: AdmissionSettings) {
 }
 
 /** Start of the ET day `days` before the ET day containing `d` (DST-safe). */
-function etDayStartBack(d: Date, days: number): Date {
+export function etDayStartBack(d: Date, days: number): Date {
   let start = campaignDayBoundsUtc(d).start;
   for (let i = 0; i < days; i++) start = campaignDayBoundsUtc(new Date(start.getTime() - 1)).start;
   return start;

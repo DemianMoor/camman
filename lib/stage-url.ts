@@ -276,48 +276,70 @@ export function hasUrlParam(url: string, key: string): boolean {
     });
 }
 
-// ⚠️ MIRRORS THE DB CHECK `link_destinations_landing_url_shape` (0094, widened
-// for digit-bearing slugs in 0111, for EXTRA PARAMS in 0170, and for
-// CascadeBlog's /bcf/ path in 0211) EXACTLY. A brand landing destination must
-// LEAD with sub_id3 and may carry further params after it:
+// ⚠️ MIRRORS THE DB TRIGGER `link_destinations_landing_url_shape` (migration
+// 0212, function landing_url_ok) EXACTLY. Until 0212 this was a CHECK with a
+// literal host list (0094 → 0111 → 0151 → 0170 → 0211); it now reads the org's
+// brand rows, and so does this — callers pass the same (host, path) pairs,
+// loaded by loadBrandLandingPairs (server) or the campaign-detail payload
+// (stage form).
 //
-//   ^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)
-//    /lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$
-//   ^https://blogcascade\.com/bcf/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$
+//   IN SCOPE  the URL contains /<p>/ for p = 'lp' (always) or any pair's path.
+//   IN-SCOPE  URLs must match, for ONE pair:
+//     ^https://<host>/<path>/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&\s]*)*$
 //
-// The trigger mirrors the CHECK's too: any URL containing /lp/ on a listed
-// host, or containing blogcascade.com/bcf/ (so www.blogcascade.com/bcf/ is
-// caught and refused here rather than by the database at mint).
+// So an unknown host on a brand path (https://x.example/lp/…) is REFUSED here
+// exactly as the database refuses it at mint (owner ruling 2026-10-14: the app
+// being looser than the database is the dangerous direction).
 //
 // It exists because malformed tracking URLs silently killed attribution.
 //
 // ⚠️ WHY A SECOND FUNCTION RATHER THAN EXTENDING validateDestination:
 // isGuideknLpUrl matches ONLY guidekn, so a lumzen or fitsyou /lp/ URL passes
-// every app-level check today and is then REJECTED by the database at mint —
-// the app and the constraint disagree, and the operator finds out hours later
-// as skipped leads rather than at Save. This closes that gap at the write
-// routes, using the same host list and the same shape as the constraint.
-const BRAND_LP_SHAPE_RE =
-  /^https:\/\/((www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp|blogcascade\.com\/bcf)\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&\s]*)*$/;
+// every app-level check and is then REJECTED by the database at mint — the app
+// and the database disagree, and the operator finds out hours later as skipped
+// leads rather than at Save.
 
-/** Is this a brand landing destination at all (any host/path in the constraint)? */
-export function isBrandLpUrl(url: string | null | undefined): boolean {
+/** A brand's landing host + path (brands.landing_host / landing_path). */
+export interface BrandLandingPair {
+  host: string;
+  path: string;
+}
+
+const LANDING_TAIL = String.raw`\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&\s]*)*$`;
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\/]/g, "\$&");
+}
+
+/** Is this URL in scope of the landing-shape rule (contains a brand path)? */
+export function isBrandLpUrl(
+  url: string | null | undefined,
+  pairs: readonly BrandLandingPair[],
+): boolean {
   const u = (url ?? "").trim();
-  return (
-    /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\//.test(u) ||
-    u.includes("blogcascade.com/bcf/")
+  const paths = new Set(["lp", ...pairs.map((p) => p.path)]);
+  for (const p of paths) if (u.includes(`/${p}/`)) return true;
+  return false;
+}
+
+function matchesAPair(u: string, pairs: readonly BrandLandingPair[]): boolean {
+  return pairs.some((p) =>
+    new RegExp(`^https:\/\/${escapeRe(p.host.toLowerCase())}\/${escapeRe(p.path)}${LANDING_TAIL}`).test(u),
   );
 }
 
 /**
- * Returns a human-readable error when a brand /lp/ URL would be refused by the
- * database, or null when it is acceptable. Non-/lp/ URLs are out of scope and
- * always pass — a network or partner URL has no shape rule.
+ * Returns a human-readable error when a brand landing URL would be refused by
+ * the database, or null when it is acceptable. URLs with no brand path are out
+ * of scope and always pass — a network or partner URL has no shape rule.
  */
-export function validateBrandLpShape(url: string | null | undefined): string | null {
+export function validateBrandLpShape(
+  url: string | null | undefined,
+  pairs: readonly BrandLandingPair[],
+): string | null {
   const u = (url ?? "").trim();
-  if (!u || !isBrandLpUrl(u)) return null;
-  if (BRAND_LP_SHAPE_RE.test(u)) return null;
+  if (!u || !isBrandLpUrl(u, pairs)) return null;
+  if (matchesAPair(u, pairs)) return null;
   // ⚠️ Extra params are ALLOWED since 0170; what is still mandatory is that
   // sub_id3 comes FIRST and carries a well-formed id. Naming the specific defect
   // matters -- "does not match the shape" sends an operator hunting through a
@@ -329,6 +351,10 @@ export function validateBrandLpShape(url: string | null | undefined): string | n
     return "sub_id3 must be the FIRST parameter on a landing-page URL.";
   }
   if (/\\?sub_id3=(&|$)/.test(u)) return "sub_id3 is present but empty.";
+  const host = (u.match(/^https?:\/\/([^/?#]+)/i)?.[1] ?? "").toLowerCase();
+  if (!pairs.some((p) => p.host.toLowerCase() === host)) {
+    return `"${host || u}" is not a brand landing host — a URL on a brand landing path must use its brand's landing host.`;
+  }
   return "This landing-page URL does not match the required shape " +
     "(https://<brand host>/<brand path>/<slug>?sub_id3=<tracking id>&<extra params>). " +
     "Check for encoded characters in the tracking ID.";

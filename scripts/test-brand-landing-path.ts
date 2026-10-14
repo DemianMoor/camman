@@ -22,6 +22,14 @@ import { STAGE_TRACKING_PARAM, validateBrandLpShape } from "@/lib/stage-url";
 // 410 and page 79 from whatever DATABASE_URL points at and builds the same
 // URLs from the LIVE rows — run it after the migration is applied.
 
+// Production's brand landing pairs (brands.landing_host / landing_path after 0211).
+const PAIRS = [
+  { host: "www.guidekn.com", path: "lp" },
+  { host: "www.lumzen.co", path: "lp" },
+  { host: "www.fitsyou.net", path: "lp" },
+  { host: "blogcascade.com", path: "bcf" },
+];
+
 let failed = 0;
 function check(name: string, cond: boolean, detail = "") {
   if (!cond) failed++;
@@ -87,9 +95,9 @@ async function main() {
     const u = new URL(one.url);
     check("exactly one param, sub_id3", JSON.stringify([...u.searchParams.keys()]) === JSON.stringify([STAGE_TRACKING_PARAM]));
     check("sub_id3 byte-identical to the stage tracking id", u.searchParams.get(STAGE_TRACKING_PARAM) === C1705[0]);
-    check("passes validateBrandLpShape", validateBrandLpShape(one.url) === null, validateBrandLpShape(one.url) ?? "");
+    check("passes validateBrandLpShape", validateBrandLpShape(one.url, PAIRS) === null, validateBrandLpShape(one.url, PAIRS) ?? "");
   } else check("built", false, one.message);
-  const ok = (u: string) => validateBrandLpShape(u) === null;
+  const ok = (u: string) => validateBrandLpShape(u, PAIRS) === null;
   const T = C1705[0];
   check("bcf + extra params after sub_id3 (0170 shape)", ok(`https://blogcascade.com/bcf/sas?sub_id3=${T}&utm_source=x`));
   check("bcf: www host refused (www 308s; CHECK lists the apex)", !ok(`https://www.blogcascade.com/bcf/sas?sub_id3=${T}`));
@@ -99,7 +107,9 @@ async function main() {
   check("bcf: placeholder subid3=sub_id3 refused", !ok("https://blogcascade.com/bcf/sas?subid3=sub_id3"));
   check("blogcascade.com /article/ has no shape rule", ok(`https://blogcascade.com/article/x?sub_id3=${T}`));
   check("lp: guidekn canonical still passes", ok(`https://www.guidekn.com/lp/orv?sub_id3=${T}`));
-  check("lp: guidekn on /bcf/ is not a brand path (no rule)", ok(`https://www.guidekn.com/bcf/orv?x=1`));
+  // 0212 (owner ruling 2026-10-14): scope is by PATH on any host, so another
+  // brand's host on /bcf/ is in scope and refused. Under 0211 it was exempt.
+  check("guidekn host on /bcf/ is REFUSED (path-based scope, 0212)", !ok(`https://www.guidekn.com/bcf/orv?x=1`));
 
   console.log("\n5. refusals — an invalid landing path never mints:");
   for (const bad of ["", "/bcf", "bcf/", "BCF", "-bcf", "bcf-", "b c f", "lp/x"]) {

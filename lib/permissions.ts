@@ -16,6 +16,9 @@ export type Permission =
   | "brands.update"
   | "brands.archive"
   | "brands.restore"
+  // 0212: a brand's landing host/path. Admin+ only — changing them re-points
+  // every future minted link for the brand (CamMan conventions, brand landing).
+  | "brands.landing.update"
   | "offers.view"
   | "offers.create"
   | "offers.update"
@@ -406,6 +409,7 @@ const adminPerms: ReadonlySet<Permission> = new Set([
   "users.manage",
   "provider_credentials.manage",
   "partner_keys.manage",
+  "brands.landing.update",
 ]);
 
 const ownerPerms: ReadonlySet<Permission> = new Set([

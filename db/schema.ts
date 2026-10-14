@@ -160,6 +160,11 @@ export const brands = pgTable(
   },
   (table) => [
     index("brands_org_id_idx").on(table.org_id),
+    // 0212: one brand per (host, path) in an org — the pair is what
+    // link-destination validation (landing_url_ok) matches against.
+    uniqueIndex("brands_landing_pair_uniq")
+      .on(table.org_id, table.landing_host, table.landing_path)
+      .where(sql`${table.landing_host} IS NOT NULL`),
     check(
       "brands_status_check",
       sql`${table.status} IN ('active', 'archived')`,

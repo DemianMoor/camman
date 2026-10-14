@@ -25,6 +25,14 @@ import { STAGE_TRACKING_PARAM } from "@/lib/stage-url";
 // param to the tracking id exactly, and separately assert no percent-encoding
 // artifact appears anywhere.
 
+// Production's brand landing pairs (brands.landing_host / landing_path after 0211).
+const PAIRS = [
+  { host: "www.guidekn.com", path: "lp" },
+  { host: "www.lumzen.co", path: "lp" },
+  { host: "www.fitsyou.net", path: "lp" },
+  { host: "blogcascade.com", path: "bcf" },
+];
+
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown) {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
@@ -130,7 +138,7 @@ function main() {
   // at MINT, surfacing hours later as skipped leads. Change either side without
   // the other and these go red.
   console.log("\n⭐ widened shape (0170) — extra params allowed AFTER sub_id3:");
-  const ok = (u: string) => validateBrandLpShape(u) === null;
+  const ok = (u: string) => validateBrandLpShape(u, PAIRS) === null;
   const T = "142_118_082426_1_s1_c599";
   check("canonical single param", ok(`https://www.lumzen.co/lp/lhj?sub_id3=${T}`), true);
   check("⭐ one extra param (the point of 0170)",
@@ -149,8 +157,10 @@ function main() {
   check("⭐ E: the %3F preview bug",
         ok("https://www.lumzen.co/lp/llx?sub_id3=8_58_082426_1_s3_c335%3F_c%3F"), false);
   check("sub_id3 must be FIRST", ok(`https://www.lumzen.co/lp/lhj?utm_source=x&sub_id3=${T}`), false);
-  check("unknown host is out of scope (no shape rule)",
-        ok(`https://evil.example/lp/lhj?sub_id3=${T}`), true);
+  // 0212 (owner ruling 2026-10-14): the app now refuses an unknown host on a
+  // brand path, exactly as the database does at mint. It used to pass here.
+  check("unknown host on a brand path is REFUSED (matches the database)",
+        ok(`https://evil.example/lp/lhj?sub_id3=${T}`), false);
   check("a non-/lp/ URL is unaffected", ok("https://partner.example/offer?a=1&b=2"), true);
 
   console.log("\nvalidateDestination (guidekn) widened in step:");

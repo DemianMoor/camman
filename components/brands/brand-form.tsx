@@ -1,7 +1,8 @@
 "use client";
 
 import { Loader2 } from "lucide-react";
-import { useForm } from "react-hook-form";
+import { useState } from "react";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 
@@ -17,6 +18,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { ColorPicker } from "@/components/color-picker";
+import { useApiCall } from "@/lib/hooks/use-api-call";
 import { brandCreateSchema } from "@/lib/validators/brands";
 
 // We use the create schema for both modes. On edit, brand_id is rendered as a
@@ -31,7 +33,38 @@ export interface BrandFormProps {
   onSubmit: (values: BrandFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
+  /** brands.landing.update (admin+). Without it the landing fields are read-only
+   *  and the caller must not send them. */
+  canEditLanding: boolean;
+  /** The brand's numeric id on edit — lets "Test" pick a slug this brand uses. */
+  brandDbId?: number;
 }
+
+type LandingTestResult = {
+  url: string;
+  slug: string;
+  outcome:
+    | "serves"
+    | "redirects"
+    | "not_found"
+    | "blocked_by_bot_protection"
+    | "error_status"
+    | "refused_address"
+    | "unreachable";
+  status: number | null;
+  location: string | null;
+  detail: string | null;
+};
+
+const OUTCOME_TEXT: Record<LandingTestResult["outcome"], string> = {
+  serves: "Serves",
+  redirects: "Redirects",
+  not_found: "Not found",
+  blocked_by_bot_protection: "Blocked by bot protection — can't verify from the server",
+  error_status: "Error",
+  refused_address: "Refused (private or invalid address)",
+  unreachable: "Unreachable",
+};
 
 export function BrandForm({
   mode,
@@ -39,7 +72,12 @@ export function BrandForm({
   onSubmit,
   onCancel,
   isSubmitting,
+  canEditLanding,
+  brandDbId,
 }: BrandFormProps) {
+  const testApi = useApiCall<LandingTestResult>();
+  const [testResult, setTestResult] = useState<LandingTestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
   const form = useForm<BrandFormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -49,8 +87,28 @@ export function BrandForm({
       website: initialValues?.website ?? "",
       avatar_url: initialValues?.avatar_url ?? "",
       color: initialValues?.color ?? "",
+      landing_host: initialValues?.landing_host ?? "",
+      landing_path: initialValues?.landing_path ?? "lp",
     },
   });
+
+  async function runLandingTest() {
+    setTestResult(null);
+    setTestError(null);
+    const r = await testApi.execute("/api/brands/landing-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        host: form.getValues("landing_host") ?? "",
+        path: form.getValues("landing_path") || "lp",
+        ...(brandDbId ? { brand_id: brandDbId } : {}),
+      }),
+    });
+    if (r.ok) setTestResult(r.data);
+    else setTestError(r.error);
+  }
+
+  const watchedHost = useWatch({ control: form.control, name: "landing_host" });
 
   const isEdit = mode === "edit";
 
@@ -132,6 +190,85 @@ export function BrandForm({
             </FormItem>
           )}
         />
+
+        <FormField
+          control={form.control}
+          name="landing_host"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Landing host</FormLabel>
+              <FormControl>
+                <Input
+                  placeholder="www.brand.com"
+                  disabled={isSubmitting || !canEditLanding}
+                  {...field}
+                  value={field.value ?? ""}
+                />
+              </FormControl>
+              <FormDescription>
+                {!(watchedHost ?? "").trim()
+                  ? "Required for slug-based landing pages."
+                  : "Slug landing pages link to https://<host>/<path>/<slug>."}
+                {!canEditLanding ? " Only an admin can change this." : ""}
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name="landing_path"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Landing path</FormLabel>
+              <FormControl>
+                <Input
+                  placeholder="lp"
+                  disabled={isSubmitting || !canEditLanding}
+                  {...field}
+                  value={field.value ?? ""}
+                />
+              </FormControl>
+              <FormDescription>
+                Lowercase letters, digits and inner dashes, no slashes. Default <span className="font-mono">lp</span>.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        {canEditLanding ? (
+          <div className="grid gap-1.5">
+            <div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void runLandingTest()}
+                disabled={isSubmitting || testApi.isLoading || !(watchedHost ?? "").trim()}
+              >
+                {testApi.isLoading ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
+                Test landing URL
+              </Button>
+            </div>
+            {testResult ? (
+              <p className="text-xs" aria-live="polite">
+                <span className={testResult.outcome === "serves" ? "text-emerald-600" : "text-destructive"}>
+                  {OUTCOME_TEXT[testResult.outcome]}
+                  {testResult.status ? ` (${testResult.status})` : ""}
+                </span>{" "}
+                <span className="text-muted-foreground font-mono break-all">{testResult.url}</span>
+                {testResult.location ? (
+                  <span className="text-muted-foreground"> → {testResult.location}</span>
+                ) : null}
+              </p>
+            ) : null}
+            {testError ? (
+              <p className="text-destructive text-xs" aria-live="polite">{testError}</p>
+            ) : null}
+          </div>
+        ) : null}
 
         <FormField
           control={form.control}

@@ -47,9 +47,27 @@ export const brandCreateSchema = z.object({
       z.literal(""),
     ])
     .optional(),
+  // 0211/0212: where this brand's slug landing pages live —
+  // https://<landing_host>/<landing_path>/<slug>. Admin+ only
+  // (brands.landing.update). The host is normalized server-side
+  // (normalizeLandingHost); "" clears it.
+  landing_host: z.string().trim().max(253).optional(),
+  landing_path: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9]+(-[a-z0-9]+)*$/,
+      "Landing path may only contain lowercase letters, digits and inner dashes (no slashes)",
+    )
+    .optional(),
 });
 
 export const brandUpdateSchema = brandCreateSchema
+  .extend({
+    // Acknowledges that a landing host/path change re-points future links
+    // (409 brand_landing_in_use otherwise).
+    confirm: z.boolean().optional(),
+  })
   .partial()
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided",

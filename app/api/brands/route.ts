@@ -8,6 +8,11 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import {
+  checkBrandLandingPair,
+  LANDING_PAIR_TAKEN_CODE,
+  normalizeLandingHost,
+} from "@/lib/api/brand-landing";
 import { can } from "@/lib/permissions";
 import { brandCreateSchema, nullIfEmpty } from "@/lib/validators/brands";
 
@@ -23,6 +28,16 @@ import { brandCreateSchema, nullIfEmpty } from "@/lib/validators/brands";
 // POST /api/brands/[id]/short-domains — which adds them as `pending` and leaves
 // activation as a deliberate act. There is exactly ONE write path; this route is
 // not a second one.
+
+// The landing (host, path) pair is unique per org (brands_landing_pair_uniq);
+// the pre-check reports it with the brand's name, this is the race backstop.
+function isLandingPairViolation(err: unknown): boolean {
+  const e = err as { constraint_name?: unknown; cause?: { constraint_name?: unknown } };
+  return (
+    e?.constraint_name === "brands_landing_pair_uniq" ||
+    e?.cause?.constraint_name === "brands_landing_pair_uniq"
+  );
+}
 
 export async function POST(req: NextRequest) {
   const auth = await requireApiMembership({
@@ -52,6 +67,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Landing host/path (0211/0212). Admin+ only — but only when the request
+  // actually SETS one: an empty host with the default path is "not touching it",
+  // so a manager can still create a brand.
+  const host = normalizeLandingHost(parsed.data.landing_host);
+  if (!host.ok) {
+    return apiError(400, host.error, API_ERROR_CODES.VALIDATION, { field: "landing_host" });
+  }
+  const landingPath = parsed.data.landing_path ?? "lp";
+  if ((host.host !== null || landingPath !== "lp") && !can(role, "brands.landing.update")) {
+    return apiError(403, "Only an admin can set a brand's landing host or path", API_ERROR_CODES.FORBIDDEN, {
+      field: "landing_host",
+    });
+  }
+  const refusal = await checkBrandLandingPair(db, {
+    orgId,
+    brandId: null,
+    nextHost: host.host,
+    nextPath: landingPath,
+  });
+  if (refusal) return apiError(refusal.status, refusal.message, refusal.code, refusal.details);
+
   try {
     const created = await db.transaction(async (tx) => {
       const [b] = await tx
@@ -64,6 +100,8 @@ export async function POST(req: NextRequest) {
           website: nullIfEmpty(parsed.data.website),
           avatar_url: nullIfEmpty(parsed.data.avatar_url),
           color: nullIfEmpty(parsed.data.color),
+          landing_host: host.host,
+          landing_path: landingPath,
           status: "active",
         })
         .returning();
@@ -74,6 +112,11 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
+    if (isLandingPairViolation(err)) {
+      return apiError(409, "Another brand already uses this landing host and path", LANDING_PAIR_TAKEN_CODE, {
+        field: "landing_host",
+      });
+    }
     if (isUniqueViolation(err)) {
       return apiError(
         409,

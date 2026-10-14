@@ -44,6 +44,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
+import { BRAND_LANDING_IN_USE_CODE } from "@/lib/brand-landing-codes";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
@@ -56,6 +57,8 @@ type Brand = {
   website: string | null;
   avatar_url: string | null;
   color: string | null;
+  landing_host: string | null;
+  landing_path: string;
   status: "active" | "archived";
   archived_at: string | null;
   created_at: string;
@@ -212,12 +215,35 @@ export default function BrandsPage() {
   const canUpdate = can("brands.update");
   const canArchive = can("brands.archive");
   const canRestore = can("brands.restore");
+  const canEditLanding = can("brands.landing.update");
+
+  // A landing host/path change re-points every future link minted for the
+  // brand's slug pages. The PATCH answers 409 brand_landing_in_use with the
+  // counts; this holds the patch until the admin confirms.
+  const [landingConfirm, setLandingConfirm] = useState<{
+    brandId: number;
+    patch: Record<string, unknown>;
+    campaigns: number;
+    stages: number;
+    from: { host: string | null; path: string };
+    to: { host: string | null; path: string };
+  } | null>(null);
+
+  // Without brands.landing.update the landing fields are read-only and must not
+  // be sent at all — the server would refuse an actual change with 403.
+  function withoutLanding<T extends Partial<BrandFormValues>>(values: T) {
+    if (canEditLanding) return values;
+    const rest: Partial<BrandFormValues> = { ...values };
+    delete rest.landing_host;
+    delete rest.landing_path;
+    return rest;
+  }
 
   async function handleCreate(values: BrandFormValues) {
     const result = await createApi.execute("/api/brands", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(values),
+      body: JSON.stringify(withoutLanding(values)),
     });
     if (!result.ok) {
       toastApiError(result, "Couldn't create brand");
@@ -231,16 +257,31 @@ export default function BrandsPage() {
   async function handleEdit(values: BrandFormValues) {
     if (!editing) return;
     // Strip brand_id from the patch (it can't change and PATCH would re-validate it).
-    const { brand_id: _omit, ...patch } = values;
-    const result = await updateApi.execute(`/api/brands/${editing.id}`, {
+    const { brand_id: _omit, ...rest } = values;
+    await savePatch(editing.id, withoutLanding(rest));
+  }
+
+  async function savePatch(brandId: number, patch: Record<string, unknown>) {
+    const result = await updateApi.execute(`/api/brands/${brandId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     });
     if (!result.ok) {
+      if (result.code === BRAND_LANDING_IN_USE_CODE && result.details) {
+        const d = result.details as {
+          campaigns: number;
+          stages: number;
+          from: { host: string | null; path: string };
+          to: { host: string | null; path: string };
+        };
+        setLandingConfirm({ brandId, patch, ...d });
+        return;
+      }
       toastApiError(result, "Couldn't save brand");
       return;
     }
+    setLandingConfirm(null);
     toast.success("Brand saved");
     setEditing(null);
     refetch();
@@ -281,6 +322,19 @@ export default function BrandsPage() {
           row.original.short_domain ? (
             <span className="font-mono text-xs">
               {row.original.short_domain}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+        enableSorting: false,
+      },
+      {
+        id: "landing",
+        header: "Landing",
+        cell: ({ row }) =>
+          row.original.landing_host ? (
+            <span className="font-mono text-xs">
+              {row.original.landing_host}/{row.original.landing_path}/
             </span>
           ) : (
             <span className="text-muted-foreground">—</span>
@@ -509,6 +563,7 @@ export default function BrandsPage() {
           key="create"
           mode="create"
           onSubmit={handleCreate}
+          canEditLanding={canEditLanding}
           onCancel={() => setCreateOpen(false)}
           isSubmitting={createApi.isLoading}
         />
@@ -539,13 +594,58 @@ export default function BrandsPage() {
               website: editing.website ?? "",
               avatar_url: editing.avatar_url ?? "",
               color: editing.color ?? "",
+              landing_host: editing.landing_host ?? "",
+              landing_path: editing.landing_path,
             }}
+            canEditLanding={canEditLanding}
+            brandDbId={editing.id}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}
             isSubmitting={updateApi.isLoading}
           />
         ) : null}
       </FormDialog>
+
+      {/* Landing host/path change confirm (409 brand_landing_in_use) */}
+      <AlertDialog
+        open={landingConfirm !== null}
+        onOpenChange={(open) => {
+          if (!open) setLandingConfirm(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Change where this brand&apos;s landing links point?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Every link minted from now on for this brand&apos;s slug landing pages will use{" "}
+              <span className="font-mono">
+                {landingConfirm?.to.host ?? "(no host)"}/{landingConfirm?.to.path}/
+              </span>{" "}
+              instead of{" "}
+              <span className="font-mono">
+                {landingConfirm?.from.host ?? "(no host)"}/{landingConfirm?.from.path}/
+              </span>
+              . {landingConfirm?.stages ?? 0} stage(s) in {landingConfirm?.campaigns ?? 0} campaign(s)
+              that haven&apos;t finished sending use slug pages under this brand. Links already sent
+              are not changed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={updateApi.isLoading}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                if (landingConfirm) {
+                  void savePatch(landingConfirm.brandId, { ...landingConfirm.patch, confirm: true });
+                }
+              }}
+              disabled={updateApi.isLoading}
+            >
+              Change landing
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Archive / Restore confirm */}
       <AlertDialog

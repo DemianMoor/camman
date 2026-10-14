@@ -277,11 +277,17 @@ export function hasUrlParam(url: string, key: string): boolean {
 }
 
 // ⚠️ MIRRORS THE DB CHECK `link_destinations_landing_url_shape` (0094, widened
-// for digit-bearing slugs in 0111 and for EXTRA PARAMS in 0170) EXACTLY. A brand
-// /lp/ destination must LEAD with sub_id3 and may carry further params after it:
+// for digit-bearing slugs in 0111, for EXTRA PARAMS in 0170, and for
+// CascadeBlog's /bcf/ path in 0211) EXACTLY. A brand landing destination must
+// LEAD with sub_id3 and may carry further params after it:
 //
 //   ^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)
 //    /lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$
+//   ^https://blogcascade\.com/bcf/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$
+//
+// The trigger mirrors the CHECK's too: any URL containing /lp/ on a listed
+// host, or containing blogcascade.com/bcf/ (so www.blogcascade.com/bcf/ is
+// caught and refused here rather than by the database at mint).
 //
 // It exists because malformed tracking URLs silently killed attribution.
 //
@@ -292,12 +298,15 @@ export function hasUrlParam(url: string, key: string): boolean {
 // as skipped leads rather than at Save. This closes that gap at the write
 // routes, using the same host list and the same shape as the constraint.
 const BRAND_LP_SHAPE_RE =
-  /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&\s]*)*$/;
+  /^https:\/\/((www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp|blogcascade\.com\/bcf)\/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&\s]*)*$/;
 
-/** Is this a brand /lp/ destination at all (any host in the constraint list)? */
+/** Is this a brand landing destination at all (any host/path in the constraint)? */
 export function isBrandLpUrl(url: string | null | undefined): boolean {
   const u = (url ?? "").trim();
-  return /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\//.test(u);
+  return (
+    /^https:\/\/(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)\/lp\//.test(u) ||
+    u.includes("blogcascade.com/bcf/")
+  );
 }
 
 /**
@@ -321,6 +330,6 @@ export function validateBrandLpShape(url: string | null | undefined): string | n
   }
   if (/\\?sub_id3=(&|$)/.test(u)) return "sub_id3 is present but empty.";
   return "This landing-page URL does not match the required shape " +
-    "(https://<brand host>/lp/<slug>?sub_id3=<tracking id>&<extra params>). " +
+    "(https://<brand host>/<brand path>/<slug>?sub_id3=<tracking id>&<extra params>). " +
     "Check for encoded characters in the tracking ID.";
 }

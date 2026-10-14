@@ -56,6 +56,8 @@ export interface DripMintInput {
   campaignTrackingId: string | null;
   stageTrackingId: string | null;
   brandLandingHost: string | null;
+  /** brands.landing_path (0211). Required so no caller silently mints /lp/. */
+  brandLandingPath: string | null;
   /** The stage's stored full_url. Non-empty ⇒ hand-edited (the auto path stores
    *  NULL on a landing-page stage), so it wins over mint-time construction. */
   handEditedUrl?: string | null;
@@ -130,6 +132,7 @@ export async function mintDripLeadLink(
       status: lp.status ?? "active",
     },
     landingHost: input.brandLandingHost,
+    landingPath: input.brandLandingPath ?? "",
     trackingId: input.stageTrackingId,
     // /lp/ destinations take exactly one param (sub_id3); buildLandingPageUrl
     // drops tags there. Drip never supplies them.

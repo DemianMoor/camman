@@ -167,6 +167,9 @@ interface MainRow {
   landing_page_external_url: string | null;
   landing_page_status: string | null;
   brand_landing_host: string | null;
+  // 0211. NULL only when the campaign has no brand (then landing_host is NULL
+  // too and buildLandingPageUrl refuses on the host first).
+  brand_landing_path: string | null;
   utm_tag_ids: number[];
   sms_provider_id: number | null;
   provider_phone_id: number | null;
@@ -234,6 +237,7 @@ export async function kickoffStageSend(
       lp.external_url            AS landing_page_external_url,
       lp.status                  AS landing_page_status,
       b.landing_host             AS brand_landing_host,
+      b.landing_path             AS brand_landing_path,
       s.utm_tag_ids              AS utm_tag_ids,
       s.sms_provider_id          AS sms_provider_id,
       s.provider_phone_id        AS provider_phone_id,
@@ -463,6 +467,7 @@ export async function kickoffStageSend(
           status: row.landing_page_status ?? "active",
         },
         landingHost: row.brand_landing_host,
+        landingPath: row.brand_landing_path ?? "",
         trackingId: row.stage_tracking_id,
         // UTM tags reach external_url destinations only; buildLandingPageUrl
         // drops them on /lp/ (single-param rule).

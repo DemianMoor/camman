@@ -75,6 +75,7 @@ export const CAMPAIGN_DETAIL_SELECT = {
     // 1b: the stage form's read-only landing-URL preview builds from this
     // with the SAME function the send path mints with.
     landing_host: brands.landing_host,
+    landing_path: brands.landing_path,
     // The brand's EFFECTIVE short domain — the tracked-mode SMS preview's
     // BRAND-LEVEL candidate. Single-row via subquery.
     //

@@ -175,6 +175,8 @@ type BrandInfo = {
   // 1b: normalized bare host for this brand's landing pages. NULL ⇒ slug-based
   // landing pages cannot be used on this brand.
   landing_host?: string | null;
+  // 0211: path segment slug pages are served under ('lp', or 'bcf' for CascadeBlog).
+  landing_path?: string | null;
 };
 type LandingPageOption = {
   id: number;
@@ -949,6 +951,7 @@ export function StageForm({
     ? buildLandingPageUrl({
         page: selectedLandingPage,
         landingHost: campaign.brand?.landing_host ?? null,
+        landingPath: campaign.brand?.landing_path ?? "",
         trackingId: effectiveTrackingId,
       })
     : null;
@@ -957,7 +960,7 @@ export function StageForm({
     // ⚠️ A LANDING PAGE PRODUCES A COMPLETE URL, a sales page a bare one.
     // They are not the same kind of value and the field must not pretend they
     // are. For a landing page the whole destination is already known — host,
-    // /lp/<slug> and sub_id3 — so it is shown in full and stays editable, which
+    // /<landing_path>/<slug> and sub_id3 — so it is shown in full and stays editable, which
     // is what lets an operator append &utm_source=... by hand. This branch was
     // missing entirely, so choosing a landing page left the field EMPTY.
     if (landingPreview?.ok) return landingPreview.url;
@@ -1533,7 +1536,9 @@ export function StageForm({
                           {activeLandingPages.map((p) => (
                             <SelectItem key={`lp-${p.id}`} value={`lp:${p.id}`}>
                               {p.title}
-                              {p.kind === "slug" ? ` · /lp/${p.slug}` : " · external"}
+                              {p.kind === "slug"
+                                ? ` · /${campaign.brand?.landing_path ?? "lp"}/${p.slug}`
+                                : " · external"}
                               {p.is_default ? " (default)" : ""}
                             </SelectItem>
                           ))}

@@ -59,6 +59,7 @@ interface CandidateRow {
   brand_id: number | null;
   brand_name: string | null;
   brand_landing_host: string | null;
+  brand_landing_path: string | null;
   campaign_tracking_id: string | null;
   campaign_paused: boolean;
   daily_cap: number | null;
@@ -132,6 +133,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
         SELECT j.id AS journey_id, j.contact_id, ct.phone_number AS phone,
                j.campaign_id, c.name AS campaign_name,
                c.brand_id, b.name AS brand_name, b.landing_host AS brand_landing_host,
+               b.landing_path AS brand_landing_path,
                c.tracking_id AS campaign_tracking_id,
                (c.send_paused IS TRUE) AS campaign_paused,
                cfg.daily_cap,
@@ -304,6 +306,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
             brandName: r.brand_name ?? "",
             brandId: r.brand_id,
             brandLandingHost: r.brand_landing_host,
+            brandLandingPath: r.brand_landing_path,
             handEditedUrl: r.child_full_url,
             campaignTrackingId: r.campaign_tracking_id,
             stageTrackingId: r.child_tracking_id,

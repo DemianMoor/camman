@@ -64,6 +64,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "brands/[id]/short-domains": null, // settings / provider registry -- Owner only
   "brands/[id]/short-domains/[domainId]": null, // settings / provider registry -- Owner only
   "brands/list": { methods: ["GET"], token: ["GET"] },
+  // 0212: the org's brand landing (host, path) pairs — the stage form validates
+  // a hand-edited Full URL against them, and operators edit stages.
+  "brands/landing-pairs": { methods: ["GET"] },
+  "brands/landing-test": null, // admin+ (brands.landing.update) — a server-side fetch
 
   // ── audience ─────────────────────────────────────────────
   // AGGREGATES ONLY: group names and integers, no rows and no contact fields

@@ -59,12 +59,15 @@ export async function checkBrandLandingPair(
   const { orgId, brandId, nextHost, nextPath } = input;
   if (!nextHost) return null;
 
-  const others = (await dbc.execute(sql`
+  // Every brand in the org that has a host — INCLUDING the saving brand's
+  // current pair: its current path is already in scope, so keeping it (e.g. a
+  // host-only change) must not be collision-checked against its own URLs.
+  const withHost = (await dbc.execute(sql`
     SELECT id, name, lower(landing_host) AS host, landing_path AS path
     FROM brands
     WHERE org_id = ${orgId}::uuid AND landing_host IS NOT NULL
-      AND (${brandId}::int IS NULL OR id <> ${brandId}::int)
   `)) as unknown as { id: number; name: string; host: string; path: string }[];
+  const others = withHost.filter((o) => o.id !== brandId);
 
   const taken = others.find((o) => o.host === nextHost && o.path === nextPath);
   if (taken) {
@@ -76,7 +79,7 @@ export async function checkBrandLandingPair(
     };
   }
 
-  const inScope = new Set(["lp", ...others.map((o) => o.path)]);
+  const inScope = new Set(["lp", ...withHost.map((o) => o.path)]);
   if (inScope.has(nextPath)) return null;
 
   const rows = (await dbc.execute(sql`

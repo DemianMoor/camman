@@ -155,7 +155,10 @@ async function main() {
       const taken = await checkBrandLandingPair(tx, { orgId: orgA, brandId: null, nextHost: "blogcascade.com", nextPath: "bcf" });
       check("pair already used by another brand ⇒ landing_pair_taken", taken?.code === LANDING_PAIR_TAKEN_CODE, JSON.stringify(taken));
       const self = await checkBrandLandingPair(tx, { orgId: orgA, brandId: nb, nextHost: "newbrand2.example", nextPath: "nb" });
-      check("a brand re-saving its own pair is not 'taken'", self === null, JSON.stringify(self));
+      check("a brand re-saving its own pair is neither 'taken' nor a collision with its own URLs",
+            self === null, JSON.stringify(self));
+      const hostOnly = await checkBrandLandingPair(tx, { orgId: orgA, brandId: nb, nextHost: "newbrand3.example", nextPath: "nb" });
+      check("a host-only change keeps its (in-scope) path — not collision-checked", hostOnly === null, JSON.stringify(hostOnly));
       // An external URL already using /mind/ on a host that is no brand's.
       check("seed external URL with /mind/", (await tryInsert(tx, orgA, "https://partner.example/mind/x?a=1")) === "A");
       const collide = await checkBrandLandingPair(tx, { orgId: orgA, brandId: null, nextHost: "fresh.example", nextPath: "mind" });

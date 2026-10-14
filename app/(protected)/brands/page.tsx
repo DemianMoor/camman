@@ -625,9 +625,8 @@ export default function BrandsPage() {
               <span className="font-mono">
                 {landingConfirm?.from.host ?? "(no host)"}/{landingConfirm?.from.path}/
               </span>
-              . {landingConfirm?.stages ?? 0} stage(s) in {landingConfirm?.campaigns ?? 0} campaign(s)
-              that haven&apos;t finished sending use slug pages under this brand. Links already sent
-              are not changed.
+              {`. ${landingConfirm?.stages ?? 0} stage(s) in ${landingConfirm?.campaigns ?? 0} campaign(s) ` +
+                "that haven't finished sending use slug pages under this brand. Links already sent are not changed."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

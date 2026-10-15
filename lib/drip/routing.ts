@@ -174,6 +174,9 @@ export async function runDripRoutingBatch(
             overflowed_from: verdict.overflowed_from,
             campaign_name: verdict.winner.campaign_name,
           }),
+          // O3 (0213): routed although every candidate was hour-full. Absent
+          // otherwise, so flag-off reasons stay byte-identical.
+          ...(verdict.hour_fallback && { hour_fallback: true }),
           evaluated_at: now.toISOString(),
         };
         try {
@@ -192,9 +195,15 @@ export async function runDripRoutingBatch(
           // Keep the per-tick cap counts true for the next evaluation.
           // `unsent` too: the new journey is routed and unsent, so it is U in the
           // send-capacity rule (0210) — without it one tick could overfill.
+          // `hour.pendingFresh` too (0213): `hour` is non-null only while the
+          // campaign's window is open now, so this journey — routed now — is
+          // pending fresh in this hour, exactly as loadHourCounts will count it.
           const c = counts.get(verdict.winner.campaign_id) ?? ZERO_COUNTS;
           counts.set(verdict.winner.campaign_id, {
             ...c, total: c.total + 1, today: c.today + 1, unsent: c.unsent + 1,
+            hour: c.hour && {
+              ...c.hour, counts: { ...c.hour.counts, pendingFresh: c.hour.counts.pendingFresh + 1 },
+            },
           });
         } catch (e) {
           if (codeOf(e) === "23505") {

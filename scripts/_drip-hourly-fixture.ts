@@ -35,14 +35,19 @@ export async function makeFixture() {
     const keyId = (await createPartnerWithKey(db, { orgId, slug: "hc-" + sfx, name: "hc", token: "tokhc" + sfx })).keyId;
     let seq = 0;
 
-    /** Active drip campaign with one first-send stage 09:00–18:00 ET. */
-    async function campaign(tag: string, cap: number | null, carry: boolean, withCreative = true) {
+    /** Active drip campaign with one first-send stage 09:00–18:00 ET. `opts` lets same-tag
+     *  siblings share an interest tag (default "hc"+tag) and set priority / daily cap. */
+    async function campaign(
+      tag: string, cap: number | null, carry: boolean, withCreative = true,
+      opts: { interestTag?: string; priority?: number; dailyCap?: number | null } = {},
+    ) {
       const id = (await one<{ id: number }>(sql`
         INSERT INTO campaigns (org_id, slug, name, status, type, link_mode)
         VALUES (${orgId}::uuid, ${`hc-${sfx}-${tag}`}, ${`HC ${tag}`}, 'active', 'drip', 'tracked') RETURNING id`)).id;
       await db.execute(sql`
-        INSERT INTO drip_campaign_configs (campaign_id, org_id, interest_tag, hourly_cap, hourly_carry)
-        VALUES (${id}, ${orgId}::uuid, ${"hc" + tag}, ${cap}, ${carry})`);
+        INSERT INTO drip_campaign_configs (campaign_id, org_id, interest_tag, hourly_cap, hourly_carry, priority, daily_cap)
+        VALUES (${id}, ${orgId}::uuid, ${opts.interestTag ?? "hc" + tag}, ${cap}, ${carry},
+                ${opts.priority ?? 100}, ${opts.dailyCap ?? null})`);
       const creativeId = withCreative
         ? (await one<{ id: number }>(sql`
             INSERT INTO creatives (org_id, slug, text, status)
@@ -82,6 +87,19 @@ export async function makeFixture() {
         WHERE id = ANY(${`{${ids.join(",")}}`}::uuid[])`);
     }
 
+    /** An unrouted lead (contact + lead_event with an interest tag) received at `at`. */
+    async function lead(interestTag: string, at: Date): Promise<string> {
+      const n = ++seq; // pre-increment: journeys() uses base+1..base+n, so seq itself is taken
+      return (await one<{ id: string }>(sql`
+        WITH c AS (
+          INSERT INTO contacts (org_id, phone_number)
+          VALUES (${orgId}::uuid, '+1997' || ${sfx} || lpad(${n}::text, 4, '0')) RETURNING id
+        )
+        INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, interest_tag, received_at)
+        SELECT ${orgId}::uuid, c.id, ${keyId}, ${"hc-" + sfx}, ${interestTag}, ${at.toISOString()}::timestamptz FROM c
+        RETURNING id`)).id;
+    }
+
     async function states(ids: string[]) {
       return (await db.execute(sql`
         SELECT id, state, close_reason, hour_start, hour_fresh, reason
@@ -92,7 +110,7 @@ export async function makeFixture() {
     }
 
 
-    return { orgId, campaign, journeys, markSent, states, teardown };
+    return { orgId, campaign, journeys, lead, markSent, states, teardown };
   } catch (e) {
     // Setup failed after the org insert: tear down what exists, then rethrow.
     await teardown().catch(() => undefined);

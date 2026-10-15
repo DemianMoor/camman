@@ -4,6 +4,8 @@ import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { admissionCloses, isCarried } from "./admission-window";
 import { dripDailySendsPredicate, sendCapacity } from "./daily-sends";
 import type { DbOrTx } from "./groups";
+import { hourStartOf, inAnyWindow } from "./hourly-cap";
+import { hourFullness, loadHourCounts, loadOpenWindowCampaigns, type HourCounts } from "./hourly-room";
 
 // Drip routing eligibility (Drip Phase 4).
 //
@@ -71,13 +73,18 @@ export interface CandidateVerdict {
 }
 
 /** A higher-priority campaign the lead was eligible for in every way except
- *  today's capacity — so the lead went to the next candidate instead (0210). */
+ *  today's capacity — so the lead went to the next candidate instead (0210) —
+ *  or, with hour overflow on (0213), except THIS HOUR's capacity. */
 export interface OverflowSkip {
   campaign_id: number;
   campaign_name: string | null;
   priority: number;
-  /** "campaign full (X/Y today: …)" or the admission-cap detail. */
+  /** "campaign full (X/Y today: …)", the admission-cap detail, or "hour full (N/cap this hour)". */
   detail: string;
+  /** Present ONLY while the hour rule is on (0213): a row written with the flag
+   *  off must stay byte-identical, so old and flag-off entries carry no kind and
+   *  read as day. */
+  kind?: "day" | "hour";
 }
 
 export interface LeadRoutingEvaluation {
@@ -97,6 +104,9 @@ export interface LeadRoutingEvaluation {
   /** Candidates ranked above the winner that were skipped only for being full
    *  today. Empty with no winner, and always empty while the flag is off. */
   overflowed_from: OverflowSkip[];
+  /** O3 (0213): no candidate was fully eligible, so the best-ranked one failing
+   *  ONLY hour_capacity won anyway — hour-fullness diverts, never defers. */
+  hour_fallback: boolean;
 }
 
 interface RawRow {
@@ -123,6 +133,8 @@ interface RawRow {
   org_carry_days: number | null;
   org_widened_at: string | null;
   org_send_capacity: boolean | null;
+  /** drip_routing_hour_overflow AND drip_routing_send_capacity AND drip_hourly_cap_enabled. */
+  org_hour_rule: boolean | null;
   campaign_id: number | null;
   campaign_name: string | null;
   campaign_offer_id: number | null;
@@ -140,6 +152,7 @@ interface RawRow {
   cfg_campaign_cap: number | null;
   cfg_admission_cap: number | null;
   cfg_daily_cap: number | null;
+  cfg_hourly_cap: number | null;
   carrier_filter: string[] | null;
   journeys_total: number;
   journeys_today: number;
@@ -173,10 +186,39 @@ export interface CampaignCounts {
   reserve: number;
   sendsToday: number;
   unsent: number;
+  /** The hour rule's operands (0213). REQUIRED (§11b — it changes who is
+   *  routed): null ⇔ the rule is inactive for this campaign this run (a flag
+   *  off, no hourly cap, or no first-send window open now). */
+  hour: HourCapacity | null;
 }
 export type CampaignJourneyCounts = Map<number, CampaignCounts>;
 
-export const ZERO_COUNTS: CampaignCounts = { total: 0, today: 0, reserve: 0, sendsToday: 0, unsent: 0 };
+/** A campaign's current-hour counts and its hourly cap. */
+export interface HourCapacity { counts: HourCounts; cap: number }
+
+export const ZERO_COUNTS: CampaignCounts = { total: 0, today: 0, reserve: 0, sendsToday: 0, unsent: 0, hour: null };
+
+/**
+ * Hour-rule operands for hourly-capped campaigns whose first-send window is
+ * open NOW (O1): one windows query + one grouped hour-count query, both through
+ * the ONE formula in hourly-room.ts (O4). A campaign with no open window gets
+ * no entry — the rule is absent for it. Callers check the org flags first.
+ */
+export async function loadHourCapacity(
+  dbc: DbOrTx, { now, campaigns }: { now: Date; campaigns: { id: number; cap: number }[] },
+): Promise<Map<number, HourCapacity>> {
+  const out = new Map<number, HourCapacity>();
+  if (campaigns.length === 0) return out;
+  const windows = await loadOpenWindowCampaigns(dbc, { campaignIds: campaigns.map((c) => c.id) });
+  const open = campaigns.filter((c) => inAnyWindow(now, windows.get(c.id) ?? []));
+  if (open.length === 0) return out;
+  const counts = await loadHourCounts(dbc, {
+    campaigns: open.map((c) => ({ id: c.id, windows: windows.get(c.id) ?? [] })),
+    hourStart: hourStartOf(now),
+  });
+  for (const c of open) out.set(c.id, { counts: counts.get(c.id)!, cap: c.cap });
+  return out;
+}
 
 /**
  * The per-campaign journey counts the cap rules read, for every drip campaign
@@ -206,17 +248,23 @@ export async function loadCampaignJourneyCounts(
       AND c.type = 'drip' AND c.status IN ('active', 'paused')
     GROUP BY j.campaign_id
   `)) as unknown as { campaign_id: number; total: number; today: number; reserve: number; unsent: number }[];
-  // S for the send-capacity rule — the scheduler's own daily-cap count.
+  // S for the send-capacity rule — the scheduler's own daily-cap count. The
+  // hour rule's flags and caps ride on this same per-campaign row, so a run
+  // with the hour flag off costs no extra query.
   const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc(now);
   const sends = (await dbc.execute(sql`
-    SELECT c.id AS campaign_id, s.n
+    SELECT c.id AS campaign_id, s.n, cfg.hourly_cap,
+           COALESCE(os.drip_routing_hour_overflow AND os.drip_routing_send_capacity
+                    AND os.drip_hourly_cap_enabled, false) AS hour_rule
     FROM campaigns c
+    LEFT JOIN drip_campaign_configs cfg ON cfg.campaign_id = c.id
+    LEFT JOIN org_settings os ON os.org_id = c.org_id
     CROSS JOIN LATERAL (
       SELECT count(*)::int AS n FROM stage_sends ss
       WHERE ss.campaign_id = c.id AND ${dripDailySendsPredicate(dayStart, dayEnd)}
     ) s
     WHERE c.org_id = ${orgId}::uuid AND c.type = 'drip' AND c.status IN ('active', 'paused')
-  `)) as unknown as { campaign_id: number; n: number }[];
+  `)) as unknown as { campaign_id: number; n: number; hourly_cap: number | null; hour_rule: boolean }[];
   const out: CampaignJourneyCounts = new Map();
   for (const r of rows) {
     out.set(Number(r.campaign_id), { ...ZERO_COUNTS, total: r.total, today: r.today, reserve: r.reserve, unsent: r.unsent });
@@ -224,6 +272,15 @@ export async function loadCampaignJourneyCounts(
   for (const r of sends) {
     const id = Number(r.campaign_id);
     out.set(id, { ...(out.get(id) ?? ZERO_COUNTS), sendsToday: r.n });
+  }
+  // The hour rule (0213): only when every flag is on — then ONE windows query
+  // and ONE grouped hour-count query for the whole run. routing.ts keeps it
+  // true in-tick by incrementing pendingFresh.
+  const capped = sends
+    .filter((r) => r.hour_rule === true && r.hourly_cap != null)
+    .map((r) => ({ id: Number(r.campaign_id), cap: Number(r.hourly_cap) }));
+  for (const [id, hour] of await loadHourCapacity(dbc, { now, campaigns: capped })) {
+    out.set(id, { ...(out.get(id) ?? ZERO_COUNTS), hour });
   }
   return out;
 }
@@ -285,6 +342,9 @@ export async function evaluateLeadRouting(
         WHERE os.org_id = ${orgId}::uuid) AS org_widened_at,
       (SELECT os.drip_routing_send_capacity FROM org_settings os
         WHERE os.org_id = ${orgId}::uuid) AS org_send_capacity,
+      (SELECT os.drip_routing_hour_overflow AND os.drip_routing_send_capacity
+              AND os.drip_hourly_cap_enabled FROM org_settings os
+        WHERE os.org_id = ${orgId}::uuid) AS org_hour_rule,
       c.id AS campaign_id, c.name AS campaign_name, c.offer_id AS campaign_offer_id,
       c.status AS campaign_status, c.send_paused AS campaign_send_paused,
       cfg.admission_cutoff_minutes AS cfg_cutoff_minutes,
@@ -294,7 +354,7 @@ export async function evaluateLeadRouting(
       cfg.priority AS cfg_priority, cfg.filters AS cfg_filters,
       cfg.campaign_cap AS cfg_campaign_cap,
       cfg.routing_daily_admission_cap AS cfg_admission_cap,
-      cfg.daily_cap AS cfg_daily_cap,
+      cfg.daily_cap AS cfg_daily_cap, cfg.hourly_cap AS cfg_hourly_cap,
       (c.audience_filters -> 'carrier_filter') AS carrier_filter,
       ${counts
         ? sql`0 AS journeys_total, 0 AS journeys_today, 0 AS journeys_reserve,
@@ -388,6 +448,19 @@ export async function evaluateLeadRouting(
   }
 
   const ageBand = head.attr_age_years == null ? null : bandFromAge(head.attr_age_years);
+
+  // The hour rule's operands (0213). With the worker's cache they are already in
+  // `counts`; without it (the debugging tool) they are read here through the
+  // same helper, so the tool explains exactly what the router decides.
+  const hourRuleOn = head.org_hour_rule === true;
+  const liveHour = hourRuleOn && !counts
+    ? await loadHourCapacity(dbc, {
+        now,
+        campaigns: rows
+          .filter((r) => r.campaign_id != null && r.cfg_hourly_cap != null)
+          .map((r) => ({ id: Number(r.campaign_id), cap: Number(r.cfg_hourly_cap) })),
+      })
+    : null;
 
   // ── per-campaign rules ────────────────────────────────────────────────────
   const candidates: CandidateVerdict[] = [];
@@ -602,6 +675,22 @@ export async function evaluateLeadRouting(
       if (cap.detail) detail.send_capacity = cap.detail;
     }
 
+    // ⭐ HOUR CAPACITY (0213, flag org_settings.drip_routing_hour_overflow; only
+    // with send capacity + the hourly cap also on). Full when this hour's
+    // committed leads (sent + assigned + pending fresh + carry-ON queue) reach
+    // the hourly cap, and only while a first-send window is open now (O1). It
+    // DIVERTS to a sibling with room and never defers: if every otherwise-
+    // eligible candidate is hour-full, the O3 fallback below routes anyway.
+    // Inactive ⇒ ABSENT, not "pass" (flag-off byte identity).
+    const hour = !hourRuleOn ? null
+      : cached ? cached.hour
+      : (liveHour?.get(Number(r.campaign_id)) ?? null);
+    if (hour) {
+      const h = hourFullness(hour.cap, hour.counts);
+      rules.hour_capacity = h.full ? "blocked" : "pass";
+      if (h.detail) detail.hour_capacity = h.detail;
+    }
+
     const eligible = Object.values(rules).every((v) => v === "pass");
     candidates.push({
       campaign_id: r.campaign_id,
@@ -615,9 +704,20 @@ export async function evaluateLeadRouting(
 
   const globallyBlocked = Object.values(global).some((v) => v !== "pass");
   // Winner: priority ASC, tie -> newest campaign (highest id).
-  const winner = globallyBlocked
+  let winner = globallyBlocked
     ? null
     : (candidates.filter((c) => c.eligible).sort(byRoutingRank)[0] ?? null);
+  // ⭐ O3 DIVERT, NEVER DEFER: no fully eligible candidate, but some fail ONLY
+  // hour_capacity ⇒ the best-ranked of those wins (the lead joins its queue,
+  // exactly as without the rule). Hour-fullness alone never defers a lead.
+  let hourFallback = false;
+  if (!globallyBlocked && !winner) {
+    winner = candidates.filter((c) => {
+      const failed = failingRules(c);
+      return failed.length === 1 && failed[0] === "hour_capacity";
+    }).sort(byRoutingRank)[0] ?? null;
+    hourFallback = winner !== null;
+  }
   const sendCapacityOn = head.org_send_capacity === true;
 
   return {
@@ -632,8 +732,13 @@ export async function evaluateLeadRouting(
     candidates,
     winner,
     send_capacity_on: sendCapacityOn,
-    overflowed_from: sendCapacityOn && winner ? overflowSkips(candidates, winner) : [],
+    overflowed_from: sendCapacityOn && winner ? overflowSkips(candidates, winner, { hourRuleOn }) : [],
+    hour_fallback: hourFallback,
   };
+}
+
+function failingRules(c: CandidateVerdict): string[] {
+  return Object.entries(c.rules).filter(([, v]) => v !== "pass").map(([k]) => k);
 }
 
 /** Routing order: priority ASC, tie -> newest campaign (highest id). */
@@ -645,23 +750,33 @@ function byRoutingRank(a: CandidateVerdict, b: CandidateVerdict): number {
  *  campaign_cap is not "full for today", so it is not one of them. */
 const DAY_CAPACITY_RULES: readonly string[] = ["send_capacity", "routing_daily_admission"];
 
-/** Candidates ranked above the winner whose ONLY failing rules are day-level
- *  capacity: the lead would have gone there had it not been full. Exported for
- *  the pure test. */
-export function overflowSkips(candidates: CandidateVerdict[], winner: CandidateVerdict): OverflowSkip[] {
+/** Candidates ranked above the winner whose ONLY failing rules are capacity —
+ *  day-level, or (0213) this hour's: the lead would have gone there had it not
+ *  been full. `kind` is emitted only while the hour rule is on, so flag-off
+ *  entries stay byte-identical; a skip failing day AND hour is kind "day" with
+ *  the unchanged day text. Exported for the pure test. */
+export function overflowSkips(
+  candidates: CandidateVerdict[], winner: CandidateVerdict, { hourRuleOn }: { hourRuleOn: boolean },
+): OverflowSkip[] {
   return [...candidates]
     .sort(byRoutingRank)
     .filter((c) => byRoutingRank(c, winner) < 0)
-    .filter((c) => {
-      const failed = Object.entries(c.rules).filter(([, v]) => v !== "pass").map(([k]) => k);
-      return failed.length > 0 && failed.every((k) => DAY_CAPACITY_RULES.includes(k));
-    })
-    .map((c) => ({
-      campaign_id: c.campaign_id,
-      campaign_name: c.campaign_name,
-      priority: c.priority,
-      detail: DAY_CAPACITY_RULES.map((k) => c.detail[k]).filter(Boolean).join("; "),
-    }));
+    .flatMap((c) => {
+      const failed = failingRules(c);
+      const capacityOnly = failed.length > 0 &&
+        failed.every((k) => DAY_CAPACITY_RULES.includes(k) || k === "hour_capacity");
+      if (!capacityOnly) return [];
+      const day = failed.some((k) => DAY_CAPACITY_RULES.includes(k));
+      const skip: OverflowSkip = {
+        campaign_id: c.campaign_id,
+        campaign_name: c.campaign_name,
+        priority: c.priority,
+        detail: day
+          ? DAY_CAPACITY_RULES.map((k) => c.detail[k]).filter(Boolean).join("; ")
+          : (c.detail.hour_capacity ?? ""),
+      };
+      return [hourRuleOn ? { ...skip, kind: day ? ("day" as const) : ("hour" as const) } : skip];
+    });
 }
 
 // ── what the routing worker does with a verdict (card 869ency4b item 1) ──────
@@ -690,6 +805,14 @@ const TEMPORARY_CANDIDATE_RULES = new Set([
 
 export type RoutingOutcome = "route" | "permanent" | "defer" | "expired";
 
+// ⚠️ hour_capacity (0213) is NEITHER temporary nor permanent — classification
+// ignores it. Alone it never gets here (the O3 fallback routes); beside another
+// failure the outcome must be what that other failure alone gives, exactly as
+// with the flag off. Treated like an unknown rule it would count as PERMANENT and
+// write a terminal 'unroutable' for a lead that is merely day-full or in use. It
+// is deliberately not in TEMPORARY_CANDIDATE_RULES either (O3: never a deferral).
+const CLASSIFICATION_IGNORED_RULE = "hour_capacity";
+
 export function classifyRoutingOutcome(v: LeadRoutingEvaluation): RoutingOutcome {
   if (v.winner) return "route";
   const failedGlobal = Object.entries(v.global).filter(([, x]) => x !== "pass").map(([k]) => k);
@@ -698,7 +821,7 @@ export function classifyRoutingOutcome(v: LeadRoutingEvaluation): RoutingOutcome
   let anyOpen = false;   // eligible, or failing only temporary rules
   let anyExpired = false;
   for (const c of v.candidates) {
-    const failed = Object.entries(c.rules).filter(([, x]) => x !== "pass").map(([k]) => k);
+    const failed = failingRules(c).filter((k) => k !== CLASSIFICATION_IGNORED_RULE);
     if (failed.some((k) => k !== "freshness" && !TEMPORARY_CANDIDATE_RULES.has(k))) continue;
     if (failed.includes("freshness")) { anyExpired = true; continue; }
     anyOpen = true;

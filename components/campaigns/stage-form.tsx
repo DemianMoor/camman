@@ -75,6 +75,7 @@ import {
   removeUrlParam,
   setUrlParam,
   STAGE_TRACKING_PARAM,
+  type BrandLandingPair,
   validateBrandLpShape,
   validateDestination,
 } from "@/lib/stage-url";
@@ -440,6 +441,7 @@ export function StageForm({
   }>();
   const providersApi = useApiCall<{ data: Provider[] }>();
   const phonesApi = useApiCall<{ data: ProviderPhone[] }>();
+  const landingPairsApi = useApiCall<{ data: BrandLandingPair[] }>();
   const previewApi = useApiCall<AudiencePreview>();
   const createCreativeApi = useApiCall<{ id: number }>();
   // Create-then-split path: when the user clicks "Split for A/B test…"
@@ -457,6 +459,21 @@ export function StageForm({
   const [creatives, setCreatives] = useState<Creative[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [phones, setPhones] = useState<ProviderPhone[]>([]);
+  // 0212: the org's brand landing (host, path) pairs — what the link_destinations
+  // trigger validates against. null until loaded; the Save-time shape check is
+  // skipped until then (the server re-checks against the same rows regardless).
+  const [landingPairs, setLandingPairs] = useState<BrandLandingPair[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void landingPairsApi.execute("/api/brands/landing-pairs").then((r) => {
+      if (!cancelled && r.ok) setLandingPairs(r.data.data);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Depend on .execute only — the whole hook object changes every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [landingPairsApi.execute]);
   const [utmTags, setUtmTags] = useState<UtmTag[]>([]);
   // UTM tags are gated on the feature flag; treat the list as "loaded" up
   // front when the entity is unavailable so the full_url reconcile below
@@ -1015,7 +1032,8 @@ export function StageForm({
   // exempt. Non-guidekn / empty URLs pass (validateDestination returns null).
   // Mirrors the DB constraint, so the operator is stopped at Save rather than
   // discovering it as skipped leads at mint.
-  const lpShapeError = watchedFullUrlAuto ? null : validateBrandLpShape(watchedFullUrl);
+  const lpShapeError =
+    watchedFullUrlAuto || !landingPairs ? null : validateBrandLpShape(watchedFullUrl, landingPairs);
   const destinationError = watchedFullUrlAuto
     ? null
     : validateDestination(watchedFullUrl, effectiveTrackingId);

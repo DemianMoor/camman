@@ -445,10 +445,17 @@ const PHASE2_ADDITIONS: Record<string, Permission[]> = {
   // switch. Declared here so the freeze keeps meaning "nothing moved that was
   // not written down".
   manager: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure"],
-  admin: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure"],
+  // "brands.landing.update" (migration 0212) is admin+ ONLY: a brand's landing
+  // host/path re-points every future minted link. Manager and operator must NOT
+  // hold it — the freeze above proves they don't.
+  admin: [
+    "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure",
+    "brands.landing.update",
+  ],
   owner: [
     "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import",
     "compliance.manage", "deletion.approve", "audit.view", "lifecycle.configure",
+    "brands.landing.update",
   ],
 };
 

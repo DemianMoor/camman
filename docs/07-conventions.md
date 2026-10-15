@@ -2791,26 +2791,53 @@ constraint is the dangerous direction and is what produced this work: a lumzen
 /lp/ URL with a UTM param passed every app check and was rejected by the database
 at MINT, surfacing hours later as skipped leads rather than at Save.
 
-## ⚠️ `link_destinations_landing_url_shape` hardcodes the brand landing hosts
+## ⚠️ `link_destinations_landing_url_shape` is a TRIGGER that reads brand rows (0212)
 
-As of 0211 the CHECK is (0170's extra-params tail shortened to `…` here):
+Until 0212 this was a CHECK with a **literal** host list (0094 → 0111 → 0151 → 0170 → 0211), so
+every new brand landing host needed a migration. It is now the trigger
+`link_destinations_landing_url_shape` (`BEFORE INSERT OR UPDATE OF url`) calling
+`landing_url_ok(org_id, url)`:
 
-```
-(url NOT LIKE '%/lp/%' AND url NOT LIKE '%blogcascade.com/bcf/%')
-  OR url ~ '^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)/lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+…$'
-  OR url ~ '^https://blogcascade\.com/bcf/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+…$'
-```
+- **In scope:** the URL contains `/<p>/` where `p` is `lp` (always — the historical floor) or the
+  `landing_path` of any brand **in the row's org** that has a `landing_host`. Scope is by PATH on any
+  host, so `www.blogcascade.com/bcf/…` and `partner.example/bcf/…` are in scope and refused.
+- **In-scope URLs must match one of the org's pairs:**
+  `^https://<landing_host>/<landing_path>/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+(&[A-Za-z0-9_.~-]+=[^&[:space:]]*)*$`
+  — the 0170 shape. Brand status is not considered (an archived brand's live links stay valid).
+- It raises `23514` with `CONSTRAINT = 'link_destinations_landing_url_shape'`, so the mint path sees
+  the same error the CHECK gave. Like the old `NOT VALID` CHECK it validates new/changed rows only;
+  but mint's `ON CONFLICT DO UPDATE SET url` fires it too, so **after a host change, re-minting a
+  destination on the brand's old host is refused** (while the old path is still in the org's scope;
+  `lp` always is).
+- **Why not a CHECK calling a function:** a CHECK must be immutable. One that reads `brands` would lie
+  to Postgres — never re-evaluated when brands change, and it can break dump/restore.
 
-Mirrored by `BRAND_LP_SHAPE_RE` / `isBrandLpUrl` in `lib/stage-url.ts`, which list the same
-host/path pairs.
+**The app mirror reads the same rows.** `validateBrandLpShape(url, pairs)` / `isBrandLpUrl(url, pairs)`
+in `lib/stage-url.ts` take the pairs as a REQUIRED argument: `loadBrandLandingPairs` on the server
+(stage POST/PATCH), `GET /api/brands/landing-pairs` in the stage form. The app refuses an unknown host
+on a brand path at Save, exactly as the database does at mint (owner ruling 2026-10-14 — the app
+being looser than the database is the dangerous direction).
 
-The host list is **literal**. A new brand with its own `landing_host` and a
-`kind='slug'` landing page will mint fine right up to the `link_destinations`
-insert and then fail on the constraint — for drip that surfaces as every lead
-being skipped with `invalid_destination`, for a blast as a failed
-materialization. Adding a brand landing host — or a new `landing_path` — means editing this constraint
-AND `BRAND_LP_SHAPE_RE` in the same change. (It is `NOT VALID` by design — see the guidekn URL-shape note — so
-altering it does not force a full table scan.)
+**Brand-save guards** (`lib/api/brand-landing.ts`, used by `POST /api/brands` and
+`PATCH /api/brands/[id]`), admin+ only (`brands.landing.update`, gated on an ACTUAL change):
+
+- `landing_pair_taken` (409) — another brand in the org has the pair; `brands_landing_pair_uniq`
+  (partial unique on `(org_id, landing_host, landing_path) WHERE landing_host IS NOT NULL`) backstops.
+- `landing_path_collides` (409, with `count` + up to 5 `examples`) — the path is NEW to the org's
+  in-scope set and existing `link_destinations` / `campaign_stages.full_url` already contain
+  `/<path>/` on a host other than the saving brand's (SQL `landing_path_collides()`). Making it a brand
+  path would pull those URLs into scope and refuse them at mint. A path already in scope (`lp`, or
+  another brand's) changes nothing and is not checked.
+- `brand_landing_in_use` (409, edit only) — a host/path change needs `confirm: true`; the response
+  carries the campaigns/stages counts (slug-page stages still minting, no hand-edited Full URL).
+
+**The Test button** (`POST /api/brands/landing-test`, `lib/brand-landing-probe.ts`) fetches a host an
+admin typed, from our server: https on 443 only; IP literals refused; the address is checked **inside
+the socket's DNS lookup** (connect time, so a DNS rebind cannot slip past) and private, loopback,
+link-local (incl. metadata `169.254.169.254`), CGNAT, multicast and reserved ranges are refused, IPv4
+and IPv6 incl. IPv4-mapped; redirects are reported, never followed. Bot-protected hosts (blogcascade
+runs Vercel challenge mode) can answer 403/429 to a server fetch — reported as "blocked by bot
+protection", not as down.
 
 ## A scripted patch can write a control character that every review surface hides
 

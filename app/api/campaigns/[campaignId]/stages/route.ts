@@ -19,6 +19,7 @@ import {
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
+import { loadBrandLandingPairs } from "@/lib/api/brand-landing-pairs";
 import {
   checkStageLandingPage,
   LANDING_PAGE_INVALID_CODE,
@@ -707,7 +708,10 @@ export async function POST(
   // sales-page URL and is exempt.
   if (!fullUrlAuto) {
     // Same app/DB disagreement as the PATCH route -- see the note there.
-    const shapeErr = validateBrandLpShape(nullIfEmpty(input.full_url) ?? "");
+    const shapeErr = validateBrandLpShape(
+      nullIfEmpty(input.full_url) ?? "",
+      await loadBrandLandingPairs(db, orgId),
+    );
     if (shapeErr) {
       return apiError(400, shapeErr, API_ERROR_CODES.VALIDATION, {
         field: "full_url",

@@ -10,6 +10,7 @@ import {
   planHourEnd, type FreshUnsent, type HourCounts, type MissedHourCause,
 } from "./hourly-cap";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import { loadAssignedSplit, loadBacklogSentInHour, loadHourCounts, routedInWindowSql } from "./hourly-room";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { pickStage, etMinutesOfDay, type StageWindow } from "./windows";
 
@@ -73,23 +74,13 @@ export async function recordSendRefusal(
     WHERE id = ${journeyId}::uuid AND state = 'routed' AND first_send_at IS NULL`);
 }
 
-/** One definition of "this journey's routed ET minute is inside a first-send window" (half-open [start,end)). */
-function routedInAnyWindow(windows: StageWindow[]) {
-  const etMin = sql`(extract(hour FROM j.routed_at AT TIME ZONE 'America/New_York') * 60
-                     + extract(minute FROM j.routed_at AT TIME ZONE 'America/New_York'))`;
-  return sql.join(
-    windows.map((w) => sql`(${etMin} >= ${w.window_start_min} AND ${etMin} < ${w.window_end_min})`),
-    sql` OR `,
-  );
-}
-
 /**
  * Owner ruling 2026-10-13: an operator action must never drop leads. A fresh lead whose routed
  * minute is no longer covered by any CURRENTLY active first-send window (stage deactivated,
  * archived, or its window edited away) reverts to waiting instead of being dropped at hour end.
  */
 async function revertOrphanedFresh(dbc: DripTx, campaignId: number, windows: StageWindow[]): Promise<number> {
-  const covered = windows.length > 0 ? sql`NOT (${routedInAnyWindow(windows)})` : sql`true`;
+  const covered = windows.length > 0 ? sql`NOT (${routedInWindowSql(windows)})` : sql`true`;
   const rows = (await dbc.execute(sql`
     UPDATE drip_journeys j SET hour_start = NULL, hour_fresh = NULL
     WHERE j.campaign_id = ${campaignId} AND ${LIVE_UNSENT} AND j.hour_fresh IS TRUE AND ${covered}
@@ -99,24 +90,13 @@ async function revertOrphanedFresh(dbc: DripTx, campaignId: number, windows: Sta
 
 async function assignFresh(dbc: DripTx, campaignId: number, hour: Date, windows: StageWindow[]) {
   if (windows.length === 0) return;
-  const inWindow = routedInAnyWindow(windows);
+  const inWindow = routedInWindowSql(windows);
   await dbc.execute(sql`
     UPDATE drip_journeys j SET hour_start = ${hour.toISOString()}::timestamptz, hour_fresh = true
     WHERE j.campaign_id = ${campaignId} AND ${LIVE_UNSENT} AND j.hour_start IS NULL
       AND j.routed_at >= ${hour.toISOString()}::timestamptz
       AND j.routed_at <  ${new Date(hour.getTime() + HOUR_MS).toISOString()}::timestamptz
       AND (${inWindow})`);
-}
-
-async function sentBetween(dbc: DripTx, campaignId: number, from: Date, backlogOnly: boolean) {
-  const r = (await dbc.execute(sql`
-    SELECT count(*)::int AS n FROM drip_journeys j
-    WHERE j.campaign_id = ${campaignId}
-      AND j.first_send_at >= ${from.toISOString()}::timestamptz
-      AND j.first_send_at <  ${new Date(from.getTime() + HOUR_MS).toISOString()}::timestamptz
-      ${backlogOnly ? sql`AND j.hour_fresh IS FALSE` : sql``}
-  `)) as unknown as { n: number }[];
-  return Number(r[0]?.n ?? 0);
 }
 
 /** Step 2 (OFF): close every past hour. Returns per-cause drops and the hours with blocked drops. */
@@ -146,8 +126,9 @@ async function closePastHours(
   }
   for (const [h, freshUnsent] of byHour) {
     const H = new Date(h);
-    const sentInHour = await sentBetween(dbc, campaignId, H, false);
-    const backlogSentInHour = await sentBetween(dbc, campaignId, H, true);
+    const sentInHour = (await loadHourCounts(dbc, { campaigns: [{ id: campaignId, windows: [] }], hourStart: H }))
+      .get(campaignId)!.sentH;
+    const backlogSentInHour = await loadBacklogSentInHour(dbc, campaignId, H);
     const plan = planHourEnd({ cap, sentInHour, backlogSentInHour, freshUnsent });
     if (plan.demote.length > 0) {
       await dbc.execute(sql`
@@ -173,20 +154,14 @@ async function closePastHours(
 }
 
 async function hourCounts(dbc: DripTx, campaignId: number, hour: Date): Promise<HourCounts> {
-  const h = hour.toISOString();
-  const r = (await dbc.execute(sql`
-    SELECT
-      count(*) FILTER (WHERE j.hour_start = ${h}::timestamptz AND j.hour_fresh)::int     AS fresh,
-      count(*) FILTER (WHERE j.hour_start = ${h}::timestamptz AND NOT j.hour_fresh)::int AS backlog,
-      count(*) FILTER (WHERE j.hour_start < ${h}::timestamptz)::int                      AS queued
-    FROM drip_journeys j
-    WHERE j.campaign_id = ${campaignId} AND ${LIVE_UNSENT} AND j.hour_start IS NOT NULL
-  `)) as unknown as { fresh: number; backlog: number; queued: number }[];
+  // windows: [] — pendingFresh is not used here (assignFresh already ran this pass).
+  const c = (await loadHourCounts(dbc, { campaigns: [{ id: campaignId, windows: [] }], hourStart: hour })).get(campaignId)!;
+  const split = await loadAssignedSplit(dbc, campaignId, hour);
   return {
-    sentInHour: await sentBetween(dbc, campaignId, hour, false),
-    freshUnsentInHour: Number(r[0]?.fresh ?? 0),
-    backlogUnsentInHour: Number(r[0]?.backlog ?? 0),
-    queuedUnsent: Number(r[0]?.queued ?? 0),
+    sentInHour: c.sentH,
+    freshUnsentInHour: split.fresh,
+    backlogUnsentInHour: split.backlog,
+    queuedUnsent: c.queued,
   };
 }
 

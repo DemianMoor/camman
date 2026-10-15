@@ -497,7 +497,7 @@ higher-ranked candidate skipped **only** for day-level capacity (`send_capacity`
 "Why not routed" shows `<campaign>: campaign full (X/Y today: S sent + U queued), overflowed to
 <winner>` under the arrival, and the same line for the live evaluation.
 
-Proof: `scripts/test-drip-send-capacity.ts` (pure) and `scripts/test-drip-routing-overflow.ts`
+Proof: `scripts/test-drip-send-capacity.ts` (pure; run with `--conditions=react-server`) and `scripts/test-drip-routing-overflow.ts`
 (preview DB, including the 8_155 / 8_154 replay scaled 1:100).
 
 ## Hour-level overflow (2026-10-15, migration 0213)
@@ -536,7 +536,7 @@ is on; entries without `kind` are day and keep their exact text. A skip failing 
 **"Why not routed"** ([components/drip/why-not-routed.tsx](../../components/drip/why-not-routed.tsx),
 text in [lib/drip/overflow-text.ts](../../lib/drip/overflow-text.ts)):
 `<name>: hour full (N/cap this hour), overflowed to <winner>`; for a fallback,
-`routed to <winner> although its hour is full — every same-tag candidate was hour-full (it queues)`,
+`routed to <winner> although its hour is full — no same-tag candidate had hour room; it joins <winner>'s hour (queues if carry is ON)`,
 and the winner's badge reads "routed (hour full)", not "not eligible" (its live verdict has
 `eligible: false` and the evaluation has `hour_fallback: true`).
 
@@ -547,6 +547,8 @@ release and commits after it, the hour is over-committed by at most the leads ro
 campaign in that one overlapping run; those leads queue to the next hour (carry ON) or hit the
 hour-end demote rule (carry OFF). Nothing is re-routed, so no ping-pong across the hour boundary
 (a carry-ON queue can make a campaign full from :00).
+
+For a carry-OFF campaign, last hour's unsent fresh leads count as queued until the scheduler's hour close runs (≤ ~1 min after :00), so routing in that first minute can see the campaign as hour-full and divert a lead to a sibling with room — harmless, nothing is lost.
 
 **Cost.** Per lead: no extra queries (in-tick cache; each routed lead adds 1 to pendingFresh). Per
 routing run with all three flags on: one windows query + one grouped hour-count query. Flag off: none.

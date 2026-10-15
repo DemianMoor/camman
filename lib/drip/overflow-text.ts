@@ -18,7 +18,7 @@ export function overflowLines(skips: OverflowSkipText[], to: string): string[] {
 
 /** O3: no same-tag candidate had hour room, so the best-ranked one took the lead anyway. */
 export function hourFallbackLine(winner: string): string {
-  return `routed to ${winner} although its hour is full — every same-tag candidate was hour-full (it queues)`;
+  return `routed to ${winner} although its hour is full — no same-tag candidate had hour room; it joins ${winner}'s hour (queues if carry is ON)`;
 }
 
 /** All overflow-related lines for one winner: skips first, then the fallback note. */

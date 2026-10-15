@@ -6,7 +6,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 
 import { db } from "@/db/client";
 import { prepareHourly } from "@/lib/drip/hourly-maintenance";
-import { hourCommitted, loadHourCounts, loadOpenWindowCampaigns } from "@/lib/drip/hourly-room";
+import { hourCommitted, loadHourCounts, loadFirstSendWindows } from "@/lib/drip/hourly-room";
 import { runDripRoutingBatch } from "@/lib/drip/routing";
 import {
   classifyRoutingOutcome, evaluateLeadRouting, loadCampaignJourneyCounts, overflowSkips,
@@ -257,7 +257,7 @@ async function main() {
       fb.length === 2 && fb.every((j) => j!.campaign_id === a) && js[6]?.reason.hour_fallback === true && js[7]?.reason.hour_fallback === true);
     bar("B's leads record A as kind hour (3/3)", js.filter((j) => j?.campaign_id === b).every((j) =>
       same(j!.reason.overflowed_from, [{ campaign_id: a, campaign_name: "HC a", priority: 97, detail: "hour full (3/3 this hour)", kind: "hour" }])));
-    const w = await loadOpenWindowCampaigns(db, { campaignIds: [a, b] });
+    const w = await loadFirstSendWindows(db, { campaignIds: [a, b] });
     const hc = await loadHourCounts(db, { campaigns: [{ id: a, windows: w.get(a)! }, { id: b, windows: w.get(b)! }], hourStart: H });
     bar("DB agrees with the in-tick cache (pendingFresh A 5, B 3)",
       hc.get(a)!.pendingFresh === 5 && hc.get(b)!.pendingFresh === 3, JSON.stringify([...hc]));
@@ -284,7 +284,7 @@ async function main() {
       INSERT INTO drip_journeys (org_id, campaign_id, contact_id, lead_event_id, state, routed_at, reason, carried_days)
       SELECT ${fx.orgId}::uuid, ${a}, contact_id, id, 'routed', ${NOW.toISOString()}::timestamptz, '{}'::jsonb, 0
       FROM lead_events WHERE id = ${l1}::uuid`);
-    const w = await loadOpenWindowCampaigns(db, { campaignIds: [a] });
+    const w = await loadFirstSendWindows(db, { campaignIds: [a] });
     const hc = (await loadHourCounts(db, { campaigns: [{ id: a, windows: w.get(a)! }], hourStart: H })).get(a)!;
     const over = hourCommitted(hc) - 3;
     bar("over-commit ≤ leads routed in that run (1)", over <= 1 && over >= 0, `committed ${hourCommitted(hc)}`);
@@ -405,7 +405,7 @@ async function main() {
         "Hot: hour full (3/3 this hour), overflowed to B");
     bar("null name falls back to #id", overflowLines([{ ...day, campaign_name: null }], "B")[0].startsWith("#1: "));
     bar("fallback line text", hourFallbackLine("B") ===
-      "routed to B although its hour is full — every same-tag candidate was hour-full (it queues)");
+      "routed to B although its hour is full — no same-tag candidate had hour room; it joins B's hour (queues if carry is ON)");
     bar("routingNoteLines: skips then fallback; no fallback line unless flagged",
       routingNoteLines([day], "B", true).length === 2 && routingNoteLines([day], "B", true)[1] === hourFallbackLine("B") &&
       routingNoteLines([day], "B", false).length === 1 && routingNoteLines([], "B", false).length === 0);

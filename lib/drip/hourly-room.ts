@@ -110,7 +110,7 @@ export async function loadBacklogSentInHour(dbc: DripTx, campaignId: number, hou
 export type OpenWindow = StageWindow & { creative_text: string | null };
 
 /** Active first-send windows per campaign (drip_active, not archived, top-level stage) + creative text. Every id gets an entry. */
-export async function loadOpenWindowCampaigns(
+export async function loadFirstSendWindows(
   dbc: DripTx, { campaignIds }: { campaignIds: number[] },
 ): Promise<Map<number, OpenWindow[]>> {
   const out = new Map<number, OpenWindow[]>();

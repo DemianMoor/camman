@@ -7,7 +7,7 @@ import {
 } from "@/lib/drip/routing-eval";
 
 // Drip routing send capacity (0210). Pure — no DB.
-//   npx tsx scripts/test-drip-send-capacity.ts
+//   npx tsx --conditions=react-server scripts/test-drip-send-capacity.ts
 //
 //   F1-F5  the fullness formula: S + U ≥ daily_cap, edges, no cap
 //   O1-O5  overflow record: only higher-ranked, capacity-only skips

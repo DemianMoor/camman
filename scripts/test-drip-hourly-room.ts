@@ -4,7 +4,7 @@ import { requirePreviewDb } from "./_require-preview-db"; // MUST be second
 import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { prepareHourly } from "@/lib/drip/hourly-maintenance";
-import { hourCommitted, hourFullness, loadAssignedSplit, loadHourCounts, loadOpenWindowCampaigns } from "@/lib/drip/hourly-room";
+import { hourCommitted, hourFullness, loadAssignedSplit, loadHourCounts, loadFirstSendWindows } from "@/lib/drip/hourly-room";
 import { makeFixture } from "./_drip-hourly-fixture";
 
 // node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-drip-hourly-room.ts
@@ -40,7 +40,7 @@ async function main() {
     await setHour(await fx.journeys(camp, 2, Z("2026-10-13T17:20:00Z")), Z("2026-10-13T17:00:00Z"));
     await fx.journeys(camp, 3, Z("2026-10-13T18:10:00Z"));      // pending, in window
     await fx.journeys(camp, 1, Z("2026-10-13T18:40:00Z"));      // routed in H, outside window
-    const windows = (await loadOpenWindowCampaigns(db, { campaignIds: [camp, idle] }));
+    const windows = (await loadFirstSendWindows(db, { campaignIds: [camp, idle] }));
     bar("D0 open windows per campaign", windows.get(camp)?.length === 1 && windows.get(idle)?.length === 1);
     const counts = await loadHourCounts(db, { campaigns: [{ id: camp, windows: windows.get(camp)! }, { id: idle, windows: [] }], hourStart: H });
     const c = counts.get(camp)!;

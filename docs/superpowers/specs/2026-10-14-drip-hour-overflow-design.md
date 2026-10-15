@@ -1,5 +1,7 @@
 # Drip hour-level overflow — design
 
+> Note: the windows loader is named `loadFirstSendWindows` in code (renamed from the `loadOpenWindowCampaigns` mentioned in earlier drafts); the O3 fallback text was also reworded (see docs/04-features/drip-campaigns-routing.md).
+
 Status: APPROVED by the owner 2026-10-14 (proposal + rulings below). Base: origin/main a4a5d3c2 (hourly cap #360/0209, manual lease #361, day-level overflow #359/0210).
 
 ## Owner rulings

@@ -5,7 +5,7 @@ import { admissionCloses, isCarried } from "./admission-window";
 import { dripDailySendsPredicate, sendCapacity } from "./daily-sends";
 import type { DbOrTx } from "./groups";
 import { hourStartOf, inAnyWindow } from "./hourly-cap";
-import { hourFullness, loadHourCounts, loadOpenWindowCampaigns, type HourCounts } from "./hourly-room";
+import { hourFullness, loadHourCounts, loadFirstSendWindows, type HourCounts } from "./hourly-room";
 
 // Drip routing eligibility (Drip Phase 4).
 //
@@ -209,7 +209,7 @@ export async function loadHourCapacity(
 ): Promise<Map<number, HourCapacity>> {
   const out = new Map<number, HourCapacity>();
   if (campaigns.length === 0) return out;
-  const windows = await loadOpenWindowCampaigns(dbc, { campaignIds: campaigns.map((c) => c.id) });
+  const windows = await loadFirstSendWindows(dbc, { campaignIds: campaigns.map((c) => c.id) });
   const open = campaigns.filter((c) => inAnyWindow(now, windows.get(c.id) ?? []));
   if (open.length === 0) return out;
   const counts = await loadHourCounts(dbc, {

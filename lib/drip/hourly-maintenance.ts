@@ -10,7 +10,7 @@ import {
   planHourEnd, type FreshUnsent, type HourCounts, type MissedHourCause,
 } from "./hourly-cap";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
-import { loadAssignedSplit, loadBacklogSentInHour, loadHourCounts, loadOpenWindowCampaigns, routedInWindowSql } from "./hourly-room";
+import { loadAssignedSplit, loadBacklogSentInHour, loadHourCounts, loadFirstSendWindows, routedInWindowSql } from "./hourly-room";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { pickStage, etMinutesOfDay, type StageWindow } from "./windows";
 
@@ -206,7 +206,7 @@ export async function prepareHourly(
   for (const c of camps) {
     const campaignId = Number(c.id);
     const cap = Number(c.hourly_cap);
-    const windows = (await loadOpenWindowCampaigns(dbc, { campaignIds: [campaignId] })).get(campaignId)!;
+    const windows = (await loadFirstSendWindows(dbc, { campaignIds: [campaignId] })).get(campaignId)!;
 
     // Step 1 — assign this hour's fresh leads.
     await assignFresh(dbc, campaignId, hour, windows);

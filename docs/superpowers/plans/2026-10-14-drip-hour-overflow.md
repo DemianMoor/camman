@@ -55,7 +55,8 @@ export async function loadHourCounts(dbc: DripTx, i: { campaigns: HourCampaign[]
 export function hourCommitted(c: HourCounts): number
 export function hourFullness(cap: number, c: HourCounts): { full: boolean; committed: number; detail: string | null }
 export function routedInWindowSql(windows: StageWindow[]): SQL   // moved from hourly-maintenance.ts (routedInAnyWindow); alias j
-export async function loadOpenWindowCampaigns(dbc: DripTx, i: { campaignIds: number[] }): Promise<Map<number, StageWindow[]>>  // active first-send windows per campaign
+// (renamed loadFirstSendWindows; earlier drafts: loadOpenWindowCampaigns)
+export async function loadFirstSendWindows(dbc: DripTx, i: { campaignIds: number[] }): Promise<Map<number, StageWindow[]>>  // active first-send windows per campaign
 ```
 `loadHourCounts` = ONE grouped query over `drip_journeys` for the given campaign ids: `count(*) FILTER (first_send_at ∈ [H,H+1h))`, `FILTER (state='routed' AND first_send_at IS NULL AND hour_start = H)`, `FILTER (… hour_start < H)`, `FILTER (… hour_start IS NULL AND routed_at ∈ [H,H+1h) AND <in-window for that campaign>)`. For the per-campaign window test use `CASE j.campaign_id WHEN <id> THEN (<routedInWindowSql(windows)>) … END` (campaigns without windows ⇒ `false`). Every campaign id in the input gets an entry (zeros when absent).
 
@@ -97,7 +98,7 @@ COMMENT ON COLUMN public.org_settings.drip_routing_hour_overflow IS
 **Files:** `lib/drip/routing-eval.ts`, `lib/drip/routing.ts`, `scripts/test-drip-hour-overflow.ts`.
 
 **Interfaces:**
-- `CampaignCounts` gains REQUIRED `hour: { counts: HourCounts; cap: number } | null` (null ⇒ rule inactive for that campaign this run). `ZERO_COUNTS.hour = null`. `loadCampaignJourneyCounts` populates it: reads the org flags (`drip_routing_hour_overflow`, `drip_routing_send_capacity`, `drip_hourly_cap_enabled`); if all on, loads hourly-capped active/paused campaigns' open windows NOW (`loadOpenWindowCampaigns` then filter to windows covering the current ET minute — `inAnyWindow` from `hourly-cap.ts`), then `loadHourCounts` for those with an open window. One extra grouped query + one windows query per run, only when the flags are on.
+- `CampaignCounts` gains REQUIRED `hour: { counts: HourCounts; cap: number } | null` (null ⇒ rule inactive for that campaign this run). `ZERO_COUNTS.hour = null`. `loadCampaignJourneyCounts` populates it: reads the org flags (`drip_routing_hour_overflow`, `drip_routing_send_capacity`, `drip_hourly_cap_enabled`); if all on, loads hourly-capped active/paused campaigns' open windows NOW (`loadFirstSendWindows (renamed from loadOpenWindowCampaigns)` then filter to windows covering the current ET minute — `inAnyWindow` from `hourly-cap.ts`), then `loadHourCounts` for those with an open window. One extra grouped query + one windows query per run, only when the flags are on.
 - Without a cache (why-not-routed live evaluation) `evaluateLeadRouting` computes the same via the same helpers for the candidate campaigns.
 - `OverflowSkip` gains `kind: "day" | "hour"`. `LeadRoutingEvaluation` gains `hour_fallback: boolean`.
 
@@ -113,7 +114,7 @@ routing.ts: store `hour_fallback: true` in `reason` only when true (absence keep
 
 ### Task 4: Why-not-routed + docs
 
-- [ ] `missedHour`-style helper for overflow lines: `kind:"hour"` entries render `"<name>: hour full (N/cap this hour), overflowed to <winner>"`; missing kind ⇒ day (existing text). `hour_fallback` renders `"routed to <winner> although its hour is full — every same-tag candidate was hour-full (queues)"`. Live evaluation shows `hour_capacity` verdicts like other rules.
+- [ ] `missedHour`-style helper for overflow lines: `kind:"hour"` entries render `"<name>: hour full (N/cap this hour), overflowed to <winner>"`; missing kind ⇒ day (existing text). `hour_fallback` renders `"routed to <winner> although its hour is full — no same-tag candidate had hour room; it joins <winner>'s hour (queues if carry is ON)"`. Live evaluation shows `hour_capacity` verdicts like other rules.
 - [ ] Docs per Global Constraints; the operator guideline verbatim in spirit: "Turn on hour-level overflow for a tag only where the combined hourly caps of its same-tag siblings ≈ the tag's hourly arrival rate. Far below it, every sibling fills each hour and the divert-never-defer fallback simply queues as before." Include the race bound and that it never defers. CHANGELOG line.
 - [ ] tsc/eslint/check:docs, commit.
 

@@ -107,19 +107,21 @@ export async function loadBacklogSentInHour(dbc: DripTx, campaignId: number, hou
   return Number(r[0]?.n ?? 0);
 }
 
-/** Active first-send windows per campaign (drip_active, not archived, top-level stage). Every id gets an entry. */
+export type OpenWindow = StageWindow & { creative_text: string | null };
+
+/** Active first-send windows per campaign (drip_active, not archived, top-level stage) + creative text. Every id gets an entry. */
 export async function loadOpenWindowCampaigns(
   dbc: DripTx, { campaignIds }: { campaignIds: number[] },
-): Promise<Map<number, StageWindow[]>> {
-  const out = new Map<number, StageWindow[]>();
+): Promise<Map<number, OpenWindow[]>> {
+  const out = new Map<number, OpenWindow[]>();
   for (const id of campaignIds) out.set(id, []);
   if (campaignIds.length === 0) return out;
   const rows = (await dbc.execute(sql`
-    SELECT s.campaign_id, s.id AS stage_id, s.window_start_min, s.window_end_min
-    FROM campaign_stages s
+    SELECT s.campaign_id, s.id AS stage_id, s.window_start_min, s.window_end_min, cr.text AS creative_text
+    FROM campaign_stages s LEFT JOIN creatives cr ON cr.id = s.creative_id
     WHERE s.campaign_id = ANY(${intArr(campaignIds)}::int[]) AND s.drip_active IS TRUE AND s.archived_at IS NULL
       AND s.parent_stage_id IS NULL AND s.window_start_min IS NOT NULL AND s.window_end_min IS NOT NULL
-  `)) as unknown as (StageWindow & { campaign_id: number })[];
-  for (const { campaign_id, ...w } of rows) out.get(Number(campaign_id))?.push(w as StageWindow);
+  `)) as unknown as (OpenWindow & { campaign_id: number })[];
+  for (const { campaign_id, ...w } of rows) out.get(Number(campaign_id))?.push(w);
   return out;
 }

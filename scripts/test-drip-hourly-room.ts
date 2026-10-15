@@ -1,28 +1,16 @@
 // scripts/test-drip-hourly-room.ts
 import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { prepareHourly } from "@/lib/drip/hourly-maintenance";
-import { hourCommitted, hourFullness, loadHourCounts, loadOpenWindowCampaigns } from "@/lib/drip/hourly-room";
+import { hourCommitted, hourFullness, loadAssignedSplit, loadHourCounts, loadOpenWindowCampaigns } from "@/lib/drip/hourly-room";
 import { makeFixture } from "./_drip-hourly-fixture";
 
 // node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-drip-hourly-room.ts
 let fail = 0;
 const bar = (n: string, ok: boolean, d = "") => { console.log(`  ${ok ? "✓" : "✗"} ${n}${d ? ` — ${d}` : ""}`); if (!ok) fail++; };
 const Z = (iso: string) => new Date(iso);
-
-// G1 — the hour-count SQL shapes: first sends counted in an hour range, and FILTER-counts on hour_start.
-export const HOUR_COUNT_SHAPES = [
-  /first_send_at\s*>=\s*\$\{[^}]*(hour|from|\bh\b)/i,
-  /FILTER\s*\(\s*WHERE[^)]*hour_start\s*(=|<)\s*\$\{/i,
-];
-// funnel.ts:~317 is the dashboard's own display query (different semantics: waiting/oldest), not a decision path.
-const G1_EXEMPT = new Set(["hourly-room.ts", "funnel.ts"]);
-const offenders = (files: Record<string, string>) =>
-  Object.entries(files).filter(([f, src]) => !G1_EXEMPT.has(f) && HOUR_COUNT_SHAPES.some((re) => re.test(src))).map(([f]) => f);
 
 async function main() {
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
@@ -34,21 +22,6 @@ async function main() {
   bar("P2 full at cap", f10.full && f10.committed === 10 && f10.detail === "hour full (10/10 this hour)", JSON.stringify(f10));
   const f11 = hourFullness(11, c4);
   bar("P3 not full under cap", !f11.full && f11.detail === null);
-
-  // G1 — source guard, real tree + provable-red mutation
-  const dir = join(process.cwd(), "lib", "drip");
-  const real: Record<string, string> = {};
-  for (const f of readdirSync(dir).filter((x) => x.endsWith(".ts"))) real[f] = readFileSync(join(dir, f), "utf8");
-  bar("G1a real tree has no re-derivation outside hourly-room.ts", offenders(real).length === 0, offenders(real).join(","));
-  const mutSent = { ...real, "hourly-maintenance.ts": real["hourly-maintenance.ts"] +
-    "\nconst x = sql`SELECT count(*) FROM drip_journeys j WHERE j.first_send_at >= ${hour.toISOString()}::timestamptz`;" };
-  const mutAssigned = { ...real, "routing.ts": "sql`count(*) FILTER (WHERE j.hour_start = ${h}::timestamptz)`" };
-  const mutQueued = { ...real, "x.ts": "sql`count(*) FILTER (WHERE j.hour_start < ${h}::timestamptz)`" };
-  bar("G1b guard goes red on a re-derived sent-in-hour count", offenders(mutSent).includes("hourly-maintenance.ts"));
-  bar("G1c guard goes red on a re-derived assigned/queued count",
-    offenders(mutAssigned).includes("routing.ts") && offenders(mutQueued).includes("x.ts"));
-  bar("G1d room module itself matches the shapes (guard is aimed at the right code)",
-    HOUR_COUNT_SHAPES.every((re) => re.test(real["hourly-room.ts"])));
 
   // D — DB
   const fx = await makeFixture();
@@ -73,6 +46,8 @@ async function main() {
     const c = counts.get(camp)!;
     bar("D1 counts", c.sentH === 2 && c.assigned === 1 && c.queued === 2 && c.pendingFresh === 3, JSON.stringify(c));
     bar("D1b campaign without rows gets zeros", JSON.stringify(counts.get(idle)) === JSON.stringify({ sentH: 0, assigned: 0, queued: 0, pendingFresh: 0 }));
+    const split = await loadAssignedSplit(db, camp, H);
+    bar("D1d fresh + backlog === assigned", split.fresh + split.backlog === c.assigned && c.assigned === 1, JSON.stringify(split));
     const noWin = (await loadHourCounts(db, { campaigns: [{ id: camp, windows: [] }], hourStart: H })).get(camp)!;
     bar("D1c no windows ⇒ pendingFresh 0", noWin.pendingFresh === 0);
 

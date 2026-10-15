@@ -10,7 +10,7 @@ import {
   planHourEnd, type FreshUnsent, type HourCounts, type MissedHourCause,
 } from "./hourly-cap";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
-import { loadAssignedSplit, loadBacklogSentInHour, loadHourCounts, routedInWindowSql } from "./hourly-room";
+import { loadAssignedSplit, loadBacklogSentInHour, loadHourCounts, loadOpenWindowCampaigns, routedInWindowSql } from "./hourly-room";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { pickStage, etMinutesOfDay, type StageWindow } from "./windows";
 
@@ -206,12 +206,7 @@ export async function prepareHourly(
   for (const c of camps) {
     const campaignId = Number(c.id);
     const cap = Number(c.hourly_cap);
-    const windows = (await dbc.execute(sql`
-      SELECT s.id AS stage_id, s.window_start_min, s.window_end_min, cr.text AS creative_text
-      FROM campaign_stages s LEFT JOIN creatives cr ON cr.id = s.creative_id
-      WHERE s.campaign_id = ${campaignId} AND s.drip_active IS TRUE AND s.archived_at IS NULL
-        AND s.parent_stage_id IS NULL AND s.window_start_min IS NOT NULL AND s.window_end_min IS NOT NULL
-    `)) as unknown as (StageWindow & { creative_text: string | null })[];
+    const windows = (await loadOpenWindowCampaigns(dbc, { campaignIds: [campaignId] })).get(campaignId)!;
 
     // Step 1 — assign this hour's fresh leads.
     await assignFresh(dbc, campaignId, hour, windows);

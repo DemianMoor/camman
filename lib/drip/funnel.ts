@@ -6,7 +6,8 @@ import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
 import { campaignTierExpr } from "@/lib/campaign-tier";
 import { etDayStartBack } from "./admission-window";
-import { HOUR_MS, hourStartOf } from "./hourly-cap";
+import { hourStartOf } from "./hourly-cap";
+import { loadHourCounts } from "./hourly-room";
 import { purchasedClause } from "@/lib/sale-attribution";
 
 // The journey funnel for one drip campaign (Drip Phase 7, ruling R4).
@@ -309,19 +310,16 @@ export async function getDripFunnel(
   if (hcfg[0]) {
     const now = new Date();
     const hour = hourStartOf(now);
-    const hourEnd = new Date(hour.getTime() + HOUR_MS);
     const weekStart = etDayStartBack(now, 6); // start of the ET day 6 days ago
     const hr = (await dbc.execute(sql`
       SELECT
-        (SELECT count(*)::int FROM drip_journeys WHERE campaign_id = ${campaignId}
-           AND first_send_at >= ${hour.toISOString()}::timestamptz AND first_send_at < ${hourEnd.toISOString()}::timestamptz) AS sent,
-        count(*) FILTER (WHERE hour_start = ${hour.toISOString()}::timestamptz)::int AS assigned,
-        count(*) FILTER (WHERE hour_start < ${hour.toISOString()}::timestamptz)::int AS queued,
         count(*) FILTER (WHERE hour_start IS NULL)::int AS waiting,
         (extract(epoch FROM (now() - min(routed_at) FILTER (WHERE hour_start IS NULL OR hour_start < ${hour.toISOString()}::timestamptz))) / 60)::int AS oldest_min
       FROM drip_journeys
       WHERE campaign_id = ${campaignId} AND state = 'routed' AND first_send_at IS NULL
-    `)) as unknown as { sent: number; assigned: number; queued: number; waiting: number; oldest_min: number | null }[];
+    `)) as unknown as { waiting: number; oldest_min: number | null }[];
+    // sent / assigned / queued come from the ONE hourly-room formula (spec 2026-10-14 O4).
+    const hc = (await loadHourCounts(dbc, { campaigns: [{ id: campaignId, windows: [] }], hourStart: hour })).get(campaignId)!;
     const days = (await dbc.execute(sql`
       SELECT to_char((closed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS day,
              count(*) FILTER (WHERE close_reason = 'missed_hour_cap')::int AS cap,
@@ -334,8 +332,8 @@ export async function getDripFunnel(
     `)) as unknown as { day: string; cap: number; closed: number; blocked: number }[];
     hourly = {
       cap: Number(hcfg[0].hourly_cap), carry: hcfg[0].hourly_carry, hour_start: hour.toISOString(),
-      sent_this_hour: Number(hr[0]?.sent ?? 0), assigned_unsent_this_hour: Number(hr[0]?.assigned ?? 0),
-      queued_from_earlier_hours: Number(hr[0]?.queued ?? 0), waiting: Number(hr[0]?.waiting ?? 0),
+      sent_this_hour: hc.sentH, assigned_unsent_this_hour: hc.assigned,
+      queued_from_earlier_hours: hc.queued, waiting: Number(hr[0]?.waiting ?? 0),
       oldest_unsent_age_min: hr[0]?.oldest_min == null ? null : Number(hr[0].oldest_min),
       drops_by_day: days.map((d) => ({ day: d.day, cap: Number(d.cap), closed: Number(d.closed), blocked: Number(d.blocked) })),
     };

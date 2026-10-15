@@ -108,6 +108,7 @@ export interface DueRow {
   brand_id: number | null;
   campaign_tracking_id: string | null;
   brand_landing_host: string | null;
+  brand_landing_path: string | null;
   hour_start: string | null;
   hour_fresh: boolean | null;
   routed_at: string;
@@ -314,6 +315,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
               campaignTrackingId: head.campaign_tracking_id,
               stageTrackingId: stage.stage_tracking_id,
               brandLandingHost: head.brand_landing_host,
+              brandLandingPath: head.brand_landing_path,
               handEditedUrl: stage.full_url,
               landingPage: {
                 id: stage.landing_page_id,
@@ -521,6 +523,7 @@ export async function selectDueJourneys(
            b.name AS brand_name,
            c.brand_id, c.tracking_id AS campaign_tracking_id,
            b.landing_host AS brand_landing_host,
+           b.landing_path AS brand_landing_path,
            cfg.daily_cap, cfg.campaign_cap
     ${pick}
     JOIN campaigns c  ON c.id = j.campaign_id

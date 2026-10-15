@@ -141,11 +141,15 @@ export const brands = pgTable(
     // consumed VERBATIM by lib/links/root-redirect.ts. Use landing_host below.
     website: text("website"),
     // Normalized bare host for this brand's LANDING pages (migration 0150), e.g.
-    // "www.guidekn.com". Builds https://<landing_host>/lp/<slug> for
+    // "www.guidekn.com". Builds https://<landing_host>/<landing_path>/<slug> for
     // offer_landing_pages of kind='slug'. Distinct from `website` (bare-root
     // redirect target) and from short_domains (the host of the link inside the
     // SMS). NULL ⇒ this brand cannot use slug-based landing pages.
     landing_host: text("landing_host"),
+    // Bare path segment (no slashes) for slug landing pages (migration 0211).
+    // 'lp' for every brand except CascadeBlog ('bcf'). DB CHECK
+    // brands_landing_path_shape_check: ^[a-z0-9]+(-[a-z0-9]+)*$.
+    landing_path: text("landing_path").notNull().default("lp"),
     avatar_url: text("avatar_url"),
     color: text("color"),
     status: text("status").notNull().default("active"),
@@ -4935,7 +4939,7 @@ export const offer_landing_pages = pgTable(
       .notNull()
       .references(() => offers.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
-    // 'slug'         -> https://<brand.landing_host>/lp/<slug>
+    // 'slug'         -> https://<brand.landing_host>/<brand.landing_path>/<slug>
     // 'external_url' -> the stored URL verbatim, any brand
     kind: text("kind").notNull().default("slug"),
     slug: text("slug"),

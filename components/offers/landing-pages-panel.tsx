@@ -248,7 +248,7 @@ export function LandingPagesPanel({
       <div>
         <Label>Landing pages</Label>
         <p className="text-muted-foreground text-xs">
-          A slug page builds <span className="font-mono">https://&lt;brand host&gt;/lp/&lt;slug&gt;</span>{" "}
+          A slug page builds <span className="font-mono">https://&lt;brand host&gt;/&lt;brand path&gt;/&lt;slug&gt;</span>{" "}
           from the campaign&apos;s brand when the link is created — one page serves every brand.
         </p>
       </div>
@@ -294,7 +294,7 @@ export function LandingPagesPanel({
                     {p.status !== "active" && <Badge variant="outline">disabled</Badge>}
                   </div>
                   <div className="text-muted-foreground truncate font-mono text-xs">
-                    {p.kind === "slug" ? `/lp/${p.slug}` : p.external_url}
+                    {p.kind === "slug" ? `/<brand path>/${p.slug}` : p.external_url}
                   </div>
                 </div>
                 {canEdit && (

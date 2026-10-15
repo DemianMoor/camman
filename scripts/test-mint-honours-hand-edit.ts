@@ -95,7 +95,7 @@ async function main() {
       const slug = `pb${sfx.slice(-4)}`;
       const base = {
         orgId, campaignId: campId, stageId, contactId, creativeId: null,
-        providerPhoneId: phoneId,
+        providerPhoneId: phoneId, brandLandingPath: "lp",
         campaignTrackingId: `9_9_010125_${sfx}`, stageTrackingId: tid,
         landingPage: { id: lpId, kind: "slug", slug, external_url: null, status: "active" },
       };

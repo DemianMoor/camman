@@ -108,6 +108,7 @@ async function main() {
         campaignTrackingId: `9_9_010125_${sfx}`,
         stageTrackingId: `9_9_010125_${sfx}_s1_c1`,
         brandLandingHost: "www.lumzen.co",
+        brandLandingPath: "lp",
       };
       const goodPageRef = {
         id: goodPage,

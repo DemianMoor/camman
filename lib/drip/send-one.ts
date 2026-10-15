@@ -50,6 +50,7 @@ export interface DripSendInput {
   brandName: string;
   brandId: number | null;
   brandLandingHost: string | null;
+  brandLandingPath: string | null;
   /** Stage's stored full_url; non-empty ⇒ hand-edited, wins over construction. */
   handEditedUrl?: string | null;
   campaignTrackingId: string | null;
@@ -98,6 +99,7 @@ export async function dispatchDripSend(
     campaignTrackingId: input.campaignTrackingId,
     stageTrackingId: input.stageTrackingId,
     brandLandingHost: input.brandLandingHost,
+    brandLandingPath: input.brandLandingPath,
     handEditedUrl: input.handEditedUrl,
     landingPage: input.landingPage,
   });

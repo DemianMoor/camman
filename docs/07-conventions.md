@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-13_
+_Last updated: 2026-10-14_
 
 ## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
 
@@ -2130,6 +2130,14 @@ collapses the duplication operators maintain by hand today: offer 58 carries `gd
   place would change the bare-root redirect. **A brand with NULL `landing_host` cannot use a
   `kind='slug'` page** — refusing beats guessing, because a wrong host ships a 404 that silently
   kills attribution.
+- **The path segment is per brand too: `brands.landing_path` (0211, default `'lp'`).** A slug page
+  mints `https://<landing_host>/<landing_path>/<slug>`. CascadeBlog serves `/bcf/<slug>` so it does
+  not share a URL pattern with GuideKin/LumZen/FitsYou. `landingPath` is a **required** input to
+  `buildLandingPageUrl` (§11b spirit): an optional one defaulting to `'lp'` would let a caller that
+  forgot to select the column silently mint `/lp/` for a `/bcf/` brand. An invalid path refuses
+  (`page_malformed`) instead of minting. The legacy UTM skip in `kickoff.ts` goes by **host**, so it
+  covers every path on a brand landing host — including CascadeBlog's `/article/` pages (accepted,
+  owner ruling 2026-10-14).
 - **`kind='external_url'` is used verbatim for any brand** and needs no landing host.
 - **`buildLandingPageUrl` is PURE and shared** by the stage editor's read-only preview and the send
   path's mint. If they diverged, an operator could approve one URL while the recipient receives
@@ -2785,19 +2793,23 @@ at MINT, surfacing hours later as skipped leads rather than at Save.
 
 ## ⚠️ `link_destinations_landing_url_shape` hardcodes the brand landing hosts
 
-The 0094 CHECK is:
+As of 0211 the CHECK is (0170's extra-params tail shortened to `…` here):
 
 ```
-url NOT LIKE '%/lp/%'
-  OR url ~ '^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)/lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+$'
+(url NOT LIKE '%/lp/%' AND url NOT LIKE '%blogcascade.com/bcf/%')
+  OR url ~ '^https://(www\.guidekn\.com|www\.lumzen\.co|www\.fitsyou\.net)/lp/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+…$'
+  OR url ~ '^https://blogcascade\.com/bcf/[a-z0-9]+\?sub_id3=[A-Za-z0-9_]+…$'
 ```
+
+Mirrored by `BRAND_LP_SHAPE_RE` / `isBrandLpUrl` in `lib/stage-url.ts`, which list the same
+host/path pairs.
 
 The host list is **literal**. A new brand with its own `landing_host` and a
 `kind='slug'` landing page will mint fine right up to the `link_destinations`
 insert and then fail on the constraint — for drip that surfaces as every lead
 being skipped with `invalid_destination`, for a blast as a failed
-materialization. Adding a brand landing host means editing this constraint in the
-same change. (It is `NOT VALID` by design — see the guidekn URL-shape note — so
+materialization. Adding a brand landing host — or a new `landing_path` — means editing this constraint
+AND `BRAND_LP_SHAPE_RE` in the same change. (It is `NOT VALID` by design — see the guidekn URL-shape note — so
 altering it does not force a full table scan.)
 
 ## A scripted patch can write a control character that every review surface hides

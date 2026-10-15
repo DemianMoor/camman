@@ -13,7 +13,7 @@ import { STAGE_TRACKING_PARAM } from "@/lib/stage-url";
 // kept pointing at the old brand's pages, because the destination was a frozen
 // absolute URL. Building it late makes a rebrand self-correcting.
 //
-// ⚠️ ON /lp/ DESTINATIONS, UTM TAGS ARE NEVER APPENDED. The canonical shape
+// ⚠️ ON SLUG DESTINATIONS (/<landing_path>/<slug>), UTM TAGS ARE NEVER APPENDED. The canonical shape
 // allows exactly ONE query param (sub_id3), which already carries tracking, and
 // the one UTM tag configured in this org emits the literal `subid3=sub_id3` —
 // the very "unsubstituted placeholder" defect validateDestination names and the
@@ -46,6 +46,10 @@ export type LandingUrlRefusal =
  * `brands.website`, which is unnormalized (mixed `www.`, mixed trailing slash)
  * and is separately consumed verbatim by the bare-root redirect.
  *
+ * `landingPath` is `brands.landing_path` (0211) — the bare segment, 'lp' for
+ * every brand but CascadeBlog ('bcf'). REQUIRED, not defaulted: a caller that
+ * forgot to select it would otherwise silently mint /lp/ for a /bcf/ brand.
+ *
  * Refuses rather than guessing. A brand with no landing_host cannot produce a
  * slug URL, and inventing one (prefixing `www.`, say) would ship a 404 that
  * silently kills attribution — the exact failure migration 0094 exists to stop.
@@ -53,6 +57,7 @@ export type LandingUrlRefusal =
 export function buildLandingPageUrl(opts: {
   page: LandingPageRef;
   landingHost: string | null | undefined;
+  landingPath: string;
   trackingId: string | null | undefined;
   /** UTM tags — applied to external_url destinations ONLY. See header. */
   utmTags?: { tag_id: string; value_source: string }[] | null;
@@ -78,6 +83,14 @@ export function buildLandingPageUrl(opts: {
           "Set the brand's landing host, or pick an external-URL landing page.",
       };
     }
+    const path = (opts.landingPath ?? "").trim();
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(path)) {
+      return {
+        ok: false,
+        reason: "page_malformed",
+        message: `This campaign's brand has an invalid landing path ("${path}").`,
+      };
+    }
     const slug = (page.slug ?? "").trim();
     if (!/^[a-z0-9]+$/.test(slug)) {
       return {
@@ -89,7 +102,7 @@ export function buildLandingPageUrl(opts: {
     const tid = (trackingId ?? "").trim();
     // Single param, always sub_id3. No UTM — see the header note.
     const qs = tid ? `?${STAGE_TRACKING_PARAM}=${encodeURIComponent(tid)}` : "";
-    return { ok: true, url: `https://${host}/lp/${slug}${qs}`, appliedUtm: false };
+    return { ok: true, url: `https://${host}/${path}/${slug}${qs}`, appliedUtm: false };
   }
 
   // kind === "external_url": the stored URL verbatim, any brand. No shape rule
@@ -122,7 +135,8 @@ export function buildLandingPageUrl(opts: {
  *
  * Used by the LEGACY (landing_page_id NULL) auto-build path to decide whether to
  * append UTM tags: on a brand landing host the single-param rule applies, so
- * tags are skipped there too. Without this, re-saving one of the 261 UTM-tagged
+ * tags are skipped there too — on EVERY path of that host, not only the brand's
+ * landing path (owner ruling 2026-10-14: accepted for CascadeBlog's /article/). Without this, re-saving one of the 261 UTM-tagged
  * `/lp/` stages in auto mode would append `subid3=sub_id3` and be rejected on
  * Save — a latent break that predates 1b.
  */

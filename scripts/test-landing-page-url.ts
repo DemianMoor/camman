@@ -52,7 +52,7 @@ function main() {
   console.log("\n⭐ the constructed URL, parsed:");
   const r = buildLandingPageUrl({
     page: PAGE,
-    landingHost: "www.lumzen.co",
+    landingPath: "lp", landingHost: "www.lumzen.co",
     trackingId: tid,
   });
   check("built", r.ok, true);
@@ -76,7 +76,7 @@ function main() {
   console.log("\n⭐ the shape that shipped — proof this test would have caught it:");
   const broken = buildLandingPageUrl({
     page: { ...PAGE, slug: "llx" },
-    landingHost: "www.lumzen.co",
+    landingPath: "lp", landingHost: "www.lumzen.co",
     // exactly what the form used to pass: a placeholder with literal '?'
     trackingId: `8_58_082426_1_s3_c335_s?_c?`,
   });
@@ -92,7 +92,7 @@ function main() {
   }
 
   console.log("\nno tracking id yet ⇒ no param at all (never a fake one):");
-  const noTid = buildLandingPageUrl({ page: PAGE, landingHost: "www.lumzen.co", trackingId: null });
+  const noTid = buildLandingPageUrl({ page: PAGE, landingPath: "lp", landingHost: "www.lumzen.co", trackingId: null });
   check("built", noTid.ok, true);
   if (noTid.ok) {
     check("bare path, no query", noTid.url, "https://www.lumzen.co/lp/lhj");
@@ -101,16 +101,16 @@ function main() {
 
   console.log("\nrefusals:");
   check("no landing host ⇒ refused",
-        buildLandingPageUrl({ page: PAGE, landingHost: null, trackingId: tid }).ok, false);
+        buildLandingPageUrl({ page: PAGE, landingPath: "lp", landingHost: null, trackingId: tid }).ok, false);
   check("malformed slug ⇒ refused",
-        buildLandingPageUrl({ page: { ...PAGE, slug: "not a slug" }, landingHost: "www.lumzen.co", trackingId: tid }).ok, false);
+        buildLandingPageUrl({ page: { ...PAGE, slug: "not a slug" }, landingPath: "lp", landingHost: "www.lumzen.co", trackingId: tid }).ok, false);
   check("disabled page ⇒ refused",
-        buildLandingPageUrl({ page: { ...PAGE, status: "disabled" }, landingHost: "www.lumzen.co", trackingId: tid }).ok, false);
+        buildLandingPageUrl({ page: { ...PAGE, status: "disabled" }, landingPath: "lp", landingHost: "www.lumzen.co", trackingId: tid }).ok, false);
 
   console.log("\nexternal_url keeps its own params and DOES take UTM:");
   const ext = buildLandingPageUrl({
     page: { id: 2, kind: "external_url", slug: null, external_url: "https://partner.example/offer?a=1", status: "active" },
-    landingHost: "www.lumzen.co",
+    landingPath: "lp", landingHost: "www.lumzen.co",
     trackingId: tid,
     utmTags: [{ tag_id: "utm_source", value_source: "sms" }],
   });

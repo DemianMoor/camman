@@ -41,8 +41,8 @@ const slugPage = {
 
 async function main() {
   console.log("construction — same page, different brands (the rebrand case):");
-  const gk = buildLandingPageUrl({ page: slugPage, landingHost: "www.guidekn.com", trackingId: "8_62_082226_1_s1_c1" });
-  const lz = buildLandingPageUrl({ page: slugPage, landingHost: "www.lumzen.co", trackingId: "8_62_082226_1_s1_c1" });
+  const gk = buildLandingPageUrl({ page: slugPage, landingPath: "lp", landingHost: "www.guidekn.com", trackingId: "8_62_082226_1_s1_c1" });
+  const lz = buildLandingPageUrl({ page: slugPage, landingPath: "lp", landingHost: "www.lumzen.co", trackingId: "8_62_082226_1_s1_c1" });
   check("Guide Kin host", gk.ok && gk.url === "https://www.guidekn.com/lp/orv?sub_id3=8_62_082226_1_s1_c1", gk.ok ? gk.url : gk.message);
   check("LumZen host", lz.ok && lz.url === "https://www.lumzen.co/lp/orv?sub_id3=8_62_082226_1_s1_c1", lz.ok ? lz.url : lz.message);
   check("SAME page ⇒ DIFFERENT url per brand (rebrand self-corrects)", gk.ok && lz.ok && gk.url !== lz.url);
@@ -50,7 +50,7 @@ async function main() {
   console.log("\nsingle-param rule — UTM never reaches an /lp/ destination:");
   const withUtm = buildLandingPageUrl({
     page: slugPage,
-    landingHost: "www.guidekn.com",
+    landingPath: "lp", landingHost: "www.guidekn.com",
     trackingId: "T1",
     // The literal tag configured in this org; appending it emits the
     // "unsubstituted placeholder" defect and fails the 0151 CHECK.
@@ -68,7 +68,7 @@ async function main() {
   console.log("\nexternal_url — verbatim, and UTM IS allowed (no shape rule applies):");
   const ext = buildLandingPageUrl({
     page: { id: 2, kind: "external_url", slug: null, external_url: "https://clicks2scale.com/click?o=1", status: "active" },
-    landingHost: null,
+    landingPath: "lp", landingHost: null,
     trackingId: "T1",
     utmTags: [{ tag_id: "subid5", value_source: "facebook" }],
   });
@@ -77,13 +77,13 @@ async function main() {
   check("external_url needs NO brand landing host", ext.ok);
 
   console.log("\nrefusals (a constructor that always returned a URL would pass a positive-only test):");
-  const noHost = buildLandingPageUrl({ page: slugPage, landingHost: null, trackingId: "T1" });
+  const noHost = buildLandingPageUrl({ page: slugPage, landingPath: "lp", landingHost: null, trackingId: "T1" });
   check("slug + brand with NO landing_host ⇒ refused", !noHost.ok && noHost.reason === "brand_missing_landing_host", JSON.stringify(noHost));
-  const disabled = buildLandingPageUrl({ page: { ...slugPage, status: "disabled" }, landingHost: "www.guidekn.com", trackingId: "T1" });
+  const disabled = buildLandingPageUrl({ page: { ...slugPage, status: "disabled" }, landingPath: "lp", landingHost: "www.guidekn.com", trackingId: "T1" });
   check("disabled page ⇒ refused", !disabled.ok && disabled.reason === "page_disabled");
-  const badSlug = buildLandingPageUrl({ page: { ...slugPage, slug: "knd8_62_1" }, landingHost: "www.guidekn.com", trackingId: "T1" });
+  const badSlug = buildLandingPageUrl({ page: { ...slugPage, slug: "knd8_62_1" }, landingPath: "lp", landingHost: "www.guidekn.com", trackingId: "T1" });
   check("slug with an UNDERSCORE ⇒ refused (the 0094 path-glue signature)", !badSlug.ok && badSlug.reason === "page_malformed");
-  const emptyExt = buildLandingPageUrl({ page: { id: 3, kind: "external_url", slug: null, external_url: "", status: "active" }, landingHost: null, trackingId: "T1" });
+  const emptyExt = buildLandingPageUrl({ page: { id: 3, kind: "external_url", slug: null, external_url: "", status: "active" }, landingPath: "lp", landingHost: null, trackingId: "T1" });
   check("external_url with no URL ⇒ refused", !emptyExt.ok);
 
   console.log("\nisBrandLandingHost (drives the legacy UTM skip):");

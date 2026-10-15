@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-10-06_
+_Last updated: 2026-10-15_
 
 **Status (2026-09-21):** Phases 1–4 are LIVE on production and Phase 5 (per-event columns) ships with this change; migrations **0181** (applied 2026-09-18) and **0182–0185** (applied 2026-09-21 19:05–19:07 UTC, one transaction) are recorded on production, byte-identical to `db/migrations`. The history below is how the phases got there. The ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). (Until 2026-09-21 these readers were verified on camman-v2 and by read-only checks against prod; since the Gate 3 cutover they run on production.)
 
@@ -12,12 +12,14 @@ A click can now produce several conversions: Psycho Book (Affise) fires a $0 **r
 
 | Table | One row per | Key facts |
 |---|---|---|
-| `event_types` | org × event | `key`, `label`, `display_order`, flags `is_purchase`, `counts_revenue`, `is_retarget_signal`. Seeded: `purchase` (is_purchase, counts_revenue), `registration` (is_retarget_signal) |
+| `event_types` | org × event | `key`, `label`, `display_order`, flags `is_purchase`, `counts_revenue`, `is_retarget_signal`. Seeded: `purchase` (is_purchase, counts_revenue), `registration` (is_retarget_signal). Configured on prod + preview (first org) 2026-10-15: `upsell` (counts_revenue only — adds to Revenue, not to Sales) |
 | `conversion_event_mappings` | org × (network **or** offer) × Keitaro type | `keitaro_type` → `event_type_id` + `conversion_status` (`pending`/`approved`/`rejected`). An offer rule beats a network rule. `event_type_id` NULL = status transition only |
 | `conversion_events` | Keitaro conversion | unique `keitaro_event_id`; `tid`; attribution `stage_send_id`/`contact_id`/`campaign_id`/`stage_id`/`offer_id` (all SET NULL); `event_type_id` (locked once set) + `status` (NULL = unmapped); `conflicting_event_type_id` + `event_type_conflict_at`; `revenue`, `currency`; `occurred_at` (original time, never moves), `last_postback_at`; `keitaro_status`, `keitaro_type`, `keitaro_version`, `status_history`, `raw_params` |
 | `offers.keitaro_offer_id` | — | Keitaro's offer id (Psycho Book = 41), for conversions with no resolvable click |
 
 Flags, not keys, carry meaning. A future `deposit` is a new `event_types` row with the right flags plus mapping rows. No code change.
+
+**Upsell (2026-10-15, config only).** `upsell` (`label` Upsell, `display_order` 30, `counts_revenue` true, `is_purchase` false) plus one network rule: Affiliati (network 47) `deposit` → Upsell → `approved`. Its approved revenue is summed into Revenue / EPC / ROI; it is not a sale, so Sales and every purchase rule ignore it. It sorts between Reg and Purchase in the per-event columns (middle class of the order below). This relies on each upsell arriving as its OWN Keitaro conversion (a new `tid` — Affiliati's CAKE issues a unique `#leadid#` per event): a re-post on the sale's `tid` would update the locked Purchase row in place and replace its revenue instead.
 
 ## How a Keitaro conversion becomes a row
 
@@ -425,13 +427,16 @@ its copy inside `handle_new_user()` (0183), the class rank leads and
   owner named is ever behind the toggle.
 
 ⭐ **That tier-B premise is pinned, not assumed.** Bar **R1** in
-[`scripts/test-event-columns-db.ts`](../../scripts/test-event-columns-db.ts) fails
-the moment a second `counts_revenue` type is configured, in any org, and its
-message names what to reconsider. It has to: `REVENUE_EVENT_TYPE_IDS` /
+[`scripts/test-event-columns-db.ts`](../../scripts/test-event-columns-db.ts) pins
+the exact set of `counts_revenue` types, in any org, and its message names what to
+reconsider. It has to: `REVENUE_EVENT_TYPE_IDS` /
 `approvedRevenueClause` ([lib/sale-attribution.ts](../../lib/sale-attribution.ts))
 carry **no per-type filter**, so with two revenue types the aggregate these columns
 "duplicate" is their SUM and the per-type columns become its only decomposition —
-while still hidden behind a toggle.
+while still hidden behind a toggle. **Owner decision 2026-10-15:** `upsell` became
+the second revenue type and the owner accepted Revenue = Purchase + Upsell with the
+per-type split (`Purchase $` / `Upsell $`) staying behind the toggle, so R1 expects
+exactly `{purchase, upsell}`. A third revenue type still turns it red.
 
 A non-`counts_revenue` type gets no money column at all: `approvedRevenueClause`
 ([lib/sale-attribution.ts](../../lib/sale-attribution.ts)) is gated on the same

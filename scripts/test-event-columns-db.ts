@@ -16,11 +16,12 @@ import { loadEventTypes, visibleEventTypes } from "@/lib/reporting/event-columns
 // every target nobody thought of, and scripts/test-preview-db-guard.ts rejects a
 // re-copied project-ref literal outside the helper for exactly that reason.
 //
-// ⭐ EVERY BAR THAT CAN FAIL IS ABOUT A TYPE PRODUCTION DOES NOT HAVE. The two
-// seeded types are asserted only as a baseline; the discriminating bars are about
-// `deposit` — a THIRD type with ZERO conversions — and about an ARCHIVED type. A
-// test that only asserted the two seeded rows would pass against a loader that
-// returned a hard-coded array.
+// ⭐ EVERY BAR THAT CAN FAIL IS ABOUT A TYPE PRODUCTION DOES NOT HAVE. The
+// configured types (the two seeded ones plus `upsell`, added to the first org on
+// prod and preview 2026-10-15) are asserted only as a baseline; the
+// discriminating bars are about `deposit` — a FOURTH type with ZERO conversions —
+// and about an ARCHIVED type. A test that only asserted the configured rows would
+// pass against a loader that returned a hard-coded array.
 
 let passed = 0;
 let failed = 0;
@@ -65,23 +66,29 @@ async function main() {
 
       const base = await loadEventTypes(tx, orgId);
       check("L1 the seeded registry loads for one org", base.length >= 2, base.map((t) => t.key).join(","));
+      // `upsell` (counts_revenue, NOT is_purchase, display_order 30) is in the
+      // middle class, so it sorts between the signal and the purchase.
       check(
-        "L2 ⭐ signals sort first, against the seeded display_order (10 vs 20)",
-        base.map((t) => t.key).join(",").startsWith("registration,purchase"),
+        "L2 ⭐ signals sort first, against the seeded display_order (10 vs 20); upsell is neither",
+        base.map((t) => t.key).join(",") === "registration,upsell,purchase",
         base.map((t) => `${t.key}:${t.display_order}`).join(","),
       );
       check("L3 the purchase type carries is_purchase AND counts_revenue", !!base.find((t) => t.key === "purchase" && t.is_purchase && t.counts_revenue));
       check("L4 the registration type carries is_retarget_signal and NOT counts_revenue", !!base.find((t) => t.key === "registration" && t.is_retarget_signal && !t.counts_revenue));
 
-      // ⭐ R1 PINS A PREMISE THE GENERATOR HARD-CODES. buildEventColumns() puts the
-      // three money columns behind the Event-breakdown toggle (tier "b") because
-      // each one duplicates an aggregate already on screen — which is true only
-      // while exactly ONE counts_revenue type exists. `REVENUE_EVENT_TYPE_IDS` /
+      // ⭐ R1 PINS THE SET OF REVENUE TYPES THE GENERATOR WAS SIGNED OFF FOR.
+      // buildEventColumns() puts the three money columns behind the
+      // Event-breakdown toggle (tier "b"). `REVENUE_EVENT_TYPE_IDS` /
       // `approvedRevenueClause` (lib/sale-attribution.ts:50,66) carry NO per-type
-      // filter, so the moment a second revenue type is configured that aggregate
-      // becomes their SUM and the tier-B columns are its only decomposition —
-      // still hidden behind a toggle. The premise was prose pinned by nothing;
-      // this is the bar that goes red when it stops holding.
+      // filter, so with more than one revenue type the aggregate Revenue is their
+      // SUM and the tier-B columns are its only decomposition — still hidden
+      // behind a toggle.
+      //
+      // OWNER DECISION 2026-10-15: `upsell` (counts_revenue, not is_purchase) was
+      // added as the second revenue type, and the owner accepted Revenue = Purchase
+      // + Upsell with the per-type split staying behind the toggle. So R1 now
+      // expects exactly {purchase, upsell}. A THIRD revenue type — or losing one of
+      // these — still turns it red, and that is the moment to revisit tier "b".
       //
       // Cross-org (`orgId = null`) so a second org configuring one also trips it.
       // Scope limit, stated rather than assumed: this reads the PREVIEW database,
@@ -89,11 +96,14 @@ async function main() {
       // same handle_new_user() copy (0183), so they agree today, and a production
       // check would need a prod-facing bar this repo does not have.
       // Taken BEFORE the probe's INSERT below, which adds a second revenue type.
-      const revenueTypes = (await loadEventTypes(tx, null)).filter((t) => t.counts_revenue);
+      const revenueKeys = (await loadEventTypes(tx, null))
+        .filter((t) => t.counts_revenue)
+        .map((t) => `${t.key}${t.archived ? " (archived)" : ""}`)
+        .sort();
       check(
-        "R1 ⭐ exactly one counts_revenue type is configured — the premise tier \"b\" is hard-coded on",
-        revenueTypes.length <= 1,
-        `counts_revenue types: ${revenueTypes.map((t) => `${t.key}${t.archived ? " (archived)" : ""}`).join(", ")} — RECONSIDER the hard-coded tier "b" on evt:<key>:revenue / :pending_revenue / :epc in buildEventColumns() (lib/reporting/event-columns.ts): with a second revenue type these per-type columns are the ONLY decomposition of a Revenue/EPC aggregate that has no per-type filter, and they must not stay behind the Event-breakdown toggle`,
+        "R1 ⭐ the counts_revenue types are exactly purchase + upsell — the set tier \"b\" was signed off for",
+        revenueKeys.join(",") === "purchase,upsell",
+        `counts_revenue types: ${revenueKeys.join(", ")} — RECONSIDER the hard-coded tier "b" on evt:<key>:revenue / :pending_revenue / :epc in buildEventColumns() (lib/reporting/event-columns.ts): these per-type columns are the ONLY decomposition of a Revenue/EPC aggregate that has no per-type filter, and the owner signed off on keeping them behind the Event-breakdown toggle for purchase + upsell only`,
       );
 
       await tx.execute(sql`
@@ -108,7 +118,7 @@ async function main() {
       );
       check(
         "L7 ordering with a second purchase type is signals, then purchases by display_order",
-        three.map((t) => t.key).join(",") === "registration,purchase,deposit",
+        three.map((t) => t.key).join(",") === "registration,upsell,purchase,deposit",
         three.map((t) => t.key).join(","),
       );
 

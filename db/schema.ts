@@ -3560,6 +3560,10 @@ export const org_settings = pgTable("org_settings", {
   // lead overflows to the next same-tag candidate (deferred if all are full).
   // Off = routing ignores the send cap, exactly as before. Rollback = set false.
   drip_routing_send_capacity: boolean("drip_routing_send_capacity").notNull().default(false),
+  // Migration 0213: drip routing hour-level overflow. On (with send capacity): routing also
+  // skips a candidate whose current hour is full and diverts to the next same-tag candidate
+  // with hourly room; never defers. Off = day-level only. Rollback = set false.
+  drip_routing_hour_overflow: boolean("drip_routing_hour_overflow").notNull().default(false),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })

@@ -5,7 +5,7 @@ Status: APPROVED by the owner 2026-10-14 (proposal + rulings below). Base: origi
 ## Owner rulings
 
 - **O1 Window-open only.** A candidate's hourly room is considered only while one of its first-send windows is open now. Outside a window a routed lead is not on any hour (it waits and is released as backlog), so "this hour" does not apply.
-- **O2 Separate flag.** `org_settings.drip_routing_hour_overflow boolean NOT NULL DEFAULT false` (migration 0211). Effective only when `drip_routing_send_capacity` is also on. Off ⇒ routing is byte-identical to today.
+- **O2 Separate flag.** `org_settings.drip_routing_hour_overflow boolean NOT NULL DEFAULT false` (migration 0213). Effective only when `drip_routing_send_capacity` is also on. Off ⇒ routing is byte-identical to today.
 - **O3 Divert, never defer.** `hour_capacity` may only move a lead to a lower-priority sibling that has hourly room. If every candidate that is otherwise eligible fails ONLY on `hour_capacity`, the lead is routed to the best-priority one of them anyway (today's behaviour: it joins that campaign's queue). Hour-fullness alone never defers a lead and never lets it expire at freshness. Deferral stays only for day-fullness and the existing temporary reasons.
 - **O4 One shared formula.** The hourly-room calculation lives in one helper used by the scheduler's maintenance pass, routing, and "Why not routed" — the `lib/drip/daily-sends.ts` pattern. No second implementation.
 - **O5 Recording.** `overflowed_from` entries carry `kind: "day" | "hour"`; hour entries read `hour full (N/cap this hour)`. A lead routed by the O3 fallback records `hour_fallback: true` plus the hour-full candidates it passed over. "Why not routed" shows both kinds. Old rows without `kind` display as day.
@@ -59,9 +59,9 @@ Routing (`drip-routing` lease) and the scheduler (`drip-scheduler` lease, cron +
 
 Per lead: no extra queries (cache). Per routing run: one grouped count over hourly-capped campaigns with an open window + one windows query — expected a few ms against the 10-13 baseline p50 585 ms / p95 1,554 ms. "Why not routed": direct per-campaign count.
 
-## 5. Data model (0211, additive)
+## 5. Data model (0213, additive)
 
-`org_settings.drip_routing_hour_overflow boolean NOT NULL DEFAULT false`. No index (existing 0209 indexes serve the counts). `org_settings` is not tracked in snapshots; 0211 snapshot = clone of 0210 with new id/prevId.
+`org_settings.drip_routing_hour_overflow boolean NOT NULL DEFAULT false`. No index (existing 0209 indexes serve the counts). `org_settings` is not tracked in snapshots; 0213 snapshot = clone of 0212's snapshot (#363) with new id, prevId = 0212's id. Renumbered from 0211 on 2026-10-15 (0211 = #362, 0212 = #363); on prod 0212 must be applied before 0213.
 
 ## 6. Test plan
 

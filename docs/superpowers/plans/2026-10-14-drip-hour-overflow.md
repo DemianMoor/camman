@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Routing diverts a lead from a same-tag campaign whose current hour is full to the next candidate with hourly room — divert only, never defer — behind `org_settings.drip_routing_hour_overflow` (0211), with one shared hourly-room formula.
+**Goal:** Routing diverts a lead from a same-tag campaign whose current hour is full to the next candidate with hourly room — divert only, never defer — behind `org_settings.drip_routing_hour_overflow` (0213), with one shared hourly-room formula.
 
 **Architecture:** New `lib/drip/hourly-room.ts` owns the hour counts (`sentH`, `assigned`, `queued`, `pendingFresh`) and the fullness test; the scheduler's maintenance pass, routing and "Why not routed" all read through it. Routing adds a per-candidate `hour_capacity` rule (window-open only), an O3 fallback that routes to the best-ranked hour-only-failing candidate instead of deferring, and `kind` on `overflowed_from`.
 
@@ -21,7 +21,7 @@
 - `overflowed_from` entries add `kind: "day" | "hour"`; existing day entries keep their exact `detail` text.
 - Required params (§11b): any new input that changes who is routed is required on internal types.
 - Drizzle flattens JS arrays: pass id lists as one `'{…}'::int[]` / `::uuid[]` string.
-- Migration 0211 hand-authored: SQL with `SET LOCAL lock_timeout = '5s'`, cloned 0210 snapshot (new id, prevId = 0210's id), journal idx 211 with `when` = 0210's + 86400000.
+- Migration **0213** hand-authored (renumbered 2026-10-15: 0211 = #362 brand landing path, merged; 0212 = #363 landing URL shape, OPEN): SQL with `SET LOCAL lock_timeout = '5s'`; snapshot = clone of **0212's** snapshot taken from `origin/feat/brand-landing-ui` (`db/migrations/meta/0212_snapshot.json`, id `0212a000-0212-4212-8212-000000000212`) with a new id and `prevId` = that id; journal entry idx **213**, `when` **1795046400000** (= 0212's 1794960000000 + 86400000). Until #363 merges, this branch's journal has no 0212 entry, so `verify-migration-integrity` reports a chain gap locally — expected; the branch is rebased onto main after #363 merges. Preview (camman-v2) already has 0212 applied, so `db:migrate` from this branch applies only 0213 there. ⚠️ ORDER: on prod, 0212 (#363) must be applied BEFORE 0213 — Drizzle applies only entries newer than the last applied `when`, so 0213 first would make 0212 skip forever.
 - `.env.local` is PRODUCTION. DB tests import `./_env-preload` then `./_require-preview-db`, run via `node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/<name>.ts`. Any helper/fixture that imports `@/db/client` must import the guard too (`npm run check:guards`).
 - Lint changed files only (`npx eslint <files>`); `npx tsc --noEmit -p .` clean.
 - Docs part of done: `docs/04-features/drip-campaigns-routing.md` (rule, O3, recording, race, **operator guideline**), `docs/03-data-model.md` (+ERD), `docs/07-conventions.md`, `docs/CHANGELOG.md`, "last updated".
@@ -34,7 +34,7 @@
 | `lib/drip/hourly-room.ts` (new) | `HourCounts`, `loadHourCounts`, `hourCommitted`, `hourFullness`, `routedInWindowSql` |
 | `lib/drip/hourly-maintenance.ts` | Reads counts through `hourly-room.ts` (no behaviour change) |
 | `scripts/test-drip-hourly-room.ts` (new) | Pure + DB parity + source guard |
-| `db/migrations/0211_drip_routing_hour_overflow.sql` + meta | Flag column |
+| `db/migrations/0213_drip_routing_hour_overflow.sql` + meta | Flag column |
 | `db/schema.ts` | `drip_routing_hour_overflow` |
 | `lib/drip/routing-eval.ts` | `hour_capacity` rule, O3 fallback, `overflowSkips` kinds, hour counts in the per-run cache |
 | `lib/drip/routing.ts` | Load hour counts once per run; in-tick `pendingFresh` increment; store `hour_fallback` |
@@ -69,14 +69,14 @@ export async function loadOpenWindowCampaigns(dbc: DripTx, i: { campaignIds: num
 - [ ] **Step 4: GREEN** + existing suites unchanged: `test-drip-hourly-maintenance.ts`, `test-drip-hourly-config.ts`, `test-drip-scheduler-fairness.ts`, `test-drip-hourly-cap-pure.ts`, `test-drip-scheduler-manual-lease.ts` — all green.
 - [ ] **Step 5:** `npx eslint` changed files, `npx tsc --noEmit -p .`, `npm run check:guards`; commit `refactor(drip): one hourly-room formula shared by maintenance (and soon routing)`.
 
-### Task 2: Migration 0211 + schema
+### Task 2: Migration 0213 + schema
 
-**Files:** `db/migrations/0211_drip_routing_hour_overflow.sql`, `meta/0211_snapshot.json`, `meta/_journal.json`, `db/schema.ts`, `scripts/test-drip-hour-overflow-schema.ts`.
+**Files:** `db/migrations/0213_drip_routing_hour_overflow.sql`, `meta/0213_snapshot.json`, `meta/_journal.json`, `db/schema.ts`, `scripts/test-drip-hour-overflow-schema.ts`.
 
 - [ ] Failing schema test (column exists, boolean NOT NULL DEFAULT false) → RED.
 - [ ] SQL:
 ```sql
--- 0211: drip routing hour-level overflow. Additive only; ships dark.
+-- 0213: drip routing hour-level overflow. Additive only; ships dark.
 --   org_settings.drip_routing_hour_overflow — when on (and drip_routing_send_capacity
 --   on), routing also skips a candidate whose CURRENT HOUR is full (hourly cap,
 --   window open) and diverts the lead to the next same-tag candidate with room.
@@ -87,9 +87,9 @@ SET LOCAL lock_timeout = '5s';--> statement-breakpoint
 ALTER TABLE public.org_settings
   ADD COLUMN IF NOT EXISTS drip_routing_hour_overflow boolean NOT NULL DEFAULT false;--> statement-breakpoint
 COMMENT ON COLUMN public.org_settings.drip_routing_hour_overflow IS
-  'Drip routing hour-level overflow (0211): divert a lead from a candidate whose current hour is full to the next same-tag candidate with hourly room. Never defers. Needs drip_routing_send_capacity. Off = day-level only.';
+  'Drip routing hour-level overflow (0213): divert a lead from a candidate whose current hour is full to the next same-tag candidate with hourly room. Never defers. Needs drip_routing_send_capacity. Off = day-level only.';
 ```
-- [ ] Snapshot = clone of 0210 (new uuid id, prevId = 0210's id; org_settings not tracked). Journal idx 211, when = 0210 when + 86400000. Schema field next to `drip_routing_send_capacity`.
+- [ ] Snapshot = clone of 0212's snapshot from `origin/feat/brand-landing-ui` (`git show origin/feat/brand-landing-ui:db/migrations/meta/0212_snapshot.json`; new uuid id, prevId = `0212a000-0212-4212-8212-000000000212`; org_settings not tracked). Journal entry idx 213, tag `0213_drip_routing_hour_overflow`, when 1795046400000 (see Global Constraints). Schema field next to `drip_routing_send_capacity`.
 - [ ] Apply to PREVIEW only (`node scripts/with-preview-env.mjs npm run db:migrate`), schema test GREEN, tsc, commit.
 
 ### Task 3: Routing rule, O3 fallback, recording
@@ -119,5 +119,5 @@ routing.ts: store `hour_fallback: true` in `reason` only when true (absence keep
 
 ### Task 5: Verify, PR, owner gate
 
-- [ ] Full sweep on preview (all suites above + scheduler-fairness, poke-chain, stop-controls, regular-unaffected). `verify-migration-integrity` vs prod (only 0211-not-applied new).
-- [ ] PR with rulings O1–O6, test evidence, race bound, operator guideline, rollback target. STOP at the owner gate (prod migrate 0211, then merge, then prove inert: flag false, no `hour_capacity` in reasons, routing mix unchanged).
+- [ ] Full sweep on preview (all suites above + scheduler-fairness, poke-chain, stop-controls, regular-unaffected). `verify-migration-integrity` vs prod (only 0213-not-applied new).
+- [ ] PR with rulings O1–O6, test evidence, race bound, operator guideline, rollback target. STOP at the owner gate (prod migrate 0213, then merge, then prove inert: flag false, no `hour_capacity` in reasons, routing mix unchanged).

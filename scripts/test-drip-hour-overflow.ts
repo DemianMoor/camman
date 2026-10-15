@@ -12,6 +12,9 @@ import {
   classifyRoutingOutcome, evaluateLeadRouting, loadCampaignJourneyCounts, overflowSkips,
   type CandidateVerdict, type LeadRoutingEvaluation,
 } from "@/lib/drip/routing-eval";
+import {
+  candidateBadgeLabel, hourFallbackLine, overflowLines, routingNoteLines,
+} from "@/lib/drip/overflow-text";
 import { makeFixture } from "./_drip-hourly-fixture";
 
 // node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-drip-hour-overflow.ts
@@ -27,6 +30,7 @@ import { makeFixture } from "./_drip-hourly-fixture";
 //   H-O8  hour boundary: carry-ON queue makes A full from :00 ⇒ divert to B; never re-routed
 //   H-O9  (owner) single candidate, hour-full, day room, carry ON ⇒ routes and queues exactly as flag-off
 //   H-O10 (owner) carry-ON queue > cap ⇒ fresh leads still route, never defer
+//   H-O11 pure: why-not-routed text helpers (day text byte-identical, hour, fallback)
 let fail = 0;
 const bar = (n: string, ok: boolean, d = "") => { console.log(`  ${ok ? "✓" : "✗"} ${n}${d ? ` — ${d}` : ""}`); if (!ok) fail++; };
 const Z = (iso: string) => new Date(iso);
@@ -387,6 +391,29 @@ async function main() {
         rechecks.every((r) => r === null), `routed ${res.routed} deferred ${res.deferred}`);
     }
   });
+
+  // ── H-O11 (pure) why-not-routed text ────────────────────────────────────
+  {
+    console.log("\nH-O11 why-not-routed text helpers");
+    const day = { campaign_id: 1, campaign_name: "A", detail: "campaign full (5/5 today: 3 sent + 2 queued)" };
+    bar("kind-less (day) entry keeps the existing text byte-for-byte",
+      overflowLines([day], "B")[0] === "A: campaign full (5/5 today: 3 sent + 2 queued), overflowed to B");
+    bar("kind:'day' entry renders the same as kind-less",
+      overflowLines([{ ...day, kind: "day" }], "B")[0] === overflowLines([day], "B")[0]);
+    bar("hour entry renders '<name>: hour full (N/cap this hour), overflowed to <winner>'",
+      overflowLines([{ campaign_id: 2, campaign_name: "Hot", detail: "hour full (3/3 this hour)", kind: "hour" }], "B")[0] ===
+        "Hot: hour full (3/3 this hour), overflowed to B");
+    bar("null name falls back to #id", overflowLines([{ ...day, campaign_name: null }], "B")[0].startsWith("#1: "));
+    bar("fallback line text", hourFallbackLine("B") ===
+      "routed to B although its hour is full — every same-tag candidate was hour-full (it queues)");
+    bar("routingNoteLines: skips then fallback; no fallback line unless flagged",
+      routingNoteLines([day], "B", true).length === 2 && routingNoteLines([day], "B", true)[1] === hourFallbackLine("B") &&
+      routingNoteLines([day], "B", false).length === 1 && routingNoteLines([], "B", false).length === 0);
+    bar("fallback winner (eligible:false) is labelled routed, never 'not eligible'",
+      candidateBadgeLabel({ eligible: false }, true) === "routed (hour full)" &&
+      candidateBadgeLabel({ eligible: false }, false) === "not eligible" &&
+      candidateBadgeLabel({ eligible: true }, false) === "eligible");
+  }
 
   console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
   process.exit(fail === 0 ? 0 : 1);

@@ -10,6 +10,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
+import {
+  candidateBadgeLabel,
+  routingNoteLines,
+  type OverflowSkipText,
+} from "@/lib/drip/overflow-text";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // "Why wasn't this number routed?" (Drip Phase 4).
@@ -47,7 +52,8 @@ type Result = {
     globalDetail: Record<string, string>;
     candidates: Candidate[];
     winner: Candidate | null;
-    overflowed_from?: OverflowSkip[];
+    overflowed_from?: OverflowSkipText[];
+    hour_fallback?: boolean;
   } | null;
 };
 
@@ -62,20 +68,21 @@ function missedHourText(e: Record<string, unknown>): string {
   return ` — missed its hour (${cr.replace("missed_hour_", "")}${detail})`;
 }
 
-/** A higher-priority campaign skipped only because it was full today (0210). */
-type OverflowSkip = { campaign_id: number; campaign_name: string | null; detail: string };
-
-/** "<name> campaign full (X/Y today …), overflowed to <winner>" — one per skip. */
-function overflowLines(skips: OverflowSkip[], to: string): string[] {
-  return skips.map((s) => `${s.campaign_name ?? `#${s.campaign_id}`}: ${s.detail}, overflowed to ${to}`);
-}
-
 function storedOverflow(e: Record<string, unknown>): string[] {
   const reason = e.reason as
-    | { overflowed_from?: OverflowSkip[]; campaign_name?: string | null; campaign_id?: number }
+    | {
+        overflowed_from?: OverflowSkipText[];
+        hour_fallback?: boolean;
+        campaign_name?: string | null;
+        campaign_id?: number;
+      }
     | null;
-  if (!reason?.overflowed_from?.length) return [];
-  return overflowLines(reason.overflowed_from, reason.campaign_name ?? `#${reason.campaign_id}`);
+  if (!reason) return [];
+  return routingNoteLines(
+    reason.overflowed_from ?? [],
+    reason.campaign_name ?? `#${reason.campaign_id}`,
+    reason.hour_fallback === true,
+  );
 }
 
 const VERDICT_STYLE: Record<RuleVerdict, string> = {
@@ -100,6 +107,11 @@ export function WhyNotRouted() {
     }
     setResult(r.data);
   };
+
+  // A fallback winner (0213, O3) has eligible:false (it failed hour_capacity) but WAS routed.
+  const isFallbackWinner = (c: Candidate) =>
+    result?.live_evaluation?.hour_fallback === true &&
+    result.live_evaluation.winner?.campaign_id === c.campaign_id;
 
   return (
     <div className="space-y-4">
@@ -172,10 +184,11 @@ export function WhyNotRouted() {
                     )}
                   </p>
                   {result.live_evaluation.winner &&
-                    overflowLines(
+                    routingNoteLines(
                       result.live_evaluation.overflowed_from ?? [],
                       result.live_evaluation.winner.campaign_name ??
                         `#${result.live_evaluation.winner.campaign_id}`,
+                      result.live_evaluation.hour_fallback === true,
                     ).map((line) => (
                       <p key={line} className="mb-1 text-xs text-amber-600">{line}</p>
                     ))}
@@ -194,8 +207,8 @@ export function WhyNotRouted() {
                             <span className="text-muted-foreground text-xs">
                               priority {c.priority}
                             </span>
-                            <Badge variant={c.eligible ? "secondary" : "outline"}>
-                              {c.eligible ? "eligible" : "not eligible"}
+                            <Badge variant={c.eligible || isFallbackWinner(c) ? "secondary" : "outline"}>
+                              {candidateBadgeLabel(c, isFallbackWinner(c))}
                             </Badge>
                           </div>
                           <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs">

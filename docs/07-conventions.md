@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-14_
+_Last updated: 2026-10-15_
 
 ## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
 
@@ -68,6 +68,23 @@ The router's "full" test is **S + U ≥ daily_cap** (U = routed journeys with no
 day). Read U from `drip_journeys` (`state = 'routed' AND first_send_at IS NULL`), never from
 `stage_sends`: the first send row and the `first_send_at` stamp land in one transaction, so S and
 U never overlap and a send leaves S + U unchanged.
+
+## ⭐ Hour counts have ONE formula; hour-overflow migration order (2026-10-15)
+
+Every hour-level count (first sends in a UTC hour, `hour_start = H` assigned, `hour_start < H`
+queued, routed-fresh pending) lives in [lib/drip/hourly-room.ts](../lib/drip/hourly-room.ts);
+`hourCommitted = sentH + assigned + pendingFresh + queued` and "full" is `committed >= hourly_cap`.
+`hourly-maintenance.ts` (the scheduler's room) and `routing-eval.ts` (the `hour_capacity` rule,
+0213) both import it. If routing counted differently from maintenance it would divert leads the
+campaign could take, or admit ones it must queue. Don't write a second hour count — extend this
+one. `npm run check:guards` bar **G1** is a pure source guard that fails when another file
+re-derives it. `hour_capacity` diverts, never defers (it is not a temporary rule and
+`classifyRoutingOutcome` ignores it). See
+[drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#hour-level-overflow-2026-10-15-migration-0213).
+
+**Migration ordering:** 0213 (`org_settings.drip_routing_hour_overflow`) chains after 0212
+(#363, landing-URL trigger). On prod apply 0212 BEFORE 0213: Drizzle applies only entries newer
+than the last applied `when`, so 0213 first would make 0212 skip forever.
 
 ## ⭐ Drip admission `widened_at` is trigger-stamped; a raise drops, never revives (2026-10-12)
 

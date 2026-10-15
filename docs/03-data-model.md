@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-14 (0212 landing-URL trigger + brands_landing_pair_uniq; 0211 brands.landing_path; 0210 drip routing send capacity; 0209 drip hourly send cap; 0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
+_Last updated: 2026-10-15 (0213 drip_routing_hour_overflow; 0212 landing-URL trigger + brands_landing_pair_uniq; 0211 brands.landing_path; 0210 drip routing send capacity; 0209 drip hourly send cap; 0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -252,6 +252,7 @@ erDiagram
     boolean drip_daily_results_enabled "Daily results tab, default false (0208)"
     boolean drip_hourly_cap_enabled "hourly cap kill switch, default false (0209)"
     boolean drip_routing_send_capacity "routing skips send-full campaigns, default false (0210)"
+    boolean drip_routing_hour_overflow "routing skips hour-full campaigns (needs send_capacity + hourly cap), default false (0213)"
   }
 ```
 
@@ -572,6 +573,7 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 | `org_settings.drip_scheduler_fair` *(0207)* | NOT NULL DEFAULT false | **Scheduler per-campaign fairness.** On: the first-send batch is filled round-robin across campaigns (each campaign's oldest routed journey, then the next…), so one campaign's backlog cannot starve another's fresh leads. Off = org-wide oldest first. See [drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#scheduler-batch-per-campaign-fairness-2026-10-12-migration-0207) |
 | `org_settings.drip_daily_results_enabled` *(0208)* | NOT NULL DEFAULT false | **Drip Daily results tab** dark-ship flag: shows the tab on drip campaign pages and serves its API. The `drip_daily_rollup` job runs regardless, so the cells can be reconciled before anyone sees them. |
 | `org_settings.drip_routing_send_capacity` *(0210)* | NOT NULL DEFAULT false | **Drip routing send capacity (capacity overflow).** On: routing treats a campaign as full for today when its sends today + routed-unsent backlog reach its `daily_cap`; the lead goes to the next same-tag candidate by priority and is deferred only when every candidate is full. Off = routing ignores the send cap. Rollback = set false. See [drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#capacity-overflow-2026-10-13-migration-0210) |
+| `org_settings.drip_routing_hour_overflow` *(0213)* | NOT NULL DEFAULT false | **Drip routing hour-level overflow.** On (and `drip_routing_send_capacity` and `drip_hourly_cap_enabled` on): a candidate with an `hourly_cap` and an open first-send window is full for the hour when sentH + assigned + pendingFresh + queued ≥ cap; the lead diverts to the next same-tag candidate, and if none has room the best hour-full one still takes it (`hour_fallback`) — never deferred. Off = no `hour_capacity` rule. Rollback = set false. See [drip-campaigns-routing.md](04-features/drip-campaigns-routing.md#hour-level-overflow-2026-10-15-migration-0213) |
 | `cron_locks.poke_requested_at` / `poke_dispatched_at` / `last_run_started_at` *(0206)* | timestamptz NULL | Poke coalescing state per job (`cron_locks` is SQL-only, not in `db/schema.ts`). A request newer than the last run start earns the lease holder a re-run; at most one wake-up in flight per job; runs spaced 5 s apart. Written only by [lib/drip/poke.ts](../lib/drip/poke.ts), only while the switch is on |
 | `drip_campaign_configs.hourly_cap` *(0209)* | integer NULL, CHECK NULL or > 0 | **Hourly send cap**: first sends per ET clock hour; NULL = no hourly limit. Ignored unless `org_settings.drip_hourly_cap_enabled`. See [Hourly send cap](04-features/drip-campaigns-routing.md#hourly-send-cap-2026-10-13-migration-0209) |
 | `drip_campaign_configs.hourly_carry` *(0209)* | boolean NOT NULL DEFAULT false | ON = unsent leads queue into later hours; OFF = fresh leads that miss their hour are dropped (`missed_hour_*`) |

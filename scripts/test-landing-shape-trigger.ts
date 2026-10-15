@@ -1,4 +1,5 @@
 import "./_env-preload";
+import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
@@ -30,11 +31,7 @@ import { validateBrandLpShape } from "@/lib/stage-url";
 //      path accepted, a path already in scope not checked.
 //   5. brands_landing_pair_uniq backstop.
 
-const PREVIEW_REF = "fdzxzxayhknywvmrhjcj";
-if (!(process.env.DATABASE_URL ?? "").includes(PREVIEW_REF)) {
-  console.error(`Refusing: DATABASE_URL is not the preview project (${PREVIEW_REF}).`);
-  process.exit(2);
-}
+console.log(`target DB: ${requirePreviewDb().label}`);
 
 let failed = 0;
 function check(name: string, cond: boolean, detail = "") {

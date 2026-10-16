@@ -7,7 +7,7 @@ import {
 } from "@/lib/drip/routing-eval";
 
 // Drip routing send capacity (0210). Pure — no DB.
-//   npx tsx scripts/test-drip-send-capacity.ts
+//   npx tsx --conditions=react-server scripts/test-drip-send-capacity.ts
 //
 //   F1-F5  the fullness formula: S + U ≥ daily_cap, edges, no cap
 //   O1-O5  overflow record: only higher-ranked, capacity-only skips
@@ -51,13 +51,16 @@ const cand = (
 };
 const full = { send_capacity: "campaign full (7000/7000 today: 7000 sent + 0 queued)" };
 
+// These bars pin the day-level (0210) behaviour, written before the hour rule (0213) existed:
+// hour rule OFF, so no `kind` may appear — the flag-off byte identity.
+const NO_HOUR = { hourRuleOn: false };
 const winner = cand(3, 100);
 const skips = overflowSkips([
   cand(1, 97, full),                                       // full, ranked above ⇒ overflow
   cand(2, 98, { campaign_paused: "campaign status is paused" }), // paused ⇒ not overflow
   winner,
   cand(4, 120, full),                                      // full but ranked BELOW ⇒ not overflow
-], winner);
+], winner, NO_HOUR);
 bar("O1 a full higher-priority campaign is recorded", skips.some((s) => s.campaign_id === 1));
 bar("O2 a paused campaign is NOT an overflow", !skips.some((s) => s.campaign_id === 2));
 bar("O3 a full lower-priority campaign is NOT an overflow", !skips.some((s) => s.campaign_id === 4));
@@ -65,15 +68,15 @@ bar("O4 the detail is the capacity detail", skips[0]?.detail === full.send_capac
 const mixed = overflowSkips([
   cand(1, 97, { ...full, filter_state: "lead state=CA not in excluded" }), // full AND filtered
   winner,
-], winner);
+], winner, NO_HOUR);
 bar("O5 full AND failing a filter ⇒ not an overflow (it would never have taken the lead)",
   mixed.length === 0);
 // Tie on priority → the newer (higher id) campaign ranks first.
-const tie = overflowSkips([cand(9, 100, full), winner], winner);
+const tie = overflowSkips([cand(9, 100, full), winner], winner, NO_HOUR);
 bar("O6 same priority, newer id ranks above the winner ⇒ recorded", tie.length === 1 && tie[0].campaign_id === 9);
-const admission = overflowSkips([cand(1, 97, { routing_daily_admission: "cap 10 reached" }), winner], winner);
+const admission = overflowSkips([cand(1, 97, { routing_daily_admission: "cap 10 reached" }), winner], winner, NO_HOUR);
 bar("O7 an admission-cap skip is a day-level overflow too", admission.length === 1);
-const lifetime = overflowSkips([cand(1, 97, { campaign_cap: "campaign cap reached" }), winner], winner);
+const lifetime = overflowSkips([cand(1, 97, { campaign_cap: "campaign cap reached" }), winner], winner, NO_HOUR);
 bar("O8 the lifetime campaign cap is NOT a today-overflow", lifetime.length === 0);
 
 // ── classification ──────────────────────────────────────────────────────────
@@ -81,7 +84,7 @@ const verdict = (candidates: CandidateVerdict[]): LeadRoutingEvaluation => ({
   lead_event_id: "x", contact_id: "y", phone: null, interest_tag: "medicare",
   partner_key_id: 1, received_at: new Date().toISOString(),
   global: { opted_out: "pass", in_use: "pass", week_rule: "pass" }, globalDetail: {},
-  candidates, winner: null, send_capacity_on: true, overflowed_from: [],
+  candidates, winner: null, send_capacity_on: true, overflowed_from: [], hour_fallback: false,
 });
 bar("D1 every candidate full ⇒ defer", classifyRoutingOutcome(verdict([cand(1, 97, full), cand(2, 100, full)])) === "defer");
 bar("D2 one full + one filtered out ⇒ defer (the full one may reopen)",

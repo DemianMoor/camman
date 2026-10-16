@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-13 (capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
+_Last updated: 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -473,7 +473,7 @@ freshness, caps): overflow is "next candidate", never a bypass. When **every** c
 the lead is **deferred**; past its freshness cutoff it leaves drip. `carry_days` is the knob for
 keeping such leads alive overnight. There is no fallback to over-cap routing.
 
-- **Day-level only.** A full *hour* (the hourly cap) never triggers overflow: with hourly carry off
+- **Day-level only** (unless [hour-level overflow](#hour-level-overflow-2026-10-15-migration-0213) is on). A full *hour* (the hourly cap) never triggers overflow: with hourly carry off
   that would quietly undo the missed-hour drop rule. **With carry OFF and an hourly cap, leads can
   drop while a same-tag sibling still has hourly room — overflow is day-level only. Prefer carry ON
   when running multiple same-tag campaigns.** (Owner-accepted as designed, 2026-10-13; the same line
@@ -497,8 +497,67 @@ higher-ranked candidate skipped **only** for day-level capacity (`send_capacity`
 "Why not routed" shows `<campaign>: campaign full (X/Y today: S sent + U queued), overflowed to
 <winner>` under the arrival, and the same line for the live evaluation.
 
-Proof: `scripts/test-drip-send-capacity.ts` (pure) and `scripts/test-drip-routing-overflow.ts`
+Proof: `scripts/test-drip-send-capacity.ts` (pure; run with `--conditions=react-server`) and `scripts/test-drip-routing-overflow.ts`
 (preview DB, including the 8_155 / 8_154 replay scaled 1:100).
+
+## Hour-level overflow (2026-10-15, migration 0213)
+
+**Problem.** Day-level overflow ([above](#capacity-overflow-2026-10-13-migration-0210)) ignores the
+hourly cap, so a campaign that has filled its hour keeps taking leads that then queue or, with carry
+OFF, drop at hour end while a same-tag sibling has hourly room.
+
+**Flag and conjunction.** `org_settings.drip_routing_hour_overflow` (default **off**, rollback = set
+false). The `hour_capacity` rule exists for a candidate only when ALL hold: this flag AND
+`drip_routing_send_capacity` AND `drip_hourly_cap_enabled` AND the candidate's `hourly_cap` is set
+AND one of its first-send windows (`drip_active`, not archived, `parent_stage_id IS NULL`) covers
+the current ET minute (half-open) — **window-open only** (O1): outside its window a campaign is
+never "hour-full", so an evening arrival is still routed. With any condition false the rule is
+**absent** (not "pass"): verdicts, stored `reason` and outcomes are byte-identical to before.
+
+**Rule.** `hour_capacity = blocked` when `committed >= hourly_cap`, detail exactly
+`hour full (N/cap this hour)`, where `committed = sentH + assigned + pendingFresh + queued`
+(first sends this UTC hour; journeys assigned to this hour; routed fresh leads awaiting assignment;
+carry-ON backlog queued for it). **Every one of those counts lives in
+[lib/drip/hourly-room.ts](../../lib/drip/hourly-room.ts)** (O4); `hourly-maintenance.ts` and
+[routing-eval.ts](../../lib/drip/routing-eval.ts) import it and nothing else re-derives it
+(`npm run check:guards`, G1).
+
+**Divert, never defer (O3).** Hour-fullness diverts a lead to the next same-tag candidate; it never
+defers it. If no candidate is fully eligible, the best-ranked candidate whose ONLY failing rule is
+`hour_capacity` wins anyway, with `hour_fallback: true` (the lead routes and queues exactly as it
+does with the flag off). `hour_capacity` is not in `TEMPORARY_CANDIDATE_RULES`, and
+`classifyRoutingOutcome` **ignores** it, so it can never turn a deferred lead permanent or defer one
+that would route.
+
+**Recorded.** `reason.overflowed_from` entries gain `kind: "day" | "hour"` — only while the hour flag
+is on; entries without `kind` are day and keep their exact text. A skip failing both day and hour is
+`kind: "day"` with the day text. `reason.hour_fallback: true` appears only on O3 fallback routes.
+
+**"Why not routed"** ([components/drip/why-not-routed.tsx](../../components/drip/why-not-routed.tsx),
+text in [lib/drip/overflow-text.ts](../../lib/drip/overflow-text.ts)):
+`<name>: hour full (N/cap this hour), overflowed to <winner>`; for a fallback,
+`routed to <winner> although its hour is full — no same-tag candidate had hour room; it joins <winner>'s hour (queues if carry is ON)`,
+and the winner's badge reads "routed (hour full)", not "not eligible" (its live verdict has
+`eligible: false` and the evaluation has `hour_fallback: true`).
+
+**Race bound (accepted).** Routing and the scheduler run concurrently. *No send overshoot:* only the
+scheduler sends, single-flight, capped at `cap − sentH`. *No double count:* a lead is pending XOR
+assigned. *Bounded over-commit:* if a routing run read the counts before the scheduler's backlog
+release and commits after it, the hour is over-committed by at most the leads routed to that
+campaign in that one overlapping run; those leads queue to the next hour (carry ON) or hit the
+hour-end demote rule (carry OFF). Nothing is re-routed, so no ping-pong across the hour boundary
+(a carry-ON queue can make a campaign full from :00).
+
+For a carry-OFF campaign, last hour's unsent fresh leads count as queued until the scheduler's hour close runs (≤ ~1 min after :00), so routing in that first minute can see the campaign as hour-full and divert a lead to a sibling with room — harmless, nothing is lost.
+
+**Cost.** Per lead: no extra queries (in-tick cache; each routed lead adds 1 to pendingFresh). Per
+routing run with all three flags on: one windows query + one grouped hour-count query. Flag off: none.
+
+**OPERATOR GUIDELINE.** Turn on hour-level overflow for a tag only where the combined hourly caps
+of its same-tag siblings ≈ the tag's hourly arrival rate. Far below it, every sibling fills each hour
+and the divert-never-defer fallback simply queues as before.
+
+Proof: `scripts/test-drip-hour-overflow.ts` (H-O1…H-O11; preview DB via `with-preview-env.mjs`).
 
 ## Scheduler batch: per-campaign fairness (2026-10-12, migration 0207)
 

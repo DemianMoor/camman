@@ -15,7 +15,7 @@ import {
 } from "@/lib/sends/opt-out-footer";
 import { formatStamp, renderMessage, shapeFromStage } from "@/lib/messages/render";
 import { NO_RECIPIENT } from "@/lib/messages/tags";
-import { skipIfTagged } from "./skip-send";
+import { notifyDripSkips, skipIfTagged, tallySkip, type DripSkipTally } from "./skip-send";
 import { orderForHour } from "./hourly-cap";
 import {
   clearIneligibleHourAssignments, prepareHourly, realHasHeadroom, recordSendRefusal,
@@ -124,6 +124,8 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
     gateRefused: 0, mintRefused: 0, capBlocked: 0, numbersExhausted: 0, pausedSkipped: 0,
     alreadyQueued: 0, hourlyCapBlocked: 0, hourlyDropped: 0, tagsSkipped: 0,
   };
+  // 0216 interim: NEW skips this tick, alerted once at the end (one per stage).
+  const skipTally: DripSkipTally = new Map();
 
   // ⭐ HOURLY CAP step 0 (spec §4): org paused/off, flag off, campaign paused or
   // cap removed ⇒ assignments revert to waiting. Runs even when no org is live,
@@ -236,7 +238,8 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
         brandName: head.brand_name ?? "", leads,
       });
       if (tagged !== null) {
-        res.tagsSkipped += tagged;
+        res.tagsSkipped += tagged.written;
+        tallySkip(skipTally, { stageId: stage.stage_id, campaignName: head.campaign_name ?? String(campaignId), result: tagged });
         continue;
       }
 
@@ -459,6 +462,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
     }
   }
 
+  await notifyDripSkips(skipTally);
   return res;
 }
 

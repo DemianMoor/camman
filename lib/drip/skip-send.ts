@@ -11,6 +11,7 @@ import { sql } from "drizzle-orm";
 import type { db } from "@/db/client";
 import { formatStamp, requiredTags, type MessageShape } from "@/lib/messages/render";
 import { TAGS } from "@/lib/messages/tags";
+import { notifyTelegram } from "@/lib/alerts/telegram";
 
 type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -63,7 +64,8 @@ export async function insertSkippedSends(
  * sent, and neither is a {brand} message whose campaign has no brand. Returns
  * null when the message can render (send normally); otherwise writes ONE
  * skipped_ineligible row per lead — reason `tags_not_supported_yet` or
- * `missing_brand`, idempotent — and returns how many were new. Journeys are NOT
+ * `missing_brand`, idempotent — and returns the reason and how many rows were
+ * NEW (only new rows are alerted: see tallySkip / notifyDripSkips). Journeys are NOT
  * touched: a first send stays routed and goes out once the message is fixed.
  * Both drip producers call this BEFORE minting (scripts/test-format-interim.ts).
  */
@@ -79,7 +81,7 @@ export async function skipIfTagged(
     brandName: string;
     leads: { contact_id: string; phone: string }[];
   },
-): Promise<number | null> {
+): Promise<{ reason: string; written: number } | null> {
   const tags = requiredTags({ shape: i.shape, creativeText: i.creativeText });
   const reason = tags.some((t) => TAGS[t].scope === "contact")
     ? "tags_not_supported_yet"
@@ -87,8 +89,43 @@ export async function skipIfTagged(
       ? "missing_brand"
       : null;
   if (reason === null) return null;
-  return insertSkippedSends(tx, {
+  const written = await insertSkippedSends(tx, {
     orgId: i.orgId, campaignId: i.campaignId, stageId: i.stageId, reason,
     renderedText: i.creativeText, ...formatStamp(i.shape), leads: i.leads,
   });
+  return { reason, written };
+}
+
+/** Per-tick tally of NEWLY written skip rows, by stage. */
+export type DripSkipTally = Map<number, { campaignName: string; reason: string; leads: number }>;
+
+export function tallySkip(
+  t: DripSkipTally,
+  i: { stageId: number; campaignName: string; result: { reason: string; written: number } | null },
+): void {
+  if (!i.result || i.result.written === 0) return;
+  const cur = t.get(i.stageId);
+  if (cur) cur.leads += i.result.written;
+  else t.set(i.stageId, { campaignName: i.campaignName, reason: i.result.reason, leads: i.result.written });
+}
+
+/**
+ * ONE Telegram per stage per tick, counting only leads skipped for the FIRST
+ * time — a (stage, lead) is therefore alerted exactly once, never every tick
+ * (owner ruling 2026-10-19). Clears the tally. Returns alerts sent.
+ */
+export async function notifyDripSkips(t: DripSkipTally): Promise<number> {
+  let sent = 0;
+  for (const [stageId, s] of t) {
+    const why = s.reason === "missing_brand"
+      ? "uses {brand} but the campaign has no brand"
+      : "uses personalization tags ({first_name}/{zip}/{state}) that can't be sent yet";
+    await notifyTelegram(
+      `⚠️ Drip: ${s.leads} lead${s.leads === 1 ? "" : "s"} not sent on campaign "${s.campaignName}" · stage id ${stageId} — the message ${why}. ` +
+        `They wait (first sends) or are skipped (follow-ups) until the message is fixed; each lead is reported once.`,
+    ).catch(() => false);
+    sent++;
+  }
+  t.clear();
+  return sent;
 }

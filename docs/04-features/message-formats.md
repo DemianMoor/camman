@@ -99,3 +99,5 @@ P4 removes the regular branch and P5 the drip branch.
 **`missing_brand`.** A message that uses `{brand}` on a campaign with no brand is refused cleanly (regular: kickoff refusal `missing_brand`, permanent for the scheduled path; drip: one idempotent `skipped_ineligible` row per lead with `last_error = 'missing_brand'`), never thrown.
 
 Drip skip rows are written in ONE statement per batch (`insertSkippedSends`): the stage's existing skip set is read once per tick, not once per lead.
+
+**Drip alerting (owner ruling 3, 2026-10-19).** Each scheduler / follow-up run tallies only the rows it NEWLY wrote and sends ONE Telegram per stage at the end of the run (`tallySkip` → `notifyDripSkips`). A (stage, lead) is therefore alerted exactly once; a lead re-selected on later ticks writes no row and raises no alert.

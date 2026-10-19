@@ -14,7 +14,7 @@ import { closeJourneyUnengaged } from "./lifecycle";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { dispatchDripSend, GateRefused, MintRefused } from "./send-one";
 import { shapeFromStage } from "@/lib/messages/render";
-import { skipIfTagged } from "./skip-send";
+import { notifyDripSkips, skipIfTagged, tallySkip, type DripSkipTally } from "./skip-send";
 
 // Behavioural follow-up scheduling (Drip Phase 6).
 //
@@ -101,6 +101,8 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
     pausedSkipped: 0, gateRefused: 0, mintRefused: 0, tagsSkipped: 0, closedUnengaged: 0,
     hitDeadline: false,
   };
+  // 0216 interim: NEW skips this run, alerted once at the end (one per stage).
+  const skipTally: DripSkipTally = new Map();
   const startedAt = Date.now();
 
   const orgs = (await db.execute(sql`
@@ -273,7 +275,8 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
         creativeText: r.child_creative_text, shape, brandName: r.brand_name ?? "", leads: [r],
       });
       if (tagged !== null) {
-        res.tagsSkipped += tagged;
+        res.tagsSkipped += tagged.written;
+        tallySkip(skipTally, { stageId: r.child_stage_id, campaignName: r.campaign_name ?? String(r.campaign_id), result: tagged });
         continue;
       }
 
@@ -383,5 +386,6 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
      }
     }
   }
+  await notifyDripSkips(skipTally);
   return res;
 }

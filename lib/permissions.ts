@@ -57,6 +57,10 @@ export type Permission =
   | "traffic_types.archive"
   | "traffic_types.restore"
   | "utm_tags.view"
+  // 0216 message formats: view = pick a format on a stage (every role);
+  // manage = create / edit / enable / make default (manager, admin, owner).
+  | "message_formats.view"
+  | "message_formats.manage"
   | "utm_tags.create"
   | "utm_tags.update"
   | "utm_tags.archive"
@@ -186,6 +190,7 @@ const viewerPerms: ReadonlySet<Permission> = new Set([
   "routing_types.view",
   "traffic_types.view",
   "utm_tags.view",
+  "message_formats.view",
   "contact_groups.view",
   "contacts.view",
   "contacts.stats",
@@ -283,6 +288,7 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "offers.view",
   "networks.view",
   "utm_tags.view",
+  "message_formats.view",
   "routing_types.view",
   "traffic_types.view",
   "registry.view",
@@ -368,6 +374,7 @@ const managerPerms: ReadonlySet<Permission> = new Set([
   "utm_tags.update",
   "utm_tags.archive",
   "utm_tags.restore",
+  "message_formats.manage",
   "contact_groups.create",
   "contact_groups.update",
   "contact_groups.archive",

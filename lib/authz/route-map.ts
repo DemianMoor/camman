@@ -496,6 +496,13 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "users/invites/[inviteId]": null, // settings / provider registry -- Owner only
   "users/list": null, // settings / provider registry -- Owner only
 
+  // ── message-formats (0216) ──────────────────────────────────────────────
+  // Operators PICK a format on a stage (the list) and never manage them.
+  "message-formats": null, // create — message_formats.manage (manager+)
+  "message-formats/[id]": null, // edit / enable — message_formats.manage
+  "message-formats/[id]/make-default": null, // message_formats.manage
+  "message-formats/list": { methods: ["GET"] },
+
   // ── utm-tags ─────────────────────────────────────────────────────────────
   // Registry is VIEW-ONLY (matrix). GET only -- these files export POST and
   // PATCH too, so a route-level allow would have granted writes.

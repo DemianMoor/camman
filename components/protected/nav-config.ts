@@ -257,6 +257,14 @@ export const navGroups: NavGroup[] = [
       },
       // Brand short domains (B1). The only write surface for them — the brand
       // form's single text field was removed, since a brand may hold several.
+      // Message formats (0216): how brand / creative / link / opt-out text are
+      // assembled. Everyone who reaches Settings may view; manager+ manages.
+      {
+        label: "Message Formats",
+        href: "/settings/message-formats",
+        permission: "message_formats.view",
+        icon: MessageSquare,
+      },
       {
         label: "Short Domains",
         href: "/settings/short-domains",

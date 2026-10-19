@@ -22,6 +22,8 @@ const MATRIX_OPERATOR: Permission[] = [
   // Registry — view only
   "brands.view", "offers.view", "networks.view", "utm_tags.view",
   "routing_types.view", "traffic_types.view", "registry.view",
+  // Message formats (0216) — pick one on a stage; never manage them
+  "message_formats.view",
   // Sending numbers (redacted to a route alias in the response)
   "provider_phones.view",
   // Campaigns & stages — full; delete on stages only (campaigns have no hard
@@ -439,23 +441,26 @@ const FROZEN: Record<Exclude<Role, "operator">, Permission[]> = {
 // Permissions Phase 2 deliberately ADDS to a frozen role, listed explicitly so
 // an intentional grant is visible here instead of quietly widening a baseline.
 const PHASE2_ADDITIONS: Record<string, Permission[]> = {
-  viewer: ["contacts.stats"],
+  // "message_formats.view" (0216) is every role — a stage picks its format;
+  // "message_formats.manage" is manager+ (owner ruling 2026-10-19: admin included).
+  viewer: ["contacts.stats", "message_formats.view"],
   // "lifecycle.configure" (migration 0187) is manager+ and inherited upward: it
   // gates the lifecycle thresholds, the per-group overrides and the engine_mode
   // switch. Declared here so the freeze keeps meaning "nothing moved that was
   // not written down".
-  manager: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure"],
+  manager: ["contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure",
+    "message_formats.view", "message_formats.manage"],
   // "brands.landing.update" (migration 0212) is admin+ ONLY: a brand's landing
   // host/path re-points every future minted link. Manager and operator must NOT
   // hold it — the freeze above proves they don't.
   admin: [
     "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure",
-    "brands.landing.update",
+    "brands.landing.update", "message_formats.view", "message_formats.manage",
   ],
   owner: [
     "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import",
     "compliance.manage", "deletion.approve", "audit.view", "lifecycle.configure",
-    "brands.landing.update",
+    "brands.landing.update", "message_formats.view", "message_formats.manage",
   ],
 };
 

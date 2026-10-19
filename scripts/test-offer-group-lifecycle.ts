@@ -1,4 +1,4 @@
-// Fixture test for migration 0214 (offer_group_lifecycle_mv). PREVIEW DATABASE
+// Fixture test for migrations 0214/0215 (offer_group_lifecycle_mv). PREVIEW DATABASE
 // ONLY — it rewrites contacts.lifecycle_status and stage_sends.sent_at inside a
 // transaction that is ALWAYS rolled back, so it leaves no residue.
 //
@@ -10,7 +10,7 @@
 // exactly the nine numbers an independent per-row computation in TypeScript
 // derives from the raw tables. The fixture spreads statuses over
 // hot/warm/cold/freeze/new and send dates over 0–119 days so every cohort, both
-// windows, the >90d exclusion and the `new` exclusion are all exercised; a
+// windows, the >30d exclusion and the `new` exclusion are all exercised; a
 // column whose total is zero is a FAILURE, not a pass.
 import "./_env-preload";
 import "./_require-preview-db";
@@ -20,9 +20,9 @@ import path from "node:path";
 import postgres from "postgres";
 
 const COLS = [
-  "hw_sent_14d", "hw_sent_90d", "hw_fresh_pool",
-  "cold_sent_14d", "cold_sent_90d", "cold_fresh_pool",
-  "freeze_sent_14d", "freeze_sent_90d", "freeze_fresh_pool",
+  "hw_sent_14d", "hw_sent_30d", "hw_fresh_pool",
+  "cold_sent_14d", "cold_sent_30d", "cold_fresh_pool",
+  "freeze_sent_14d", "freeze_sent_30d", "freeze_fresh_pool",
 ] as const;
 type Row = Record<(typeof COLS)[number], number>;
 const zero = (): Row => Object.fromEntries(COLS.map((c) => [c, 0])) as Row;
@@ -40,7 +40,7 @@ const ROLLBACK = new Error("rollback");
 
 async function main() {
   const src = fs.readFileSync(
-    path.resolve(__dirname, "../db/migrations/0214_offer_group_lifecycle_report.sql"),
+    path.resolve(__dirname, "../db/migrations/0215_lifecycle_cohort_sent_30d.sql"),
     "utf8",
   );
   const body = src
@@ -86,7 +86,7 @@ async function main() {
       const sends = await tx`
         select ss.contact_id, cs.campaign_id,
                ss.sent_at >= now() - interval '14 days' as in14,
-               ss.sent_at >= now() - interval '90 days' as in90
+               ss.sent_at >= now() - interval '30 days' as in30
         from stage_sends ss join campaign_stages cs on cs.id = ss.stage_id
         where ss.status = 'sent'`;
       const members = await tx`select contact_id, contact_group_id, org_id from contact_contact_groups`;
@@ -114,13 +114,13 @@ async function main() {
       for (const s of sends) {
         const camp = campById.get(Number(s.campaign_id));
         const ct = contactById.get(s.contact_id);
-        if (!camp || !ct || !s.in90 || ct.org_id !== camp.org_id) continue;
+        if (!camp || !ct || !s.in30 || ct.org_id !== camp.org_id) continue;
         const cohort = cohortOf(ct.lifecycle_status);
         if (!cohort) continue;
         for (const m of groupsOf.get(s.contact_id) ?? []) {
           if (m.org !== camp.org_id || !(camp.gids as number[]).includes(m.group)) continue;
           const r = want.get(key(camp.org_id, Number(camp.offer_id), m.group))!;
-          r[`${cohort}_sent_90d` as keyof Row]++;
+          r[`${cohort}_sent_30d` as keyof Row]++;
           if (s.in14) r[`${cohort}_sent_14d` as keyof Row]++;
         }
       }
@@ -154,8 +154,8 @@ async function main() {
       check("every cell equals the independent computation", mismatches.length === 0, mismatches.slice(0, 10).join("; "));
       for (const c of COLS) check(`fixture exercises ${c} (total ${totals[c]})`, totals[c] > 0);
       for (const cohort of ["hw", "cold", "freeze"])
-        check(`${cohort}: 14d ≤ 90d on every row`,
-          got.every((g) => Number(g[`${cohort}_sent_14d`]) <= Number(g[`${cohort}_sent_90d`])));
+        check(`${cohort}: 14d ≤ 30d on every row`,
+          got.every((g) => Number(g[`${cohort}_sent_14d`]) <= Number(g[`${cohort}_sent_30d`])));
 
       throw ROLLBACK;
     });

@@ -1506,6 +1506,13 @@
       "when": 1795132800000,
       "tag": "0214_offer_group_lifecycle_report",
       "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1795219200000,
+      "tag": "0215_lifecycle_cohort_sent_30d",
+      "breakpoints": true
     }
   ]
 }

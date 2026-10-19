@@ -64,26 +64,26 @@ export type OfferTotals = RawMetrics & {
   attributable_pending_revenue: number;
 };
 
-// Lifecycle-cohort columns for one group row (migration 0214,
+// Lifecycle-cohort columns for one group row (migrations 0214/0215,
 // offer_group_lifecycle_mv). Cohort = the contact's CURRENT lifecycle status:
 // hw = hot + warm. Sent = messages (same scope as sent_7d/30d/90d); fresh = contacts
 // (0133 definition). new/suppressed are in no cohort.
 export type GroupLifecycleRow = {
   hw_sent_14d: number;
-  hw_sent_90d: number;
+  hw_sent_30d: number;
   hw_fresh_pool: number;
   cold_sent_14d: number;
-  cold_sent_90d: number;
+  cold_sent_30d: number;
   cold_fresh_pool: number;
   freeze_sent_14d: number;
-  freeze_sent_90d: number;
+  freeze_sent_30d: number;
   freeze_fresh_pool: number;
 };
 
 export const LIFECYCLE_COLUMNS = [
-  "hw_sent_14d", "hw_sent_90d", "hw_fresh_pool",
-  "cold_sent_14d", "cold_sent_90d", "cold_fresh_pool",
-  "freeze_sent_14d", "freeze_sent_90d", "freeze_fresh_pool",
+  "hw_sent_14d", "hw_sent_30d", "hw_fresh_pool",
+  "cold_sent_14d", "cold_sent_30d", "cold_fresh_pool",
+  "freeze_sent_14d", "freeze_sent_30d", "freeze_fresh_pool",
 ] as const satisfies ReadonlyArray<keyof GroupLifecycleRow>;
 
 export type OfferGroupReport = {

@@ -23,6 +23,9 @@ export interface RecipientData {
   state: string | null;
 }
 
+/** No contact data: a message without tags renders the same for everyone. */
+export const NO_RECIPIENT: RecipientData = { first_name: null, zip: null, state: null };
+
 export interface TagDef {
   key: TagKey;
   label: string;

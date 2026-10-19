@@ -559,6 +559,10 @@ async function main() {
       carrierNorm: null,
       providerPhoneId: null,
       costPerSms: null,
+      // 0216 stamp: this part tests the lifecycle stamp CTE, not formats — the
+      // pre-0216 value (no format recorded) keeps it about one thing.
+      messageFormatId: null,
+      formatCustom: false,
     }));
     const gIds = sql.join(gRows.map((r) => sql`${r.id}`), sql`, `);
 

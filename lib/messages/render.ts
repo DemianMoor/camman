@@ -9,7 +9,7 @@
 // values are never re-scanned, so a creative containing "{url}" stays literal.
 
 import { countSegments } from "@/lib/sends/segments";
-import { assembleMessage } from "./format";
+import { T1_TEMPLATE, assembleMessage } from "./format";
 import { TAGS, findTags, type RecipientData, type TagKey } from "./tags";
 
 export type MessageShape =
@@ -97,4 +97,24 @@ export function firstNameMaxLength(i: Omit<RenderInput, "recipient">, maxSegment
 
 export function checkRecipientBody(body: string, maxSegments: number): { ok: true } | { ok: false; reason: "segment_limit" } {
   return countSegments(body).segments <= maxSegments ? { ok: true } : { ok: false, reason: "segment_limit" };
+}
+
+/** The shape stored on a stage (0216: exactly one of format / custom text). */
+export function shapeFromStage(c: {
+  message_format_id: number | null;
+  custom_text: string | null;
+  /** message_formats.template, joined on message_format_id. */
+  format_template: string | null;
+}): MessageShape {
+  if (c.custom_text != null) return { kind: "custom", text: c.custom_text };
+  // A NULL template only happens for a stage read before 0216 was applied; T1
+  // is exactly what the 0216 backfill assigns such a stage.
+  return { kind: "template", formatId: c.message_format_id, template: c.format_template ?? T1_TEMPLATE };
+}
+
+/** What a stage_sends row records about the shape that rendered it. */
+export function formatStamp(shape: MessageShape): { messageFormatId: number | null; formatCustom: boolean } {
+  return shape.kind === "custom"
+    ? { messageFormatId: null, formatCustom: true }
+    : { messageFormatId: shape.formatId, formatCustom: false };
 }

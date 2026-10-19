@@ -35,7 +35,8 @@ import {
   buildLandingPageUrl,
   isBrandLandingHost,
 } from "@/lib/landing-page-url";
-import { buildStageSms } from "@/lib/sends/stage-sms";
+import { formatStamp, renderMessage, requiredTags, shapeFromStage } from "@/lib/messages/render";
+import { NO_RECIPIENT } from "@/lib/messages/tags";
 import {
   buildStageFullUrl,
   isGuideknLpUrl,
@@ -114,6 +115,10 @@ export type KickoffRefusal =
   // Request does NOT append one on API sends. ENFORCED for txr; other API
   // providers only dry-run (log + alert) during the 30-day observation window.
   | "missing_opt_out_language"
+  // 0216 interim (P2 → P4): the creative or custom text uses a personalization
+  // tag ({first_name} {zip} {state} {brand}) and per-recipient rendering has not
+  // shipped yet. Fail closed rather than send the literal tag. Removed in P4.
+  | "tags_not_supported_yet"
   // Ahoi's send() requires a `source` number (spec §5 carry, Section 2 final
   // review): a stage with no provider_phone_id previously passed kickoff,
   // materialized every recipient, then failed at DRAIN — wasteful and risks
@@ -192,6 +197,10 @@ interface MainRow {
   split_group_state: string | null;
   creative_text: string | null;
   creative_allow_multi_segment: boolean;
+  // 0216: the stage's message shape — exactly one of format / custom text.
+  message_format_id: number | null;
+  custom_text: string | null;
+  format_template: string | null;
   exclude_prior_offer_contacts: boolean;
   lifecycle_rules: boolean;
   offer_rules_enabled: boolean;
@@ -255,6 +264,9 @@ export async function kickoffStageSend(
       sg.state                   AS split_group_state,
       cr.text                    AS creative_text,
       cr.allow_multi_segment     AS creative_allow_multi_segment,
+      s.message_format_id        AS message_format_id,
+      s.custom_text              AS custom_text,
+      mf.template                AS format_template,
       c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
       c.lifecycle_rules AS lifecycle_rules,
            c.offer_rules_enabled AS offer_rules_enabled,
@@ -268,6 +280,7 @@ export async function kickoffStageSend(
     LEFT JOIN brands b ON b.id = c.brand_id
     LEFT JOIN offer_landing_pages lp ON lp.id = s.landing_page_id AND lp.org_id = c.org_id
     LEFT JOIN creatives cr ON cr.id = s.creative_id
+    LEFT JOIN message_formats mf ON mf.id = s.message_format_id AND mf.org_id = c.org_id
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     LEFT JOIN sms_providers prov ON prov.id = s.sms_provider_id AND prov.org_id = c.org_id
     LEFT JOIN campaign_stage_split_groups sg ON sg.id = s.split_group_id
@@ -317,6 +330,30 @@ export async function kickoffStageSend(
     };
   }
 
+  // ---- 0216: the stage's message shape. Every body below is rendered from it
+  // (lib/messages/render.ts — the one renderer) and every row is stamped with
+  // it. T1 is byte-identical to the pre-format body.
+  const shape = shapeFromStage(row);
+  const stamp = formatStamp(shape);
+  // INTERIM (P2 → P4): per-recipient tag rendering is not built yet. A stage
+  // whose message uses a tag is refused, never sent with the literal tag.
+  const tags = requiredTags({ shape, creativeText: row.creative_text });
+  if (tags.length > 0) {
+    void notifyTelegram(
+      `⚠️ Stage not sent: campaign "${row.campaign_name ?? String(campaignId)}" · stage ${row.stage_number != null ? `#${row.stage_number}` : `id ${stageId}`} ` +
+        `uses personalization tags (${tags.map((t) => `{${t}}`).join(", ")}) that can't be sent yet. Remove them from the creative or custom text.`,
+    ).catch(() => {});
+    return { ok: false, reason: "tags_not_supported_yet" };
+  }
+  const renderBody = (linkUrl: string | null): string => {
+    const r = renderMessage({
+      shape, brandName, creativeText: row.creative_text, linkUrl, stopText: footer.text, recipient: NO_RECIPIENT,
+    });
+    // Unreachable while the tag gate above holds: with no tag, nothing is missing.
+    if (!r.ok) throw new Error(`kickoff: render refused (${r.reason}: ${r.tag}) for stage ${stageId}`);
+    return r.body;
+  };
+
   // ---- Resolve mode-specific send context (guards) BEFORE materializing, so a
   // misconfigured stage refuses cheaply without inserting partial rows.
   let shortDomain: { id: number; domain: string } | null = null;
@@ -328,12 +365,7 @@ export async function kickoffStageSend(
 
   if (mode === "manual") {
     // Freeze the pasted short_url into every row, no minting.
-    manualText = buildStageSms({
-      brandName,
-      creativeText: row.creative_text,
-      linkUrl: row.short_url,
-      stopText: footer.text,
-    });
+    manualText = renderBody(row.short_url);
   } else {
     // Tracked: enforce readiness + resolve provider/credential/domain/destination.
     if (!row.stage_tracking_id || !row.campaign_tracking_id) {
@@ -548,12 +580,7 @@ export async function kickoffStageSend(
   const representativeText =
     mode === "manual"
       ? manualText
-      : buildStageSms({
-          brandName,
-          creativeText: row.creative_text,
-          linkUrl: buildRepresentativeTrackedLinkUrl(shortDomain!.domain),
-          stopText: footer.text,
-        });
+      : renderBody(buildRepresentativeTrackedLinkUrl(shortDomain!.domain));
   // CamMan renders the opt-out footer INTO the body — the RESOLVED footer, which
   // may come from the number, the provider or the stage (Q3) — so
   // representativeText IS the on-wire text, including its true length.
@@ -745,6 +772,7 @@ export async function kickoffStageSend(
             carrierNorm: r.carrier_norm ?? null,
             providerPhoneId: row.provider_phone_id,
             costPerSms: row.provider_cost_per_sms,
+            ...stamp,
           };
         });
       } else {
@@ -784,16 +812,12 @@ export async function kickoffStageSend(
             contactId: t.contactId,
             phone: t.phone,
             linkId: link.id,
-            renderedText: buildStageSms({
-              brandName,
-              creativeText: row.creative_text!,
-              linkUrl: buildTrackedLinkUrl(sd.domain, link.code),
-              stopText: footer.text,
-            }),
+            renderedText: renderBody(buildTrackedLinkUrl(sd.domain, link.code)),
             leadId: t.sendToken,
             carrierNorm: t.carrierNorm,
             providerPhoneId: row.provider_phone_id,
             costPerSms: row.provider_cost_per_sms,
+            ...stamp,
           };
         });
       }
@@ -894,6 +918,9 @@ interface StageSendInsertRow {
   // Migration 0112: reporting snapshots, constant across the stage's rows.
   providerPhoneId: number | null;
   costPerSms: string | null;
+  // 0216: which format rendered the row (REQUIRED — every writer must decide).
+  messageFormatId: number | null;
+  formatCustom: boolean;
 }
 
 const STAGE_SENDS_CHUNK = 1000;
@@ -930,14 +957,15 @@ export async function bulkInsertStageSends(
       (r) => sql`(
         ${r.id}, ${r.orgId}, ${r.campaignId}, ${r.stageId}, ${r.contactId},
         ${r.phone}, ${r.linkId}, ${r.renderedText}, 'pending', ${r.leadId}, ${r.carrierNorm},
-        ${r.providerPhoneId}, ${r.costPerSms}
+        ${r.providerPhoneId}, ${r.costPerSms}, ${r.messageFormatId}, ${r.formatCustom}
       )`,
     );
     const res = (await tx.execute(sql`
       WITH ins AS (
         INSERT INTO stage_sends
           (id, org_id, campaign_id, stage_id, contact_id, phone, link_id,
-           rendered_text, status, lead_id, carrier_norm, provider_phone_id, cost_per_sms)
+           rendered_text, status, lead_id, carrier_norm, provider_phone_id, cost_per_sms,
+           message_format_id, format_custom)
         VALUES ${sql.join(values, sql`, `)}
         ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending', 'sending')
         DO NOTHING

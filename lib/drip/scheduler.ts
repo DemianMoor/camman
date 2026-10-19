@@ -13,7 +13,9 @@ import {
   optOutGateSubject,
   resolveOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
-import { buildStageSms } from "@/lib/sends/stage-sms";
+import { formatStamp, renderMessage, shapeFromStage } from "@/lib/messages/render";
+import { NO_RECIPIENT } from "@/lib/messages/tags";
+import { skipIfTagged } from "./skip-send";
 import { orderForHour } from "./hourly-cap";
 import {
   clearIneligibleHourAssignments, prepareHourly, realHasHeadroom, recordSendRefusal,
@@ -90,6 +92,8 @@ export interface SchedulerResult {
   hourlyCapBlocked: number;
   /** Assigned leads dropped by the hourly-cap maintenance (cap / closed / blocked). */
   hourlyDropped: number;
+  /** 0216 interim: leads whose stage message uses a tag — skip row written once, journey left routed. */
+  tagsSkipped: number;
 }
 
 export interface DueRow {
@@ -118,7 +122,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
   const res: SchedulerResult = {
     postureOn: false, considered: 0, inserted: 0, waitingForWindow: 0,
     gateRefused: 0, mintRefused: 0, capBlocked: 0, numbersExhausted: 0, pausedSkipped: 0,
-    alreadyQueued: 0, hourlyCapBlocked: 0, hourlyDropped: 0,
+    alreadyQueued: 0, hourlyCapBlocked: 0, hourlyDropped: 0, tagsSkipped: 0,
   };
 
   // ⭐ HOURLY CAP step 0 (spec §4): org paused/off, flag off, campaign paused or
@@ -182,11 +186,13 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
         SELECT s.id AS stage_id, s.window_start_min, s.window_end_min,
                s.creative_id, s.stop_text, s.short_url, s.landing_page_id,
                s.tracking_id AS stage_tracking_id, s.full_url,
+               s.message_format_id, s.custom_text, mf.template AS format_template,
                cr.text AS creative_text,
                lp.kind AS lp_kind, lp.slug AS lp_slug,
                lp.external_url AS lp_external_url, lp.status AS lp_status
         FROM campaign_stages s
         LEFT JOIN creatives cr ON cr.id = s.creative_id
+        LEFT JOIN message_formats mf ON mf.id = s.message_format_id AND mf.org_id = s.org_id
         LEFT JOIN offer_landing_pages lp
                ON lp.id = s.landing_page_id AND lp.org_id = s.org_id
         WHERE s.campaign_id = ${campaignId}
@@ -203,6 +209,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
         short_url: string | null; landing_page_id: number | null; creative_text: string | null;
         full_url: string | null;
         stage_tracking_id: string | null;
+        message_format_id: number | null; custom_text: string | null; format_template: string | null;
         lp_kind: string | null; lp_slug: string | null;
         lp_external_url: string | null; lp_status: string | null;
       })[];
@@ -217,6 +224,20 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       }
       const stage = stages.find((s) => s.stage_id === pick.stage_id)!;
       if (!stage.creative_text) continue;
+
+      // 0216: the stage's message shape renders every body and stamps every row.
+      const shape = shapeFromStage(stage);
+      const stamp = formatStamp(shape);
+      // INTERIM (P2 → P5): tag rendering is not built yet. Each lead gets ONE
+      // skipped_ineligible row (idempotent) and its journey stays routed, so it
+      // sends normally once the tag is removed from the creative / custom text.
+      const tagged = await skipIfTagged(db, {
+        orgId, campaignId, stageId: stage.stage_id, creativeText: stage.creative_text, shape, leads,
+      });
+      if (tagged !== null) {
+        res.tagsSkipped += tagged;
+        continue;
+      }
 
       // ── caps, counted over the ET day as a RANGE (never a functional
       // predicate on sent_at — R15) ──────────────────────────────────────
@@ -327,12 +348,17 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
             });
             if (!r.ok) throw new MintRefused(r.reason, r.message);
 
-            const body = buildStageSms({
+            const rendered = renderMessage({
+              shape,
               brandName: head.brand_name ?? "",
               creativeText: stage.creative_text!,
               linkUrl: r.linkUrl,
               stopText: footer.text,
+              recipient: NO_RECIPIENT,
             });
+            // Unreachable while the interim tag gate above holds.
+            if (!rendered.ok) throw new GateRefused(`render refused: ${rendered.reason} ${rendered.tag}`);
+            const body = rendered.body;
 
             // ⭐ THE GATE, PER MESSAGE, ON THE FINAL TEXT.
             const gate = optOutGateSubject({
@@ -353,7 +379,8 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
             const ins = (await tx.execute(sql`
               INSERT INTO stage_sends
                 (id, org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
-                 link_id, rendered_text, status, created_at, cost_per_sms)
+                 link_id, rendered_text, status, created_at, cost_per_sms,
+                 message_format_id, format_custom)
               VALUES (${sendToken}::uuid, ${orgId}::uuid, ${campaignId}, ${stage.stage_id},
                       ${lead.contact_id}::uuid, ${lead.phone}, ${number.provider_phone_id},
                       ${r.linkId}, ${body}, 'pending', now(),
@@ -361,7 +388,8 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
                       -- kickoff does: the partner report's Send Cost must not
                       -- move when the number's rate is edited later.
                       (SELECT pp.cost_per_sms FROM provider_phones pp
-                       WHERE pp.id = ${number.provider_phone_id}))
+                       WHERE pp.id = ${number.provider_phone_id}),
+                      ${stamp.messageFormatId}, ${stamp.formatCustom})
               RETURNING id
             `)) as unknown as { id: string }[];
 

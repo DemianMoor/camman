@@ -11,7 +11,8 @@ import {
   type ResolvedOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
 import { getDescriptor } from "@/lib/sends/providers/registry";
-import { buildStageSms } from "@/lib/sends/stage-sms";
+import { formatStamp, renderMessage, type MessageShape } from "@/lib/messages/render";
+import { NO_RECIPIENT } from "@/lib/messages/tags";
 import { mintDripLeadLink } from "./mint";
 
 type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -47,6 +48,8 @@ export interface DripSendInput {
   phone: string;
   creativeId: number | null;
   creativeText: string;
+  /** 0216: the stage's message shape (REQUIRED — every caller decides). */
+  shape: MessageShape;
   brandName: string;
   brandId: number | null;
   brandLandingHost: string | null;
@@ -107,12 +110,18 @@ export async function dispatchDripSend(
   // and a send with no link_id is unattributable — worse than silence.
   if (!minted.ok) throw new MintRefused(minted.reason, minted.message);
 
-  const body = buildStageSms({
+  const rendered = renderMessage({
+    shape: input.shape,
     brandName: input.brandName,
     creativeText: input.creativeText,
     linkUrl: minted.linkUrl,
     stopText: input.footer.text,
+    recipient: NO_RECIPIENT,
   });
+  // Callers refuse a tagged message before dispatch (interim, P2 → P5).
+  if (!rendered.ok) throw new GateRefused(`render refused: ${rendered.reason} ${rendered.tag}`);
+  const body = rendered.body;
+  const stamp = formatStamp(input.shape);
 
   const descriptor = input.adapterCode ? getDescriptor(input.adapterCode) : null;
   const gate = optOutGateSubject({
@@ -129,13 +138,14 @@ export async function dispatchDripSend(
   const ins = (await tx.execute(sql`
     INSERT INTO stage_sends
       (id, org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
-       link_id, rendered_text, status, created_at, cost_per_sms)
+       link_id, rendered_text, status, created_at, cost_per_sms, message_format_id, format_custom)
     VALUES (${sendToken}::uuid, ${input.orgId}::uuid, ${input.campaignId}, ${input.stageId},
             ${input.contactId}::uuid, ${input.phone}, ${input.providerPhoneId},
             ${minted.linkId}, ${body}, 'pending', now(),
             -- Rate snapshot at send time (0112) — see lib/drip/scheduler.ts.
             (SELECT pp.cost_per_sms FROM provider_phones pp
-             WHERE pp.id = ${input.providerPhoneId}))
+             WHERE pp.id = ${input.providerPhoneId}),
+            ${stamp.messageFormatId}, ${stamp.formatCustom})
     RETURNING id
   `)) as unknown as { id: string }[];
 

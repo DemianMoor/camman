@@ -4,6 +4,7 @@
 import { sql } from "drizzle-orm";
 import type { db } from "@/db/client";
 import { validateCustomText } from "./format";
+import { FORMAT_LOCKED_TEXT } from "@/lib/stages/lock-copy";
 
 type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -96,7 +97,7 @@ export function decideStageFormatChange(i: {
   if (i.hasSent) {
     return {
       ok: false, status: 409, reason: "format_locked_after_send", field: wantsCustom ? "custom_text" : "message_format_id",
-      message: "This stage has already sent, so its message format is locked. Create a new stage to use another format.",
+      message: `This stage has already sent, so its message format is locked. ${FORMAT_LOCKED_TEXT}.`,
     };
   }
   return wantsCustom

@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
-import { buildStageSms } from "@/lib/sends/stage-sms";
+import { renderWorstCase, type MessageShape } from "@/lib/messages/render";
 import { cn } from "@/lib/utils";
 import type {
   CreativeFunnelStage,
@@ -172,7 +172,11 @@ export interface CreativePickerDialogProps {
   // panel; brand + link state drive the SMS preview.
   campaignOffer: { id: number; name: string } | null;
   brandName: string;
+  // The RESOLVED opt-out footer (resolveOptOutFooter), never the raw stage
+  // field — otherwise the picker previews a body that does not ship.
   stopText: string;
+  // 0216: the stage's message shape (format template or custom text).
+  shape: MessageShape;
   // Already-resolved link line for the preview (tracked-link preview or the
   // manual short_url). Empty string when there's none.
   linkPreviewUrl: string;
@@ -188,6 +192,7 @@ export function CreativePickerDialog({
   campaignOffer,
   brandName,
   stopText,
+  shape,
   linkPreviewUrl,
   selectedCreativeId,
   onSelect,
@@ -296,7 +301,10 @@ export function CreativePickerDialog({
     [creatives, activeId],
   );
 
-  const assembledSms = buildStageSms({
+  // Rendered with the STAGE's message shape and its RESOLVED footer, so the
+  // picker previews exactly the body the stage form shows and the send ships.
+  const assembledSms = renderWorstCase({
+    shape,
     brandName,
     creativeText: activeCreative?.text,
     linkUrl: linkPreviewUrl,

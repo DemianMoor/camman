@@ -17,7 +17,8 @@ export async function stageHasSent(dbc: DbOrTx, stageId: number): Promise<boolea
   return r[0]?.sent === true;
 }
 
-export const CREATIVE_LOCKED_TEXT = "Create a new stage to use another creative";
+export { CREATIVE_LOCKED_TEXT } from "./lock-copy";
+import { CREATIVE_LOCKED_TEXT } from "./lock-copy";
 
 /** PURE. The form echoes creative_id, so only a DIFFERENT value is a change. */
 export function decideCreativeChange(i: {

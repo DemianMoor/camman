@@ -56,6 +56,10 @@ export interface EditableStage {
   full_url: string | null;
   utm_tag_ids: number[] | null;
   stop_text: string;
+  // 0216: message shape + whether the stage has sent (locks format / drip creative).
+  message_format_id: number | null;
+  custom_text: string | null;
+  has_sent: boolean;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -259,6 +263,8 @@ export function StageInlineEditor({
         full_url: stage.full_url ?? "",
         utm_tag_ids: stage.utm_tag_ids ?? [],
         stop_text: stage.stop_text,
+        message_format_id: stage.message_format_id,
+        custom_text: stage.custom_text,
         include_no_status: stage.include_no_status,
         include_clickers: stage.include_clickers,
         exclude_clickers: stage.exclude_clickers,
@@ -328,6 +334,7 @@ export function StageInlineEditor({
             splitTotal={isEdit ? stage!.split_total : null}
             behavioralTier={isEdit ? stage!.behavioral_tier : null}
             sentAt={isEdit ? stage!.sent_at : null}
+            hasSent={isEdit ? stage!.has_sent : false}
             armed={
               isEdit &&
               !!stage!.send_approved &&

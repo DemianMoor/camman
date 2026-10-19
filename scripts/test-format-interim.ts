@@ -47,6 +47,8 @@ async function main() {
 
       const none = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi there", shape: t1, leads });
       check("M4.3 untagged message ⇒ null (send normally), no rows", none === null);
+      const brandOnly = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi from {brand}", shape: t1, leads });
+      check("M4.3b {brand} only ⇒ null (renders from the campaign, sends normally)", brandOnly === null);
 
       const first = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, leads });
       const again = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, leads });

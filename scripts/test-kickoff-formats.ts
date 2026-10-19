@@ -113,6 +113,14 @@ async function main() {
         !rTag.ok && rTag.reason === "tags_not_supported_yet" && nTag.n === 0 && telegramCalls === 1,
         JSON.stringify({ rTag, rows: nTag.n, telegramCalls }));
 
+      const sBrand = await mkCase(6, "{brand} says hi", { formatId: t2.id });
+      const rBrand = await kickoffStageSend(tx as unknown as typeof db, { orgId, campaignId, stageId: sBrand });
+      const r6 = rBrand.ok ? await rowOf(sBrand) : undefined;
+      check("M4.3 {brand} in the creative renders now (campaign data, not contact data) — not refused",
+        rBrand.ok && !!r6 && r6.body === `${brand.name} says hi ${brand.name} STOP
+
+${r6.url}`, JSON.stringify({ rBrand, r6 }));
+
       const sLit = await mkCase(5, "Hi {FirstName}", {});
       const rLit = await kickoffStageSend(tx as unknown as typeof db, { orgId, campaignId, stageId: sLit });
       const r5 = rLit.ok ? await rowOf(sLit) : undefined;

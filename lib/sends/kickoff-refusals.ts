@@ -67,7 +67,7 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
   tags_not_supported_yet: {
     status: 400,
     message:
-      "This message uses personalization tags ({first_name}, {zip}, {state}, {brand}) that can't be sent yet — remove them from the creative or the custom text",
+      "This message uses personalization tags ({first_name}, {zip}, {state}) that can't be sent yet — remove them from the creative or the custom text",
   },
   no_sender_number: {
     status: 400,

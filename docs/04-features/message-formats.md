@@ -86,7 +86,7 @@ Every `stage_sends` row records the shape that rendered it in `message_format_id
 
 ## Interim: `tags_not_supported_yet` (P2 → P4/P5)
 
-Until per-recipient rendering ships, a message whose creative or custom text uses a tag (`requiredTags` > 0) is never sent with the literal tag:
+Until per-recipient rendering ships, a message whose creative or custom text uses a **contact** tag (`{first_name}` `{zip}` `{state}`; `requiredContactTags` > 0) is never sent with the literal tag. `{brand}` is campaign data and **renders now** (spec A5) — a creative such as "Hello from {brand}" sends with the campaign's brand name:
 
 | Path | Outcome |
 |---|---|

@@ -35,7 +35,7 @@ import {
   buildLandingPageUrl,
   isBrandLandingHost,
 } from "@/lib/landing-page-url";
-import { formatStamp, renderMessage, requiredTags, shapeFromStage } from "@/lib/messages/render";
+import { formatStamp, renderMessage, requiredContactTags, shapeFromStage } from "@/lib/messages/render";
 import { NO_RECIPIENT } from "@/lib/messages/tags";
 import {
   buildStageFullUrl,
@@ -116,7 +116,7 @@ export type KickoffRefusal =
   // providers only dry-run (log + alert) during the 30-day observation window.
   | "missing_opt_out_language"
   // 0216 interim (P2 → P4): the creative or custom text uses a personalization
-  // tag ({first_name} {zip} {state} {brand}) and per-recipient rendering has not
+  // CONTACT tag ({first_name} {zip} {state}) and per-recipient rendering has not
   // shipped yet. Fail closed rather than send the literal tag. Removed in P4.
   | "tags_not_supported_yet"
   // Ahoi's send() requires a `source` number (spec §5 carry, Section 2 final
@@ -336,8 +336,9 @@ export async function kickoffStageSend(
   const shape = shapeFromStage(row);
   const stamp = formatStamp(shape);
   // INTERIM (P2 → P4): per-recipient tag rendering is not built yet. A stage
-  // whose message uses a tag is refused, never sent with the literal tag.
-  const tags = requiredTags({ shape, creativeText: row.creative_text });
+  // whose message uses a CONTACT tag is refused, never sent with the literal
+  // tag. {brand} renders now — it is campaign data, not contact data.
+  const tags = requiredContactTags({ shape, creativeText: row.creative_text });
   if (tags.length > 0) {
     void notifyTelegram(
       `⚠️ Stage not sent: campaign "${row.campaign_name ?? String(campaignId)}" · stage ${row.stage_number != null ? `#${row.stage_number}` : `id ${stageId}`} ` +

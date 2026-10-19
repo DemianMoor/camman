@@ -9,7 +9,7 @@
 
 import { sql } from "drizzle-orm";
 import type { db } from "@/db/client";
-import { formatStamp, requiredTags, type MessageShape } from "@/lib/messages/render";
+import { formatStamp, requiredContactTags, type MessageShape } from "@/lib/messages/render";
 
 type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -64,7 +64,8 @@ export async function skipIfTagged(
     leads: { contact_id: string; phone: string }[];
   },
 ): Promise<number | null> {
-  if (requiredTags({ shape: i.shape, creativeText: i.creativeText }).length === 0) return null;
+  // {brand} is campaign data and renders now; only contact tags are held back.
+  if (requiredContactTags({ shape: i.shape, creativeText: i.creativeText }).length === 0) return null;
   let written = 0;
   for (const lead of i.leads) {
     written += await insertSkippedSend(tx, {

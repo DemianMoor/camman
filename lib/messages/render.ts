@@ -55,6 +55,14 @@ export function requiredTags(i: { shape: MessageShape; creativeText: string | nu
   return findTags(`${i.creativeText ?? ""}\n${custom}`);
 }
 
+/**
+ * The tags that need CONTACT data ({first_name} {zip} {state}). {brand} comes
+ * from the campaign and renders without a recipient (spec A5).
+ */
+export function requiredContactTags(i: { shape: MessageShape; creativeText: string | null | undefined }): TagKey[] {
+  return requiredTags(i).filter((k) => TAGS[k].scope === "contact");
+}
+
 export function renderMessage(i: RenderInput): RenderResult {
   if (!i.creativeText) return { ok: true, body: "" };
   const values: Record<TagKey, string | null> = {

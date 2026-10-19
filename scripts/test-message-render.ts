@@ -3,7 +3,7 @@
 import { TAGS, findTags, findUnknownTokens, type RecipientData } from "@/lib/messages/tags";
 import { SEED_FORMATS, T1_TEMPLATE, validateCustomText, validateTemplate } from "@/lib/messages/format";
 import {
-  checkRecipientBody, firstNameMaxLength, renderMessage, renderWorstCase, requiredTags, type MessageShape,
+  checkRecipientBody, firstNameMaxLength, renderMessage, renderWorstCase, requiredContactTags, requiredTags, type MessageShape,
 } from "@/lib/messages/render";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 
@@ -143,6 +143,7 @@ eq("R2.18 renderWorstCase", renderWorstCase(fixedNoName("Hi {first_name} in {sta
 eq("R2.19 checkRecipientBody", [checkRecipientBody(pad(160), 1), checkRecipientBody(pad(161), 1), checkRecipientBody(pad(161), 4)], [{ ok: true }, { ok: false, reason: "segment_limit" }, { ok: true }]);
 eq("R2.20 requiredTags creative + custom", requiredTags({ shape: { kind: "custom", text: "{zip} {creative_text}{url}{stop_text}" }, creativeText: "Hi {first_name} {FirstName}" }), ["first_name", "zip"]);
 eq("R2.21 requiredTags ignores template blocks", requiredTags({ shape: t1, creativeText: "Hi" }), []);
+eq("R2.21b requiredContactTags: {brand} needs no contact data", requiredContactTags({ shape: t1, creativeText: "{brand} hi {first_name} {zip}" }), ["first_name", "zip"]);
 
 eq("R2.22 validateTemplate missing_block", validateTemplate("{creative_text}{url}")?.code, "missing_block");
 eq("R2.23 validateTemplate unknown_token", validateTemplate("{first_name} {creative_text}{url}{stop_text}")?.code, "unknown_token");

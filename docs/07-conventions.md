@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-15_
+_Last updated: 2026-10-19_
 
 ## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
 
@@ -4885,3 +4885,7 @@ CTR, Checkout Rate and Sales CR on `/creatives` and in the stage creative picker
 ### A candidate set built from a LATERAL or a DISTINCT join is a temp table, ANALYZEd (2026-10-12)
 
 The audience-snapshot trap (CLAUDE.md §10b) recurs wherever a set is built by `JOIN LATERAL (… LIMIT 1)` or a join to `SELECT DISTINCT …`: Postgres has no statistics for the result and estimates **1 row**, then nested-loops everything downstream over it. The drip Daily results cohort did exactly that, re-running the delivery-receipt aggregation once per send: a 110 s timeout on one day of prod, and still 44 s with only the cohort materialized, because the LATERAL step and the cohort join were in one statement. Materialize EACH such step as an `ON COMMIT DROP` temp table, `ANALYZE` it, then join (0.9 s). See `prepareCells()` in [lib/reporting/drip-daily-rollup.ts](../lib/reporting/drip-daily-rollup.ts). Measure with `EXPLAIN (ANALYZE, BUFFERS)` on prod drip-scoped data before choosing a cadence, and say whether the run was warm: a second run of the same window read 0 blocks where the first read 106K.
+
+## One message renderer; T1 is the pre-format body byte-for-byte (2026-10-19)
+
+Every SMS body is assembled by `lib/messages/` — `tags.ts` (personalization tag registry: keys, normalizers, the one `JUNK_VALUES` list, worst-case lengths), `format.ts` (template grammar: blocks `{brand}` `{creative_text}` `{url}` `{stop_text}`, `<new_row>`), `render.ts` (`renderMessage`, worst case, segment threshold). `buildStageSms` is T1 (`{brand}: {creative_text}<new_row>{url}<new_row>{stop_text}`) and must stay byte-identical to the pre-format composer: a row that is exactly one empty block is dropped, `url`/`stop_text` are trimmed, `brand`/`creative_text` are not, block values are never re-scanned. Tag keys are exact lowercase; any other brace token is literal (live creative 637 ships `{FirstName}`). Proof: `scripts/test-message-render.ts` (150-case grid against a frozen copy) and `scripts/export-t1-corpus.ts` → `scripts/verify-t1-format-identity.ts` (live sent corpus, read-only). Spec: docs/superpowers/specs/2026-10-19-message-personalization-formats-design.md.

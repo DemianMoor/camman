@@ -2,14 +2,22 @@
 // used by BOTH the stage form's live preview AND the send pipeline so the body
 // a recipient receives can NEVER diverge from what the operator previewed.
 //
-// Shape (short_url/link on its own line between creative text and stop text):
+// This is T1 of lib/messages/format.ts — the pre-format shape, byte-for-byte:
 //   <Brand>: <Creative text>
 //   <link>            ← omitted entirely when there's no link
-//   <Stop text>
+//   <Stop text>       ← omitted entirely when the resolved footer is empty
 //
 // `linkUrl` is whichever link applies to the mode: the pasted short_url in
 // manual mode, or the minted https://<short_domain>/r/<code> in tracked mode.
+// `stopText` is the RESOLVED opt-out footer (lib/sends/opt-out-footer.ts), not
+// necessarily the stage's stop_text. An empty footer arises only when the
+// provider appends its own opt-out text (descriptor.appendsOwnOptOut); its line
+// is dropped rather than left as a trailing newline.
 // Returns "" when there's no creative (nothing to preview/send yet).
+//
+// Callers move to lib/messages/render.ts renderMessage as stages gain formats.
+
+import { T1_TEMPLATE, assembleMessage } from "@/lib/messages/format";
 
 export function buildStageSms(opts: {
   brandName: string;
@@ -17,24 +25,10 @@ export function buildStageSms(opts: {
   linkUrl?: string | null;
   stopText: string;
 }): string {
-  const { brandName, creativeText, stopText } = opts;
-  if (!creativeText) return "";
-  const link = (opts.linkUrl ?? "").trim();
-  const base = `${brandName}: ${creativeText}`;
-  // `stopText` is the RESOLVED opt-out footer (lib/sends/opt-out-footer.ts),
-  // not necessarily the stage's stop_text — the sending number and the provider
-  // account can both out-rank it.
-  //
-  // An EMPTY footer omits the line entirely rather than leaving a trailing
-  // newline. That case arises only when the provider appends its own opt-out
-  // text (descriptor.appendsOwnOptOut), where a blank line would be a visible
-  // artefact on the wire. No adapter sets that flag today and every current
-  // stage resolves to a non-empty footer, so this branch changes no existing
-  // message — asserted byte-for-byte against the live corpus by
-  // scripts/verify-q3-optout-footer.ts.
-  const footer = (stopText ?? "").trim();
-  const parts = [base];
-  if (link.length > 0) parts.push(link);
-  if (footer.length > 0) parts.push(footer);
-  return parts.join("\n");
+  return assembleMessage(T1_TEMPLATE, {
+    brand: opts.brandName,
+    creative_text: opts.creativeText ?? "",
+    url: opts.linkUrl ?? "",
+    stop_text: opts.stopText ?? "",
+  });
 }

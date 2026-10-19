@@ -1,6 +1,11 @@
 // scripts/test-message-render.ts — pure suite for lib/messages (no DB).
 // npx tsx scripts/test-message-render.ts
-import { TAGS, findTags, findUnknownTokens } from "@/lib/messages/tags";
+import { TAGS, findTags, findUnknownTokens, type RecipientData } from "@/lib/messages/tags";
+import { SEED_FORMATS, T1_TEMPLATE, validateCustomText, validateTemplate } from "@/lib/messages/format";
+import {
+  checkRecipientBody, firstNameMaxLength, renderMessage, renderWorstCase, requiredTags, type MessageShape,
+} from "@/lib/messages/render";
+import { buildStageSms } from "@/lib/sends/stage-sms";
 
 let fail = 0;
 const bar = (n: string, ok: boolean, d = "") => {
@@ -46,6 +51,83 @@ eq("R1.26 findTags distinct, first-seen", findTags("Hi {first_name}, {FirstName}
 eq("R1.27 findUnknownTokens", findUnknownTokens("Hi {first_name}, {FirstName} {zip} {url}"), ["{FirstName}"]);
 eq("R1.28 spaced token is not a tag", findTags("{ first_name }"), []);
 eq("R1.29 worst cases per spec A1", [TAGS.first_name.worstCase.length, TAGS.zip.worstCase, TAGS.state.worstCase, TAGS.brand.worstCase.length], [15, "00000", "XX", 20]);
+
+// ── R2 — grammar + renderer; buildStageSms = T1 ─────────────────────────────
+// FROZEN copy of origin/main cdf96d7f lib/sends/stage-sms.ts buildStageSms.
+// The reference T1 must equal byte-for-byte. Never edit it to make a test pass.
+function legacyBuildStageSms(opts: {
+  brandName: string;
+  creativeText: string | null | undefined;
+  linkUrl?: string | null;
+  stopText: string;
+}): string {
+  const { brandName, creativeText, stopText } = opts;
+  if (!creativeText) return "";
+  const link = (opts.linkUrl ?? "").trim();
+  const base = `${brandName}: ${creativeText}`;
+  const footer = (stopText ?? "").trim();
+  const parts = [base];
+  if (link.length > 0) parts.push(link);
+  if (footer.length > 0) parts.push(footer);
+  return parts.join("\n");
+}
+
+console.log("\nR2 — grammar + renderer");
+const NO_ONE: RecipientData = { first_name: null, zip: null, state: null };
+const t1: MessageShape = { kind: "template", formatId: null, template: T1_TEMPLATE };
+const tpl = (name: string): MessageShape => ({
+  kind: "template", formatId: null, template: SEED_FORMATS.find((f) => f.name.startsWith(name))!.template,
+});
+
+let gridDiffs = 0, renderDiffs = 0, cases = 0;
+for (const brand of ["Guide Kin", ""])
+  for (const creative of ["Hi there", "Line1\nLine2", " lead/trail ", "", null])
+    for (const link of ["https://gdkn.org/r/Ab3dE9x", "", "  ", " https://x.co/a ", null])
+      for (const stop of ["Stop to END", "", "  Reply STOP  "]) {
+        cases++;
+        const legacy = legacyBuildStageSms({ brandName: brand, creativeText: creative, linkUrl: link, stopText: stop });
+        if (buildStageSms({ brandName: brand, creativeText: creative, linkUrl: link, stopText: stop }) !== legacy) gridDiffs++;
+        const r = renderMessage({ shape: t1, brandName: brand, creativeText: creative, linkUrl: link, stopText: stop, recipient: NO_ONE });
+        if (!r.ok || r.body !== legacy) renderDiffs++;
+      }
+bar("R2.1 buildStageSms == legacy over the grid", gridDiffs === 0 && cases === 150, `${gridDiffs} diffs / ${cases}`);
+bar("R2.2 renderMessage(T1) == legacy over the grid", renderDiffs === 0, `${renderDiffs} diffs / ${cases}`);
+
+const base = { brandName: "G", creativeText: "Hi", linkUrl: "", stopText: "Stop to END", recipient: NO_ONE };
+eq("R2.3 T2 no-link: blank row kept, url row dropped", renderMessage({ ...base, shape: tpl("T2") }), { ok: true, body: "Hi G Stop to END\n" });
+eq("R2.4 T2 with link", renderMessage({ ...base, linkUrl: "https://x.co/a", shape: tpl("T2") }), { ok: true, body: "Hi G Stop to END\n\nhttps://x.co/a" });
+eq("R2.5 T3 has no brand", renderMessage({ ...base, linkUrl: "https://x.co/a", shape: tpl("T3") }), { ok: true, body: "Hi\nhttps://x.co/a\nStop to END" });
+eq("R2.6 T1 seed is T1_TEMPLATE and the only default", SEED_FORMATS.filter((f) => f.isDefault).map((f) => f.template), [T1_TEMPLATE]);
+
+eq("R2.7 {FirstName} stays literal", renderMessage({ ...base, shape: t1, creativeText: "Hi {FirstName}" }), { ok: true, body: "G: Hi {FirstName}\nStop to END" });
+eq("R2.8 {first_name} missing", renderMessage({ ...base, shape: t1, creativeText: "Hi {first_name}" }), { ok: false, reason: "missing_tag", tag: "first_name" });
+eq("R2.9 {first_name} normalized", renderMessage({ ...base, shape: t1, creativeText: "Hi {first_name}", recipient: { ...NO_ONE, first_name: "josé" } }), { ok: true, body: "G: Hi Jose\nStop to END" });
+eq("R2.10 {zip} {state} {brand} in creative", renderMessage({ ...base, shape: tpl("T3"), creativeText: "{brand} in {state} {zip}", recipient: { first_name: null, zip: "02134-1234", state: "texas" } }), { ok: true, body: "G in TX 02134\nStop to END" });
+eq("R2.11 empty brand + {brand} tag ⇒ missing", renderMessage({ ...base, brandName: " ", shape: tpl("T3"), creativeText: "{brand} hi" }), { ok: false, reason: "missing_tag", tag: "brand" });
+eq("R2.12 no re-scan: creative '{url}' stays literal", renderMessage({ ...base, linkUrl: "https://x.co/a", shape: t1, creativeText: "go {url}" }), { ok: true, body: "G: go {url}\nhttps://x.co/a\nStop to END" });
+eq("R2.13 empty creative ⇒ empty body", renderMessage({ ...base, shape: tpl("T2"), creativeText: "" }), { ok: true, body: "" });
+eq("R2.14 custom text with tags + blocks",
+  renderMessage({ ...base, linkUrl: "https://x.co/a", shape: { kind: "custom", text: "Hey {first_name}!<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}" }, recipient: { ...NO_ONE, first_name: "ANA" } }),
+  { ok: true, body: "Hey Ana!\nHi\nhttps://x.co/a\nStop to END" });
+
+// firstNameMaxLength: "B: " + creative; no link, no footer ⇒ body = 3 + creative length.
+const pad = (n: number) => "a".repeat(n);
+const fixedNoName = (creative: string) => ({ shape: t1, brandName: "B", creativeText: creative, linkUrl: "", stopText: "" });
+eq("R2.15 firstNameMaxLength = 10 when the no-name body is 150", firstNameMaxLength(fixedNoName("Hi {first_name}" + pad(144)), 1), 10);
+eq("R2.16 firstNameMaxLength = 15 when everything fits", firstNameMaxLength(fixedNoName("Hi {first_name}"), 1), 15);
+eq("R2.17 firstNameMaxLength = null when even L=0 overflows", firstNameMaxLength(fixedNoName("Hi {first_name}" + pad(155)), 1), null);
+eq("R2.18 renderWorstCase", renderWorstCase(fixedNoName("Hi {first_name} in {state}")), "B: Hi XXXXXXXXXXXXXXX in XX");
+eq("R2.19 checkRecipientBody", [checkRecipientBody(pad(160), 1), checkRecipientBody(pad(161), 1), checkRecipientBody(pad(161), 4)], [{ ok: true }, { ok: false, reason: "segment_limit" }, { ok: true }]);
+eq("R2.20 requiredTags creative + custom", requiredTags({ shape: { kind: "custom", text: "{zip} {creative_text}{url}{stop_text}" }, creativeText: "Hi {first_name} {FirstName}" }), ["first_name", "zip"]);
+eq("R2.21 requiredTags ignores template blocks", requiredTags({ shape: t1, creativeText: "Hi" }), []);
+
+eq("R2.22 validateTemplate missing_block", validateTemplate("{creative_text}{url}")?.code, "missing_block");
+eq("R2.23 validateTemplate unknown_token", validateTemplate("{first_name} {creative_text}{url}{stop_text}")?.code, "unknown_token");
+eq("R2.24 seeds all validate", SEED_FORMATS.map((f) => validateTemplate(f.template)), [null, null, null]);
+eq("R2.25 custom missing everything", validateCustomText("Hi {first_name}")?.code, "custom_text_missing_required_block");
+eq("R2.26 custom without {creative_text}", validateCustomText("Hi {first_name} {url} {stop_text}")?.code, "custom_text_missing_required_block");
+eq("R2.27 custom with all three", validateCustomText("Hi {first_name}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}"), null);
+eq("R2.28 custom unknown token is literal", validateCustomText("{creative_text}{url}{stop_text}{Foo}"), null);
 
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

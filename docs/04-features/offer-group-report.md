@@ -479,6 +479,10 @@ pin rows or foot a table; justified by the small per-offer row count).
   profit · Sent 7d · Sent 30d · Sent 90d · Fresh pool. Default sort: Net RPM
   descending. All columns sortable client-side (the full row set is already
   loaded).
+- **Frozen Group column** — the first column is `sticky left-0`, so group
+  names stay visible while the table scrolls sideways (the lifecycle columns
+  push it past the viewport). Sticky cells use solid `bg-muted`/`bg-background`
+  so scrolled cells don't show through.
 - **Pinned top row** — "All offers (org-wide)": the de-duplicated
   `orgBenchmark`; the per-contact-window/fresh-pool cells show "—". Carries the
   `+manual` badge when `benchmarkHasManual` is true.

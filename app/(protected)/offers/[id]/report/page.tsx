@@ -98,6 +98,11 @@ const LIFECYCLE_COLUMNS: { key: LifecycleKey; label: string; numeric: true }[] =
 
 type ViewRow = GroupRawRow & Derived & Partial<GroupLifecycleRow>;
 
+// The Group column stays frozen while the table scrolls sideways. Sticky cells
+// need an OPAQUE background or the scrolled cells show through, so the tinted
+// rows use solid bg-muted here (same pattern as components/drip/daily-results.tsx).
+const STICKY_CELL = "sticky left-0 z-10";
+
 // "read low" / "read high" / "match" is derived from the actual ratio, never
 // assumed: attributable_revenue/attributable_sales and revenue/sales are not
 // a whole-and-part pair (different sources, not a subset — see the comment on
@@ -322,7 +327,7 @@ export default function OfferGroupReportPage() {
                 <th
                   key={c.key}
                   onClick={() => toggleSort(c.key)}
-                  className={`cursor-pointer select-none px-3 py-2 font-medium ${c.numeric ? "text-right" : "text-left"}`}
+                  className={`cursor-pointer select-none px-3 py-2 font-medium ${c.numeric ? "text-right" : "text-left"} ${c.key === "group_name" ? `${STICKY_CELL} bg-muted` : ""}`}
                 >
                   {c.label}{sortBy === c.key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
                 </th>
@@ -332,7 +337,7 @@ export default function OfferGroupReportPage() {
           <tbody>
             {benchmark ? (
               <tr className="border-t bg-muted/30 font-medium">
-                <td className="px-3 py-2">
+                <td className={`${STICKY_CELL} bg-muted px-3 py-2`}>
                   All offers (org-wide)
                   {data?.benchmarkHasManual ? <ManualMix /> : null}
                 </td>
@@ -341,13 +346,13 @@ export default function OfferGroupReportPage() {
             ) : null}
             {sorted.map((r) => (
               <tr key={r.group_id} className="border-t">
-                <td className="px-3 py-2">{r.group_name}</td>
+                <td className={`${STICKY_CELL} bg-background px-3 py-2`}>{r.group_name}</td>
                 <MetricCells m={r} isGroup breakEven={breakEven} showLifecycle={showLifecycle} />
               </tr>
             ))}
             {offerTotal ? (
               <tr className="border-t bg-muted/30 font-medium">
-                <td className="px-3 py-2">
+                <td className={`${STICKY_CELL} bg-muted px-3 py-2`}>
                   This offer · all groups
                   {data?.offerTotals.has_manual_stages ? <ManualMix /> : null}
                 </td>

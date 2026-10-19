@@ -86,6 +86,17 @@ async function main() {
       const freshList = await listFormats(tx, fresh[0].id);
       bar("M2.18 a brand-new org's list is seeded on first read (T1 default + T2 + T3)",
         freshList.length === 3 && freshList[0].is_default && freshList[0].name.startsWith("T1"), JSON.stringify(freshList.map((f) => f.name)));
+      // Review fix: creating a format as an unseeded org's FIRST action must not
+      // leave it with formats but no default (ensure_message_formats would then
+      // RAISE on every stage insert and list read).
+      const virgin = (await tx.execute(sql`INSERT INTO organizations (name) VALUES ('msgfmt-admin-virgin') RETURNING id`)) as unknown as { id: string }[];
+      const firstCreate = await createFormat(tx, virgin[0].id, { name: "Mine", template: VALID });
+      const virginList = await listFormats(tx, virgin[0].id);
+      const virginStage = (await tx.execute(sql`
+        INSERT INTO campaign_stages (org_id, campaign_id) VALUES (${virgin[0].id}, ${campaignId}) RETURNING message_format_id`)) as unknown as { message_format_id: number }[];
+      bar("M2.19 createFormat as an unseeded org's first action ⇒ seeds T1-T3 first; list + stage insert still work",
+        firstCreate.ok && virginList.length === 4 && virginList[0].is_default && virginList[0].name.startsWith("T1")
+          && virginStage[0].message_format_id === virginList[0].id, JSON.stringify(virginList.map((f) => f.name)));
       throw new Rollback();
     });
   } catch (e) {

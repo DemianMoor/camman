@@ -232,7 +232,8 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       // skipped_ineligible row (idempotent) and its journey stays routed, so it
       // sends normally once the tag is removed from the creative / custom text.
       const tagged = await skipIfTagged(db, {
-        orgId, campaignId, stageId: stage.stage_id, creativeText: stage.creative_text, shape, leads,
+        orgId, campaignId, stageId: stage.stage_id, creativeText: stage.creative_text, shape,
+        brandName: head.brand_name ?? "", leads,
       });
       if (tagged !== null) {
         res.tagsSkipped += tagged;

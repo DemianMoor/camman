@@ -45,13 +45,18 @@ async function main() {
       const leads = [await mk(1), await mk(2)];
       const t1 = { kind: "template" as const, formatId: 7, template: T1_TEMPLATE };
 
-      const none = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi there", shape: t1, leads });
+      const none = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi there", shape: t1, brandName: "G", leads });
       check("M4.3 untagged message ⇒ null (send normally), no rows", none === null);
-      const brandOnly = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi from {brand}", shape: t1, leads });
+      const brandOnly = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi from {brand}", shape: t1, brandName: "G", leads });
       check("M4.3b {brand} only ⇒ null (renders from the campaign, sends normally)", brandOnly === null);
+      const nbStage = (await one<{ id: number }>(sql`INSERT INTO campaign_stages (org_id, campaign_id) VALUES (${org}, ${camp}) RETURNING id`)).id;
+      const noBrand = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: nbStage, creativeText: "Hi from {brand}", shape: t1, brandName: " ", leads });
+      const nbRows = (await tx.execute(sql`SELECT DISTINCT last_error FROM stage_sends WHERE stage_id = ${nbStage}`)) as unknown as { last_error: string }[];
+      check("M4.3c {brand} with an EMPTY campaign brand ⇒ skip rows with reason missing_brand (no throw)",
+        noBrand === 2 && nbRows.length === 1 && nbRows[0].last_error === "missing_brand", JSON.stringify({ noBrand, nbRows }));
 
-      const first = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, leads });
-      const again = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, leads });
+      const first = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, brandName: "G", leads });
+      const again = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, brandName: "G", leads });
       const rows = (await tx.execute(sql`
         SELECT status, last_error, message_format_id, format_custom, link_id FROM stage_sends WHERE stage_id = ${stage}`)) as unknown as
         { status: string; last_error: string; message_format_id: number | null; format_custom: boolean; link_id: number | null }[];
@@ -62,11 +67,25 @@ async function main() {
 
       const child = (await one<{ id: number }>(sql`INSERT INTO campaign_stages (org_id, campaign_id) VALUES (${org}, ${camp}) RETURNING id`)).id;
       const custom = { kind: "custom" as const, text: "{zip}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}" };
-      const fu = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: child, creativeText: "Hi", shape: custom, leads: [leads[0]] });
+      const fu = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: child, creativeText: "Hi", shape: custom, brandName: "G", leads: [leads[0]] });
       const fuRow = await one<{ n: number; custom: boolean }>(sql`
         SELECT count(*)::int AS n, bool_and(format_custom) AS custom FROM stage_sends WHERE stage_id = ${child} AND status = 'skipped_ineligible'`);
       check("M4.6 drip follow-up whose CUSTOM text has a tag ⇒ one skip row (already_sent then stops re-selection), format_custom",
         fu === 1 && fuRow.n === 1 && fuRow.custom === true, JSON.stringify({ fu, fuRow }));
+      // Review fix: ONE statement per batch (the existing-skip set read once), not one per lead.
+      const many = await Promise.all(Array.from({ length: 50 }, (_, k) => mk(100 + k)));
+      const bigStage = (await one<{ id: number }>(sql`INSERT INTO campaign_stages (org_id, campaign_id) VALUES (${org}, ${camp}) RETURNING id`)).id;
+      let statements = 0;
+      const counting = new Proxy(tx, {
+        get(target, key, recv) {
+          if (key === "execute") return (...a: Parameters<typeof tx.execute>) => { statements++; return target.execute(...a); };
+          return Reflect.get(target, key, recv);
+        },
+      });
+      const wrote = await skipIfTagged(counting, { orgId: org, campaignId: camp, stageId: bigStage, creativeText: "Hi {zip}", shape: t1, brandName: "G", leads: many });
+      check("M4.7 50 leads ⇒ 50 rows in ONE statement", wrote === 50 && statements === 1, JSON.stringify({ wrote, statements }));
+      const half = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: bigStage, creativeText: "Hi {zip}", shape: t1, brandName: "G", leads: [...many.slice(0, 10), await mk(999)] });
+      check("M4.8 a batch mixing already-skipped and new leads writes only the new one", half === 1, `${half}`);
       throw ROLLBACK;
     });
   } catch (e) {

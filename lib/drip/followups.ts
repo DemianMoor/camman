@@ -270,7 +270,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
       });
       const tagged = await skipIfTagged(db, {
         orgId, campaignId: r.campaign_id, stageId: r.child_stage_id,
-        creativeText: r.child_creative_text, shape, leads: [r],
+        creativeText: r.child_creative_text, shape, brandName: r.brand_name ?? "", leads: [r],
       });
       if (tagged !== null) {
         res.tagsSkipped += tagged;

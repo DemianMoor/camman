@@ -64,6 +64,10 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     message:
       'This message has no opt-out language — add "Text STOP to opt out" (or similar) to the stage\'s stop text before sending',
   },
+  missing_brand: {
+    status: 400,
+    message: "This message uses {brand} but the campaign has no brand — set the campaign's brand before sending",
+  },
   tags_not_supported_yet: {
     status: 400,
     message:

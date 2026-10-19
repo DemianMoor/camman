@@ -91,6 +91,10 @@ async function loadOwned(dbc: DbOrTx, orgId: string, id: number): Promise<Messag
 export async function createFormat(dbc: DbOrTx, orgId: string, input: { name: string; template: string }): Promise<FormatAdminResult> {
   const bad = templateError(input.template);
   if (bad) return bad;
+  // Seed FIRST: an org whose first format is a custom one would otherwise hold
+  // formats but no default, and ensure_message_formats (the stage-insert
+  // trigger, the list) refuses that state for good.
+  await dbc.execute(sql`SELECT public.ensure_message_formats(${orgId}::uuid)`);
   const [row] = await dbc
     .insert(message_formats)
     .values({ org_id: orgId, name: input.name, template: input.template })

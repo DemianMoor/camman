@@ -428,6 +428,7 @@ const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
   "segment_ceiling_exceeded",
   "missing_opt_out_language",
   "tags_not_supported_yet",
+  "missing_brand",
   "no_sender_number",
 ]);
 

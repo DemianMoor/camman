@@ -35,8 +35,8 @@ import {
   buildLandingPageUrl,
   isBrandLandingHost,
 } from "@/lib/landing-page-url";
-import { formatStamp, renderMessage, requiredContactTags, shapeFromStage } from "@/lib/messages/render";
-import { NO_RECIPIENT } from "@/lib/messages/tags";
+import { formatStamp, renderMessage, requiredContactTags, requiredTags, shapeFromStage } from "@/lib/messages/render";
+import { NO_RECIPIENT, TAGS } from "@/lib/messages/tags";
 import {
   buildStageFullUrl,
   isGuideknLpUrl,
@@ -119,6 +119,8 @@ export type KickoffRefusal =
   // CONTACT tag ({first_name} {zip} {state}) and per-recipient rendering has not
   // shipped yet. Fail closed rather than send the literal tag. Removed in P4.
   | "tags_not_supported_yet"
+  // 0216: the message uses {brand} and the campaign has no brand.
+  | "missing_brand"
   // Ahoi's send() requires a `source` number (spec §5 carry, Section 2 final
   // review): a stage with no provider_phone_id previously passed kickoff,
   // materialized every recipient, then failed at DRAIN — wasteful and risks
@@ -345,6 +347,14 @@ export async function kickoffStageSend(
         `uses personalization tags (${tags.map((t) => `{${t}}`).join(", ")}) that can't be sent yet. Remove them from the creative or custom text.`,
     ).catch(() => {});
     return { ok: false, reason: "tags_not_supported_yet" };
+  }
+  // {brand} renders from the campaign's brand; with no brand there is nothing
+  // to render, so refuse cleanly (permanent until a brand is set).
+  if (
+    requiredTags({ shape, creativeText: row.creative_text }).includes("brand") &&
+    TAGS.brand.normalize(brandName) === null
+  ) {
+    return { ok: false, reason: "missing_brand" };
   }
   const renderBody = (linkUrl: string | null): string => {
     const r = renderMessage({

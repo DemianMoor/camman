@@ -121,6 +121,22 @@ async function main() {
 
 ${r6.url}`, JSON.stringify({ rBrand, r6 }));
 
+      // Review fix: a {brand} message on a campaign with NO brand is a clean
+      // refusal, not a throw (which 500'd Send-now and retried every tick).
+      const noBrand = await one<{ id: number }>(sql`
+        INSERT INTO campaigns (org_id, slug, name, status, link_mode, tracking_id)
+        VALUES (${orgId}, ${"kfmt-nb-" + sfx}, ${"kfmt-nb"}, 'active', 'tracked', ${"9_99_kfmtnb_" + sfx}) RETURNING id`);
+      const nbCre = await one<{ id: number }>(sql`
+        INSERT INTO creatives (slug, org_id, text, status) VALUES (${"kfmt-nb-" + sfx}, ${orgId}, ${"{brand} says hi"}, 'active') RETURNING id`);
+      const nbStage = await one<{ id: number }>(sql`
+        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, sms_provider_id, provider_phone_id, send_approved, stop_text, scheduled_at)
+        VALUES (${orgId}, ${noBrand.id}, 1, ${nbCre.id}, ${prov.id}, ${phone.id}, true, ${"STOP"}, now()) RETURNING id`);
+      telegramCalls = 0;
+      const rNb = await kickoffStageSend(tx as unknown as typeof db, { orgId, campaignId: noBrand.id, stageId: nbStage.id });
+      const nNb = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${nbStage.id}`);
+      check("M4.4 {brand} message on a brandless campaign ⇒ refused missing_brand (no throw), 0 rows",
+        !rNb.ok && rNb.reason === "missing_brand" && nNb.n === 0, JSON.stringify({ rNb, rows: nNb.n }));
+
       const sLit = await mkCase(5, "Hi {FirstName}", {});
       const rLit = await kickoffStageSend(tx as unknown as typeof db, { orgId, campaignId, stageId: sLit });
       const r5 = rLit.ok ? await rowOf(sLit) : undefined;

@@ -23,7 +23,7 @@ Status: RECON APPROVED by the owner 2026-10-19 (answers 1–5, approvals and blo
 ## Points confirmed (owner, 2026-10-19)
 
 All six confirmed; point 3 changed to a block. Further owner corrections, 2026-10-19:
-- **Interim fail-closed reason `tags_not_supported_yet`** (P2 → P4/P5):
+- **Interim fail-closed reason `tags_not_supported_yet`** (P2 → P4/P5), for a message with a **contact** tag (`{first_name}` `{zip}` `{state}`). `{brand}` needs no contact data and renders from P2 on (implementation ruling 2026-10-19, spec A5):
   - regular kickoff refuses the stage + Telegram alert;
   - drip skips the lead with a `skipped_ineligible` row, `last_error='tags_not_supported_yet'`, and no journey close;
   - removed in P4 (regular) and P5 (drip).

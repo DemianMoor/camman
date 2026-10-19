@@ -82,6 +82,10 @@ async function main() {
       const list = await listFormats(tx, orgId);
       bar("M2.17 list is org-scoped, carries live_stage_count, default first",
         list.length >= 4 && list.every((r) => r.org_id === orgId) && list[0].is_default && list.every((r) => typeof r.live_stage_count === "number"));
+      const fresh = (await tx.execute(sql`INSERT INTO organizations (name) VALUES ('msgfmt-admin-fresh') RETURNING id`)) as unknown as { id: string }[];
+      const freshList = await listFormats(tx, fresh[0].id);
+      bar("M2.18 a brand-new org's list is seeded on first read (T1 default + T2 + T3)",
+        freshList.length === 3 && freshList[0].is_default && freshList[0].name.startsWith("T1"), JSON.stringify(freshList.map((f) => f.name)));
       throw new Rollback();
     });
   } catch (e) {

@@ -67,6 +67,10 @@ export async function countLiveStagesUsingFormat(dbc: DbOrTx, orgId: string, for
 }
 
 export async function listFormats(dbc: DbOrTx, orgId: string): Promise<(MessageFormat & { live_stage_count: number })[]> {
+  // A new org has no formats until its first stage insert seeds them (0216
+  // trigger). Seed on read too, so Settings and the stage picker never show an
+  // empty list. Idempotent: returns the existing default when already seeded.
+  await dbc.execute(sql`SELECT public.ensure_message_formats(${orgId}::uuid)`);
   const rows = await dbc
     .select()
     .from(message_formats)

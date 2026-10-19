@@ -41,25 +41,40 @@ const FIRST_NAME_MIN = 2;
 const FIRST_NAME_MAX = 15;
 
 // Letters NFKD does not decompose to ASCII, or decomposes to more than one letter.
-const MULTI_LETTER: Record<string, string> = {
+const EXTRA_LETTERS: Record<string, string> = {
   "ß": "ss", "æ": "ae", "Æ": "Ae", "œ": "oe", "Œ": "Oe",
-  "ø": "o", "Ø": "O", "đ": "d", "ł": "l", "Ł": "L",
+  "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ð": "d", "Ð": "D",
+  "þ": "th", "Þ": "Th", "ł": "l", "Ł": "L", "ı": "i", "ħ": "h", "Ħ": "H",
 };
 
+// Typographic variants phone keyboards insert: curly apostrophes → ', Unicode
+// hyphens/dashes → -. Without this "O’Neil" cleans to "Oneil".
+const PUNCTUATION: Record<string, string> = {
+  "’": "'", "‘": "'", "ʼ": "'", "`": "'", "´": "'",
+  "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-", "―": "-",
+};
+
+// Latin-1 Supplement + Latin Extended-A/B (U+00C0–U+024F: José, Ștefan) and
+// Latin Extended Additional (U+1E00–U+1EFF: Nguyễn).
+const TRANSLIT_RANGES: readonly [number, number][] = [[0xc0, 0x24f], [0x1e00, 0x1eff]];
+
 /**
- * Transliteration table for U+00C0–U+017F: each character's NFKD base letter
- * (José → Jose), overridden by MULTI_LETTER. GENERATED, not hand-typed, and the
- * SQL twin is generated from this same map — a name must clean to the same
- * length on both sides or the segment-limit count would drift from the send.
+ * Transliteration table: each character's NFKD base letters (José → Jose) over
+ * TRANSLIT_RANGES, then EXTRA_LETTERS and PUNCTUATION. GENERATED, not
+ * hand-typed, and the SQL twin is generated from this same map — a name must
+ * clean to the same length on both sides or the segment-limit count would
+ * drift from the send.
  */
 export const TRANSLIT: ReadonlyMap<string, string> = (() => {
   const m = new Map<string, string>();
-  for (let cp = 0xc0; cp <= 0x17f; cp++) {
-    const ch = String.fromCodePoint(cp);
-    const base = ch.normalize("NFKD").replace(/\p{M}/gu, "");
-    if (base !== ch && /^[A-Za-z]+$/.test(base)) m.set(ch, base);
+  for (const [from, to] of TRANSLIT_RANGES) {
+    for (let cp = from; cp <= to; cp++) {
+      const ch = String.fromCodePoint(cp);
+      const base = ch.normalize("NFKD").replace(/\p{M}/gu, "");
+      if (base !== ch && /^[A-Za-z]+$/.test(base)) m.set(ch, base);
+    }
   }
-  for (const [k, v] of Object.entries(MULTI_LETTER)) m.set(k, v);
+  for (const [k, v] of Object.entries({ ...EXTRA_LETTERS, ...PUNCTUATION })) m.set(k, v);
   return m;
 })();
 
@@ -89,14 +104,18 @@ const trimmed = (raw: string | null | undefined): string => (raw ?? "").trim();
 function normalizeFirstName(raw: string | null | undefined): string | null {
   const t = trimmed(raw);
   if (!t || JUNK_VALUES.includes(t.toLowerCase()) || /\d/.test(t)) return null;
-  const cleaned = [...t]
-    .map((ch) => TRANSLIT.get(ch) ?? ch)
-    .join("")
+  const mapped = [...t].map((ch) => TRANSLIT.get(ch) ?? ch).join("");
+  // A letter we cannot transliterate is MISSING, never silently deleted:
+  // deleting it ships a wrong name ("Ana李" → "Ana"). Non-letters (".", emoji)
+  // are dropped below.
+  if (/[^\P{L}A-Za-z]/u.test(mapped)) return null;
+  const cleaned = mapped
     .replace(/\s+/g, " ")
     .replace(/[^A-Za-z' -]/g, "")
     .replace(/ +/g, " ")
     .trim();
-  if (cleaned.length < FIRST_NAME_MIN || cleaned.length > FIRST_NAME_MAX) return null;
+  const letters = cleaned.replace(/[^A-Za-z]/g, "").length;
+  if (letters < FIRST_NAME_MIN || cleaned.length > FIRST_NAME_MAX) return null;
   return cleaned.toLowerCase().replace(/(^|[ '-])([a-z])/g, (_, sep: string, c: string) => sep + c.toUpperCase());
 }
 

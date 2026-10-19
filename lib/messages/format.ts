@@ -13,7 +13,7 @@
 //   • an empty creative ⇒ "" (nothing to send).
 // With these rules T1 reproduces the pre-format buildStageSms byte-for-byte.
 
-import { BLOCK_KEYS } from "./tags";
+import { BLOCK_KEYS, type TagKey } from "./tags";
 
 export type BlockKey = (typeof BLOCK_KEYS)[number];
 
@@ -28,7 +28,7 @@ export const SEED_FORMATS: readonly { name: string; template: string; isDefault:
   { name: "T3 — Brand in creative", template: "{creative_text}<new_row>{url}<new_row>{stop_text}", isDefault: false },
 ];
 
-const BLOCK_TOKEN = /\{(brand|creative_text|url|stop_text)\}/g;
+const TOKEN = /\{(brand|creative_text|url|stop_text|first_name|zip|state)\}/g;
 const ONLY_BLOCK = /^\{(brand|creative_text|url|stop_text)\}$/;
 const REQUIRED_TEMPLATE_BLOCKS: readonly BlockKey[] = ["creative_text", "url", "stop_text"];
 
@@ -55,7 +55,16 @@ export function validateCustomText(t: string): { code: "custom_text_missing_requ
   return missing ? { code: "custom_text_missing_required_block", detail: `{${missing}}` } : null;
 }
 
-export function assembleMessage(template: string, v: Record<BlockKey, string>): string {
+/**
+ * `tags` is only for owner custom text, where tags sit in the template itself:
+ * they are substituted in the SAME single pass as the blocks, so no value — a
+ * brand or a name — is ever re-read as template syntax.
+ */
+export function assembleMessage(
+  template: string,
+  v: Record<BlockKey, string>,
+  tags: Partial<Record<TagKey, string>> = {},
+): string {
   if (!v.creative_text) return "";
   const value = (k: BlockKey): string =>
     k === "url" || k === "stop_text" ? (v[k] ?? "").trim() : (v[k] ?? "");
@@ -63,7 +72,11 @@ export function assembleMessage(template: string, v: Record<BlockKey, string>): 
   for (const row of template.split(NEW_ROW)) {
     const only = row.match(ONLY_BLOCK);
     if (only && value(only[1] as BlockKey) === "") continue;
-    rows.push(row.replace(BLOCK_TOKEN, (_, k: BlockKey) => value(k)));
+    rows.push(
+      row.replace(TOKEN, (token: string, k: string) =>
+        (BLOCK_KEYS as readonly string[]).includes(k) ? value(k as BlockKey) : (tags[k as TagKey] ?? token),
+      ),
+    );
   }
   return rows.join("\n");
 }

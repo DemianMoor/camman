@@ -36,14 +36,17 @@ function expand(text: string, values: Record<TagKey, string | null>): string {
 }
 
 function assemble(i: Omit<RenderInput, "recipient">, values: Record<TagKey, string | null>): string {
-  const creative = expand(i.creativeText ?? "", values);
-  const template = i.shape.kind === "custom" ? expand(i.shape.text, values) : i.shape.template;
-  return assembleMessage(template, {
+  const blocks = {
     brand: i.brandName,
-    creative_text: creative,
+    creative_text: expand(i.creativeText ?? "", values),
     url: i.linkUrl ?? "",
     stop_text: i.stopText,
-  });
+  };
+  if (i.shape.kind === "template") return assembleMessage(i.shape.template, blocks);
+  // Custom text: its tags go through the same single pass as its blocks.
+  const tags: Partial<Record<TagKey, string>> = {};
+  for (const k of Object.keys(values) as TagKey[]) if (values[k] !== null) tags[k] = values[k]!;
+  return assembleMessage(i.shape.text, blocks, tags);
 }
 
 /** Tags this stage's message needs: creative text first, then custom text. */

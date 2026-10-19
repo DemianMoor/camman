@@ -90,13 +90,17 @@ A contact tag is **missing** when its normalizer returns `null`. Junk values liv
   - it contains a digit;
   - after cleaning, its length is < 2 or > 15.
 
-  Cleaning steps:
-  1. Map characters through `TRANSLIT`. This is a generated table covering U+00C0–U+017F (each character's NFKD base letter), plus a small multi-letter table: ß→ss, æ→ae, Æ→Ae, œ→oe, Œ→Oe, ø→o, Ø→O, đ→d, ł→l, Ł→L.
-  2. Delete every character outside `[A-Za-z' -]`.
-  3. Collapse runs of whitespace and trim.
-  4. Title-case: lowercase everything, then uppercase the first letter and any letter after a space, hyphen or apostrophe. Examples: `JOSÉ` → `Jose`, `mary-jane` → `Mary-Jane`, `o'neil` → `O'Neil`.
+  Cleaning steps (tightened 2026-10-19 after the P1 review found mangled names: "Ștefan"→"Tefan", "O’Neil"→"Oneil", "--" accepted):
+  1. Map characters through `TRANSLIT`, a generated table covering:
+     - each character's NFKD base letters over U+00C0–U+024F (Latin-1, Latin Extended-A/B) and U+1E00–U+1EFF (Latin Extended Additional);
+     - extra letters: ß→ss, æ/Æ→ae/Ae, œ/Œ→oe/Oe, ø/Ø→o/O, đ/Đ→d/D, ð/Ð→d/D, þ/Þ→th/Th, ł/Ł→l/L, ı→i, ħ/Ħ→h/H;
+     - punctuation variants: curly apostrophes → `'`, Unicode hyphens/dashes → `-`.
+  2. **Any letter that is still not A–Z makes the name missing.** It is never deleted, because deleting it ships a wrong name ("Ana李" → "Ana"). Non-letters such as `.` or emoji are dropped.
+  3. Delete every remaining character outside `[A-Za-z' -]`, collapse runs of whitespace, and trim.
+  4. **At least 2 letters**, and at most 15 characters, or the name is missing ("--" and "A-" are missing).
+  5. Title-case: lowercase everything, then uppercase the first letter and any letter after a space, hyphen or apostrophe. Examples: `JOSÉ` → `Jose`, `mary-jane` → `Mary-Jane`, `O’Neil` → `O'Neil`, `Ștefan` → `Stefan`, `Nguyễn` → `Nguyen`.
 
-  Unicode never causes a skip by itself; only the length rules can.
+  Accents never cause a skip: every Latin-script letter transliterates. Only a non-Latin letter or the length rules can.
 - **zip.** The trimmed value must match `^(\d{5})(?:-?\d{4})?$`; the result is the first 5 digits. Anything else is missing. A zip that lost its leading zero (3 live rows) is missing; we don't guess.
 - **state.** If the trimmed value is 2 letters and its uppercase form is in `US_STATES` (50 states + DC), the result is that code. Otherwise, lowercase it and collapse whitespace; if that matches a full state name, the result is its code. Anything else is missing.
 - **brand.** The trimmed campaign brand name. Activation already requires a brand. An empty brand with a `{brand}` tag present:

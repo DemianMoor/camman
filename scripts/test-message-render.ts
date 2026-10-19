@@ -50,6 +50,17 @@ eq("R1.25 DC", st("District of Columbia"), "DC");
 eq("R1.26 findTags distinct, first-seen", findTags("Hi {first_name}, {FirstName} {zip} {first_name}"), ["first_name", "zip"]);
 eq("R1.27 findUnknownTokens", findUnknownTokens("Hi {first_name}, {FirstName} {zip} {url}"), ["{FirstName}"]);
 eq("R1.28 spaced token is not a tag", findTags("{ first_name }"), []);
+// Review fix: never send a MANGLED name — transliterate, or call it missing.
+eq("R1.30 Đorđe → Dorde", fn("Đorđe"), "Dorde");
+eq("R1.31 Ștefan → Stefan (Latin Ext-B)", fn("Ștefan"), "Stefan");
+eq("R1.32 Nguyễn → Nguyen (Latin Ext Additional)", fn("Nguyễn"), "Nguyen");
+eq("R1.33 Yıldız → Yildiz", fn("Yıldız"), "Yildiz");
+eq("R1.34 Þór → Thor", fn("Þór"), "Thor");
+eq("R1.35 Ħanna → Hanna", fn("Ħanna"), "Hanna");
+eq("R1.36 curly apostrophe O’Neil → O'Neil", fn("O’Neil"), "O'Neil");
+eq("R1.37 non-breaking hyphen Jean‑Luc → Jean-Luc", fn("Jean‑Luc"), "Jean-Luc");
+eq("R1.38 punctuation-only names are missing", [fn("--"), fn("''"), fn("- -"), fn("A-")], [null, null, null, null]);
+eq("R1.39 any unmappable letter ⇒ missing, never a truncated name", [fn("Ελένη"), fn("Ana李")], [null, null]);
 eq("R1.29 worst cases per spec A1", [TAGS.first_name.worstCase.length, TAGS.zip.worstCase, TAGS.state.worstCase, TAGS.brand.worstCase.length], [15, "00000", "XX", 20]);
 
 // ── R2 — grammar + renderer; buildStageSms = T1 ─────────────────────────────
@@ -109,6 +120,13 @@ eq("R2.13 empty creative ⇒ empty body", renderMessage({ ...base, shape: tpl("T
 eq("R2.14 custom text with tags + blocks",
   renderMessage({ ...base, linkUrl: "https://x.co/a", shape: { kind: "custom", text: "Hey {first_name}!<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}" }, recipient: { ...NO_ONE, first_name: "ANA" } }),
   { ok: true, body: "Hey Ana!\nHi\nhttps://x.co/a\nStop to END" });
+
+eq("R2.29 custom text: a {brand} value is never re-scanned as template syntax",
+  renderMessage({ ...base, brandName: "Acme {url}<new_row>{stop_text}", linkUrl: "https://x.co/a", shape: { kind: "custom", text: "From {brand}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}" } }),
+  { ok: true, body: "From Acme {url}<new_row>{stop_text}\nHi\nhttps://x.co/a\nStop to END" });
+eq("R2.30 custom text: a {first_name} value is never re-scanned",
+  renderMessage({ ...base, linkUrl: "https://x.co/a", shape: { kind: "custom", text: "{first_name}{zip}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}" }, recipient: { first_name: "Ann", zip: "02134", state: null } }),
+  { ok: true, body: "Ann02134\nHi\nhttps://x.co/a\nStop to END" });
 
 // firstNameMaxLength: "B: " + creative; no link, no footer ⇒ body = 3 + creative length.
 const pad = (n: number) => "a".repeat(n);

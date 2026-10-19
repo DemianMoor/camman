@@ -2156,3 +2156,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-15 — Hour-overflow final review fixes: O3 fallback wording corrected, carry-OFF hour-close race note, loadOpenWindowCampaigns renamed loadFirstSendWindows, send-capacity test documented with --conditions=react-server — 04-features/drip-campaigns-routing
 
 2026-10-19 — Offer Group Report "Show lifecycle detailed report" checkbox: Sent 14d / Sent 90d / Fresh pool per Hot/Warm, Cold, Freeze cohort (current status; Sent = messages) from new matview offer_group_lifecycle_mv (migration 0214), refreshed last by refresh-offer-group-report; GET /api/offers/[id]/report?lifecycle=1 — 03-data-model, 04-features/offer-group-report
+
+2026-10-19 — Offer Group Report lifecycle footnote corrected: Sent cohorts sum to Sent 90d; only fresh pools sum to less (New) — 04-features/offer-group-report

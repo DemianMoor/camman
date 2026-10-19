@@ -405,9 +405,9 @@ export default function OfferGroupReportPage() {
           “Fresh pool” by each contact’s <em>current</em> lifecycle status
           (Hot/Warm, Cold, Freeze), and add a 14-day window. Sent columns count
           messages; fresh pool columns count contacts. New and Suppressed
-          contacts are in no cohort column, so the three cohorts sum to less
-          than the overall columns — New contacts are counted in the overall
-          Fresh pool.
+          contacts are in no cohort column. Sent cohorts add up to “Sent 90d”
+          (a texted contact is never New); the three fresh pools add up to
+          less than “Fresh pool”, which also counts New contacts.
         </p>
       ) : null}
     </div>

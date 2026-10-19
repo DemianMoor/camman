@@ -32,7 +32,8 @@
   - 409 `creative_locked_after_send`, 409 `format_locked_after_send`, 409 `format_in_use` (`details.count`);
   - 403 `compliance_field_locked` (field `custom_text`);
   - 400 `custom_text_missing_required_block`, 400 `unknown_token`, 400 `missing_block`;
-  - kickoff reasons `per_recipient_render_failed`, `missing_brand`.
+  - kickoff reasons `per_recipient_render_failed`, `missing_brand`;
+  - interim reason `tags_not_supported_yet` (P2 → removed in P4 regular / P5 drip).
 - **§11b:**
   - `tagRules` is REQUIRED on `StageEligibilityParams`, on the recipients input and on the audience-preview inputs. Run `tsc` and treat each error as a decision.
   - Callers that never read it get `Omit<…>`.
@@ -132,7 +133,7 @@ export const T1_TEMPLATE = "{brand}: {creative_text}<new_row>{url}<new_row>{stop
 export const SEED_FORMATS: readonly { name: string; template: string; isDefault: boolean }[]; // spec B2 table
 export type TemplateError = { code: "unknown_token" | "missing_block"; detail: string };
 export function validateTemplate(t: string): TemplateError | null;      // blocks only; requires creative_text,url,stop_text
-export function validateCustomText(t: string): { code: "custom_text_missing_required_block" | "unknown_token"; detail: string } | null; // blocks+tags; requires url,stop_text
+export function validateCustomText(t: string): { code: "custom_text_missing_required_block" | "unknown_token"; detail: string } | null; // blocks+tags; requires creative_text,url,stop_text
 export function assembleMessage(template: string, v: Record<BlockKey, string>): string;
 // render.ts
 export type MessageShape = { kind: "template"; formatId: number | null; template: string } | { kind: "custom"; text: string };
@@ -155,7 +156,13 @@ export function requiredTags(i: { shape: MessageShape; creativeText: string | nu
   - **Tags:** `{FirstName}` stays literal. `{first_name}` with recipient first_name `null` ⇒ `{ok:false, reason:"missing_tag", tag:"first_name"}`. With `"josé"` ⇒ body contains `"Jose"`.
   - **No re-scan:** a creative `"{url}"` renders the literal `{url}`.
   - **`firstNameMaxLength`:** for a GSM creative whose worst-case body without a name is 150 characters and `maxSegments` 1 ⇒ 10. When even L=0 exceeds ⇒ `null`.
-  - **Validators:** `validateTemplate("{creative_text}{url}")` ⇒ `missing_block`; `validateTemplate("{first_name} {creative_text}{url}{stop_text}")` ⇒ `unknown_token`; `validateCustomText("Hi {first_name}")` ⇒ `custom_text_missing_required_block`.
+  - **Validators:**
+    - `validateTemplate("{creative_text}{url}")` ⇒ `missing_block`;
+    - `validateTemplate("{first_name} {creative_text}{url}{stop_text}")` ⇒ `unknown_token`;
+    - `validateCustomText("Hi {first_name}")` ⇒ `custom_text_missing_required_block`;
+    - `validateCustomText("Hi {first_name} {url} {stop_text}")` (no `{creative_text}`) ⇒ `custom_text_missing_required_block`;
+    - `validateCustomText("Hi {first_name}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}")` ⇒ `null`;
+    - `validateCustomText("{creative_text}{url}{stop_text}{Foo}")` ⇒ `null` (unknown tokens are literal in custom text, the same rule as creatives — spec point 6).
 - [ ] **Step 2:** Run. Expected: FAIL.
 - [ ] **Step 3:** Implement `format.ts`, `render.ts`, and rewrite the `stage-sms.ts` body. Keep its header comment and add one line: "T1 of lib/messages/format.ts".
 - [ ] **Step 4:** Run the pure suite, plus the existing `npx tsx scripts/verify-sms-preview.ts`. Expected: all ✓.
@@ -229,7 +236,7 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 
 **Files:**
 - Create: `lib/validators/message-formats.ts`; `app/api/message-formats/list/route.ts`, `route.ts` (POST), `[id]/route.ts` (PATCH), `[id]/make-default/route.ts`; `app/(protected)/settings/message-formats/page.tsx`; `components/settings/message-formats-panel.tsx`.
-- Modify: `lib/permissions.ts` (`message_formats.view` all roles, `message_formats.manage` manager+), `lib/authz/route-map.ts`, `components/protected/nav-config.ts`.
+- Modify: `lib/permissions.ts` (`message_formats.view` in `viewerPerms`; `message_formats.manage` in `managerPerms` ⇒ manager/admin/owner, NOT operator — spec B1 table), `lib/authz/route-map.ts`, `components/protected/nav-config.ts`.
 - Test: `scripts/test-message-formats-api.ts`.
 
 **Live-stage count for `format_in_use`:** spec B3 definition. One SQL helper, `countLiveStagesUsingFormat(dbc, orgId, formatId)`, in `lib/messages/format-usage.ts`.
@@ -240,7 +247,8 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
   - disabling the default ⇒ 409;
   - making a disabled format default ⇒ 409;
   - make-default moves the single default;
-  - an operator PATCH ⇒ 403;
+  - an operator PATCH / POST / make-default ⇒ 403; a manager ⇒ 200; an operator GET list ⇒ 200;
+  - `can("operator","message_formats.manage") === false`, `can("manager",…) === true`, `can("admin",…) === true`, `can("owner",…) === true` (pure);
   - list is org-scoped.
 - [ ] **Step 2:** Implement, following the UTM-tags pattern (Zod, `apiError`, `can()`), and the panel. Use a plain table, `Switch` for enabled, a radio/"Make default" action, and `<FormDialog>` for create/edit with a live T1-style preview via `renderWorstCase`.
 - [ ] **Step 3:** Run `M2.*` and `npx tsx scripts/test-route-map-coverage.ts`. Commit.
@@ -262,7 +270,7 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 
 **UI:**
 - A format `<Select>` lists the enabled formats; the "Custom" option is shown only with `compliance.manage`.
-- The custom textarea has "Insert {url}" / "Insert {stop_text}" buttons (insert at the cursor via `setRangeText`).
+- The custom textarea has "Insert {creative_text}" / "Insert {url}" / "Insert {stop_text}" buttons (insert at the cursor via `setRangeText`).
 - Both pickers are disabled with the lock copy once the stage has sent. The stage GET returns `has_sent`.
 - B5 warnings.
 - The SMS preview card uses `renderWorstCase` with the stage's shape.
@@ -271,13 +279,27 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 **Steps:**
 - [ ] **Step 1: Failing tests** (`M3.*`):
   - an operator setting `custom_text` ⇒ 403;
-  - owner custom text without `{stop_text}` ⇒ 400;
+  - owner custom text without `{stop_text}` ⇒ 400 `custom_text_missing_required_block`;
+  - owner custom text with `{url}` + `{stop_text}` but no `{creative_text}` ⇒ 400 `custom_text_missing_required_block`;
+  - owner custom text with all three ⇒ 200;
   - switching format after a sent row ⇒ 409;
   - echoing the same format after send ⇒ 200;
   - drip creative change after send ⇒ 409, before send ⇒ 200;
   - a regular stage's creative change after send ⇒ 200 (the creative lock is drip-only).
 - [ ] **Step 2:** Implement the server side. Run `M3.*` ✓.
-- [ ] **Step 3: Switch the render call sites to the stage's shape.** `kickoff.ts` (3 sites), `scheduler.ts:330`, `send-one.ts:110`, `stage-form.tsx`, `creative-picker-dialog.tsx` call `renderMessage`, with `recipient` = all-null for now. Tags arrive in P4/P5; until then a creative containing a real tag key fails closed with `missing_tag`, and none exist live. Each send path stamps `message_format_id` / `format_custom` on its inserted rows. Load the shape in the existing main-row queries (`LEFT JOIN message_formats mf ON mf.id = s.message_format_id`).
+- [ ] **Step 3: Switch the render call sites to the stage's shape.**
+  - **Call sites:** `kickoff.ts` (3 sites), `scheduler.ts:330`, `send-one.ts:110`, `stage-form.tsx` and `creative-picker-dialog.tsx` call `renderMessage`, with `recipient` = all-null for now.
+  - **Stamping:** each send path stamps `message_format_id` / `format_custom` on its inserted rows.
+  - **Loading the shape:** in the existing main-row queries (`LEFT JOIN message_formats mf ON mf.id = s.message_format_id`).
+  - **Interim fail-closed until tags arrive.** A send path decides this BEFORE rendering, with `requiredTags({shape, creativeText}).length > 0`, i.e. a real tag key in the creative or custom text:
+    - **Regular kickoff:** refuse the stage with reason `tags_not_supported_yet`, before any recipient enumeration. Send one Telegram alert naming the campaign, stage and tags.
+    - **Drip scheduler (first send) and follow-up:** skip the lead with `insertSkippedSend(...)` (create `lib/drip/skip-send.ts` here; P5 reuses it): `status='skipped_ineligible'`, `last_error='tags_not_supported_yet'`. **No journey close, no mint.**
+  - **Tests** (`M4.*`, preview):
+    - a regular stage whose creative contains `{first_name}` ⇒ kickoff `{ok:false, reason:"tags_not_supported_yet"}`, 0 rows, the Telegram stub called once;
+    - a drip first send with a `{first_name}` creative ⇒ one `skipped_ineligible` row with that `last_error`, journey still `routed`, no `short_links` row;
+    - a drip follow-up with the same ⇒ one skipped row, and the next tick does not reselect it;
+    - creative 637-style `{FirstName}` ⇒ sends normally (literal).
+  - **Removal:** P4 Task 4 deletes the regular branch, and its test changes to the personalized-render test. P5 Task 2 deletes the drip branch the same way. A grep bar in each of those tasks asserts `tags_not_supported_yet` no longer appears in that path's file.
 - [ ] **Step 4: Preview test.** A T2 stage materializes rows whose `rendered_text` matches the T2 layout and carries the stamp. A T1 stage is unchanged.
 - [ ] **Step 5: Playwright visual check of the stage form** (memory recipe: preview stack, creds via scratchpad). Format select, custom option hidden for operator, warnings, picker preview footer equals stage preview footer.
 - [ ] **Step 6: Docs.**
@@ -417,7 +439,7 @@ The flow is spec §C3:
    - No STOP: txr ⇒ `missing_opt_out_language`; dry-run providers ⇒ ONE aggregated alert, "N of M rendered bodies have no STOP".
 4. Insert the rendered bodies, stamped (P2).
 
-The representative-body block at `kickoff.ts:543-616` is replaced by steps 1 and 3.
+The representative-body block at `kickoff.ts:543-616` is replaced by steps 1 and 3. **Delete the interim `tags_not_supported_yet` kickoff branch.** Its M4 regular test becomes the per-recipient test below. Grep bar: `tags_not_supported_yet` is absent from `lib/sends/`.
 
 - [ ] **Step 1: Failing preview tests:**
   - materialized rows have per-recipient names (`"Hi Jose"`);
@@ -460,7 +482,7 @@ The representative-body block at `kickoff.ts:543-616` is replaced by steps 1 and
 
 ### Task 2: Scheduler + follow-ups: per-lead render, skip rows, segment rule
 
-**Files:** Modify `lib/drip/scheduler.ts` (`selectDueJourneys` LEFT JOIN `contact_attributes`; render via `renderMessage` + `checkRecipientBody`), `lib/drip/send-one.ts`, `lib/drip/followups.ts` (same join). Create the helper `insertSkippedSend(tx, row: { orgId; campaignId; stageId; contactId; phone; reason: string; renderedText: string })` in `lib/drip/skip-send.ts`.
+**Files:** Modify `lib/drip/scheduler.ts` (`selectDueJourneys` LEFT JOIN `contact_attributes`; render via `renderMessage` + `checkRecipientBody`), `lib/drip/send-one.ts`, `lib/drip/followups.ts` (same join). Reuse `insertSkippedSend(tx, row: { orgId; campaignId; stageId; contactId; phone; reason: string; renderedText: string })` from `lib/drip/skip-send.ts` (created in P2 Task 4). **Delete the interim `tags_not_supported_yet` drip branch.** Its M4 drip tests become the personalized tests below. Grep bar: `tags_not_supported_yet` is absent from `lib/drip/`.
 
 - **First send skip:** `insertSkippedSend` + journey `exited`/`close_reason` in the same transaction. No mint.
 - **Follow-up skip:** `insertSkippedSend` only.

@@ -20,13 +20,18 @@ Status: RECON APPROVED by the owner 2026-10-19 (answers 1–5, approvals and blo
   - The creative picker previews with the raw `stop_text`. Fix it inside P2 so the preview equals the rendered send.
 - **Build order:** P1 → P2 → P3 → P4 → P5 → P6, one PR per phase, with the verify step reported per phase. P1's PR description carries the byte-for-byte T1 proof against live `rendered_text`.
 
-## Points to confirm
+## Points confirmed (owner, 2026-10-19)
 
-These are my readings where the brief leaves a choice. Each is cheap to change before its phase starts.
+All six confirmed; point 3 changed to a block. Further owner corrections, 2026-10-19:
+- **Interim fail-closed reason `tags_not_supported_yet`** (P2 → P4/P5):
+  - regular kickoff refuses the stage + Telegram alert;
+  - drip skips the lead with a `skipped_ineligible` row, `last_error='tags_not_supported_yet'`, and no journey close;
+  - removed in P4 (regular) and P5 (drip).
+- **Permission set:** `message_formats.manage` excludes the operator (B1).
 
 1. **Where the >50% warning appears.** In two places: the campaign status dialog for draft → active (for every existing stage whose creative uses tags), and the stage Prepare dialog. Both are non-blocking.
 2. **The format lock covers ALL stages, regular and drip** (sent ≥ 1). By Format revenue is attributed per stage (Keitaro rows), so a format changed after a regular stage has sent would relabel its history. The creative lock stays drip-only, per A9.
-3. **A custom-text stage still requires a creative.** The exposure ledger, content dedup, By Creative and kickoff's `no_creative` gate all key on it. If the custom text omits `{creative_text}`, the stage form warns "creative text is not included in this message".
+3. **A custom-text stage still requires a creative.** The exposure ledger, content dedup, By Creative and kickoff's `no_creative` gate all key on it. **CHANGED by the owner 2026-10-19: block, not warn.** Custom text must contain `{creative_text}` (see B4).
 4. **The drip routing rule also covers the segment limit**, not only missing data. A lead whose first name is too long for any first-send stage of a campaign falls through at routing rather than being admitted and then skipped.
 5. **A drip FIRST send skipped at send time** (the creative changed after routing) writes the skipped row and closes the journey: `state='exited'`, `close_reason` = the same reason string. Without the close, the scheduler would pick the journey up again on the next tick.
 6. **Unknown brace tokens stay literal.** Tag keys match exactly (lowercase). Live creative 637 contains `{FirstName}` and keeps rendering exactly as today. The creative editor warns "unknown tag {FirstName} — will be sent literally" but does not refuse the save.
@@ -163,8 +168,18 @@ UI: the picker is disabled and reads exactly "Create a new stage to use another 
 ### B1. Screen
 
 `/settings/message-formats` lists every format with its name, template, enabled toggle and default marker. The org always has exactly one default. Permissions:
-- `message_formats.view`: every role;
-- `message_formats.manage`: manager+, covering create, edit, enable/disable and make-default.
+- `message_formats.view`: every role (viewer, operator, manager, admin, owner). Operators need it to pick a format in the stage form.
+- `message_formats.manage` covers create, edit, enable/disable and make-default:
+
+  | Role | `message_formats.manage` |
+  |---|---|
+  | viewer | ✗ |
+  | operator | ✗ (picks from enabled formats only) |
+  | manager | ✓ |
+  | admin | ✓ |
+  | owner | ✓ |
+
+  `admin` holds it because `lib/permissions.ts` builds `adminPerms` from `managerPerms` — every manager permission reaches admin and owner.
 
 ### B2. Grammar
 
@@ -203,7 +218,7 @@ UI: the picker is disabled and reads exactly "Create a new stage to use another 
 
 - **Who:** owner-only (R5).
 - **What it is:** a stage-level template that may contain the blocks, the tags, literal text and `<new_row>`.
-- **Validator at save:** it must contain `{url}` AND `{stop_text}`; otherwise the save is refused with `custom_text_missing_required_block`. The form has "Insert {url}" and "Insert {stop_text}" buttons.
+- **Validator at save:** it must contain `{creative_text}`, `{url}` AND `{stop_text}`; otherwise the save is refused with `custom_text_missing_required_block`. The form has "Insert {creative_text}", "Insert {url}" and "Insert {stop_text}" buttons.
 - **Same path as everything else:** custom text goes through the same render, segment rule and opt-out gate.
 - **Creative:** the creative is still required (point 3).
 

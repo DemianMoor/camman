@@ -50,25 +50,27 @@ an average of per-group ratios.
 | **Sent last 7 / 30 / 90 days** | `COUNT(*)` of attributed `stage_sends` rows within the window — send rows, **not** distinct contacts, scoped to **this offer**, and (since migration 0132) tracked campaigns only. |
 | **Fresh pool** | Contacts in the group that are sendable (`contacts.messaging_status = 'eligible'` AND no `opt_outs` row) AND have never been sent a campaign of **this offer** — anti-joined against `offer_exposures` per offer (migration 0133). All-time, not a window; offer-scoped, not shared across offers. |
 
-## Lifecycle detailed report (migration 0214)
+## Lifecycle detailed report (migrations 0214, 0215)
 
 A **"Show lifecycle detailed report"** checkbox above the table adds nine
-columns — Sent 14d, Sent 90d and Fresh pool for each of three lifecycle
+columns — Sent 14d, Sent 30d and Fresh pool for each of three lifecycle
 cohorts: **Hot/Warm** (hot + warm), **Cold**, **Freeze**. Owner rulings,
 2026-10-19:
 
 | Decision | Ruling |
 |---|---|
 | Which status buckets a contact | Its **current** status (`contacts.lifecycle_status`, as of the matview refresh) — not status-at-send — so a cohort's three columns describe one population |
-| Unit of the Sent columns | **Messages** (`stage_sends` rows), the same unit and scope as "Sent 90d (this offer)" |
+| Unit of the Sent columns | **Messages** (`stage_sends` rows), the same unit and scope as "Sent 30d (this offer)" |
+| Cohort Sent window | **14d and 30d** (0215, owner request 2026-10-19 — was 14d and 90d in 0214). The overall "Sent 90d (this offer)" column is unchanged |
 | New / Suppressed | No cohort column. New contacts stay in the overall **Fresh pool** column |
 
 Fresh pool per cohort uses the 0133 definition above (eligible, not opted out,
 never exposed to this offer), split by status. New and Suppressed are in no
 cohort, so the three fresh pools sum to **less** than the overall Fresh pool.
-The Sent cohorts sum to the overall "Sent 90d (this offer)" in practice — a
+The Sent 30d cohorts sum to the overall "Sent 30d (this offer)" in practice — a
 texted contact is never `new`, and on 2026-10-19 Suppressed was 0 (measured on
-production at the 0214 apply: 5,927,289 = 5,927,289 across all 237 rows).
+production at the 0214 apply, then for 90d: 5,927,289 = 5,927,289 across all
+237 rows).
 
 Source: `offer_group_lifecycle_mv` (one row per org × offer × group, nine
 columns `hw_*` / `cold_*` / `freeze_*`), refreshed **last** by the same
@@ -553,6 +555,8 @@ registration as a sale, and nothing here is waiting for a backfill.
   group-row attribution; adds `offer_report_tracked_campaigns` and
   `offer_report_offer_totals_mv`; extends the dedup-at-grain rule to every
   group-row column.
+- `db/migrations/0215_lifecycle_cohort_sent_30d.sql` — rebuilds
+  `offer_group_lifecycle_mv` with `*_sent_30d` in place of `*_sent_90d`.
 - `db/migrations/0214_offer_group_lifecycle_report.sql` —
   `offer_group_lifecycle_mv`, the lifecycle-cohort columns.
 - `lib/reporting/offer-group-report.ts` — read + refresh helper.

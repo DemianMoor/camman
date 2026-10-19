@@ -16,6 +16,7 @@ import {
   generateStageTrackingId,
 } from "@/lib/tracking-id";
 import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
+import { inheritedStageFormat } from "@/lib/messages/stage-format";
 
 const SLUG_RETRY_LIMIT = 5;
 
@@ -215,7 +216,11 @@ export async function POST(
             typeof campaign_stages.$inferInsert,
             "stage_number"
           > & { stage_number?: number };
-          const rowsToInsert: StageInsertable[] = sourceStages.map((s) => ({
+          // 0216: each copy keeps its stage's message shape (format or custom text).
+          const formats = await Promise.all(
+            sourceStages.map((s) => inheritedStageFormat(tx, orgId, s)),
+          );
+          const rowsToInsert: StageInsertable[] = sourceStages.map((s, i) => ({
             org_id: orgId,
             campaign_id: inserted.id,
             label: s.label,
@@ -233,6 +238,7 @@ export async function POST(
             short_url: s.short_url,
             full_url: s.full_url,
             stop_text: s.stop_text,
+            ...formats[i],
             include_clickers: s.include_clickers,
             exclude_clickers: s.exclude_clickers,
             include_no_status: s.include_no_status,

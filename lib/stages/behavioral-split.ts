@@ -14,6 +14,7 @@ import {
   setUrlParam,
 } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
+import { inheritedStageFormat } from "@/lib/messages/stage-format";
 
 // Core of the behavioural-split endpoint, factored out of the route so it can be
 // tested directly against a throwaway org (the route resolves org from the auth
@@ -294,6 +295,8 @@ export async function performBehavioralSplit(
       typeof campaign_stages.$inferInsert,
       "stage_number"
     > & { stage_number?: number };
+    // 0216: every lane keeps the anchor's message shape (format or custom text).
+    const format = await inheritedStageFormat(tx, orgId, source);
     const newRows: StageInsertable[] = LANE_TIERS.filter(({ tier }) =>
       selectedTiers.has(tier),
     ).map(({ tier, label }) => ({
@@ -315,6 +318,7 @@ export async function performBehavioralSplit(
       full_url: source.full_url,
       utm_tag_ids: source.utm_tag_ids,
       stop_text: source.stop_text,
+      ...format,
       include_clickers: source.include_clickers,
       exclude_clickers: source.exclude_clickers,
       include_no_status: source.include_no_status,

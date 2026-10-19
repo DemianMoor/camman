@@ -6,6 +6,8 @@ import { requirePreviewDb } from "./_require-preview-db"; // MUST be second
 import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { SEED_FORMATS } from "@/lib/messages/format";
+import { inheritedStageFormat, type StageFormatColumns } from "@/lib/messages/stage-format";
+import { ensureFollowupChildren } from "@/lib/drip/children";
 
 let fail = 0;
 const bar = (n: string, ok: boolean, d = "") => { console.log(`  ${ok ? "✓" : "✗"} ${n}${d ? ` — ${d}` : ""}`); if (!ok) fail++; };
@@ -81,6 +83,28 @@ async function main() {
       bar("M1.11 stage_sends stamp columns: format_custom boolean NOT NULL DEFAULT false, message_format_id integer NULL",
         cols.length === 2 && cols[0].column_name === "format_custom" && cols[0].column_default === "false" && cols[0].is_nullable === "NO"
           && cols[1].data_type === "integer" && cols[1].is_nullable === "YES", JSON.stringify(cols));
+      // inheritedStageFormat — what a derived stage starts with.
+      const t2 = (await tx.execute(sql`SELECT id FROM message_formats WHERE org_id = ${c.org_id} AND name LIKE 'T2%'`)) as unknown as { id: number }[];
+      const inh = await inheritedStageFormat(tx, c.org_id, { message_format_id: t2[0].id, custom_text: null });
+      bar("M1.12 derived stage keeps an enabled parent format", inh.message_format_id === t2[0].id && inh.custom_text === null);
+      const inhCustom = await inheritedStageFormat(tx, c.org_id, { message_format_id: null, custom_text: "x {creative_text}{url}{stop_text}" });
+      bar("M1.13 derived stage keeps the parent's custom text", inhCustom.message_format_id === null && inhCustom.custom_text === "x {creative_text}{url}{stop_text}");
+      await tx.execute(sql`UPDATE message_formats SET is_enabled = false WHERE id = ${t2[0].id}`);
+      const inhOff = await inheritedStageFormat(tx, c.org_id, { message_format_id: t2[0].id, custom_text: null });
+      bar("M1.14 a disabled parent format is NOT copied (trigger default instead)", inhOff.message_format_id === null && inhOff.custom_text === null);
+      const otherOrg = await inheritedStageFormat(tx, org[0].id, { message_format_id: def[0].id, custom_text: null });
+      bar("M1.15 another org's format is never copied", otherOrg.message_format_id === null);
+      // A real derived insert site end-to-end: drip follow-up children of a custom-text parent.
+      const parent = (await tx.execute(sql`
+        INSERT INTO campaign_stages (org_id, campaign_id, window_start_min, window_end_min, custom_text)
+        VALUES (${c.org_id}, ${c.id}, 600, 660, 'Hi<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}')
+        RETURNING id`)) as unknown as { id: number }[];
+      const made = await ensureFollowupChildren(tx, { orgId: c.org_id, parentStageId: parent[0].id });
+      const kids = (await tx.execute(sql`
+        SELECT message_format_id, custom_text FROM campaign_stages WHERE parent_stage_id = ${parent[0].id}`)) as unknown as StageFormatColumns[];
+      bar("M1.16 drip children copy the parent's custom text (real insert site)",
+        made.created > 0 && kids.length === made.created && kids.every((k) => k.message_format_id === null && k.custom_text === "Hi<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}"),
+        `${made.created} children`);
       throw new Rollback();
     });
   } catch (e) {

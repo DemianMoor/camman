@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { TIER_DEFAULT, TIER_LABEL, type FollowupTier } from "./followup-timing";
+import { inheritedStageFormat } from "@/lib/messages/stage-format";
 
 type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -59,7 +60,8 @@ export async function ensureFollowupChildren(
 ): Promise<{ created: number; existing: number }> {
   const parent = (await tx.execute(sql`
     SELECT s.id, s.campaign_id, s.org_id, s.creative_id, s.landing_page_id,
-           s.sms_provider_id, s.provider_phone_id, s.stop_text, s.drip_active
+           s.sms_provider_id, s.provider_phone_id, s.stop_text, s.drip_active,
+           s.message_format_id, s.custom_text
     FROM campaign_stages s
     WHERE s.id = ${parentStageId} AND s.org_id = ${orgId}::uuid
       AND s.archived_at IS NULL AND s.window_start_min IS NOT NULL
@@ -74,6 +76,12 @@ export async function ensureFollowupChildren(
   `)) as unknown as { behavioral_tier: number }[];
   const present = new Set(have.map((h) => h.behavioral_tier));
 
+  // 0216: children keep the parent's message shape (format or custom text).
+  const format = await inheritedStageFormat(tx, orgId, {
+    message_format_id: (p.message_format_id as number | null) ?? null,
+    custom_text: (p.custom_text as string | null) ?? null,
+  });
+
   let created = 0;
   for (const tier of FOLLOWUP_TIERS) {
     if (present.has(tier)) continue;
@@ -81,12 +89,14 @@ export async function ensureFollowupChildren(
       INSERT INTO campaign_stages
         (org_id, campaign_id, parent_stage_id, behavioral_tier,
          drip_followup_minutes, drip_active, label,
-         creative_id, landing_page_id, sms_provider_id, provider_phone_id, stop_text)
+         creative_id, landing_page_id, sms_provider_id, provider_phone_id, stop_text,
+         message_format_id, custom_text)
       VALUES (
         ${orgId}::uuid, ${p.campaign_id}, ${parentStageId}, ${tier},
         ${TIER_DEFAULT[tier]}, false, ${TIER_LABEL[tier]},
         NULL, ${p.landing_page_id ?? null}, ${p.sms_provider_id ?? null},
-        ${p.provider_phone_id ?? null}, ${p.stop_text ?? "Stop to END"}
+        ${p.provider_phone_id ?? null}, ${p.stop_text ?? "Stop to END"},
+        ${format.message_format_id}, ${format.custom_text}
       )
     `);
     created++;

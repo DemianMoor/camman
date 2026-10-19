@@ -13,6 +13,7 @@ import {
   generateStageTrackingId,
 } from "@/lib/tracking-id";
 import { STAGE_TRACKING_PARAM, setUrlParam } from "@/lib/stage-url";
+import { inheritedStageFormat } from "@/lib/messages/stage-format";
 
 function parseId(idParam: string): number | null {
   const n = Number(idParam);
@@ -136,6 +137,8 @@ export async function POST(
     short_url: source.short_url,
     full_url: source.full_url,
     stop_text: source.stop_text,
+    // 0216: the copy keeps the source's message shape (format or custom text).
+    ...(await inheritedStageFormat(db, orgId, source)),
     include_clickers: source.include_clickers,
     exclude_clickers: source.exclude_clickers,
     include_no_status: source.include_no_status,

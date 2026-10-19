@@ -19,6 +19,7 @@ import {
 } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { liveSplitPartnerCount } from "@/lib/stages/split-membership";
+import { inheritedStageFormat } from "@/lib/messages/stage-format";
 
 // Split a stage into N siblings for A/B testing. The source stage is
 // repurposed as split 1 of N; (N-1) new stages clone its configuration
@@ -255,6 +256,8 @@ export async function POST(
       "stage_number"
     > & { stage_number?: number };
     const newRows: StageInsertable[] = [];
+    // 0216: every sibling keeps the source's message shape (format or custom text).
+    const format = await inheritedStageFormat(tx, orgId, source);
     for (let i = 1; i < count; i++) {
       newRows.push({
         org_id: orgId,
@@ -274,6 +277,7 @@ export async function POST(
         short_url: source.short_url,
         full_url: source.full_url,
         stop_text: source.stop_text,
+        ...format,
         include_clickers: source.include_clickers,
         exclude_clickers: source.exclude_clickers,
         include_no_status: source.include_no_status,

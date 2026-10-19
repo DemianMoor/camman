@@ -183,7 +183,7 @@ UI: the picker is disabled and reads exactly "Create a new stage to use another 
   | admin | ✓ |
   | owner | ✓ |
 
-  `admin` holds it because `lib/permissions.ts` builds `adminPerms` from `managerPerms` — every manager permission reaches admin and owner.
+  `admin` holds it because `lib/permissions.ts` builds `adminPerms` from `managerPerms` — every manager permission reaches admin and owner. Confirmed by the owner 2026-10-19: keep admin included.
 
 ### B2. Grammar
 
@@ -198,6 +198,7 @@ UI: the picker is disabled and reads exactly "Create a new stage to use another 
   - **Single pass:** block values are substituted verbatim and never re-scanned.
   - **Trimming:** `url` and `stop_text` values are trimmed; `brand` and `creative_text` are not.
   - **Row drop:** a row whose template is exactly one block token, and whose value is empty, is dropped. Any other empty row, such as T2's deliberate blank line, is kept.
+  - **Trailing blank rows are trimmed** (owner, 2026-10-19), for every format and for custom text: T2 with no link ends on its stop text. Rows are template rows, so a creative whose own text ends in a newline is untouched, and T1 stays byte-identical to legacy (grid and live proof re-run: 0 diffs).
   - **No creative:** an empty or absent creative text gives `""` (nothing to send), as today.
 - **Seeds (per org):**
 

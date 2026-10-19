@@ -9,7 +9,8 @@
 //   • single pass — block VALUES are substituted verbatim and never re-scanned;
 //   • url and stop_text values are trimmed; brand and creative_text are not;
 //   • a row whose template is EXACTLY one block, rendering empty, is dropped
-//     (today's "no link ⇒ no link line"); any other empty row is kept;
+//     (today's "no link ⇒ no link line"); any other empty row is kept, except
+//   • trailing blank rows (empty / whitespace-only) are trimmed;
 //   • an empty creative ⇒ "" (nothing to send).
 // With these rules T1 reproduces the pre-format buildStageSms byte-for-byte.
 
@@ -78,5 +79,9 @@ export function assembleMessage(
       ),
     );
   }
+  // Trailing blank ROWS are trimmed (owner, 2026-10-19): T2 with no link must
+  // end on its stop text, not "\n". Rows are template rows, so a creative whose
+  // own text ends in "\n" is untouched — exactly as the pre-format composer.
+  while (rows.length > 0 && rows[rows.length - 1].trim() === "") rows.pop();
   return rows.join("\n");
 }

@@ -67,7 +67,8 @@ export const dynamic = "force-dynamic";
 // per-statement timeout, not the 300s ceiling.
 //
 // 300s remains the right Vercel budget: it is ~2x the ~145s the four views
-// cost today, and it is ABOVE the 180s per-statement timeout so the database
+// cost today (0214 adds a fifth, offer_group_lifecycle_mv, refreshed last; its
+// measured cost is in docs/04-features/offer-group-report.md), and it is ABOVE the 180s per-statement timeout so the database
 // cancels a runaway refresh first. That ordering is deliberate — a 57014
 // throws and this route alerts on it, whereas a Vercel timeout kills the
 // invocation with no catch and no alert. See docs/04-features/offer-group-report.md.
@@ -99,7 +100,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         `effectiveStatementTimeoutMs=${connection.statementTimeoutMs}` +
         (connection.fallbackReason ? ` fallbackReason=${connection.fallbackReason}` : "") +
         ` totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} ` +
-        `audienceTotalsMs=${durations.audienceTotalsMs} totalMs=${durations.totalMs} ` +
+        `audienceTotalsMs=${durations.audienceTotalsMs} lifecycleMs=${durations.lifecycleMs} totalMs=${durations.totalMs} ` +
         `refreshed=${refreshed.length}/${durations.outcomes.length}`,
     );
 
@@ -133,7 +134,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Stamped only when ALL FOUR refreshes succeeded — the heartbeat must mean
+    // Stamped only when ALL FIVE refreshes succeeded — the heartbeat must mean
     // "every report is fresh", not "the route was reached" and not "some of it
     // worked". Per-view freshness lives in report_refresh_log, which each view
     // stamps for itself.

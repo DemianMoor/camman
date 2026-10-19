@@ -6,12 +6,15 @@ import { can } from "@/lib/permissions";
 import { db } from "@/db/client";
 import { and, eq } from "drizzle-orm";
 import { offers } from "@/db/schema";
-import { getOfferGroupReport } from "@/lib/reporting/offer-group-report";
+import {
+  getOfferGroupLifecycle,
+  getOfferGroupReport,
+} from "@/lib/reporting/offer-group-report";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ offerId: string }> },
 ) {
   const auth = await requireApiMembership({
@@ -41,6 +44,12 @@ export async function GET(
   }
 
   const report = await getOfferGroupReport(orgId, offerId);
+  // Lifecycle cohort columns are read only when the page's checkbox asks for
+  // them (?lifecycle=1) -- the default view stays one matview read lighter.
+  const lifecycle =
+    req.nextUrl.searchParams.get("lifecycle") === "1"
+      ? await getOfferGroupLifecycle(orgId, offerId)
+      : null;
 
   // The footer is read at OFFER grain, never summed from the group rows. Those
   // rows are per-recipient full counts and a contact in three of this offer's
@@ -63,5 +72,7 @@ export async function GET(
     // non-tracked/untargeted campaign, or to a recipient outside its targeted groups.
     unattributedSends: offerTotals.unattributed_sends,
     refreshedAt: report.refreshedAt,
+    // null unless ?lifecycle=1. rows is keyed by group_id.
+    lifecycle,
   });
 }

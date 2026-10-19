@@ -19,11 +19,13 @@ import {
   StaleBanner,
 } from "@/components/reports/report-metrics";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import type {
   RawMetrics,
   GroupRawRow,
+  GroupLifecycleRow,
   OfferTotals,
 } from "@/lib/reporting/offer-group-report";
 
@@ -36,11 +38,16 @@ type ReportResponse = {
   breakEvenPer1k: number | null;
   unattributedSends: number;
   refreshedAt: string | null;
+  // Present only when requested with ?lifecycle=1; rows keyed by group_id.
+  lifecycle: { rows: Record<number, GroupLifecycleRow>; refreshedAt: string | null } | null;
 };
+
+type LifecycleKey = keyof GroupLifecycleRow;
 
 type SortKey =
   | "group_name" | "sends" | "rpm" | "net_rpm" | "epc" | "ctr" | "sales" | "pending_revenue"
-  | "oo_pct" | "net_profit" | "sent_7d" | "sent_30d" | "sent_90d" | "fresh_pool";
+  | "oo_pct" | "net_profit" | "sent_7d" | "sent_30d" | "sent_90d" | "fresh_pool"
+  | LifecycleKey;
 
 const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   // TIME BASIS — this report applies NO date filter. offer_report_campaign_econ
@@ -72,7 +79,24 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "fresh_pool", label: "Fresh pool", numeric: true },
 ];
 
-type ViewRow = GroupRawRow & Derived;
+// Behind the "Show lifecycle detailed report" checkbox (migration 0214,
+// offer_group_lifecycle_mv). Cohort = the contact's CURRENT lifecycle status;
+// Sent = messages in the same scope as "Sent 90d (this offer)", Fresh = contacts
+// on the same definition as "Fresh pool". New contacts are in no cohort — they
+// stay in the overall Fresh pool column.
+const LIFECYCLE_COLUMNS: { key: LifecycleKey; label: string; numeric: true }[] = [
+  { key: "hw_sent_14d", label: "Hot/Warm sent 14d", numeric: true },
+  { key: "hw_sent_90d", label: "Hot/Warm sent 90d", numeric: true },
+  { key: "hw_fresh_pool", label: "Hot/Warm fresh pool", numeric: true },
+  { key: "cold_sent_14d", label: "Cold sent 14d", numeric: true },
+  { key: "cold_sent_90d", label: "Cold sent 90d", numeric: true },
+  { key: "cold_fresh_pool", label: "Cold fresh pool", numeric: true },
+  { key: "freeze_sent_14d", label: "Freeze sent 14d", numeric: true },
+  { key: "freeze_sent_90d", label: "Freeze sent 90d", numeric: true },
+  { key: "freeze_fresh_pool", label: "Freeze fresh pool", numeric: true },
+];
+
+type ViewRow = GroupRawRow & Derived & Partial<GroupLifecycleRow>;
 
 // "read low" / "read high" / "match" is derived from the actual ratio, never
 // assumed: attributable_revenue/attributable_sales and revenue/sales are not
@@ -85,7 +109,7 @@ function coverageWord(pct: number): string {
   return "match exactly";
 }
 
-function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived & { pending_revenue?: number }; isGroup: boolean; breakEven: number | null }) {
+function MetricCells({ m, isGroup, breakEven, showLifecycle }: { m: RawMetrics & Derived & { pending_revenue?: number }; isGroup: boolean; breakEven: number | null; showLifecycle: boolean }) {
   return (
     <>
       <td className="px-3 py-2 text-right tabular-nums">{fmtInt(m.sends)}</td>
@@ -107,6 +131,16 @@ function MetricCells({ m, isGroup, breakEven }: { m: RawMetrics & Derived & { pe
       <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_30d) : "—"}</td>
       <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).sent_90d) : "—"}</td>
       <td className="px-3 py-2 text-right tabular-nums">{isGroup ? fmtInt((m as ViewRow).fresh_pool) : "—"}</td>
+      {showLifecycle
+        ? LIFECYCLE_COLUMNS.map((c) => {
+            const v = isGroup ? (m as ViewRow)[c.key] : undefined;
+            return (
+              <td key={c.key} className="px-3 py-2 text-right tabular-nums">
+                {v == null ? "—" : fmtInt(v)}
+              </td>
+            );
+          })
+        : null}
     </>
   );
 }
@@ -119,18 +153,31 @@ export default function OfferGroupReportPage() {
   const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<SortKey>("net_rpm");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [showLifecycle, setShowLifecycle] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
-    const res = await api.execute(`/api/offers/${offerId}/report`);
+    const res = await api.execute(
+      `/api/offers/${offerId}/report${showLifecycle ? "?lifecycle=1" : ""}`,
+    );
     if (res.ok) setData(res.data);
     else setError(res.error);
-  }, [api.execute, offerId]);
+  }, [api.execute, offerId, showLifecycle]);
+
+  const columns = useMemo(
+    () => (showLifecycle ? [...COLUMNS, ...LIFECYCLE_COLUMNS] : COLUMNS),
+    [showLifecycle],
+  );
 
   useEffect(() => { void load(); }, [load]);
 
   const viewRows: ViewRow[] = useMemo(
-    () => (data?.rows ?? []).map((r) => ({ ...r, ...derive(r) })),
+    () =>
+      (data?.rows ?? []).map((r) => ({
+        ...r,
+        ...derive(r),
+        ...(data?.lifecycle?.rows[r.group_id] ?? {}),
+      })),
     [data],
   );
 
@@ -201,7 +248,7 @@ export default function OfferGroupReportPage() {
 
   function exportCsv() {
     if (!data) return;
-    const header = COLUMNS.map((c) => c.label);
+    const header = columns.map((c) => c.label);
     const line = (label: string, m: RawMetrics & Derived) => [
       label, m.sends, fmtNum(m.rpm), fmtNum(m.net_rpm), fmtNum(m.epc), fmtNum(m.ctr), m.sales,
       "pending_revenue" in m ? fmtNum((m as { pending_revenue: number }).pending_revenue) : "",
@@ -210,6 +257,9 @@ export default function OfferGroupReportPage() {
       "sent_30d" in m ? (m as ViewRow).sent_30d : "",
       "sent_90d" in m ? (m as ViewRow).sent_90d : "",
       "fresh_pool" in m ? (m as ViewRow).fresh_pool : "",
+      ...(showLifecycle
+        ? LIFECYCLE_COLUMNS.map((c) => (m as ViewRow)[c.key] ?? "")
+        : []),
     ];
     downloadCsv(`offer-${offerId}-group-report.csv`, [
       header,
@@ -234,6 +284,11 @@ export default function OfferGroupReportPage() {
             {breakEven != null ? ` · break-even ${fmtUsd(breakEven)}/1k` : ""}
           </p>
           {data ? <StaleBanner refreshedAt={data.refreshedAt} /> : null}
+          {data?.lifecycle ? (
+            <p className="text-xs text-muted-foreground">
+              Lifecycle columns as of {formatCampaignDateTime(data.lifecycle.refreshedAt)}
+            </p>
+          ) : null}
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={api.isLoading}>
@@ -247,11 +302,23 @@ export default function OfferGroupReportPage() {
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
 
+      <div className="flex items-center gap-2">
+        <input
+          id="show-lifecycle"
+          type="checkbox"
+          checked={showLifecycle}
+          onChange={(e) => setShowLifecycle(e.target.checked)}
+        />
+        <Label htmlFor="show-lifecycle" className="text-sm">
+          Show lifecycle detailed report
+        </Label>
+      </div>
+
       <div className="overflow-x-auto rounded-md border">
         <table className="w-full text-sm">
           <thead className="bg-muted/50">
             <tr>
-              {COLUMNS.map((c) => (
+              {columns.map((c) => (
                 <th
                   key={c.key}
                   onClick={() => toggleSort(c.key)}
@@ -269,13 +336,13 @@ export default function OfferGroupReportPage() {
                   All offers (org-wide)
                   {data?.benchmarkHasManual ? <ManualMix /> : null}
                 </td>
-                <MetricCells m={benchmark} isGroup={false} breakEven={breakEven} />
+                <MetricCells m={benchmark} isGroup={false} breakEven={breakEven} showLifecycle={showLifecycle} />
               </tr>
             ) : null}
             {sorted.map((r) => (
               <tr key={r.group_id} className="border-t">
                 <td className="px-3 py-2">{r.group_name}</td>
-                <MetricCells m={r} isGroup breakEven={breakEven} />
+                <MetricCells m={r} isGroup breakEven={breakEven} showLifecycle={showLifecycle} />
               </tr>
             ))}
             {offerTotal ? (
@@ -284,12 +351,12 @@ export default function OfferGroupReportPage() {
                   This offer · all groups
                   {data?.offerTotals.has_manual_stages ? <ManualMix /> : null}
                 </td>
-                <MetricCells m={offerTotal} isGroup={false} breakEven={breakEven} />
+                <MetricCells m={offerTotal} isGroup={false} breakEven={breakEven} showLifecycle={showLifecycle} />
               </tr>
             ) : null}
             {data && sorted.length === 0 ? (
               <tr className="border-t">
-                <td colSpan={COLUMNS.length} className="px-3 py-6 text-center text-muted-foreground">
+                <td colSpan={columns.length} className="px-3 py-6 text-center text-muted-foreground">
                   No group data for this offer yet.
                 </td>
               </tr>
@@ -331,6 +398,18 @@ export default function OfferGroupReportPage() {
         counts across every offer and both link modes, independent of
         tracking.
       </p>
+
+      {showLifecycle ? (
+        <p className="text-xs text-muted-foreground">
+          <strong>Lifecycle columns</strong> split “Sent 90d (this offer)” and
+          “Fresh pool” by each contact’s <em>current</em> lifecycle status
+          (Hot/Warm, Cold, Freeze), and add a 14-day window. Sent columns count
+          messages; fresh pool columns count contacts. New and Suppressed
+          contacts are in no cohort column, so the three cohorts sum to less
+          than the overall columns — New contacts are counted in the overall
+          Fresh pool.
+        </p>
+      ) : null}
     </div>
   );
 }

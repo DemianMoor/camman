@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-09-28_
+_Last updated: 2026-10-19_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -49,6 +49,32 @@ an average of per-group ratios.
 | **Opt-out %** | `optouts / sends * 100`. |
 | **Sent last 7 / 30 / 90 days** | `COUNT(*)` of attributed `stage_sends` rows within the window — send rows, **not** distinct contacts, scoped to **this offer**, and (since migration 0132) tracked campaigns only. |
 | **Fresh pool** | Contacts in the group that are sendable (`contacts.messaging_status = 'eligible'` AND no `opt_outs` row) AND have never been sent a campaign of **this offer** — anti-joined against `offer_exposures` per offer (migration 0133). All-time, not a window; offer-scoped, not shared across offers. |
+
+## Lifecycle detailed report (migration 0214)
+
+A **"Show lifecycle detailed report"** checkbox above the table adds nine
+columns — Sent 14d, Sent 90d and Fresh pool for each of three lifecycle
+cohorts: **Hot/Warm** (hot + warm), **Cold**, **Freeze**. Owner rulings,
+2026-10-19:
+
+| Decision | Ruling |
+|---|---|
+| Which status buckets a contact | Its **current** status (`contacts.lifecycle_status`, as of the matview refresh) — not status-at-send — so a cohort's three columns describe one population |
+| Unit of the Sent columns | **Messages** (`stage_sends` rows), the same unit and scope as "Sent 90d (this offer)" |
+| New / Suppressed | No cohort column. New contacts stay in the overall **Fresh pool** column |
+
+Fresh pool per cohort uses the 0133 definition above (eligible, not opted out,
+never exposed to this offer), split by status. Because New and Suppressed are
+excluded, the three cohorts sum to **less** than the overall columns.
+
+Source: `offer_group_lifecycle_mv` (one row per org × offer × group, nine
+columns `hw_*` / `cold_*` / `freeze_*`), refreshed **last** by the same
+twice-daily cron and stamped separately in `report_refresh_log`; the page shows
+its own "Lifecycle columns as of" line. A separate matview, not new columns on
+`offer_group_report_mv`, so that view and `audience_report_group_totals_mv`
+(which sums it) are not dropped and recreated. Read only when the checkbox is
+on (`GET /api/offers/[id]/report?lifecycle=1`); benchmark and footer rows show
+"—". The checkbox is not persisted — it resets on reload.
 
 ## Tracked-only attribution and the per-contact-column limitation
 
@@ -223,8 +249,9 @@ measured 2026-08-13: `offer_report_offer_totals_mv` ~4.5s,
 total against the 300s ceiling. This is a background job with no user waiting
 on it, so the larger budget costs nothing. The same cron also refreshes the
 Audience Stats group totals (`audience_report_group_totals_mv`, migration 0180)
-last; its defining SELECT measured 5.3s on 2026-09-14, logged per run as
-`audienceTotalsMs`.
+after the group view; its defining SELECT measured 5.3s on 2026-09-14, logged
+per run as `audienceTotalsMs`. `offer_group_lifecycle_mv` (migration 0214)
+refreshes last, logged as `lifecycleMs`; its first build is timed at apply.
 
 ### ⛔ `maxDuration` is not the binding limit — `statement_timeout` is
 
@@ -431,7 +458,9 @@ Telegram report's Warsaw-time cron — see [crons.md](crons.md)).
 - Computes `breakEvenPer1k = offerTotals.cost / offerTotals.sends * 1000`
   (null at 0 sends).
 - Returns `{ offerName, rows, offerTotals, orgBenchmark, benchmarkHasManual,
-  breakEvenPer1k, unattributedSends, refreshedAt }`. `unattributedSends` is
+  breakEvenPer1k, unattributedSends, refreshedAt, lifecycle }`. `lifecycle` is
+  `null` unless `?lifecycle=1`, then `{ rows: { [group_id]: {hw_sent_14d, …} },
+  refreshedAt }` from `getOfferGroupLifecycle`. `unattributedSends` is
   `offerTotals.unattributed_sends` — sends the footer counts that cannot reach
   any group row. Read-only — no writes, no on-demand refresh trigger.
 
@@ -521,6 +550,8 @@ registration as a sale, and nothing here is waiting for a backfill.
   group-row attribution; adds `offer_report_tracked_campaigns` and
   `offer_report_offer_totals_mv`; extends the dedup-at-grain rule to every
   group-row column.
+- `db/migrations/0214_offer_group_lifecycle_report.sql` —
+  `offer_group_lifecycle_mv`, the lifecycle-cohort columns.
 - `lib/reporting/offer-group-report.ts` — read + refresh helper.
 - `lib/reporting/refresh-session.ts` — the session-mode connection the refresh
   runs on, with this job's `statement_timeout` (180s) and `work_mem` (384MB)

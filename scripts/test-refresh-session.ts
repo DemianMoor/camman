@@ -51,6 +51,7 @@ const VIEWS = [
   "offer_group_report_mv",
   "offer_report_offer_totals_mv",
   "audience_report_group_totals_mv",
+  "offer_group_lifecycle_mv",
 ];
 
 // ── source-scan bar ──────────────────────────────────────────────────────────
@@ -256,13 +257,13 @@ async function main() {
     sent[0],
   );
 
-  // ── 8. A clean run refreshes all four and stamps all four ──────────────────
+  // ── 8. A clean run refreshes all five and stamps all five ──────────────────
   const probe = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
   const stampsBefore = await readStamps(probe);
 
   const clean = await refreshOfferGroupReport();
   check("clean run reports no failures", clean.failed.length === 0, clean.failed.join(", "));
-  check("clean run returns one outcome per view", clean.outcomes.length === 4);
+  check("clean run returns one outcome per view", clean.outcomes.length === VIEWS.length);
   check(
     "clean run marks every view ok",
     clean.outcomes.every((o) => o.ok),
@@ -270,7 +271,7 @@ async function main() {
   );
   const stampsAfter = await readStamps(probe);
   check(
-    "clean run advances all four report_refresh_log stamps",
+    "clean run advances all five report_refresh_log stamps",
     VIEWS.every((v) => stampsAfter[v] > stampsBefore[v]),
     VIEWS.map((v) => `${v}:${stampsAfter[v] > stampsBefore[v]}`).join(" "),
   );
@@ -309,8 +310,8 @@ async function main() {
     for (const name of [
       "the failing view is reported in `failed`",
       "the failure carries an error message (reported, not swallowed)",
-      "the OTHER THREE views still refreshed — including the two queued behind it",
-      "the other three stamped their own success in report_refresh_log",
+      "the OTHER FOUR views still refreshed — including the three queued behind it",
+      "the other four stamped their own success in report_refresh_log",
       "the failed view did NOT stamp a success (its staleness stays visible)",
     ]) {
       check(name, false, "refreshOfferGroupReport threw — the run aborted");
@@ -327,12 +328,12 @@ async function main() {
   );
   const others = VIEWS.filter((v) => v !== "offer_group_report_mv");
   check(
-    "the OTHER THREE views still refreshed — including the two queued behind it",
+    "the OTHER FOUR views still refreshed — including the three queued behind it",
     others.every((v) => partial!.outcomes.find((o) => o.view === v)?.ok === true),
     others.map((v) => `${v}=${partial!.outcomes.find((o) => o.view === v)?.ok}`).join(" "),
   );
   check(
-    "the other three stamped their own success in report_refresh_log",
+    "the other four stamped their own success in report_refresh_log",
     others.every((v) => after[v] > before[v]),
     others.map((v) => `${v}:${after[v] > before[v]}`).join(" "),
   );

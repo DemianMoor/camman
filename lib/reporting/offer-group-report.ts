@@ -64,6 +64,28 @@ export type OfferTotals = RawMetrics & {
   attributable_pending_revenue: number;
 };
 
+// Lifecycle-cohort columns for one group row (migration 0214,
+// offer_group_lifecycle_mv). Cohort = the contact's CURRENT lifecycle status:
+// hw = hot + warm. Sent = messages (same scope as sent_7d/30d/90d); fresh = contacts
+// (0133 definition). new/suppressed are in no cohort.
+export type GroupLifecycleRow = {
+  hw_sent_14d: number;
+  hw_sent_90d: number;
+  hw_fresh_pool: number;
+  cold_sent_14d: number;
+  cold_sent_90d: number;
+  cold_fresh_pool: number;
+  freeze_sent_14d: number;
+  freeze_sent_90d: number;
+  freeze_fresh_pool: number;
+};
+
+export const LIFECYCLE_COLUMNS = [
+  "hw_sent_14d", "hw_sent_90d", "hw_fresh_pool",
+  "cold_sent_14d", "cold_sent_90d", "cold_fresh_pool",
+  "freeze_sent_14d", "freeze_sent_90d", "freeze_fresh_pool",
+] as const satisfies ReadonlyArray<keyof GroupLifecycleRow>;
+
 export type OfferGroupReport = {
   rows: GroupRawRow[];
   offerTotals: OfferTotals;
@@ -148,6 +170,37 @@ export async function getOfferGroupReport(
   };
 }
 
+// The lifecycle columns per group_id, read only when the page asks for them
+// (the "Show lifecycle detailed report" checkbox). A group with no row here
+// (lifecycle view not yet refreshed) is simply absent and renders "—".
+export async function getOfferGroupLifecycle(
+  orgId: string,
+  offerId: number,
+): Promise<{ rows: Record<number, GroupLifecycleRow>; refreshedAt: string | null }> {
+  const rows = (await db.execute(sql`
+    select group_id, ${sql.raw(LIFECYCLE_COLUMNS.join(", "))}
+    from offer_group_lifecycle_mv
+    where org_id = ${orgId}::uuid and offer_id = ${offerId}
+  `)) as unknown as Record<string, unknown>[];
+  const logRows = (await db.execute(sql`
+    select refreshed_at from report_refresh_log
+    where view_name = 'offer_group_lifecycle_mv'
+  `)) as unknown as { refreshed_at: string | null }[];
+
+  const out: Record<number, GroupLifecycleRow> = {};
+  for (const r of rows) {
+    const row = {} as GroupLifecycleRow;
+    for (const c of LIFECYCLE_COLUMNS) row[c] = Number(r[c] ?? 0);
+    out[Number(r.group_id)] = row;
+  }
+  return {
+    rows: out,
+    refreshedAt: logRows[0]?.refreshed_at
+      ? new Date(logRows[0].refreshed_at).toISOString()
+      : null,
+  };
+}
+
 // The de-duplicated org-wide benchmark row. Shared with the Audience Stats
 // report (lib/reporting/audience-report.ts) so both screens read one definition.
 export async function readOrgBenchmark(
@@ -189,7 +242,7 @@ export async function readGroupReportRefreshedAt(): Promise<string | null> {
     : null;
 }
 
-/** Per-view result. One entry per matview, in refresh order, always all four. */
+/** Per-view result. One entry per matview, in refresh order, always all five. */
 export type RefreshOutcome = {
   view: string;
   ok: boolean;
@@ -203,8 +256,9 @@ export type RefreshDurations = {
   summaryMs: number;
   groupMs: number;
   audienceTotalsMs: number;
+  lifecycleMs: number;
   totalMs: number;
-  /** All four views, in order, with per-view success and duration. */
+  /** All five views, in order, with per-view success and duration. */
   outcomes: RefreshOutcome[];
   /** Names of the views that failed this run. Empty on a clean run. */
   failed: string[];
@@ -216,7 +270,7 @@ export type RefreshDurations = {
   connection: RefreshConnection;
 };
 
-// The four matviews, in refresh order. Ordering still matters even though a
+// The five matviews, in refresh order. Ordering still matters even though a
 // failure no longer stops the run:
 //
 //   * audience_report_group_totals_mv SUMS offer_group_report_mv, so it must
@@ -224,6 +278,8 @@ export type RefreshDurations = {
 //     FAILS, this one still runs and sums the previous group snapshot — stale,
 //     but internally consistent and visibly stale via its own log stamp, which
 //     beats freezing it too.
+//   * offer_group_lifecycle_mv (0214) depends on no other matview; it goes
+//     LAST so the four older reports are never queued behind it.
 //   * The two 0093 matviews lead, so a code-before-migration deploy (CLAUDE.md
 //     §14) breaks on the newer views rather than the older ones.
 const REFRESH_SEQUENCE = [
@@ -231,12 +287,13 @@ const REFRESH_SEQUENCE = [
   { view: "offer_group_report_mv", durationKey: "groupMs" },
   { view: "offer_report_offer_totals_mv", durationKey: "totalsMs" },
   { view: "audience_report_group_totals_mv", durationKey: "audienceTotalsMs" },
+  { view: "offer_group_lifecycle_mv", durationKey: "lifecycleMs" },
 ] as const satisfies ReadonlyArray<{
   view: string;
-  durationKey: "summaryMs" | "groupMs" | "totalsMs" | "audienceTotalsMs";
+  durationKey: "summaryMs" | "groupMs" | "totalsMs" | "audienceTotalsMs" | "lifecycleMs";
 }>;
 
-// Rebuild all four matviews (CONCURRENTLY -- non-blocking) and stamp the
+// Rebuild all five matviews (CONCURRENTLY -- non-blocking) and stamp the
 // refresh log. Called by the twice-daily cron. CONCURRENTLY must run outside a
 // transaction, so each statement is its own execute() call.
 //
@@ -255,10 +312,10 @@ const REFRESH_SEQUENCE = [
 //
 // ── EACH VIEW STAMPS ITS OWN SUCCESS ─────────────────────────────────────────
 // report_refresh_log is updated immediately after that view's OWN refresh
-// succeeds, and NOT at all when it fails. That is what makes the four
+// succeeds, and NOT at all when it fails. That is what makes the five
 // refreshed_at values independently meaningful: a view whose stamp is current
 // really was rebuilt on the last run, and a view whose stamp is stale really
-// was not, regardless of what its neighbours did. Reading all four back is the
+// was not, regardless of what its neighbours did. Reading all five back is the
 // supported way to check a run.
 //
 // Runs on a dedicated session-mode connection (see ./refresh-session) so the
@@ -273,7 +330,7 @@ export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
   return withRefreshSession(async (sessionDb, connection) => {
     const t0 = Date.now();
     const outcomes: RefreshOutcome[] = [];
-    const durations = { summaryMs: 0, groupMs: 0, totalsMs: 0, audienceTotalsMs: 0 };
+    const durations = { summaryMs: 0, groupMs: 0, totalsMs: 0, audienceTotalsMs: 0, lifecycleMs: 0 };
 
     for (const target of REFRESH_SEQUENCE) {
       const startedAt = Date.now();

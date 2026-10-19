@@ -2160,3 +2160,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-19 — Offer Group Report lifecycle footnote corrected: Sent cohorts sum to Sent 90d; only fresh pools sum to less (New) — 04-features/offer-group-report
 
 2026-10-19 — Offer Group Report lifecycle cohorts: Sent window 90d → 30d (migration 0215 rebuilds offer_group_lifecycle_mv with *_sent_30d; overall Sent 90d unchanged) — 03-data-model, 04-features/offer-group-report
+
+2026-10-19 — Offer Group Report: Group column frozen (sticky) during horizontal scroll — 04-features/offer-group-report

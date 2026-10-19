@@ -64,8 +64,11 @@ cohorts: **Hot/Warm** (hot + warm), **Cold**, **Freeze**. Owner rulings,
 | New / Suppressed | No cohort column. New contacts stay in the overall **Fresh pool** column |
 
 Fresh pool per cohort uses the 0133 definition above (eligible, not opted out,
-never exposed to this offer), split by status. Because New and Suppressed are
-excluded, the three cohorts sum to **less** than the overall columns.
+never exposed to this offer), split by status. New and Suppressed are in no
+cohort, so the three fresh pools sum to **less** than the overall Fresh pool.
+The Sent cohorts sum to the overall "Sent 90d (this offer)" in practice — a
+texted contact is never `new`, and on 2026-10-19 Suppressed was 0 (measured on
+production at the 0214 apply: 5,927,289 = 5,927,289 across all 237 rows).
 
 Source: `offer_group_lifecycle_mv` (one row per org × offer × group, nine
 columns `hw_*` / `cold_*` / `freeze_*`), refreshed **last** by the same

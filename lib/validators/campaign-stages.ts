@@ -71,6 +71,13 @@ const stageBaseSchema = z.object({
   // false/absent, full_url is stored verbatim. Lets the form keep an
   // editable-but-auto-derived field without a "is custom" column.
   full_url_auto: z.boolean().optional(),
+  // 0216: the stage's message shape — a format id OR owner-only custom text
+  // (exactly one is stored). Content and permission rules are decided by
+  // lib/messages/stage-format.ts decideStageFormatChange, not here, so the
+  // route can answer with the precise reason. Custom text is not trimmed:
+  // spaces are literal message text.
+  message_format_id: z.number().int().positive().nullable().optional(),
+  custom_text: z.string().max(1000).nullable().optional(),
   stop_text: z.string().trim().min(1).max(80).default("Stop to END"),
   include_clickers: z.boolean().default(false),
   exclude_clickers: z.boolean().default(false),

@@ -8,6 +8,7 @@ import { db } from "@/db/client";
 import { SEED_FORMATS } from "@/lib/messages/format";
 import { inheritedStageFormat, type StageFormatColumns } from "@/lib/messages/stage-format";
 import { ensureFollowupChildren } from "@/lib/drip/children";
+import { stageHasSent } from "@/lib/stages/send-locks";
 
 let fail = 0;
 const bar = (n: string, ok: boolean, d = "") => { console.log(`  ${ok ? "✓" : "✗"} ${n}${d ? ` — ${d}` : ""}`); if (!ok) fail++; };
@@ -105,6 +106,15 @@ async function main() {
       bar("M1.16 drip children copy the parent's custom text (real insert site)",
         made.created > 0 && kids.length === made.created && kids.every((k) => k.message_format_id === null && k.custom_text === "Hi<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}"),
         `${made.created} children`);
+      // stageHasSent: only a status='sent' row counts.
+      const contact = (await tx.execute(sql`SELECT id, phone_number FROM contacts WHERE org_id = ${c.org_id} LIMIT 1`)) as unknown as { id: string; phone_number: string }[];
+      const before = await stageHasSent(tx, ins[0].id);
+      await tx.execute(sql`INSERT INTO stage_sends (id, org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
+        VALUES (gen_random_uuid(), ${c.org_id}, ${c.id}, ${ins[0].id}, ${contact[0].id}, ${contact[0].phone_number}, 'x', 'pending')`);
+      const pendingOnly = await stageHasSent(tx, ins[0].id);
+      await tx.execute(sql`UPDATE stage_sends SET status = 'sent', sent_at = now() WHERE stage_id = ${ins[0].id}`);
+      bar("M1.17 stageHasSent: false → false with only a pending row → true once sent",
+        before === false && pendingOnly === false && (await stageHasSent(tx, ins[0].id)) === true);
       throw new Rollback();
     });
   } catch (e) {

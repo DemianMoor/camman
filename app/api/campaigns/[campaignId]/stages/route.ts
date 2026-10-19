@@ -44,6 +44,7 @@ import {
   validateDestination,
 } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
+import { decideStageFormatChange, isFormatUsable } from "@/lib/messages/stage-format";
 import {
   generateCampaignTrackingId,
   generateStageTrackingId,
@@ -195,6 +196,13 @@ export async function GET(
       landing_page_id: campaign_stages.landing_page_id,
       utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
+      // 0216: message shape + whether the stage has sent (format / drip
+      // creative locks; the form disables those pickers).
+      message_format_id: campaign_stages.message_format_id,
+      custom_text: campaign_stages.custom_text,
+      // Literal correlation: a Drizzle column ref in a correlated subquery can
+      // render unqualified (see docs/07-conventions.md).
+      has_sent: drizzleSql<boolean>`EXISTS (SELECT 1 FROM stage_sends ss WHERE ss.stage_id = "campaign_stages"."id" AND ss.status = 'sent')`,
       include_clickers: campaign_stages.include_clickers,
       exclude_clickers: campaign_stages.exclude_clickers,
       include_no_status: campaign_stages.include_no_status,
@@ -735,7 +743,30 @@ export async function POST(
     typeof campaign_stages.$inferInsert,
     "stage_number"
   > & { stage_number?: number };
+  // 0216: message shape. Nothing sent ⇒ the BEFORE INSERT trigger stamps the
+  // org default; a format must be enabled; custom text is owner-only and must
+  // carry {creative_text} {url} {stop_text}.
+  const shape = decideStageFormatChange({
+    current: null,
+    input: { message_format_id: input.message_format_id, custom_text: input.custom_text },
+    canCompliance: can(role, "compliance.manage"),
+    hasSent: false,
+    formatUsable:
+      input.custom_text == null && input.message_format_id != null
+        ? await isFormatUsable(db, orgId, input.message_format_id)
+        : true,
+  });
+  if (!shape.ok) {
+    return apiError(
+      shape.status,
+      shape.message,
+      shape.status === 403 ? API_ERROR_CODES.FORBIDDEN : API_ERROR_CODES.VALIDATION,
+      { reason: shape.reason, field: shape.field },
+    );
+  }
+
   const values: StageInsertable = {
+    ...shape.set,
     org_id: orgId,
     campaign_id: cid,
     label: nullIfEmpty(input.label),

@@ -29,6 +29,8 @@ import { loadBrandLandingPairs } from "@/lib/api/brand-landing-pairs";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { deleteStage } from "@/lib/stages/delete-stage";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
+import { decideCreativeChange, stageHasSent } from "@/lib/stages/send-locks";
+import { decideStageFormatChange, isFormatUsable } from "@/lib/messages/stage-format";
 import {
   generateCampaignTrackingId,
   generateStageTrackingId,
@@ -398,6 +400,11 @@ export async function PATCH(
     .select({
       tracking_id: campaign_stages.tracking_id,
       creative_id: campaign_stages.creative_id,
+      // 0216: the stored message shape + campaign type, for the format and
+      // drip-creative locks below.
+      message_format_id: campaign_stages.message_format_id,
+      custom_text: campaign_stages.custom_text,
+      campaign_type: campaigns.type,
       // Brand -> numbers (1a) grandfathering: an existing mismatched stage
       // stays editable unless the number itself is changing.
       current_provider_phone_id: campaign_stages.provider_phone_id,
@@ -432,6 +439,51 @@ export async function PATCH(
     });
   }
   const current = existing[0];
+
+  // ── 0216: message shape (format / owner-only custom text) + send locks ──
+  // The loop above copied whatever the form echoed; the shape is decided here
+  // instead, against the STORED values, so an echo is never refused.
+  delete updates.message_format_id;
+  delete updates.custom_text;
+  const wantsShape = input.message_format_id != null || input.custom_text != null;
+  const creativeChanging =
+    input.creative_id !== undefined && input.creative_id !== current.creative_id;
+  const hasSent =
+    wantsShape || (creativeChanging && current.campaign_type === "drip")
+      ? await stageHasSent(db, sid)
+      : false;
+  const shape = decideStageFormatChange({
+    current: { message_format_id: current.message_format_id, custom_text: current.custom_text },
+    input: { message_format_id: input.message_format_id, custom_text: input.custom_text },
+    canCompliance: can(role, "compliance.manage"),
+    hasSent,
+    formatUsable:
+      input.custom_text == null && input.message_format_id != null
+        ? await isFormatUsable(db, orgId, input.message_format_id)
+        : true,
+  });
+  if (!shape.ok) {
+    return apiError(
+      shape.status,
+      shape.message,
+      shape.status === 403 ? API_ERROR_CODES.FORBIDDEN
+        : shape.status === 409 ? API_ERROR_CODES.CONFLICT : API_ERROR_CODES.VALIDATION,
+      { reason: shape.reason, field: shape.field },
+    );
+  }
+  Object.assign(updates, shape.set);
+  const creativeLock = decideCreativeChange({
+    isDrip: current.campaign_type === "drip",
+    currentCreativeId: current.creative_id,
+    inputCreativeId: input.creative_id,
+    hasSent,
+  });
+  if (!creativeLock.ok) {
+    return apiError(409, creativeLock.message, API_ERROR_CODES.CONFLICT, {
+      reason: creativeLock.reason,
+      field: "creative_id",
+    });
+  }
 
   // A stage may only be ARMED as a behavioural follow-up child at a tier that
   // has follow-up machinery. Closed here, by tier, rather than by making the

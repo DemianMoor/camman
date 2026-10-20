@@ -27,13 +27,19 @@ export interface ZipCandidate {
  */
 export async function planZipBackfill(
   dbc: DbOrTx,
-  i: { orgId: string | null; afterContactId: string | null; limit: number },
+  i: {
+    orgId: string | null;
+    afterContactId: string | null;
+    limit: number;
+    /** false = a pre-0217 database (dry run only): no column, so every contact is zip-less. */
+    hasZipColumn: boolean;
+  },
 ): Promise<{ candidates: ZipCandidate[]; scanned: number; lastContactId: string | null }> {
   const rows = (await dbc.execute(sql`
     WITH batch AS (
       SELECT ca.contact_id, ca.org_id
       FROM contact_attributes ca
-      WHERE ca.zip IS NULL
+      WHERE ${i.hasZipColumn ? sql`ca.zip IS NULL` : sql`true`}
         AND (${i.orgId}::uuid IS NULL OR ca.org_id = ${i.orgId}::uuid)
         AND (${i.afterContactId}::uuid IS NULL OR ca.contact_id > ${i.afterContactId}::uuid)
       ORDER BY ca.contact_id

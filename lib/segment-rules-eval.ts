@@ -4,6 +4,7 @@ import { and, asc, eq, sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { lineTypeBlockedContactsSql } from "@/lib/contact-groups/line-type-gate";
 import { dripInUseSubquery, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
 import { ENGAGEMENT_JOB, INCREMENTAL_OVERLAP_MINUTES } from "@/lib/engagement/constants";
@@ -791,15 +792,23 @@ export async function buildSegmentAudienceClause(
   // (segment_contacts) or non-contacts rules (clickers, opt-ins, …), which the
   // is_not/contact_added scan gates alone can't reach. messaging_status is a
   // LITERAL (not a bind). Gating here (not per-consumer) means preview, snapshot,
-  // and every draft count share the exact same eligible audience.
+  // and every draft count share the exact same eligible audience. The group
+  // line-type gate (migration 0218) is subtracted at the same point for the
+  // same reason — see lib/contact-groups/line-type-gate.ts.
+  // Wrapped in its own SELECT so the EXCEPT can never bind to a set operator a
+  // caller splices around this clause.
   function gateEligible(audience: SQL): SQL {
     return drizzleSql`
-      SELECT elig_s.contact_id
-      FROM (${audience}) elig_s
-      INNER JOIN contacts elig_c
-        ON elig_c.id = elig_s.contact_id
-        AND elig_c.org_id = ${orgId}::uuid
-        AND elig_c.messaging_status = 'eligible'
+      SELECT elig_out.contact_id FROM (
+        SELECT elig_s.contact_id
+        FROM (${audience}) elig_s
+        INNER JOIN contacts elig_c
+          ON elig_c.id = elig_s.contact_id
+          AND elig_c.org_id = ${orgId}::uuid
+          AND elig_c.messaging_status = 'eligible'
+        EXCEPT
+        ${lineTypeBlockedContactsSql(orgId)}
+      ) elig_out
     `;
   }
 

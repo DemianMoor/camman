@@ -82,6 +82,11 @@ export async function GET(req: NextRequest) {
         // for the Partner column and the read-only states of the group form.
         partner_id: contact_groups.partner_id,
         system_role: contact_groups.system_role,
+        // Line-type gate (migration 0218). Returned so the list page's edit
+        // dialog starts from the stored value — without it a rename from the
+        // list would send the form default (true) and re-allow VoIP.
+        allow_voip: contact_groups.allow_voip,
+        allow_unknown: contact_groups.allow_unknown,
         partner_name: drizzleSql<string | null>`(
           select p."name" from "partners" p where p."id" = "contact_groups"."partner_id"
         )`,

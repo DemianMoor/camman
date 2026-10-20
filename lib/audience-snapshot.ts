@@ -4,6 +4,7 @@ import { sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { lineTypeBlockedContactsSql } from "@/lib/contact-groups/line-type-gate";
 import { inUseSetBody, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
 
@@ -111,23 +112,29 @@ function buildGroupMembershipClause(
   // messaging_status='eligible' (LITERAL, not a bind). This gates the group
   // dimension the same way buildSegmentAudienceClause gates the segment side, so
   // every consumer (snapshot, preview, draft counts) sees a landline-free audience
-  // regardless of how it composes the two dimensions.
+  // regardless of how it composes the two dimensions. The group line-type gate
+  // (migration 0218, lib/contact-groups/line-type-gate.ts) is subtracted here
+  // for the same reason, wrapped so the EXCEPT stays local to this clause.
   return drizzleSql`
-    SELECT ccg.contact_id
-    FROM contact_contact_groups ccg
-    INNER JOIN contacts c
-      ON c.id = ccg.contact_id
-      AND c.org_id = ${orgId}::uuid
-      AND c.messaging_status = 'eligible'${
-        chipStatuses
-          ? drizzleSql`
-      AND c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chipStatuses))})`
-          : drizzleSql``
-      }
-    WHERE ccg.org_id = ${orgId}::uuid
-      AND ccg.contact_group_id = ANY(${drizzleSql.raw(
-        "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-      )})
+    SELECT gm_out.contact_id FROM (
+      SELECT ccg.contact_id
+      FROM contact_contact_groups ccg
+      INNER JOIN contacts c
+        ON c.id = ccg.contact_id
+        AND c.org_id = ${orgId}::uuid
+        AND c.messaging_status = 'eligible'${
+          chipStatuses
+            ? drizzleSql`
+        AND c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chipStatuses))})`
+            : drizzleSql``
+        }
+      WHERE ccg.org_id = ${orgId}::uuid
+        AND ccg.contact_group_id = ANY(${drizzleSql.raw(
+          "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+        )})
+      EXCEPT
+      ${lineTypeBlockedContactsSql(orgId)}
+    ) gm_out
   `;
 }
 

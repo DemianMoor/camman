@@ -119,6 +119,8 @@ interface RawRow {
   contact_created_at: string;
   is_opted_out: boolean;
   carrier_norm: string | null;
+  line_type: string;
+  line_type_blocked: boolean;
   in_use_regular: boolean;
   in_use_drip: boolean;
   prior_event_count: number;
@@ -303,7 +305,8 @@ export async function evaluateLeadRouting(
   const rows = (await dbc.execute(sql`
     WITH le AS (
       SELECT e.id, e.contact_id, e.partner_key_id, e.interest_tag, e.received_at,
-             c.created_at AS contact_created_at, c.carrier_norm, c.phone_number
+             c.created_at AS contact_created_at, c.carrier_norm, c.phone_number,
+             c.line_type
       FROM lead_events e
       JOIN contacts c ON c.id = e.contact_id
       WHERE e.id = ${leadEventId}::uuid AND e.org_id = ${orgId}::uuid
@@ -311,9 +314,18 @@ export async function evaluateLeadRouting(
     SELECT
       le.id AS lead_event_id, le.contact_id, le.phone_number AS phone,
       le.interest_tag AS lead_tag, le.partner_key_id AS lead_partner_key_id,
-      le.received_at, le.contact_created_at, le.carrier_norm,
+      le.received_at, le.contact_created_at, le.carrier_norm, le.line_type,
       EXISTS (SELECT 1 FROM opt_outs oo
               WHERE oo.org_id = ${orgId}::uuid AND oo.contact_id = le.contact_id) AS is_opted_out,
+      -- Group line-type gate (migration 0218): any ACTIVE group of this contact
+      -- that disallows its line type. Same predicate as
+      -- lib/contact-groups/line-type-gate.ts, for one contact.
+      EXISTS (SELECT 1 FROM contact_contact_groups lt_ccg
+              JOIN contact_groups lt_g ON lt_g.id = lt_ccg.contact_group_id
+              WHERE lt_ccg.org_id = ${orgId}::uuid AND lt_ccg.contact_id = le.contact_id
+                AND lt_g.status = 'active'
+                AND ((lt_g.allow_voip = false AND le.line_type = 'voip')
+                  OR (lt_g.allow_unknown = false AND le.line_type = 'unknown'))) AS line_type_blocked,
       -- "In use" BOTH DIRECTIONS (G2): a regular campaign's frozen pool, or
       -- another live drip journey. Either blocks.
       EXISTS (SELECT 1 FROM campaign_audience_pool p
@@ -423,6 +435,14 @@ export async function evaluateLeadRouting(
 
   global.opted_out = head.is_opted_out ? "blocked" : "pass";
   if (head.is_opted_out) globalDetail.opted_out = "contact is on the opt-out list";
+
+  // Group line-type gate (migration 0218). PERMANENT — not in
+  // TEMPORARY_GLOBAL_RULES — so the lead is marked unroutable, like an opt-out.
+  global.line_type = head.line_type_blocked ? "blocked" : "pass";
+  if (head.line_type_blocked) {
+    globalDetail.line_type =
+      `contact line type is ${head.line_type} and one of its groups disallows ${head.line_type} numbers`;
+  }
 
   const inUse = head.in_use_regular || head.in_use_drip;
   global.in_use = inUse ? "blocked" : "pass";

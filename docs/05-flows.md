@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-21_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -609,9 +609,9 @@ sequenceDiagram
   E-)L: poke (lookupsEnqueued > 0)
   L->>L: runLookupWorker (own lease, rps pacing, caps)
   L-)E: poke (processed > 0)
-  E->>E: pass 2 — contact + lead_events (processed_at)
+  E->>E: pass 2 — contact (+ lookup line_type / carrier_norm) + lead_events (processed_at)
   E-)R: poke (processed > 0)
-  R->>R: runDripRoutingBatch → drip_journeys (routed_at)
+  R->>R: runDripRoutingBatch → drip_journeys (routed_at)<br/>global rules incl. line_type (0218 group gate) ⇒ unroutable
   R-)S: poke (routed > 0)
   S->>S: hourly-cap maintenance (0209): clear ineligible, then per capped campaign<br/>assign fresh → able to send? → close past hours (OFF) → release backlog → room
   S->>S: runDripSchedulerBatch → due query (assigned journeys, ≤ room) → mint + gate + pending stage_sends<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)

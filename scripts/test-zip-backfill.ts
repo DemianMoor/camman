@@ -5,7 +5,7 @@ import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second
 import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { applyZipBackfill, planZipBackfill } from "@/lib/drip/zip-backfill";
+import { applyZipBackfill, planZipBackfill, withDeadlockRetry } from "@/lib/drip/zip-backfill";
 import { createPartnerWithKey } from "./_partner-fixture";
 
 let fail = 0;
@@ -13,7 +13,22 @@ const bar = (n: string, ok: boolean, d = "") => { console.log(`  ${ok ? "✓" : 
 class Rollback extends Error {}
 
 async function main() {
-  console.log(`Target DB: ${requirePreviewDb().label}\n`);
+  console.log("Deadlock retry (pure)");
+  let calls = 0;
+  const ok = await withDeadlockRetry(async () => {
+    calls++;
+    if (calls === 1) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    return "done";
+  });
+  bar("B7 a page that loses a deadlock (40P01) is retried and succeeds", ok === "done" && calls === 2, `${calls}`);
+  let other = 0;
+  const err = await withDeadlockRetry(async () => { other++; throw Object.assign(new Error("boom"), { code: "23505" }); }).catch((e: { code?: string }) => e.code);
+  bar("B8 any other error is not retried", err === "23505" && other === 1);
+  let always = 0;
+  const gaveUp = await withDeadlockRetry(async () => { always++; throw Object.assign(new Error("dl"), { cause: { code: "40P01" } }); }).catch(() => "gave up");
+  bar("B9 a persistent deadlock (code on .cause, as Drizzle wraps it) gives up after 3 attempts", gaveUp === "gave up" && always === 3, `${always}`);
+
+  console.log(`\nTarget DB: ${requirePreviewDb().label}\n`);
   try {
     await db.transaction(async (tx) => {
       const sfx = Date.now().toString().slice(-7);

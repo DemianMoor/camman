@@ -88,3 +88,22 @@ export async function applyZipBackfill(dbc: DbOrTx, candidates: ZipCandidate[]):
   `)) as unknown as unknown[];
   return res.length;
 }
+
+/**
+ * Run one backfill page, retrying if Postgres aborts it as a deadlock victim
+ * (40P01). Live enrichment upserts attributes for up to 200 leads per
+ * transaction in arrival order while a page UPDATE locks up to a batch of rows
+ * in join order, so a crossing pair can deadlock; the page is idempotent (only
+ * zip IS NULL rows), so re-running it is safe. Other errors propagate at once.
+ */
+export async function withDeadlockRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let n = 1; ; n++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const err = e as { code?: string; cause?: { code?: string } };
+      const code = err.code ?? err.cause?.code;
+      if (code !== "40P01" || n >= attempts) throw e;
+    }
+  }
+}

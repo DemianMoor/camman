@@ -14,7 +14,7 @@ import "./_env-preload";
 import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
 import { TAGS } from "@/lib/messages/tags";
-import { applyZipBackfill, planZipBackfill } from "@/lib/drip/zip-backfill";
+import { applyZipBackfill, planZipBackfill, withDeadlockRetry } from "@/lib/drip/zip-backfill";
 
 const args = process.argv.slice(2);
 const APPLY = args.includes("--apply");
@@ -64,10 +64,15 @@ async function main() {
   for (;;) {
     let page: Awaited<ReturnType<typeof planZipBackfill>> | undefined;
     if (APPLY) {
-      await db.transaction(async (tx) => {
-        page = await planZipBackfill(tx, { orgId: ORG, afterContactId: cursor, limit: BATCH, hasZipColumn: true });
-        written += await applyZipBackfill(tx, page.candidates);
-      });
+      // A page that loses a deadlock to live enrichment is retried (idempotent).
+      const res = await withDeadlockRetry(() =>
+        db.transaction(async (tx) => {
+          const pg = await planZipBackfill(tx, { orgId: ORG, afterContactId: cursor, limit: BATCH, hasZipColumn: true });
+          return { pg, w: await applyZipBackfill(tx, pg.candidates) };
+        }),
+      );
+      page = res.pg;
+      written += res.w;
     } else {
       try {
         await db.transaction(async (tx) => {

@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
+_Last updated: 2026-10-20 (zip attribute, 0217); 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -206,3 +206,9 @@ transaction and the status write is the commit point. A re-run after a crash bet
 and "mark processed" is a no-op, because `lead_events` carries a partial `UNIQUE (inbox_id)` and the
 insert is `ON CONFLICT DO NOTHING`. Contact and attribute writes are upserts;
 `COALESCE(EXCLUDED.x, existing)` means a later, sparser lead can never blank a value already known.
+
+## ZIP code (0217, 2026-10-20)
+
+`zip` is a canonical lead field (`lib/intake/fields.ts`; aliases `zip_code`, `zipcode`, `postal_code`, `postal`, `postcode`; a partner key's `field_mapping` wins). `normalizeLead` stores it **trimmed, as received**; the `{zip}` personalization tag normalizes at render (5 digits, ZIP+4 cut — `lib/messages/tags.ts`). The attribute upsert is `upsertLeadAttributes` (same COALESCE rule: a lead without a zip never blanks a known one).
+
+Before 0217 enrichment dropped zip although partner `pml` sends it on ~96% of leads. `scripts/backfill-contact-zip.ts` recovers it from `lead_inbox.raw` for contacts whose zip is still NULL, using the same extraction (`lib/drip/zip-backfill.ts`; newest lead carrying a zip wins). Dry run by default (READ ONLY); `--apply` writes per batch, idempotent, never overwrites a known zip. Owner-gated on prod, off-hours (~300 MB read).

@@ -96,6 +96,17 @@ async function main() {
   `)) as unknown as { tablename: string; n: number }[];
   check("both new tables carry exactly one SELECT policy", pol.map((p) => p.n), [1, 1]);
 
+  // Residue is measured as a DELTA: the preview DB is shared, and other suites
+  // legitimately leave lead_events / counters behind. Asserting the tables are
+  // EMPTY was true only on the day this test was written (it failed at 265
+  // events on 2026-10-20 without this test leaving anything).
+  const residueCounts = async () => ((await db.execute(sql`
+    SELECT (SELECT count(*)::int FROM lead_events)       AS events,
+           (SELECT count(*)::int FROM lead_intake_daily) AS daily,
+           (SELECT count(*)::int FROM lookup_queue WHERE priority > 0) AS prio_rows
+  `)) as unknown as { events: number; daily: number; prio_rows: number }[])[0];
+  const before = await residueCounts();
+
   let rolledBack = false;
   try {
     await db.transaction(async (tx) => {
@@ -176,7 +187,7 @@ async function main() {
         ((await tx.execute(sql`
           INSERT INTO lead_intake_daily (org_id, partner_key_id, day_et, ${sql.raw(colName)})
           VALUES (${orgId}, ${keyId}, '2026-08-23'::date, ${n})
-          ON CONFLICT (partner_key_id, day_et)
+          ON CONFLICT (org_id, partner_key_id, day_et, interest_tag) -- PK since 0171 (tag grain; interest_tag defaults to '')
           DO UPDATE SET ${sql.raw(colName)} = lead_intake_daily.${sql.raw(colName)} + ${n}
           RETURNING ${sql.raw(colName)} AS v`)) as unknown as { v: number }[])[0].v;
 
@@ -245,14 +256,10 @@ async function main() {
   }
 
   check("probe transaction rolled back", rolledBack, true);
-  const residue = (await db.execute(sql`
-    SELECT (SELECT count(*)::int FROM lead_events)       AS events,
-           (SELECT count(*)::int FROM lead_intake_daily) AS daily,
-           (SELECT count(*)::int FROM lookup_queue WHERE priority > 0) AS prio_rows
-  `)) as unknown as { events: number; daily: number; prio_rows: number }[];
-  check("no probe lead_events left behind", residue[0]?.events, 0);
-  check("no probe counters left behind", residue[0]?.daily, 0);
-  check("no probe queue rows left behind", residue[0]?.prio_rows, 0);
+  const after = await residueCounts();
+  check("no probe lead_events left behind (delta)", after.events - before.events, 0);
+  check("no probe counters left behind (delta)", after.daily - before.daily, 0);
+  check("no probe queue rows left behind (delta)", after.prio_rows - before.prio_rows, 0);
 
   await pgConn.end({ timeout: 5 });
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);

@@ -38,6 +38,10 @@ async function main() {
         JOIN short_domains sd ON sd.brand_id = b.id AND sd.status = 'active'
         WHERE b.org_id = ${orgId} LIMIT 1`);
       if (!brand) { console.log("SKIP: need a brand with an active short domain"); throw ROLLBACK; }
+      // 0212: a guidekn-shaped destination must match ITS brand's landing host/path
+      // (link_destinations_landing_url_shape). Give the fixture brand the host the
+      // URL below uses — as every real guidekn brand has on prod. Rolled back.
+      await tx.execute(sql`UPDATE brands SET landing_host = 'www.guidekn.com', landing_path = 'lp' WHERE id = ${brand.id}`);
 
       const TRACKING = "9_99_061626_1_s1_c1";
       const FULL_URL = `https://www.guidekn.com/lp/knd?sub_id3=${TRACKING}`;

@@ -48,7 +48,10 @@ async function main() {
       await db.execute(sql`
         SELECT c.org_id, c.brand_id, cr.id AS creative_id
         FROM campaigns c
-        JOIN creatives cr ON cr.org_id = c.org_id AND cr.text IS NOT NULL
+        -- A SHORT ASCII creative: this test is about materialization, and an
+        -- arbitrary preview creative can render past 1 segment (kickoff then
+        -- refuses multi_segment_not_allowed before anything materializes).
+        JOIN creatives cr ON cr.org_id = c.org_id AND cr.text ~ '^[ -~]{1,60}$'
         WHERE c.brand_id IS NOT NULL
         LIMIT 1`)
     )[0] as { org_id: string; brand_id: number; creative_id: number };

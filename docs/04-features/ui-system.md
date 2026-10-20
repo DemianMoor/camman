@@ -1,6 +1,6 @@
 # Feature — UI System
 
-_Last updated: 2026-09-23_
+_Last updated: 2026-10-19_
 
 ## 1. Purpose
 A consistent, server-component-first UI built on Next.js 16 + Tailwind v4 + shadcn/ui. Reusable wrappers enforce the project's interaction conventions (dialog dismissal, required-field markers, file uploads, multi-select) so individual screens stay thin.
@@ -62,7 +62,7 @@ Required fields get a trailing red asterisk via `<FormLabel required>` (or inlin
 
 **Audience preview** (right-rail card): total contacts, will-send-vs-above-cap progress bar, pool breakdown (segments / groups / overlap / excluded opt-outs), filter chips, exclude-in-use switch. Backed by `POST /api/campaigns/audience-preview`.
 
-**SMS preview composition** (`lib/sends/stage-sms.ts`): `<Brand>: <creative>` + (optional) `short_url` line + `stop_text`.
+**SMS preview composition** (`lib/messages/render.ts`, 0216): the stage's message format or custom text; default T1 = `<Brand>: <creative>` + (optional) link line + resolved footer. See [message-formats.md](message-formats.md).
 
 ## 5. Data it reads/writes
 - UI components are presentational; data flows through the per-entity API routes (CLAUDE.md §8).

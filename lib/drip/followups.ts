@@ -13,6 +13,8 @@ import { isDripPostureOn } from "./in-use";
 import { closeJourneyUnengaged } from "./lifecycle";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { dispatchDripSend, GateRefused, MintRefused } from "./send-one";
+import { shapeFromStage } from "@/lib/messages/render";
+import { notifyDripSkips, skipIfTagged, tallySkip, type DripSkipTally } from "./skip-send";
 
 // Behavioural follow-up scheduling (Drip Phase 6).
 //
@@ -44,6 +46,8 @@ export interface FollowupResult {
   pausedSkipped: number;
   gateRefused: number;
   mintRefused: number;
+  /** 0216 interim: tagged child message, skipped with a skipped_ineligible row. */
+  tagsSkipped: number;
   /** Journeys closed completed/unengaged because the Ignored lane fired (R4). */
   closedUnengaged: number;
   /** The tick stopped paging at FOLLOWUP_DEADLINE_MS; the rest is next tick. */
@@ -73,6 +77,9 @@ interface CandidateRow {
   child_stop_text: string | null;
   child_tracking_id: string | null;
   child_full_url: string | null;
+  child_message_format_id: number | null;
+  child_custom_text: string | null;
+  child_format_template: string | null;
   lp_id: number | null;
   lp_kind: string | null;
   lp_slug: string | null;
@@ -91,9 +98,11 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
   const res: FollowupResult = {
     postureOn: false, considered: 0, inserted: 0, notDue: 0, noDetection: 0,
     tierMismatch: 0, alreadySent: 0, capBlocked: 0, numbersExhausted: 0,
-    pausedSkipped: 0, gateRefused: 0, mintRefused: 0, closedUnengaged: 0,
+    pausedSkipped: 0, gateRefused: 0, mintRefused: 0, tagsSkipped: 0, closedUnengaged: 0,
     hitDeadline: false,
   };
+  // 0216 interim: NEW skips this run, alerted once at the end (one per stage).
+  const skipTally: DripSkipTally = new Map();
   const startedAt = Date.now();
 
   const orgs = (await db.execute(sql`
@@ -143,6 +152,9 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
                cr.text AS child_creative_text, ch.creative_id AS child_creative_id,
                ch.stop_text AS child_stop_text, ch.tracking_id AS child_tracking_id,
                ch.full_url AS child_full_url,
+               ch.message_format_id AS child_message_format_id,
+               ch.custom_text AS child_custom_text,
+               mf.template AS child_format_template,
                lp.id AS lp_id, lp.kind AS lp_kind, lp.slug AS lp_slug,
                lp.external_url AS lp_external_url, lp.status AS lp_status,
                COALESCE(bt.tier, 0) AS tier,
@@ -200,6 +212,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
          AND ch.drip_active IS TRUE
          AND ch.drip_followup_minutes IS NOT NULL
         LEFT JOIN creatives cr ON cr.id = ch.creative_id
+        LEFT JOIN message_formats mf ON mf.id = ch.message_format_id AND mf.org_id = ch.org_id
         LEFT JOIN offer_landing_pages lp
                ON lp.id = ch.landing_page_id AND lp.org_id = ch.org_id
         -- the ONE shared tier definition (G3)
@@ -248,6 +261,24 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
       if (!due.due) { res.noDetection++; continue; }
       if (due.at > now) { res.notDue++; continue; }
       if (!r.child_creative_text) { res.mintRefused++; continue; }
+
+      // 0216 INTERIM (P2 → P5): tag rendering is not built yet. Skip THIS
+      // follow-up with a reason row (already_sent then stops re-selection); the
+      // journey itself is not touched.
+      const shape = shapeFromStage({
+        message_format_id: r.child_message_format_id,
+        custom_text: r.child_custom_text,
+        format_template: r.child_format_template,
+      });
+      const tagged = await skipIfTagged(db, {
+        orgId, campaignId: r.campaign_id, stageId: r.child_stage_id,
+        creativeText: r.child_creative_text, shape, brandName: r.brand_name ?? "", leads: [r],
+      });
+      if (tagged !== null) {
+        res.tagsSkipped += tagged.written;
+        tallySkip(skipTally, { stageId: r.child_stage_id, campaignName: r.campaign_name ?? String(r.campaign_id), result: tagged });
+        continue;
+      }
 
       // ⭐ FRESH READ of both stop controls right before queuing. The candidate
       // query's campaign_paused is as old as the tick, and the org gate above
@@ -303,6 +334,7 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
             phone: r.phone,
             creativeId: r.child_creative_id,
             creativeText: r.child_creative_text!,
+            shape,
             brandName: r.brand_name ?? "",
             brandId: r.brand_id,
             brandLandingHost: r.brand_landing_host,
@@ -354,5 +386,6 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
      }
     }
   }
+  await notifyDripSkips(skipTally);
   return res;
 }

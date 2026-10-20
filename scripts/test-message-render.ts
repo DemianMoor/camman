@@ -3,7 +3,7 @@
 import { TAGS, findTags, findUnknownTokens, type RecipientData } from "@/lib/messages/tags";
 import { SEED_FORMATS, T1_TEMPLATE, validateCustomText, validateTemplate } from "@/lib/messages/format";
 import {
-  checkRecipientBody, firstNameMaxLength, renderMessage, renderWorstCase, requiredTags, type MessageShape,
+  checkRecipientBody, firstNameMaxLength, renderMessage, renderWorstCase, requiredContactTags, requiredTags, type MessageShape,
 } from "@/lib/messages/render";
 import { buildStageSms } from "@/lib/sends/stage-sms";
 
@@ -105,7 +105,12 @@ bar("R2.1 buildStageSms == legacy over the grid", gridDiffs === 0 && cases === 1
 bar("R2.2 renderMessage(T1) == legacy over the grid", renderDiffs === 0, `${renderDiffs} diffs / ${cases}`);
 
 const base = { brandName: "G", creativeText: "Hi", linkUrl: "", stopText: "Stop to END", recipient: NO_ONE };
-eq("R2.3 T2 no-link: blank row kept, url row dropped", renderMessage({ ...base, shape: tpl("T2") }), { ok: true, body: "Hi G Stop to END\n" });
+// Owner 2026-10-19: trailing blank rows are TRIMMED after rendering, every format + custom.
+eq("R2.3 T2 no-link ends with the stop text, no trailing \\n", renderMessage({ ...base, shape: tpl("T2") }), { ok: true, body: "Hi G Stop to END" });
+eq("R2.3b custom text: trailing blank rows trimmed, inner blank rows kept",
+  renderMessage({ ...base, shape: { kind: "custom", text: "{creative_text}<new_row><new_row>{stop_text}<new_row>{url}<new_row><new_row>" } }),
+  { ok: true, body: "Hi\n\nStop to END" });
+eq("R2.3c whitespace-only trailing rows trimmed", renderMessage({ ...base, shape: { kind: "custom", text: "{creative_text} {url}<new_row>{stop_text}<new_row>  " } }), { ok: true, body: "Hi \nStop to END" });
 eq("R2.4 T2 with link", renderMessage({ ...base, linkUrl: "https://x.co/a", shape: tpl("T2") }), { ok: true, body: "Hi G Stop to END\n\nhttps://x.co/a" });
 eq("R2.5 T3 has no brand", renderMessage({ ...base, linkUrl: "https://x.co/a", shape: tpl("T3") }), { ok: true, body: "Hi\nhttps://x.co/a\nStop to END" });
 eq("R2.6 T1 seed is T1_TEMPLATE and the only default", SEED_FORMATS.filter((f) => f.isDefault).map((f) => f.template), [T1_TEMPLATE]);
@@ -138,6 +143,7 @@ eq("R2.18 renderWorstCase", renderWorstCase(fixedNoName("Hi {first_name} in {sta
 eq("R2.19 checkRecipientBody", [checkRecipientBody(pad(160), 1), checkRecipientBody(pad(161), 1), checkRecipientBody(pad(161), 4)], [{ ok: true }, { ok: false, reason: "segment_limit" }, { ok: true }]);
 eq("R2.20 requiredTags creative + custom", requiredTags({ shape: { kind: "custom", text: "{zip} {creative_text}{url}{stop_text}" }, creativeText: "Hi {first_name} {FirstName}" }), ["first_name", "zip"]);
 eq("R2.21 requiredTags ignores template blocks", requiredTags({ shape: t1, creativeText: "Hi" }), []);
+eq("R2.21b requiredContactTags: {brand} needs no contact data", requiredContactTags({ shape: t1, creativeText: "{brand} hi {first_name} {zip}" }), ["first_name", "zip"]);
 
 eq("R2.22 validateTemplate missing_block", validateTemplate("{creative_text}{url}")?.code, "missing_block");
 eq("R2.23 validateTemplate unknown_token", validateTemplate("{first_name} {creative_text}{url}{stop_text}")?.code, "unknown_token");

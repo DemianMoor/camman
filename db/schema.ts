@@ -1763,6 +1763,41 @@ export type NewSegmentRule = typeof segment_rules.$inferInsert;
 // + Brand. `slug` is auto-generated and used in short-link construction.
 // `creative_id` is an optional human-friendly identifier for external
 // tracking systems.
+// ── message_formats (0216) ──────────────────────────────────────────────────
+// Org-level SMS format templates: how {brand} {creative_text} {url} {stop_text}
+// assemble into the body (<new_row> = line break). Rendered ONLY by
+// lib/messages/render.ts. One default per org (partial unique index); the
+// default is always enabled + active (CHECK). Seeded by the SQL function
+// ensure_message_formats(org) = lib/messages/format.ts SEED_FORMATS.
+export const message_formats = pgTable(
+  "message_formats",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    template: text("template").notNull(),
+    is_enabled: boolean("is_enabled").notNull().default(true),
+    is_default: boolean("is_default").notNull().default(false),
+    status: text("status").notNull().default("active"),
+    archived_at: timestamp("archived_at", { withTimezone: true }),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("message_formats_org_default_uniq").on(table.org_id).where(sql`${table.is_default}`),
+    index("message_formats_org_status_idx").on(table.org_id, table.status),
+    check("message_formats_status_check", sql`${table.status} IN ('active', 'archived')`),
+    check(
+      "message_formats_default_usable_check",
+      sql`NOT ${table.is_default} OR (${table.is_enabled} AND ${table.status} = 'active')`,
+    ),
+  ],
+);
+
+export type MessageFormat = typeof message_formats.$inferSelect;
+
 // Creatives: SMS copy templates. Many-to-many with offers via the
 // creative_offers junction (or applies_to_all_offers=true for an
 // org-wide creative). No direct provider/brand association — those live
@@ -2129,6 +2164,15 @@ export const campaign_stages = pgTable(
     // the creative text and the stop text.
     short_url: text("short_url"),
     full_url: text("full_url"),
+    // 0216: the stage's message shape — EXACTLY ONE of these is set (CHECK
+    // campaign_stages_format_one_of). A BEFORE INSERT trigger fills the org
+    // default format when both are NULL. custom_text is owner-only
+    // (compliance.manage) and must contain {creative_text} {url} {stop_text}.
+    message_format_id: integer("message_format_id").references(
+      (): AnyPgColumn => message_formats.id,
+      { onDelete: "restrict" },
+    ),
+    custom_text: text("custom_text"),
     // Drip P1 1b (0150). NULL ⇒ EXACTLY today's behaviour: build from
     // offers.sales_pages / the stored full_url. When set, the destination is
     // CONSTRUCTED AT MINT TIME from the campaign's brand, so a rebrand
@@ -2393,6 +2437,13 @@ export const campaign_stages = pgTable(
       "campaign_stages_clickers_mutex",
       sql`NOT (${table.include_clickers} AND ${table.exclude_clickers})`,
     ),
+    check(
+      "campaign_stages_format_one_of",
+      sql`(${table.message_format_id} IS NULL) <> (${table.custom_text} IS NULL)`,
+    ),
+    index("campaign_stages_message_format_idx")
+      .on(table.message_format_id)
+      .where(sql`message_format_id IS NOT NULL`),
     check(
       "campaign_stages_split_pair_check",
       sql`(${table.split_index} IS NULL AND ${table.split_total} IS NULL)
@@ -3277,6 +3328,11 @@ export const stage_sends = pgTable(
       { onDelete: "set null" },
     ),
     cost_per_sms: numeric("cost_per_sms", { precision: 12, scale: 4 }),
+    // 0216: which format rendered this row (audit + exact sent counts per
+    // format). NULL with format_custom=false = rendered before 0216 (T1).
+    // No FK: keeps the hot insert path light.
+    message_format_id: integer("message_format_id"),
+    format_custom: boolean("format_custom").notNull().default(false),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

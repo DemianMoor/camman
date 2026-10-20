@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-19 (0215 lifecycle cohort Sent 30d; 0214 offer_group_lifecycle_mv; 0213 drip_routing_hour_overflow; 0212 landing-URL trigger + brands_landing_pair_uniq; 0211 brands.landing_path; 0210 drip routing send capacity; 0209 drip hourly send cap; 0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
+_Last updated: 2026-10-19 (0216 message_formats + stage format columns + send stamp; 0215 lifecycle cohort Sent 30d; 0214 offer_group_lifecycle_mv; 0213 drip_routing_hour_overflow; 0212 landing-URL trigger + brands_landing_pair_uniq; 0211 brands.landing_path; 0210 drip routing send capacity; 0209 drip hourly send cap; 0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -144,6 +144,8 @@ erDiagram
   stage_result_rows }o--|| clickers : "created_clicker_id"
 
   campaign_stages ||--o{ stage_sends : materialized
+  organizations ||--o{ message_formats : "SMS format templates (0216)"
+  message_formats ||--o{ campaign_stages : "message_format_id (restrict; XOR custom_text)"
   campaigns ||--o{ links : minted
   campaign_stages ||--o{ links : ""
   short_domains ||--o{ links : ""
@@ -587,11 +589,20 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 
 > **⚠️ "In use" is now defined in one shared builder** ([lib/drip/in-use.ts](../lib/drip/in-use.ts)) used by BOTH `iu_set` (campaign flag) and `applyInUseExclusion` (segment flag). They were independent definitions that agreed only by coincidence.
 
+### Message formats (migration 0216)
+
+- **`message_formats`** — org-level SMS format templates (`name`, `template`, `is_enabled`, `is_default`, `status` active|archived). Blocks `{brand}` `{creative_text}` `{url}` `{stop_text}` + `<new_row>`; rendered only by `lib/messages/render.ts`. Partial unique index `message_formats_org_default_uniq` (one default per org); CHECK `message_formats_default_usable_check` (the default is enabled + active). RLS: org SELECT only (server writes). Seeded T1 (default) / T2 / T3 per org by `ensure_message_formats(org)`.
+- **`campaign_stages.message_format_id`** (FK → message_formats, ON DELETE RESTRICT) **/ `custom_text`** (owner-only free-form message) — exactly one set (CHECK `campaign_stages_format_one_of`); every pre-0216 stage backfilled to its org's T1. Partial index `campaign_stages_message_format_idx`.
+- **`stage_sends.message_format_id`** (no FK) **/ `format_custom`** (default false) — the shape that rendered the row. NULL/false on pre-0216 rows.
+
+See [04-features/message-formats.md](04-features/message-formats.md).
+
 ## Triggers & DB-side logic (in migrations, not Drizzle)
 - **`handle_new_user()`** (`0001`, amended `0177`): on `auth.users` INSERT, creates an `organizations` row + an `owner` `org_members` row — **unless an open, unexpired `invites` row matches the new address**, in which case it returns early and leaves the membership to the invite branch of [`app/auth/callback/route.ts`](../app/auth/callback/route.ts). Without that skip an invitee gets a stray org of their own and never joins the inviting one (see [07-conventions.md](07-conventions.md)).
 - **`current_org_id()`** (`0001`): SECURITY DEFINER, backs RLS policies.
 - **`segment_contacts` AFTER INSERT/DELETE trigger**: keeps `segment_stats.total_count` in sync.
 - **`campaign_stages` BEFORE INSERT trigger**: auto-assigns `stage_number`.
+- **`campaign_stages_fill_message_format`** (`0216`, BEFORE INSERT): when both `message_format_id` and `custom_text` are NULL, stamps the org default via **`ensure_message_formats(org)`** (seeds T1/T2/T3 for an org with none, under a per-org advisory lock; returns the default id). Keeps the base create path, new orgs and raw-SQL fixtures valid under the one-of CHECK.
 - RLS policies per table across the security migrations (`0001`, `0021`, `0025`, `0028`, `0030`, …).
 - **RLS enabled on every `public` table.** `geoip_cache` (infra cache, no `org_id`, server-only) has RLS enabled with **no policies** (migration `0066`) — the direct postgres-js connection and `service_role` bypass RLS, so server reads/writes keep working while anon/authenticated access is denied. Clears the Supabase advisor `rls_disabled_in_public`.
 - **`stage_manual_sales` + `opt_out_attributions` RLS** (migration `0085`): both are tenant tables (`org_id`) written only by the privileged server connection but read org-scoped by the Reports tab, so each gets an `org_id = current_org_id()` **SELECT** policy and no write policies — mirroring `stage_sends` (`0050`). Second `rls_disabled_in_public` remediation after `geoip_cache`.

@@ -68,7 +68,15 @@ import {
   describeOptOutFooterLevel,
   resolveOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
-import { buildStageSms } from "@/lib/sends/stage-sms";
+import { T1_TEMPLATE } from "@/lib/messages/format";
+import { renderWorstCase, type MessageShape } from "@/lib/messages/render";
+import { CREATIVE_LOCKED_TEXT } from "@/lib/stages/lock-copy";
+import {
+  StageFormatField,
+  formatWarnings,
+  stageShapeFromForm,
+  type StageFormatOption,
+} from "@/components/campaigns/stage-format-field";
 import {
   appendParamName,
   hasUrlParam,
@@ -113,6 +121,11 @@ export interface StageFormValues {
   // field; flipped back on by "Reset to generated".
   full_url_auto: boolean;
   stop_text: string;
+  // 0216: the message shape. message_format_id null on a NEW stage = the org
+  // default (the server trigger stamps it). custom_text is owner-only and wins
+  // when set.
+  message_format_id: number | null;
+  custom_text: string | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -276,6 +289,8 @@ export interface StageFormProps {
   // send-scheduled flow). NULL = not yet sent (editable / reschedulable, even
   // if a prior scheduled attempt was missed).
   sentAt?: string | null;
+  /** 0216: the stage has ≥1 sent message — locks its format (and a drip stage's creative). */
+  hasSent?: boolean;
   // Edit-mode only: the stage is ARMED — pre-materialized for a future schedule
   // (Approve-Send flow) but not yet released. The Scheduled field locks just like
   // a fired send; the operator must "Cancel armed send" to reschedule. NULL/false
@@ -357,6 +372,13 @@ export function buildStageCreateBody(
     utm_tag_ids: values.utm_tag_ids,
     full_url_auto: values.full_url_auto,
     ...(opts.includeStopText === false ? {} : { stop_text: values.stop_text }),
+    // 0216: custom text (owner) or a chosen format; neither ⇒ the server keeps
+    // what is stored (edit) or stamps the org default (create).
+    ...(values.custom_text != null
+      ? { custom_text: values.custom_text }
+      : values.message_format_id != null
+        ? { message_format_id: values.message_format_id }
+        : {}),
     include_no_status: values.include_no_status,
     include_clickers: values.include_clickers,
     exclude_clickers: values.exclude_clickers,
@@ -383,6 +405,8 @@ const DEFAULT_VALUES: StageFormValues = {
   utm_tag_ids: [],
   full_url_auto: true,
   stop_text: "Stop to END",
+  message_format_id: null,
+  custom_text: null,
   include_no_status: true,
   // Default to including clickers so a fresh stage shows the maximum
   // audience drawn from the campaign's frozen pool. Operators who want
@@ -410,6 +434,7 @@ export function StageForm({
   splitTotal,
   behavioralTier,
   sentAt,
+  hasSent = false,
   armed,
   onSplit,
   campaign,
@@ -428,6 +453,18 @@ export function StageForm({
   // Reference data
   const { can } = useAuth();
   const canEditCompliance = can("compliance.manage");
+  // 0216: the org's message formats, for the picker and the preview.
+  const { execute: formatsExec } = useApiCall<{ data: StageFormatOption[] }>();
+  const [formats, setFormats] = useState<StageFormatOption[]>([]);
+  useEffect(() => {
+    let active = true;
+    void formatsExec("/api/message-formats/list").then((r) => {
+      if (active && r.ok) setFormats(r.data.data);
+    });
+    return () => {
+      active = false;
+    };
+  }, [formatsExec]);
   const creativesApi = useApiCall<{ data: Creative[] }>();
   // Single-creative fetch — fallback for the edit-load case where the saved
   // creative belongs to an offer outside this campaign's (picked via the
@@ -829,7 +866,18 @@ export function StageForm({
     stageStopText: watchedStopText,
     providerAppendsOwnOptOut: selectedProvider?.appends_own_opt_out === true,
   });
-  const assembledSms = buildStageSms({
+  // 0216: rendered with the stage's message shape by the one renderer (tags,
+  // if any, at their worst case). Until the formats load the preview is T1,
+  // which is what every pre-format stage renders.
+  const watchedFormatId = form.watch("message_format_id");
+  const watchedCustomText = form.watch("custom_text");
+  const shape: MessageShape =
+    stageShapeFromForm(formats, watchedFormatId, watchedCustomText) ??
+    { kind: "template", formatId: null, template: T1_TEMPLATE };
+  const shapeWarnings = formatWarnings(shape, selectedCreative?.text);
+  const creativeLocked = campaignType === "drip" && hasSent;
+  const assembledSms = renderWorstCase({
+    shape,
     brandName,
     creativeText: selectedCreative?.text,
     linkUrl: previewLinkUrl,
@@ -1480,7 +1528,7 @@ export function StageForm({
                       type="button"
                       variant="outline"
                       className="h-9 w-full justify-start gap-2 overflow-hidden font-normal"
-                      disabled={isSubmitting}
+                      disabled={isSubmitting || creativeLocked}
                       onClick={() => setPickerOpen(true)}
                     >
                       {selectedCreative ? (
@@ -1502,6 +1550,9 @@ export function StageForm({
                         </span>
                       )}
                     </Button>
+                    {creativeLocked ? (
+                      <p className="text-xs text-muted-foreground">{CREATIVE_LOCKED_TEXT}</p>
+                    ) : null}
                     {/* Full creative text under the picker so the operator
                         can read what they selected in one place. Hidden
                         until a creative is actually picked. */}
@@ -1519,6 +1570,25 @@ export function StageForm({
                   </FormItem>
                 )}
               />
+
+                {/* 0216: message format (or owner-only custom text) + B5 warnings. */}
+                <div className="grid gap-1">
+                  <StageFormatField
+                    formats={formats}
+                    messageFormatId={watchedFormatId}
+                    customText={watchedCustomText}
+                    onChange={(next) => {
+                      form.setValue("message_format_id", next.message_format_id, { shouldDirty: true });
+                      form.setValue("custom_text", next.custom_text, { shouldDirty: true });
+                    }}
+                    canCustom={canEditCompliance}
+                    locked={hasSent}
+                    disabled={isSubmitting}
+                  />
+                  {shapeWarnings.map((w) => (
+                    <p key={w} className="text-xs text-amber-700 dark:text-amber-400">{w}</p>
+                  ))}
+                </div>
 
                 {/* ── ONE destination picker ────────────────────────────
                     Was TWO fields ("Landing page" and "Sales page"), which put
@@ -2278,7 +2348,8 @@ export function StageForm({
             : null
         }
         brandName={brandName}
-        stopText={watchedStopText}
+        stopText={resolvedFooter.text}
+        shape={shape}
         linkPreviewUrl={previewLinkUrl}
         selectedCreativeId={watchedCreativeId}
         onSelect={handleCreativeSelected}

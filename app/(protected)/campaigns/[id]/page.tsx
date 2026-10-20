@@ -249,6 +249,10 @@ type Stage = {
   landing_page_id: number | null;
   utm_tag_ids: number[] | null;
   stop_text: string;
+  // 0216 (from GET .../stages): message shape + whether the stage has sent.
+  message_format_id: number | null;
+  custom_text: string | null;
+  has_sent: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
   include_no_status: boolean;

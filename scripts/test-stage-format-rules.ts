@@ -39,11 +39,11 @@ eq("M3.10 operator picking another enabled format ⇒ ok", decideStageFormatChan
 eq("M3.11 create with nothing ⇒ ok, nothing set (trigger fills the default)", decideStageFormatChange({ ...base, current: null, input: {} }), { ok: true, set: {} });
 
 console.log("\nM3 — creative lock");
-const dripSent = decideCreativeChange({ isDrip: true, currentCreativeId: 5, inputCreativeId: 6, hasSent: true, lockEnabled: true });
+const dripSent = decideCreativeChange({ isDrip: true, currentCreativeId: 5, inputCreativeId: 6, hasSent: true });
 bar("M3.12 drip creative change after send ⇒ 409 creative_locked_after_send", !dripSent.ok && dripSent.reason === "creative_locked_after_send");
-bar("M3.13 drip creative change before send ⇒ ok", decideCreativeChange({ isDrip: true, currentCreativeId: 5, inputCreativeId: 6, hasSent: false, lockEnabled: true }).ok);
-bar("M3.14 drip echo of the same creative after send ⇒ ok", decideCreativeChange({ isDrip: true, currentCreativeId: 5, inputCreativeId: 5, hasSent: true, lockEnabled: true }).ok);
-bar("M3.15 regular creative change after send ⇒ ok (creative lock is drip-only)", decideCreativeChange({ isDrip: false, currentCreativeId: 5, inputCreativeId: 6, hasSent: true, lockEnabled: true }).ok);
+bar("M3.13 drip creative change before send ⇒ ok", decideCreativeChange({ isDrip: true, currentCreativeId: 5, inputCreativeId: 6, hasSent: false }).ok);
+bar("M3.14 drip echo of the same creative after send ⇒ ok", decideCreativeChange({ isDrip: true, currentCreativeId: 5, inputCreativeId: 5, hasSent: true }).ok);
+bar("M3.15 regular creative change after send ⇒ ok (creative lock is drip-only)", decideCreativeChange({ isDrip: false, currentCreativeId: 5, inputCreativeId: 6, hasSent: true }).ok);
 
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

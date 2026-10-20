@@ -30,7 +30,6 @@ import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { deleteStage } from "@/lib/stages/delete-stage";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 import { decideCreativeChange, stageHasSent } from "@/lib/stages/send-locks";
-import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 import { decideStageFormatChange, isFormatUsable } from "@/lib/messages/stage-format";
 import {
   generateCampaignTrackingId,
@@ -478,7 +477,6 @@ export async function PATCH(
     currentCreativeId: current.creative_id,
     inputCreativeId: input.creative_id,
     hasSent,
-    lockEnabled: messageFormatsUiEnabled(),
   });
   if (!creativeLock.ok) {
     return apiError(409, creativeLock.message, API_ERROR_CODES.CONFLICT, {

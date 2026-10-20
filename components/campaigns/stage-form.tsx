@@ -2351,7 +2351,7 @@ export function StageForm({
             : null
         }
         brandName={brandName}
-        stopText={formatsUi ? resolvedFooter.text : watchedStopText}
+        stopText={resolvedFooter.text}
         shape={shape}
         linkPreviewUrl={previewLinkUrl}
         selectedCreativeId={watchedCreativeId}

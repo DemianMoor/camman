@@ -64,19 +64,20 @@ async function main() {
       const known = await contact("99999", [{ ...P, raw: { phone: "x", zip: "12345" } }]);
       const none = await contact(null, [{ ...P, raw: { phone: "x", state: "TX" } }]);
       const olderHasZip = await contact(null, [{ ...P, raw: { phone: "x", zip: "11111" } }, { ...P, raw: { phone: "x" } }]);
+      const numeric = await contact(null, [{ ...P, raw: { phone: "x", zip: 2134 } }]);
       const newerWins = await contact(null, [{ ...P, raw: { phone: "x", zip: "33333" } }, { ...P, raw: { phone: "x", Zip_Code: "22222" } }]);
 
       const plan = await planZipBackfill(tx, { orgId: org, afterContactId: null, limit: 100, hasZipColumn: true });
       const byId = new Map(plan.candidates.map((x) => [x.contactId, x.zip]));
       bar("B1 plan: zip from raw (trimmed), via partner field_mapping, from the newest lead that HAS one; known zips and zip-less leads excluded",
-        plan.candidates.length === 4 && byId.get(a) === "02134" && byId.get(b) === "10001"
+        plan.candidates.length === 5 && byId.get(numeric) === "02134" && byId.get(a) === "02134" && byId.get(b) === "10001"
           && byId.get(olderHasZip) === "11111" && byId.get(newerWins) === "22222" && !byId.has(known) && !byId.has(none),
         JSON.stringify(plan.candidates));
-      bar("B2 plan scans every zip-less contact in the batch (5 of 6; the known one is not scanned)", plan.scanned === 5, `${plan.scanned}`);
+      bar("B2 plan scans every zip-less contact in the batch (6 of 7; the known one is not scanned)", plan.scanned === 6, `${plan.scanned}`);
 
       const applied = await applyZipBackfill(tx, plan.candidates);
       const knownAfter = ((await tx.execute(sql`SELECT zip FROM contact_attributes WHERE contact_id = ${known}::uuid`)) as unknown as { zip: string }[])[0].zip;
-      bar("B3 apply writes 4; an already-known zip is never overwritten", applied === 4 && knownAfter === "99999", JSON.stringify({ applied, knownAfter }));
+      bar("B3 apply writes 5 (incl. numeric 2134 → 02134); an already-known zip is never overwritten", applied === 5 && knownAfter === "99999", JSON.stringify({ applied, knownAfter }));
 
       const again = await planZipBackfill(tx, { orgId: org, afterContactId: null, limit: 100, hasZipColumn: true });
       const reapplied = await applyZipBackfill(tx, plan.candidates);
@@ -87,7 +88,7 @@ async function main() {
       // Pre-0217 dry run (prod before the migration): no zip column ⇒ every contact is zip-less.
       const pre = await planZipBackfill(tx, { orgId: org, afterContactId: null, limit: 100, hasZipColumn: false });
       bar("B6 hasZipColumn=false ⇒ plans every contact (the 'known' one too: no column to know it from)",
-        pre.scanned === 6 && pre.candidates.length === 5, JSON.stringify({ scanned: pre.scanned, n: pre.candidates.length }));
+        pre.scanned === 7 && pre.candidates.length === 6, JSON.stringify({ scanned: pre.scanned, n: pre.candidates.length }));
       throw new Rollback();
     });
   } catch (e) {

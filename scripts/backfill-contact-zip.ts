@@ -26,9 +26,16 @@ const ORG = arg("--org") ?? null;
 const BATCH = Number(arg("--batch") ?? 5000);
 class ReadOnlyDone extends Error {}
 
-async function counts() {
+async function hasZipColumn(): Promise<boolean> {
   const r = (await db.execute(sql`
-    SELECT count(*)::int AS attrs, count(zip)::int AS with_zip
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'contact_attributes' AND column_name = 'zip'`)) as unknown as unknown[];
+  return r.length > 0;
+}
+
+async function counts(withZip: boolean) {
+  const r = (await db.execute(sql`
+    SELECT count(*)::int AS attrs, ${withZip ? sql`count(zip)::int` : sql`0`} AS with_zip
     FROM contact_attributes WHERE (${ORG}::uuid IS NULL OR org_id = ${ORG}::uuid)`)) as unknown as { attrs: number; with_zip: number }[];
   return r[0];
 }
@@ -36,7 +43,18 @@ async function counts() {
 async function main() {
   const host = new URL(process.env.DATABASE_URL ?? "postgres://x@unknown/x");
   console.log(`DB ${host.username.split(".").pop()} · ${APPLY ? "APPLY" : "DRY RUN (read-only)"} · batch ${BATCH}${ORG ? ` · org ${ORG}` : ""}`);
-  const before = await counts();
+  // Before 0217 the column does not exist: a dry run still measures what the
+  // backfill WOULD write (every contact counts as zip-less); --apply refuses.
+  const zipCol = await hasZipColumn();
+  if (!zipCol) {
+    if (APPLY) {
+      console.error("contact_attributes.zip does not exist — apply migration 0217 first.");
+      process.exitCode = 2;
+      return;
+    }
+    console.log("note: contact_attributes.zip does not exist yet (pre-0217) — every contact counts as zip-less");
+  }
+  const before = await counts(zipCol);
   console.log(`before: ${before.attrs.toLocaleString()} attribute rows, ${before.with_zip.toLocaleString()} with zip`);
 
   let cursor: string | null = null;
@@ -47,14 +65,14 @@ async function main() {
     let page: Awaited<ReturnType<typeof planZipBackfill>> | undefined;
     if (APPLY) {
       await db.transaction(async (tx) => {
-        page = await planZipBackfill(tx, { orgId: ORG, afterContactId: cursor, limit: BATCH });
+        page = await planZipBackfill(tx, { orgId: ORG, afterContactId: cursor, limit: BATCH, hasZipColumn: true });
         written += await applyZipBackfill(tx, page.candidates);
       });
     } else {
       try {
         await db.transaction(async (tx) => {
           await tx.execute(sql`SET TRANSACTION READ ONLY`);
-          page = await planZipBackfill(tx, { orgId: ORG, afterContactId: cursor, limit: BATCH });
+          page = await planZipBackfill(tx, { orgId: ORG, afterContactId: cursor, limit: BATCH, hasZipColumn: zipCol });
           throw new ReadOnlyDone();
         });
       } catch (e) {
@@ -77,7 +95,7 @@ async function main() {
   console.log(`${APPLY ? "updated" : "would update"}: ${(APPLY ? written : candidates).toLocaleString()}`);
   console.log(`  of which a valid {zip} (5 digits / ZIP+4): ${fiveDigit.toLocaleString()} (${candidates ? ((100 * fiveDigit) / candidates).toFixed(2) : "0.00"}%)`);
   console.log(`  by partner: ${JSON.stringify(Object.fromEntries([...byPartner].sort((a, b) => b[1] - a[1])))}`);
-  const after = await counts();
+  const after = await counts(zipCol);
   console.log(`after: ${after.with_zip.toLocaleString()} with zip${APPLY ? "" : " (unchanged — dry run)"}`);
 }
 

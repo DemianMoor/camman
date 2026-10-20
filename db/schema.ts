@@ -4885,6 +4885,8 @@ export const contact_attributes = pgTable(
     last_name: text("last_name"),
     address: text("address"),
     state: text("state"),
+    // 0217: as received (trimmed); the {zip} tag normalizes at render.
+    zip: text("zip"),
     country: text("country"),
     // Stored normalized (lowercase, trimmed) at the write boundary. No unique
     // constraint — see the header note.

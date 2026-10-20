@@ -1527,6 +1527,13 @@
       "when": 1795478400000,
       "tag": "0218_contact_group_line_type_gate",
       "breakpoints": true
+    },
+    {
+      "idx": 218,
+      "version": "7",
+      "when": 1795564800000,
+      "tag": "0219_contact_zip",
+      "breakpoints": true
     }
   ]
 }

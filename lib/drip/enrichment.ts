@@ -100,6 +100,8 @@ export function normalizeLead(
     last_name: str(f.last_name),
     address: str(f.address),
     state: str(f.state),
+    // 0217: stored as received (trimmed); the {zip} tag normalizes at render.
+    zip: str(f.zip),
     country: str(f.country),
     email: normalizeEmail(str(f.email)),
     gender: normalizeGender(str(f.gender)),
@@ -110,6 +112,44 @@ export function normalizeLead(
   };
   for (const k of Object.keys(out)) if (out[k] === null || out[k] === undefined) delete out[k];
   return out;
+}
+
+/**
+ * Write a lead's attributes. Only mapped, non-null fields, and NEVER blank a
+ * known value — the COALESCE direction is the whole point. Extracted (0217) so
+ * the statement is testable on its own; behaviour unchanged apart from zip.
+ */
+export async function upsertLeadAttributes(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0] | typeof db,
+  i: { contactId: string; orgId: string; normalized: Record<string, unknown>; interestTag: string | null; partnerSlug: string | null },
+): Promise<void> {
+  const n = i.normalized as Record<string, string | boolean | null>;
+  await tx.execute(sql`
+    INSERT INTO contact_attributes AS ca
+      (contact_id, org_id, first_name, last_name, address, state, zip, country, email,
+       gender, income_band, kids, married, dob, interest_tag, partner_slug, source)
+    VALUES (${i.contactId}::uuid, ${i.orgId}::uuid,
+            ${n.first_name ?? null}, ${n.last_name ?? null}, ${n.address ?? null},
+            ${n.state ?? null}, ${n.zip ?? null}, ${n.country ?? null}, ${n.email ?? null},
+            ${n.gender ?? null}, ${n.income_band ?? null},
+            ${n.kids ?? null}, ${n.married ?? null}, ${(n.dob as string) ?? null},
+            ${i.interestTag}, ${i.partnerSlug}, 'drip_intake')
+    ON CONFLICT (contact_id) DO UPDATE SET
+      first_name   = COALESCE(EXCLUDED.first_name,   ca.first_name),
+      last_name    = COALESCE(EXCLUDED.last_name,    ca.last_name),
+      address      = COALESCE(EXCLUDED.address,      ca.address),
+      state        = COALESCE(EXCLUDED.state,        ca.state),
+      zip          = COALESCE(EXCLUDED.zip,          ca.zip),
+      country      = COALESCE(EXCLUDED.country,      ca.country),
+      email        = COALESCE(EXCLUDED.email,        ca.email),
+      gender       = COALESCE(EXCLUDED.gender,       ca.gender),
+      income_band  = COALESCE(EXCLUDED.income_band,  ca.income_band),
+      kids         = COALESCE(EXCLUDED.kids,         ca.kids),
+      married      = COALESCE(EXCLUDED.married,      ca.married),
+      dob          = COALESCE(EXCLUDED.dob,          ca.dob),
+      interest_tag = COALESCE(EXCLUDED.interest_tag, ca.interest_tag),
+      partner_slug = COALESCE(EXCLUDED.partner_slug, ca.partner_slug),
+      source       = COALESCE(EXCLUDED.source,       ca.source)`);
 }
 
 /** Per-tick budget: the cron's maxDuration is 60 s. */
@@ -341,34 +381,10 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
         RETURNING id`)) as unknown as { id: string }[];
       const contactId = contact[0].id;
 
-      // Attributes: only mapped, non-null fields, and NEVER blank a known
-      // value — the COALESCE direction is the whole point.
-      const n = normalized as Record<string, string | boolean | null>;
-      await tx.execute(sql`
-        INSERT INTO contact_attributes AS ca
-          (contact_id, org_id, first_name, last_name, address, state, country, email,
-           gender, income_band, kids, married, dob, interest_tag, partner_slug, source)
-        VALUES (${contactId}::uuid, ${orgId}::uuid,
-                ${n.first_name ?? null}, ${n.last_name ?? null}, ${n.address ?? null},
-                ${n.state ?? null}, ${n.country ?? null}, ${n.email ?? null},
-                ${n.gender ?? null}, ${n.income_band ?? null},
-                ${n.kids ?? null}, ${n.married ?? null}, ${(n.dob as string) ?? null},
-                ${row.interest_tag}, ${row.partner_slug}, 'drip_intake')
-        ON CONFLICT (contact_id) DO UPDATE SET
-          first_name   = COALESCE(EXCLUDED.first_name,   ca.first_name),
-          last_name    = COALESCE(EXCLUDED.last_name,    ca.last_name),
-          address      = COALESCE(EXCLUDED.address,      ca.address),
-          state        = COALESCE(EXCLUDED.state,        ca.state),
-          country      = COALESCE(EXCLUDED.country,      ca.country),
-          email        = COALESCE(EXCLUDED.email,        ca.email),
-          gender       = COALESCE(EXCLUDED.gender,       ca.gender),
-          income_band  = COALESCE(EXCLUDED.income_band,  ca.income_band),
-          kids         = COALESCE(EXCLUDED.kids,         ca.kids),
-          married      = COALESCE(EXCLUDED.married,      ca.married),
-          dob          = COALESCE(EXCLUDED.dob,          ca.dob),
-          interest_tag = COALESCE(EXCLUDED.interest_tag, ca.interest_tag),
-          partner_slug = COALESCE(EXCLUDED.partner_slug, ca.partner_slug),
-          source       = COALESCE(EXCLUDED.source,       ca.source)`);
+      await upsertLeadAttributes(tx, {
+        contactId, orgId, normalized: normalized as Record<string, unknown>,
+        interestTag: row.interest_tag, partnerSlug: row.partner_slug,
+      });
 
       // The arrival ledger. ON CONFLICT DO NOTHING against the partial unique
       // on inbox_id makes a crashed-and-retried batch a no-op rather than a

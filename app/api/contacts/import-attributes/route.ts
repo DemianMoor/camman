@@ -180,14 +180,14 @@ export async function POST(req: NextRequest) {
       const col = (f: string) => (v[f] === undefined ? sql`NULL` : sql`${v[f]}`);
       return sql`(${c.id}::uuid, ${orgId}::uuid,
         ${col("first_name")}::text, ${col("last_name")}::text, ${col("address")}::text,
-        ${col("state")}::text, ${col("country")}::text, ${col("email")}::text,
+        ${col("state")}::text, ${col("zip")}::text, ${col("country")}::text, ${col("email")}::text,
         ${col("gender")}::text, ${col("income_band")}::text,
         ${col("kids")}::boolean, ${col("married")}::boolean, ${col("dob")}::date,
         ${col("interest_tag")}::text, ${col("partner_slug")}::text, ${source}::text)`;
     });
     const res = (await db.execute(sql`
       INSERT INTO contact_attributes AS ca (
-        contact_id, org_id, first_name, last_name, address, state, country, email,
+        contact_id, org_id, first_name, last_name, address, state, zip, country, email,
         gender, income_band, kids, married, dob, interest_tag, partner_slug, source
       )
       VALUES ${sql.join(values, sql`, `)}
@@ -196,6 +196,7 @@ export async function POST(req: NextRequest) {
         last_name    = COALESCE(EXCLUDED.last_name,    ca.last_name),
         address      = COALESCE(EXCLUDED.address,      ca.address),
         state        = COALESCE(EXCLUDED.state,        ca.state),
+        zip          = COALESCE(EXCLUDED.zip,          ca.zip),
         country      = COALESCE(EXCLUDED.country,      ca.country),
         email        = COALESCE(EXCLUDED.email,        ca.email),
         gender       = COALESCE(EXCLUDED.gender,       ca.gender),

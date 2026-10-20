@@ -7,13 +7,21 @@
 // write. Window = the last N days of sent rows (default 3): a windowed read,
 // not full history (stage_sends is ~2 GB).
 //
-//   npx tsx scripts/export-t1-corpus.ts <out.json> [days]
+//   npx tsx scripts/export-t1-corpus.ts <out.json> [days] [sinceIso]
+// `sinceIso` keeps only rows CREATED (rendered) at/after that instant — the
+// post-deploy smoke: a regular row is rendered at Prepare, so "sent after the
+// deploy" alone could still be a pre-deploy body.
 import "./_env-preload";
 import { writeFileSync } from "node:fs";
 import postgres from "postgres";
 
 const out = process.argv[2];
 const days = Number(process.argv[3] ?? 3);
+const since = process.argv[4] ? new Date(process.argv[4]) : null;
+if (since && Number.isNaN(+since)) {
+  console.error("sinceIso must be an ISO timestamp");
+  process.exit(2);
+}
 if (!out || !Number.isFinite(days) || days <= 0) {
   console.error("usage: npx tsx scripts/export-t1-corpus.ts <out.json> [days]");
   process.exit(2);
@@ -44,6 +52,9 @@ async function main() {
              CASE WHEN c.type = 'drip' THEN dprov.opt_out_footer ELSE sprov.opt_out_footer END AS provider_footer,
              CASE WHEN c.type = 'drip' THEN dprov.adapter_code  ELSE sprov.adapter_code  END AS adapter_code,
              ss.sent_at,
+             ss.created_at,
+             ss.message_format_id,
+             ss.format_custom,
              ss.rendered_text
       FROM stage_sends ss
       JOIN campaigns c        ON c.id = ss.campaign_id
@@ -58,11 +69,12 @@ async function main() {
       LEFT JOIN sms_providers dprov ON dprov.id = pp.provider_id
       WHERE ss.status = 'sent'
         AND ss.sent_at >= now() - make_interval(days => ${days})
+        AND (${since ? since.toISOString() : null}::timestamptz IS NULL OR ss.created_at >= ${since ? since.toISOString() : null}::timestamptz)
       ORDER BY ss.sent_at
     `;
     return rows;
   });
-  writeFileSync(out, JSON.stringify({ exported_at: new Date().toISOString(), days, rows: result }));
+  writeFileSync(out, JSON.stringify({ exported_at: new Date().toISOString(), days, since: since?.toISOString() ?? null, rows: result }));
   console.log(`exported ${result.length.toLocaleString()} sent rows (last ${days}d) to ${out} in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 }
 

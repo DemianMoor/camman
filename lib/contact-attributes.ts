@@ -23,6 +23,7 @@ export const ATTRIBUTE_FIELDS = [
   { field: "email", label: "Email" },
   { field: "address", label: "Address" },
   { field: "state", label: "State" },
+  { field: "zip", label: "ZIP code" },
   { field: "country", label: "Country" },
   { field: "gender", label: "Gender" },
   { field: "dob", label: "Date of birth" },

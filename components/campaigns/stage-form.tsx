@@ -70,6 +70,7 @@ import {
 } from "@/lib/sends/opt-out-footer";
 import { T1_TEMPLATE } from "@/lib/messages/format";
 import { renderWorstCase, type MessageShape } from "@/lib/messages/render";
+import { messageFormatsUiEnabled, stageFormatPayload } from "@/lib/messages/ui-flag";
 import { CREATIVE_LOCKED_TEXT } from "@/lib/stages/lock-copy";
 import {
   StageFormatField,
@@ -374,11 +375,8 @@ export function buildStageCreateBody(
     ...(opts.includeStopText === false ? {} : { stop_text: values.stop_text }),
     // 0216: custom text (owner) or a chosen format; neither ⇒ the server keeps
     // what is stored (edit) or stamps the org default (create).
-    ...(values.custom_text != null
-      ? { custom_text: values.custom_text }
-      : values.message_format_id != null
-        ? { message_format_id: values.message_format_id }
-        : {}),
+    // Flag OFF (default) ⇒ nothing is sent: the stage keeps its stored shape.
+    ...stageFormatPayload(values, messageFormatsUiEnabled()),
     include_no_status: values.include_no_status,
     include_clickers: values.include_clickers,
     exclude_clickers: values.exclude_clickers,
@@ -453,10 +451,13 @@ export function StageForm({
   // Reference data
   const { can } = useAuth();
   const canEditCompliance = can("compliance.manage");
+  // Message-formats UI flag (hotfix 2026-10-20): OFF ⇒ this form is exactly pre-P2.
+  const formatsUi = messageFormatsUiEnabled();
   // 0216: the org's message formats, for the picker and the preview.
   const { execute: formatsExec } = useApiCall<{ data: StageFormatOption[] }>();
   const [formats, setFormats] = useState<StageFormatOption[]>([]);
   useEffect(() => {
+    if (!formatsUi) return;
     let active = true;
     void formatsExec("/api/message-formats/list").then((r) => {
       if (active && r.ok) setFormats(r.data.data);
@@ -464,7 +465,7 @@ export function StageForm({
     return () => {
       active = false;
     };
-  }, [formatsExec]);
+  }, [formatsExec, formatsUi]);
   const creativesApi = useApiCall<{ data: Creative[] }>();
   // Single-creative fetch — fallback for the edit-load case where the saved
   // creative belongs to an offer outside this campaign's (picked via the
@@ -874,8 +875,8 @@ export function StageForm({
   const shape: MessageShape =
     stageShapeFromForm(formats, watchedFormatId, watchedCustomText) ??
     { kind: "template", formatId: null, template: T1_TEMPLATE };
-  const shapeWarnings = formatWarnings(shape, selectedCreative?.text);
-  const creativeLocked = campaignType === "drip" && hasSent;
+  const shapeWarnings = formatsUi ? formatWarnings(shape, selectedCreative?.text) : [];
+  const creativeLocked = formatsUi && campaignType === "drip" && hasSent;
   const assembledSms = renderWorstCase({
     shape,
     brandName,
@@ -1572,6 +1573,7 @@ export function StageForm({
               />
 
                 {/* 0216: message format (or owner-only custom text) + B5 warnings. */}
+                {formatsUi && (
                 <div className="grid gap-1">
                   <StageFormatField
                     formats={formats}
@@ -1589,6 +1591,7 @@ export function StageForm({
                     <p key={w} className="text-xs text-amber-700 dark:text-amber-400">{w}</p>
                   ))}
                 </div>
+                )}
 
                 {/* ── ONE destination picker ────────────────────────────
                     Was TWO fields ("Landing page" and "Sales page"), which put
@@ -2348,7 +2351,7 @@ export function StageForm({
             : null
         }
         brandName={brandName}
-        stopText={resolvedFooter.text}
+        stopText={formatsUi ? resolvedFooter.text : watchedStopText}
         shape={shape}
         linkPreviewUrl={previewLinkUrl}
         selectedCreativeId={watchedCreativeId}

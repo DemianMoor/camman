@@ -26,8 +26,10 @@ export function decideCreativeChange(i: {
   currentCreativeId: number | null;
   inputCreativeId: number | null | undefined;
   hasSent: boolean;
+  /** Message-formats UI flag. OFF ⇒ no lock, exactly as before P2 (hotfix 2026-10-20). REQUIRED. */
+  lockEnabled: boolean;
 }): { ok: true } | { ok: false; reason: "creative_locked_after_send"; message: string } {
-  if (!i.isDrip || !i.hasSent || i.inputCreativeId === undefined || i.inputCreativeId === i.currentCreativeId) {
+  if (!i.lockEnabled || !i.isDrip || !i.hasSent || i.inputCreativeId === undefined || i.inputCreativeId === i.currentCreativeId) {
     return { ok: true };
   }
   return {

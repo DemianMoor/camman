@@ -24,6 +24,14 @@ async function main() {
   bar("Z5 normalizeLead omits an empty zip (COALESCE never blanks a known value)",
     !("zip" in normalizeLead({ phone: "+12025550199", zip: "  " }, {})));
   bar("Z6 CSV import: zip cell trimmed", normalizeAttributeValue("zip", " 02134 ") === "02134");
+  // Owner 2026-10-20: a zip that lost its leading zero (JSON number, or a CSV / string cell of 3-4 digits) is left-padded.
+  const z = (v: unknown) => normalizeLead({ phone: "+12025550199", zip: v }, {}).zip;
+  bar("Z8 JSON number 2134 → \"02134\"", z(2134) === "02134", JSON.stringify(z(2134)));
+  bar("Z9 JSON number 12345 → \"12345\" (unchanged)", z(12345) === "12345", JSON.stringify(z(12345)));
+  bar("Z10 JSON number 501 → \"00501\" (3 digits padded)", z(501) === "00501", JSON.stringify(z(501)));
+  bar("Z11 string \"2134\" padded the same way; ZIP+4 and letters untouched",
+    z("2134") === "02134" && z("02134-1234") === "02134-1234" && z("ABC12") === "ABC12" && z(21) === "21", JSON.stringify([z("2134"), z("02134-1234"), z("ABC12"), z(21)]));
+  bar("Z12 CSV import pads a 4-digit cell", normalizeAttributeValue("zip", "2134") === "02134");
 
   console.log(`\nPreview DB (${requirePreviewDb().label}, rolled back)`);
   try {

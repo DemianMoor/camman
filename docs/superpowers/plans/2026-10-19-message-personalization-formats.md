@@ -335,7 +335,9 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 **Files:** Create `scripts/backfill-contact-zip.ts`. Add it to the guard EXCLUSIONS with the reason "owner-gated prod backfill".
 
 - Flags: `--dry-run` (default) prints the candidate count, the 5-digit share, and the rows that would change. `--apply` updates in batches of 5,000.
-- The update writes `contact_attributes.zip = btrim(li.raw->>'zip')` from each contact's latest `lead_inbox` row, `WHERE ca.zip IS NULL AND li.raw ? 'zip'` (also checks the aliases in the `LEAD_FIELDS` entry). Idempotent.
+- **Source rule (owner decision 2026-10-20): the NEWEST lead that CARRIES a zip** — a contact whose latest lead has no zip falls back to an older lead that has one. Leads are reached through `lead_events.inbox_id` (`lead_inbox` has no contact id); the zip is extracted with `normalizeLead` (built-in aliases + the partner key's `field_mapping`), the same extraction enrichment uses. Written only `WHERE ca.zip IS NULL` (idempotent; a known zip is never overwritten). Core: `lib/drip/zip-backfill.ts` (`planZipBackfill`, `applyZipBackfill`, `withDeadlockRetry`).
+- **Leading zero (owner ruling 2026-10-20):** a zip received as a JSON number, or a digits-only value of 3–4 characters, is left-padded to 5 (`2134` → `02134`) by `normalizeZipInput` (`lib/contact-attributes.ts`) — the one rule for enrichment, the CSV import and the backfill.
+- Before 0217 is applied the dry run treats every contact as zip-less (`hasZipColumn: false`); `--apply` refuses.
 
 - [ ] **Step 1:** Preview test: fixtures with raw zip ⇒ apply fills them, a second apply changes 0.
 - [ ] **Step 2:** Docs (`03-data-model`, `drip` intake doc, CHANGELOG). PR.

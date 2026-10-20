@@ -9,6 +9,7 @@ import {
   normalizeEmail,
   normalizeGender,
   normalizeIncomeBand,
+  normalizeZipInput,
 } from "@/lib/contact-attributes";
 import { extractLeadFields } from "@/lib/intake/fields";
 import { enqueueNormalized } from "@/lib/telnyx/enqueue";
@@ -101,7 +102,7 @@ export function normalizeLead(
     address: str(f.address),
     state: str(f.state),
     // 0217: stored as received (trimmed); the {zip} tag normalizes at render.
-    zip: str(f.zip),
+    zip: normalizeZipInput(f.zip),
     country: str(f.country),
     email: normalizeEmail(str(f.email)),
     gender: normalizeGender(str(f.gender)),

@@ -26,17 +26,19 @@ bar("F5 OFF: no format / custom field is ever sent (server keeps what is stored;
 
 console.log("\nDrip creative lock");
 const sentDrip = { isDrip: true, currentCreativeId: 5, inputCreativeId: 6, hasSent: true };
-bar("F6 OFF: a sent drip stage's creative can change, exactly as before P2", decideCreativeChange({ ...sentDrip, lockEnabled: false }).ok === true);
-bar("F7 ON: the lock refuses", decideCreativeChange({ ...sentDrip, lockEnabled: true }).ok === false);
+// Owner 2026-10-20: the SERVER lock is on regardless of the flag; only the
+// greyed-out picker UI is behind it.
+bar("F6 a sent drip stage's creative change is refused (409 creative_locked_after_send) — no flag input exists",
+  decideCreativeChange(sentDrip).ok === false && !("lockEnabled" in sentDrip));
 
 console.log("\nSource guards (every P2 UI addition sits behind the flag)");
 const form = strip(readFileSync("components/campaigns/stage-form.tsx", "utf8"));
 bar("G1 stage form gates the format field + warnings on the flag", /formatsUi\s*&&[\s\S]{0,200}<StageFormatField/.test(form) && /formatsUi\s*\?\s*formatWarnings/.test(form));
 bar("G2 stage form gates the creative-lock UI on the flag", /creativeLocked\s*=\s*formatsUi\s*&&/.test(form));
 bar("G3 stage form fetches formats only when the flag is on", /if\s*\(!formatsUi\)\s*return;[\s\S]{0,120}message-formats\/list/.test(form));
-bar("G4 picker gets the pre-P2 raw stop text when the flag is off", /stopText=\{formatsUi\s*\?\s*resolvedFooter\.text\s*:\s*watchedStopText\}/.test(form));
+bar("G4 picker ALWAYS previews with the resolved footer (correctness fix, not gated)", /stopText=\{resolvedFooter\.text\}/.test(form) && !/stopText=\{formatsUi/.test(form));
 const route = strip(readFileSync("app/api/campaigns/[campaignId]/stages/[stageId]/route.ts", "utf8"));
-bar("G5 PATCH passes the flag to the drip creative lock", /decideCreativeChange\(\{[\s\S]{0,300}lockEnabled:\s*messageFormatsUiEnabled\(\)/.test(route));
+bar("G5 PATCH applies the drip creative lock regardless of the flag", /decideCreativeChange\(\{/.test(route) && !/lockEnabled/.test(route));
 const settings = strip(readFileSync("app/(protected)/settings/message-formats/page.tsx", "utf8"));
 bar("G6 Settings page shows the UI-off note", settings.includes("messageFormatsUiEnabled()") && settings.includes("switched off"));
 

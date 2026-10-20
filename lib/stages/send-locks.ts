@@ -26,10 +26,10 @@ export function decideCreativeChange(i: {
   currentCreativeId: number | null;
   inputCreativeId: number | null | undefined;
   hasSent: boolean;
-  /** Message-formats UI flag. OFF ⇒ no lock, exactly as before P2 (hotfix 2026-10-20). REQUIRED. */
-  lockEnabled: boolean;
 }): { ok: true } | { ok: false; reason: "creative_locked_after_send"; message: string } {
-  if (!i.lockEnabled || !i.isDrip || !i.hasSent || i.inputCreativeId === undefined || i.inputCreativeId === i.currentCreativeId) {
+  // Always on, whatever the message-formats UI flag says (owner 2026-10-20):
+  // only the greyed-out picker in the stage form is behind the flag.
+  if (!i.isDrip || !i.hasSent || i.inputCreativeId === undefined || i.inputCreativeId === i.currentCreativeId) {
     return { ok: true };
   }
   return {

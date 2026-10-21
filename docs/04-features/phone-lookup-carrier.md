@@ -1,6 +1,6 @@
 # Phone Lookup & Carrier Enrichment (Telnyx)
 
-_Last updated: 2026-10-21 (drip contacts get the copy at creation; history backfilled)_
+_Last updated: 2026-10-21 (≥250-contact unresolved-carrier alert is now once per ET day)_
 
 > **Status: in build** (`feat/telnyx-number-lookup`). Phase 1 (schema) is authored; the worker, upload flows, segment/campaign wiring, and admin UI land in later phases. This doc is updated as each phase ships.
 
@@ -44,7 +44,7 @@ Plus two non-bucket states (migration 0099):
 
 **AI triage** (`/api/cron/carrier-triage`, `17,47 * * * *`, [lib/carrier/ai-triage.ts](../../lib/carrier/ai-triage.ts)): drains `carrier_classify_queue` under `withCronLease` (single-runner). Batches 50 distinct strings per call to **`claude-haiku-4-5`** with a constrained JSON schema (brand ∈ the six buckets; return `Unknown` rather than guess). `confidence ≥ 0.85` → written to `carrier_mappings` (`mapped_by='ai'`, retro-updates all Unmapped variants + contacts via [lib/carrier/apply-mapping.ts](../../lib/carrier/apply-mapping.ts)) and marked `ai_resolved`; below threshold / `Unknown` / out-of-enum → `needs_human`. **One API call per distinct string, ever** — the second occurrence is served from `carrier_mappings`. Guardrails: per-run API-call cap (`lookup_settings.carrier_ai_run_cap`, default 200) + bounded attempts (3). Env: `ANTHROPIC_API_KEY` (unset → cron no-ops, sends continue under the Unmapped policy).
 
-**Telegram alerts** (existing `notifyTelegram` surface): API failure, rate-limit storm, out-of-enum brand (rejected + requeued), unresolved string affecting ≥250 contacts, and cost-cap tripped. A one-line triage summary folds into the daily 11 AM report (`X auto-mapped · Y need review · Z pending`).
+**Telegram alerts** (existing `notifyTelegram` surface): API failure, rate-limit storm, out-of-enum brand (rejected + requeued), unresolved string affecting ≥250 contacts (**at most once per ET day**, first triage run from 09:00 ET — gated on `alert_state` key `carrier_triage_high_volume`, stamped only on confirmed delivery; it used to re-post every 30-min tick), and cost-cap tripped. A one-line triage summary folds into the daily 11 AM report (`X auto-mapped · Y need review · Z pending`).
 
 **Admin review** — the `/settings/lookup` "Carrier triage — needs review" section (`/api/carrier/triage-queue`) lists `pending`/`needs_human` strings **ranked by affected contact count**; assigning a bucket (`/api/carrier/triage-queue/assign`) writes the mapping on the normalized key (fixing all variants) and marks the row `human_resolved`. The legacy "Unmapped carriers" section (by exact `carrier_raw`) remains.
 

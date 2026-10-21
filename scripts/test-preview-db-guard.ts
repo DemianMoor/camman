@@ -232,6 +232,14 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "builds migration 0198's contact_offer_campaigns covering index with CREATE INDEX CONCURRENTLY (cannot run inside drizzle-kit's transaction); owner-approved 2026-10-03; dry run by default, --apply only 05:00-05:50 UTC, issues only CREATE INDEX (and DROP INDEX of its own INVALID half-build with --drop-invalid)",
   },
   {
+    file: "apply-stage-sends-contact-sent-index-concurrent.ts",
+    why: "builds migration 0219's stage_sends contact-range index with CREATE INDEX CONCURRENTLY (cannot run inside drizzle-kit's transaction); owner-approved 2026-10-21; dry run by default, --apply only 05:00-05:50 UTC unless --off-window (owner's go), issues only CREATE INDEX (and DROP INDEX of its own INVALID half-build with --drop-invalid)",
+  },
+  {
+    file: "measure-engagement-batch-plans.ts",
+    why: "READ-ONLY production plan measurement for the batched engagement recount: its .unsafe( calls are EXPLAIN (ANALYZE, BUFFERS) of SELECTs inside BEGIN READ ONLY … ROLLBACK, plus SET LOCAL; it writes nothing",
+  },
+  {
     file: "engagement-cron-pause.ts",
     why: "pauses/resumes the contact-engagement cron against production for the migration 0188 window by holding the lease row the job already respects (cron_locks.contact-engagement-run); writes only that one lease row, and its 30-minute TTL self-clears",
   },

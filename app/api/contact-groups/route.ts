@@ -48,6 +48,8 @@ export async function POST(req: NextRequest) {
         contact_group_id: parsed.data.contact_group_id,
         description: nullIfEmpty(parsed.data.description),
         color: nullIfEmpty(parsed.data.color),
+        allow_voip: parsed.data.allow_voip ?? true,
+        allow_unknown: parsed.data.allow_unknown ?? true,
         status: "active",
       })
       .returning();

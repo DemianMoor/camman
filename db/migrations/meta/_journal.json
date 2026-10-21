@@ -1520,6 +1520,13 @@
       "when": 1795305600000,
       "tag": "0216_message_formats",
       "breakpoints": true
+    },
+    {
+      "idx": 217,
+      "version": "7",
+      "when": 1795478400000,
+      "tag": "0218_contact_group_line_type_gate",
+      "breakpoints": true
     }
   ]
 }

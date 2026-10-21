@@ -1,6 +1,6 @@
 # Feature — Contacts, Contact Groups, Opt-outs/ins & Clickers
 
-_Last updated: 2026-10-09_
+_Last updated: 2026-10-21 (allowed number types — line-type gate, 0218)_
 
 ## 1. Purpose
 The central phone registry and the suppression/engagement records attached to it. Contacts are the atomic audience unit (scaling to millions); contact groups are tags; opt-outs/ins and clickers are the status signals that audience filters and segment rules read.
@@ -62,6 +62,35 @@ value actually changed, so a plain rename never 403s or 409s. The list shows a *
 (name, `drip` chip on pipeline groups, `system` badge on system groups); the detail header shows a
 `Partner: <name>` badge. `GET /api/contact-groups/list` and `GET /api/contact-groups/[id]` carry
 `partner_id`, `partner_name`, `system_role`.
+
+### Allowed number types (migration 0218)
+
+Two checkboxes on the group's Create/Edit dialog, both **checked by default**:
+**Allow VoIP numbers** (`contact_groups.allow_voip`) and **Allow unknown numbers (type not
+identified)** (`allow_unknown`). Landlines are never sent to regardless (`messaging_status`);
+toll-free is not gated.
+
+Unchecking one blocks that group's contacts of that `contacts.line_type`:
+
+- **Everywhere, strictest group wins.** A contact in ANY *active* group with the box unchecked is
+  out of every campaign — including campaigns that select a different group, or only segments.
+  An archived group blocks nothing.
+- **Selection time only** (owner ruling 2026-10-20, "only block new sends"). Applied where the
+  landline stop is applied: `gateEligible()` in [lib/segment-rules-eval.ts](../../lib/segment-rules-eval.ts)
+  (segment side) and `buildGroupMembershipClause()` in [lib/audience-snapshot.ts](../../lib/audience-snapshot.ts)
+  (group side) — so preview, draft stage counts, lanes, the activation snapshot, the segment page
+  and its CSV export all drop them — and as the drip routing global rule `line_type` (permanent ⇒
+  the lead is marked unroutable, like an opt-out). **Not** in `lib/sends/eligibility.ts`: queued
+  sends, frozen audience pools and drip follow-ups already in flight still go out.
+- The blocked set is one helper, [lib/contact-groups/line-type-gate.ts](../../lib/contact-groups/line-type-gate.ts).
+  It costs one index probe while no group in the org has a box unchecked.
+- `unknown` includes numbers never looked up (`carrier_norm = 'Unidentified'`). It reads
+  `contacts.line_type`, the copy of `phone_lookups` — see [phone-lookup-carrier.md](phone-lookup-carrier.md)
+  for why that copy was stale on drip contacts until 2026-10-20.
+
+Permission: `contact_groups.update` (manager+). Both list and detail API responses carry the two
+fields so either edit dialog starts from the stored value (a rename from the list must not re-check
+a box). Test: `scripts/test-group-line-type-gate.ts` (preview DB).
 
 **`contact_contact_groups.created_at` means "appeared"** (ruling Q2). For drip partner×tag groups
 it is the lead's first delivery (`lead_inbox.received_at`), stamped by enrichment going forward and

@@ -74,6 +74,9 @@ type ContactGroup = {
   partner_id: number | null;
   partner_name: string | null;
   system_role: "drip_intake" | "drip_sandbox" | null;
+  // Line-type gate (migration 0218).
+  allow_voip: boolean;
+  allow_unknown: boolean;
   /** The org defaults, returned alongside the row for the "Effective: N" hints. */
   org_thresholds?: OrgThresholds;
 };
@@ -749,6 +752,8 @@ export default function ContactGroupDetailPage() {
             suppress_after_days: group.suppress_after_days,
             suppress_min_freeze_messages: group.suppress_min_freeze_messages,
             partner_id: group.partner_id,
+            allow_voip: group.allow_voip,
+            allow_unknown: group.allow_unknown,
           }}
           onSubmit={handleEdit}
           onCancel={() => setEditOpen(false)}

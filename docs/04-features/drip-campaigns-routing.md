@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
+_Last updated: 2026-10-21 (global `line_type` rule, 0218); 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -135,6 +135,7 @@ campaign; the rest are per candidate.
 | opt-out | global |
 | in use | global, **both directions**: an active regular campaign's pool **or** another live drip journey |
 | >1-week re-entry | global. A repeat arrival only qualifies once the contact has been in the system more than 7 days |
+| line type | global, **permanent** (0218): `blocked` when the contact is in an active contact group with **Allow VoIP** / **Allow unknown** unchecked and its `contacts.line_type` is that type. See [contacts-and-groups.md](contacts-and-groups.md#allowed-number-types-migration-0218) |
 | interest tag | exact match, required |
 | partner key | optional narrowing |
 | window | `received_at ∈ [start_at, end_at)` |

@@ -4,6 +4,7 @@ import { sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { lineTypeBlockedContactsSql } from "@/lib/contact-groups/line-type-gate";
 import type {
   AudiencePreviewInput,
   AudiencePreviewResult,
@@ -66,17 +67,23 @@ export function buildGroupMembershipClause(
   // dimension the same way buildSegmentAudienceClause gates the segment side, so
   // every consumer (snapshot, preview, draft counts) sees a landline-free audience
   // regardless of how it composes the two dimensions.
+  // The group line-type gate (migration 0218) — same as the live builder, so
+  // the kill-switch path cannot admit a contact the live path blocks.
   return drizzleSql`
-    SELECT ccg.contact_id
-    FROM contact_contact_groups ccg
-    INNER JOIN contacts c
-      ON c.id = ccg.contact_id
-      AND c.org_id = ${orgId}::uuid
-      AND c.messaging_status = 'eligible'
-    WHERE ccg.org_id = ${orgId}::uuid
-      AND ccg.contact_group_id = ANY(${drizzleSql.raw(
-        "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-      )})
+    SELECT gm_out.contact_id FROM (
+      SELECT ccg.contact_id
+      FROM contact_contact_groups ccg
+      INNER JOIN contacts c
+        ON c.id = ccg.contact_id
+        AND c.org_id = ${orgId}::uuid
+        AND c.messaging_status = 'eligible'
+      WHERE ccg.org_id = ${orgId}::uuid
+        AND ccg.contact_group_id = ANY(${drizzleSql.raw(
+          "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+        )})
+      EXCEPT
+      ${lineTypeBlockedContactsSql(orgId)}
+    ) gm_out
   `;
 }
 

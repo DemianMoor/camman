@@ -341,6 +341,23 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
         RETURNING id`)) as unknown as { id: string }[];
       const contactId = contact[0].id;
 
+      // Copy the lookup verdict onto the contact. The Telnyx worker's own copy
+      // (lib/telnyx/sync-contacts.ts) runs when the lookup completes — BEFORE
+      // this contact exists — so without this every drip contact kept the
+      // default 'unknown' / 'Unidentified' (416K of them by 2026-10-20). The
+      // group line-type gate (migration 0218) reads contacts.line_type.
+      // Sandbox leads have no lookup; the join simply matches nothing.
+      if (!row.sandbox) {
+        await tx.execute(sql`
+          UPDATE contacts c
+          SET line_type = pl.line_type, carrier_norm = pl.carrier_norm, updated_at = now()
+          FROM phone_lookups pl
+          WHERE c.id = ${contactId}::uuid
+            AND pl.phone = c.phone_number
+            AND (c.line_type IS DISTINCT FROM pl.line_type
+                 OR c.carrier_norm IS DISTINCT FROM pl.carrier_norm)`);
+      }
+
       // Attributes: only mapped, non-null fields, and NEVER blank a known
       // value — the COALESCE direction is the whole point.
       const n = normalized as Record<string, string | boolean | null>;

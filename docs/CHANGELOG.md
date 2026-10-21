@@ -2174,3 +2174,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-19 — Offer Group Report lifecycle cohorts: Sent window 90d → 30d (migration 0215 rebuilds offer_group_lifecycle_mv with *_sent_30d; overall Sent 90d unchanged) — 03-data-model, 04-features/offer-group-report
 
 2026-10-19 — Offer Group Report: Group column frozen (sticky) during horizontal scroll — 04-features/offer-group-report
+
+2026-10-21 — Carrier triage ≥250-contact unresolved-string Telegram alert: every 30-min tick → once per ET day from 09:00 ET (alert_state gate) — 04-features/phone-lookup-carrier

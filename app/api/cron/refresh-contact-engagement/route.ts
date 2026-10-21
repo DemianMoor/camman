@@ -4,7 +4,9 @@ import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@/db/client";
 import { withCronLease } from "@/lib/cron/lease";
 import {
+  ENGAGEMENT_DAY_ROLLUP_JOB,
   ENGAGEMENT_FULL_JOB,
+  ENGAGEMENT_GROUP_ROLLUP_JOB,
   ENGAGEMENT_JOB,
   ENGAGEMENT_LEASE,
   ENGAGEMENT_REEVAL_JOB,
@@ -43,13 +45,22 @@ import { refreshLifecycleDayRollup } from "@/lib/reporting/lifecycle-rollup";
 // touched set would be slower than recounting the org, and a long outage is
 // exactly when drift is likeliest.
 //
-// Heartbeats are stamped only when EVERY org succeeded, so a failing org ages
-// the heartbeat and the watcher says so. Status is never computed in the send
-// loop — the drain only ever READS contact_engagement.
+// Three steps, three heartbeats, each stamped the moment its step succeeded
+// for EVERY org (a failing org ages that step's heartbeat and the watcher names
+// it): the recount (contact-engagement / -full / -reeval), then the Group x
+// Lifecycle rollup, then — nightly — the Lifecycle day rollup. Until 2026-10-21
+// the recount heartbeats were stamped after BOTH rollups, so the nightly run
+// killed at the old 300 s limit inside the day rollup (Oct 20 + 21) reported
+// the recount — which had committed — as 50 h stale. Status is never computed
+// in the send loop — the drain only ever READS contact_engagement.
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+// 800 s = the Pro + Fluid compute ceiling (confirmed 2026-10-21). The nightly
+// run measured ~245 s recount + ~10 s group + ~41 s day rollup ≈ 297 s on
+// 10-19 and then outgrew 300 s. A stopgap: the planned fix splits the steps
+// into separate routes and batches the recount.
+export const maxDuration = 800;
 
-const LEASE_MS = 6 * 60 * 1000; // > maxDuration: a killed function's SQL keeps running
+const LEASE_MS = 14 * 60 * 1000; // > maxDuration: a killed function's SQL keeps running
 
 type OrgResult = { org_id: string; error?: string } & Partial<RefreshResult>;
 
@@ -99,47 +110,25 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       const results: OrgResult[] = [];
       for (const org_id of orgs) {
         // One org's failure must not stop the rest; it withholds the heartbeat.
+        const started = Date.now();
         try {
           const r = await db.transaction(async (tx) => {
             // One budget for both modes: an incremental run ESCALATES to a full
             // recount when the touched set is too big (lib/engagement/refresh.ts),
             // and a 100 s ceiling would kill exactly the runs that needed to
             // escalate. The lease, not the timeout, is what stops overlap.
-            await tx.execute(sql.raw("SET LOCAL statement_timeout = '270s'"));
+            // 600 s: the full recount alone reached ~245 s against the old 270 s.
+            await tx.execute(sql.raw("SET LOCAL statement_timeout = '600s'"));
             return refreshContactEngagement(tx, org_id, { mode, dryRun: false, since, evaluateAll });
           });
+          console.info("[contact-engagement] recount", {
+            org_id,
+            mode: r.mode,
+            escalatedToFull: r.escalatedToFull ?? false,
+            recounted: r.recounted,
+            durationMs: Date.now() - started,
+          });
           results.push({ org_id, ...r });
-          // The Group x Lifecycle table (migration 0193), EVERY tick. It is
-          // what the report reads instead of computing 15-36s of joins on
-          // page load, so it has to keep pace with the 15-minute job rather
-          // than the nightly one. Outside the refresh transaction for the same
-          // reason as the rollup below: a reporting query must never be able to
-          // roll back contact_engagement, which the send path reads.
-          try {
-            const gl = await refreshGroupLifecycleRollup(db, { orgId: org_id });
-            console.info("[contact-engagement] group lifecycle rollup", gl);
-          } catch (err) {
-            console.error("[contact-engagement] group lifecycle rollup failed", {
-              org_id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-          // ⚠️ NIGHTLY ONLY, and OUTSIDE the refresh transaction. The rollup is
-          // a read-side convenience: if it fails, contact_engagement — which
-          // the send path reads — must still have been written. Folding it into
-          // the same transaction would let a reporting query roll back the
-          // statuses. A rollup failure is logged and withholds nothing.
-          if (mode === "full") {
-            try {
-              const roll = await refreshLifecycleDayRollup(db, { orgId: org_id });
-              console.info("[contact-engagement] lifecycle rollup", roll);
-            } catch (err) {
-              console.error("[contact-engagement] lifecycle rollup failed", {
-                org_id,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
-          }
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
           console.error("[contact-engagement] refresh failed", { org_id, mode, error });
@@ -147,6 +136,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         }
       }
 
+      // Stamp the recount heartbeats NOW, before either rollup: the statuses the
+      // send path reads are committed, and a rollup that fails or runs the
+      // function out of time must not make them look stale.
       const ok = results.every((r) => !r.error);
       if (ok) {
         await recordHeartbeat(db, ENGAGEMENT_JOB);
@@ -154,9 +146,49 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         // A full recount evaluates everyone too, so it satisfies any pending request.
         if (evaluateAll || mode === "full") await recordHeartbeat(db, ENGAGEMENT_REEVAL_JOB);
       }
+
+      // Rollups run only for orgs whose recount committed, and each stamps its
+      // own heartbeat only when it succeeded for every org — so an org whose
+      // recount failed withholds the rollup heartbeats too.
+      const recounted = results.filter((r) => !r.error).map((r) => r.org_id);
+      let groupOk = ok;
+      let dayOk = ok && mode === "full";
+      for (const org_id of recounted) {
+        // The Group x Lifecycle table (migration 0193), EVERY tick. It is what
+        // the report reads instead of computing 15-36s of joins on page load,
+        // so it has to keep pace with the 15-minute job rather than the nightly
+        // one. Outside the refresh transaction: a reporting query must never be
+        // able to roll back contact_engagement, which the send path reads.
+        try {
+          const gl = await refreshGroupLifecycleRollup(db, { orgId: org_id });
+          console.info("[contact-engagement] group lifecycle rollup", gl);
+        } catch (err) {
+          groupOk = false;
+          console.error("[contact-engagement] group lifecycle rollup failed", {
+            org_id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        // ⚠️ NIGHTLY ONLY, and OUTSIDE the refresh transaction, for the same
+        // reason. A failure withholds only this rollup's own heartbeat.
+        if (mode === "full") {
+          try {
+            const roll = await refreshLifecycleDayRollup(db, { orgId: org_id });
+            console.info("[contact-engagement] lifecycle rollup", roll);
+          } catch (err) {
+            dayOk = false;
+            console.error("[contact-engagement] lifecycle rollup failed", {
+              org_id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+      if (groupOk) await recordHeartbeat(db, ENGAGEMENT_GROUP_ROLLUP_JOB);
+      if (dayOk) await recordHeartbeat(db, ENGAGEMENT_DAY_ROLLUP_JOB);
       // Watch the nightly recount from the frequent job, never from itself.
       if (mode === "incremental") await watchEngagementHeartbeat(db, "full");
-      return { ok, engine: "on" as const, mode, evaluateAll, results };
+      return { ok, engine: "on" as const, mode, evaluateAll, groupRollupOk: groupOk, dayRollupOk: dayOk, results };
     },
     LEASE_MS,
   );

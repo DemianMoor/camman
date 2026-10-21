@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-05_
+_Last updated: 2026-10-21 (per-step heartbeats; nightly run limits 800 s / 600 s / 14-min lease)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -848,11 +848,30 @@ costs the evaluate pass only — no recount.
 
 ## 7. Monitoring
 
-Heartbeats `contact-engagement` (every 15 min) and `contact-engagement-full`
-(nightly) in `cron_locks`, stamped only when every org succeeded. The hourly
-`/api/cron/tracking-monitors` watches the 15-minute job; the 15-minute job
-watches the nightly one. Neither vouches for itself
-([lib/engagement/monitor.ts](../../lib/engagement/monitor.ts)).
+Four heartbeats in `cron_locks`, one per step, each stamped the moment that
+step has succeeded for every org:
+
+| Heartbeat | Step | Tolerance | Watched by |
+|---|---|---|---|
+| `contact-engagement` | any recount (every 15 min) | 45 min | hourly `/api/cron/tracking-monitors` |
+| `contact-engagement-group-rollup` | Group × Lifecycle table (0193), every tick | 45 min | hourly `/api/cron/tracking-monitors` |
+| `contact-engagement-full` | nightly full recount | 50 h | the 15-minute run |
+| `contact-engagement-day-rollup` | Lifecycle day rollup (0192), nightly | 50 h | the 15-minute run |
+
+The recount heartbeats are stamped **right after the recount commits, before
+either rollup**; each rollup then stamps its own. A rollup alert therefore says
+"Contact statuses are unaffected" and names the stale report, and a recount
+alert means the statuses the send path reads really are stale. Neither job
+vouches for itself ([lib/engagement/monitor.ts](../../lib/engagement/monitor.ts)).
+
+⚠️ **Why (2026-10-21):** until then one heartbeat set covered all three steps
+and was stamped after the last rollup. The nightly run had grown to ~297 s
+(≈ 245 s recount + 10 s group + 41 s day rollup) against `maxDuration = 300`,
+was killed inside the day rollup on 10-20 and 10-21, and the alert reported the
+**recount** — which had committed both nights — as 50 h stale. Stopgap limits
+since then: `maxDuration = 800` (Pro + Fluid ceiling), `statement_timeout` 600 s,
+lease 14 min. Each step logs its `durationMs` (`[contact-engagement] recount` /
+`group lifecycle rollup` / `lifecycle rollup`).
 
 Both watches are **silent while no org has the engine on** — a switched-off job
 is not a stale one — and they honour the first-run grace, so the deploy that

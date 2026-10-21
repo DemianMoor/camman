@@ -50,6 +50,13 @@ export const DEFAULT_LIFECYCLE_THRESHOLDS: LifecycleThresholds = {
 export const ENGAGEMENT_LEASE = "contact-engagement-run";
 export const ENGAGEMENT_JOB = "contact-engagement"; // heartbeat: any successful run
 export const ENGAGEMENT_FULL_JOB = "contact-engagement-full"; // heartbeat: a successful full recount
+// The two rollups the same route runs AFTER the recount commits. Separate
+// heartbeats so a stale report and stale statuses page as different things —
+// until 2026-10-21 one heartbeat covered all three, stamped after the last
+// rollup, so a run killed in the (read-side) day rollup reported the recount
+// itself as 50 h stale.
+export const ENGAGEMENT_GROUP_ROLLUP_JOB = "contact-engagement-group-rollup"; // heartbeat: Group x Lifecycle table (0193), every tick
+export const ENGAGEMENT_DAY_ROLLUP_JOB = "contact-engagement-day-rollup"; // heartbeat: Lifecycle day rollup (0192), nightly
 /** cron_locks watermark: the last run that evaluated EVERY stored row (a full recount, or one honouring a threshold change). */
 export const ENGAGEMENT_REEVAL_JOB = "contact-engagement-reeval";
 

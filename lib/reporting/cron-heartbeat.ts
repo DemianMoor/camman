@@ -209,6 +209,21 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     first_run_grace_hours: 48, // 2x the nightly interval
     label: "Contact lifecycle full recount (nightly)",
   },
+  // The two read-side rollups the same route runs after the recount commits.
+  // Watched alongside their recount (group with the 15-min one, day with the
+  // nightly one) but on their own heartbeats, so the alert names the step.
+  contactEngagementGroupRollup: {
+    job_name: "contact-engagement-group-rollup",
+    max_age_hours: 0.75,
+    first_run_grace_hours: 0.5,
+    label: "Contact lifecycle Group × Lifecycle rollup (every 15 min)",
+  },
+  contactEngagementDayRollup: {
+    job_name: "contact-engagement-day-rollup",
+    max_age_hours: 50,
+    first_run_grace_hours: 48,
+    label: "Contact lifecycle day rollup (nightly)",
+  },
   // ---- Tells (spec §4.5) — MUTUAL WATCH, because these two are the sole
   // detection layer for broken STOP intake and a dead job cannot report itself
   // dead. tellsMonitors (hourly) checks tellsSweep; tellsSweep (*/5) checks

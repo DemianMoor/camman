@@ -10,6 +10,9 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 //   are hand-derived from the fixture timeline, not read back off the job.
 // Part C — watchEngagementHeartbeat: silent while every engine is off, and one
 //   latched alert once a switched-on job stays missing past its first-run grace.
+//   C3: a stale ROLLUP pages on its own key, naming the rollup, while the
+//   recount it rides with stays healthy (2026-10-21 — one heartbeat covered all
+//   three steps, so a killed day rollup was reported as a 50 h stale recount).
 //
 // Torn down by org_id after re-reading the marker, with a post-teardown count of 0.
 //
@@ -747,7 +750,8 @@ async function main() {
       // crons, so clearing these two rows is safe and repeatable.
       await db.execute(sql`
         DELETE FROM cron_locks
-        WHERE job_name IN ('contact-engagement', 'contact-engagement:awaiting-first-run')`);
+        WHERE job_name IN ('contact-engagement', 'contact-engagement:awaiting-first-run',
+                           'contact-engagement-group-rollup', 'contact-engagement-group-rollup:awaiting-first-run')`);
       {
         // PR #210's first-run grace: a job that has never run is not stale until
         // it has been missing longer than first_run_grace_hours (0.5 h here), so
@@ -763,10 +767,28 @@ async function main() {
         bar("C2b missing past the grace ⇒ stale, one alert, latched on the second check",
           s2?.stale === true && s3?.stale === true && sent.length === 1, `sent=${sent.length}`);
       }
+      {
+        // C3: recount fresh, Group x Lifecycle rollup 2 h old (> 0.75 h).
+        await db.execute(sql`
+          INSERT INTO cron_locks (job_name, watermark) VALUES
+            ('contact-engagement', now()),
+            ('contact-engagement-group-rollup', now() - interval '2 hours')
+          ON CONFLICT (job_name) DO UPDATE SET watermark = EXCLUDED.watermark`);
+        const before = sent.length;
+        const s4 = await watchEngagementHeartbeat(db, "incremental", { send });
+        const msg = sent.slice(before);
+        bar("C3 stale rollup + fresh recount ⇒ recount not stale, exactly one alert, and it names the rollup",
+          s4?.stale === false && msg.length === 1 && msg[0].includes("Group × Lifecycle rollup")
+            && msg[0].includes("statuses are unaffected"),
+          `recountStale=${s4?.stale} alerts=${JSON.stringify(msg)}`);
+      }
     } finally {
       await db.execute(sql`DELETE FROM organizations WHERE id = ${monitorOrg}::uuid AND name LIKE ${`${MARKER}%`}`);
       await watchEngagementHeartbeat(db, "incremental", { send }); // engine off again ⇒ clears the latch
-      await db.execute(sql`DELETE FROM cron_locks WHERE job_name = 'contact-engagement:awaiting-first-run'`);
+      await db.execute(sql`
+        DELETE FROM cron_locks
+        WHERE job_name IN ('contact-engagement:awaiting-first-run', 'contact-engagement-group-rollup',
+                           'contact-engagement-group-rollup:awaiting-first-run')`);
     }
   }
 

@@ -1,6 +1,6 @@
 # Message formats (0216)
 
-_Last updated: 2026-10-22 (P4: tags on regular stages; regular format lock at materialized_at)_
+_Last updated: 2026-10-22 (pre-flag fixes: default race, preflight personalization blocker, skip % on timeout)_
 
 How the brand, the creative text, the link and the opt-out footer are assembled into one SMS. Spec: [docs/superpowers/specs/2026-10-19-message-personalization-formats-design.md](../superpowers/specs/2026-10-19-message-personalization-formats-design.md) (§B). Personalization tags (`{first_name}` …) are part A of the same spec. They render on regular stages since P4 and on drip since P5 (both below).
 
@@ -123,3 +123,10 @@ Drip renders contact tags per lead: routing rule `creative_tags` (permanent; abs
 ## By Format report (P6, 2026-10-22)
 
 `/reports/format` (behind the UI flag) groups performance by the stage's format name, or "Custom". The per-send stamp stays audit only. See [reports-rollup.md](reports-rollup.md#by-format-p6-2026-10-22--tab-behind-the-message-formats-ui-flag).
+
+## Pre-flag fixes (2026-10-22)
+
+- **Make default is serialized per org** (`makeDefaultFormat` locks the org's format rows first): two concurrent calls no longer 500 on the one-default unique index — the last writer wins (`scripts/test-message-formats-default-race.ts`).
+- **Preflight shows a personalization blocker** for a tagged stage kickoff would refuse outright (`segment_ceiling_exceeded` / `multi_segment_not_allowed` / `missing_brand`): a failing "personalization" check + the blocker, so the Prepare checklist and the send agree. Tag-less stages get no new check.
+- **"N% would be skipped" is hidden when the preview timed out** (`tagSkipShare` returns null without a will_send) instead of showing a false 100%.
+- **Trailing rows:** verified — no seeded format, with or without a link or footer, ever ends in a newline (trailing blank rows are trimmed); the only trailing character left is T2's literal space before an empty footer (`test-message-render` R5).

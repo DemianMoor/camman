@@ -117,6 +117,15 @@ async function main() {
     bar("T3.8 reconcile: layers missing_tag_data = 2, segment_limit = 1, qualified = 2",
       rec.excluded_by_layer.missing_tag_data === 2 && rec.excluded_by_layer.segment_limit === 1 && rec.qualified === 2, JSON.stringify({ l: rec.excluded_by_layer, q: rec.qualified }));
 
+    console.log("\nT3 — a tagged stage kickoff would refuse outright shows a blocker (minor #9)");
+    const tooLong = await mkStage(await mkCreative(`Hi {first_name} ${"a".repeat(170)}`));
+    await addPool(tooLong.campaignId);
+    const pfRefused = await preflightStageSend(db, { orgId, campaignId: tooLong.campaignId, stageId: tooLong.stageId });
+    bar("T3.12 over 1 segment even with an empty name ⇒ blocker multi_segment_not_allowed, not ok",
+      pfRefused.blockers.includes("multi_segment_not_allowed") && pfRefused.ok === false,
+      JSON.stringify({ blockers: pfRefused.blockers, ok: pfRefused.ok }));
+    bar("T3.13 …and the checklist names it", pfRefused.checks.some((c) => c.key === "personalization" && !c.ok), JSON.stringify(pfRefused.checks.map((c) => c.key)));
+
     console.log("\nT3 — tag-less stage is untouched");
     const plain = await mkStage(await mkCreative("Hi there, big sale today"));
     await addPool(plain.campaignId);

@@ -2906,8 +2906,8 @@ function FilterChip({
 function TagSkipLine({ eligibility }: { eligibility: { will_send: number | null; excluded_lifecycle?: Record<string, number> } }) {
   const missingData = eligibility.excluded_lifecycle?.missing_tag_data ?? 0;
   const segmentLimit = eligibility.excluded_lifecycle?.segment_limit ?? 0;
-  const share = tagSkipShare({ willSend: eligibility.will_send ?? 0, missingData, segmentLimit });
-  if (share.skipped === 0) return null;
+  const share = tagSkipShare({ willSend: eligibility.will_send, missingData, segmentLimit });
+  if (!share || share.skipped === 0) return null;
   return (
     <span className={cn(share.pct > SKIP_WARN_PCT && "text-amber-700 dark:text-amber-400")}>
       {share.pct}% would be skipped (missing data {missingData.toLocaleString()} · segment limit{" "}

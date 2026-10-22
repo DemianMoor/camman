@@ -145,6 +145,13 @@ export async function updateFormat(
 }
 
 export async function makeDefaultFormat(dbc: DbOrTx, orgId: string, id: number): Promise<FormatAdminResult> {
+  // Minor #5: serialize concurrent "make default" calls for one org. Lock the
+  // org's format rows FIRST (the caller runs this in a transaction): a second
+  // call waits here, then re-reads after the first commits, clears that new
+  // default and sets its own — last writer wins. Without the lock its clear
+  // skipped the row the first call had just set and its set hit the
+  // one-default-per-org unique index (a 500).
+  await dbc.execute(sql`SELECT id FROM message_formats WHERE org_id = ${orgId}::uuid ORDER BY id FOR UPDATE`);
   const current = await loadOwned(dbc, orgId, id);
   if (!current) return notFound;
   if (!current.is_enabled) {

@@ -85,7 +85,7 @@ async function main() {
 
       const page1 = await planZipBackfill(tx, { orgId: org, afterContactId: null, limit: 1, hasZipColumn: true });
       bar("B5 keyset paging: limit 1 returns lastContactId to resume from", page1.scanned === 1 && page1.lastContactId != null);
-      // Pre-0217 dry run (prod before the migration): no zip column ⇒ every contact is zip-less.
+      // Pre-0219 dry run (prod before the migration): no zip column ⇒ every contact is zip-less.
       const pre = await planZipBackfill(tx, { orgId: org, afterContactId: null, limit: 100, hasZipColumn: false });
       bar("B6 hasZipColumn=false ⇒ plans every contact (the 'known' one too: no column to know it from)",
         pre.scanned === 7 && pre.candidates.length === 6, JSON.stringify({ scanned: pre.scanned, n: pre.candidates.length }));

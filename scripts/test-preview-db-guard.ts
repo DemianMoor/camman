@@ -134,7 +134,7 @@ const EXCLUSIONS: ReadonlyArray<{
   {
     file: "backfill-contact-zip.ts",
     viaLibrary: true,
-    why: "owner-gated production backfill of contact_attributes.zip (migration 0217) from lead_inbox.raw; dry-run default (READ ONLY transactions), writes only behind --apply, through lib/drip/zip-backfill (so it carries no write token of its own); only rows still zip IS NULL",
+    why: "owner-gated production backfill of contact_attributes.zip (migration 0219) from lead_inbox.raw; dry-run default (READ ONLY transactions), writes only behind --apply, through lib/drip/zip-backfill (so it carries no write token of its own); only rows still zip IS NULL",
   },
   {
     file: "backfill-conversion-events.ts",

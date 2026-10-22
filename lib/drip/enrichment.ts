@@ -101,7 +101,7 @@ export function normalizeLead(
     last_name: str(f.last_name),
     address: str(f.address),
     state: str(f.state),
-    // 0217: stored as received (trimmed); the {zip} tag normalizes at render.
+    // 0219: stored as received (trimmed); the {zip} tag normalizes at render.
     zip: normalizeZipInput(f.zip),
     country: str(f.country),
     email: normalizeEmail(str(f.email)),
@@ -117,7 +117,7 @@ export function normalizeLead(
 
 /**
  * Write a lead's attributes. Only mapped, non-null fields, and NEVER blank a
- * known value — the COALESCE direction is the whole point. Extracted (0217) so
+ * known value — the COALESCE direction is the whole point. Extracted (0219) so
  * the statement is testable on its own; behaviour unchanged apart from zip.
  */
 export async function upsertLeadAttributes(

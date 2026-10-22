@@ -1,4 +1,4 @@
-// scripts/backfill-contact-zip.ts — fill contact_attributes.zip (0217) from
+// scripts/backfill-contact-zip.ts — fill contact_attributes.zip (0219) from
 // lead_inbox.raw for contacts whose zip is still NULL. Core: lib/drip/zip-backfill.ts.
 //
 // ⚠️ Targets whatever DATABASE_URL holds (.env.local = PRODUCTION). Owner-gated:
@@ -43,16 +43,16 @@ async function counts(withZip: boolean) {
 async function main() {
   const host = new URL(process.env.DATABASE_URL ?? "postgres://x@unknown/x");
   console.log(`DB ${host.username.split(".").pop()} · ${APPLY ? "APPLY" : "DRY RUN (read-only)"} · batch ${BATCH}${ORG ? ` · org ${ORG}` : ""}`);
-  // Before 0217 the column does not exist: a dry run still measures what the
+  // Before 0219 the column does not exist: a dry run still measures what the
   // backfill WOULD write (every contact counts as zip-less); --apply refuses.
   const zipCol = await hasZipColumn();
   if (!zipCol) {
     if (APPLY) {
-      console.error("contact_attributes.zip does not exist — apply migration 0217 first.");
+      console.error("contact_attributes.zip does not exist — apply migration 0219 first.");
       process.exitCode = 2;
       return;
     }
-    console.log("note: contact_attributes.zip does not exist yet (pre-0217) — every contact counts as zip-less");
+    console.log("note: contact_attributes.zip does not exist yet (pre-0219) — every contact counts as zip-less");
   }
   const before = await counts(zipCol);
   console.log(`before: ${before.attrs.toLocaleString()} attribute rows, ${before.with_zip.toLocaleString()} with zip`);

@@ -278,4 +278,4 @@ it is half the credential and should not render on every settings visit.
 the instant it exists. Sandbox leads are stored and flagged, and are excluded from sending and
 reporting. Promotion to live is one toggle and changes nothing about the partner's request.
 
-**ZIP code field (0217, 2026-10-20).** `zip` joined the canonical lead fields (`lib/intake/fields.ts`) — the generated partner doc (`docs/partners/lead-intake.md`) lists it. Stored on `contact_attributes.zip` as received; see [drip-lead-enrichment.md](drip-lead-enrichment.md).
+**ZIP code field (0219, 2026-10-20).** `zip` joined the canonical lead fields (`lib/intake/fields.ts`) — the generated partner doc (`docs/partners/lead-intake.md`) lists it. Stored on `contact_attributes.zip` as received; see [drip-lead-enrichment.md](drip-lead-enrichment.md).

@@ -189,7 +189,7 @@ export function normalizeGender(raw: string | null | undefined): string | null {
 }
 
 /**
- * A zip as STORED (0217): as received, trimmed — except a value that lost its
+ * A zip as STORED (0219): as received, trimmed — except a value that lost its
  * leading zero. A JSON number (2134) or a digits-only cell of 3–4 characters
  * (spreadsheets drop the zero too) is left-padded to 5 digits (owner ruling
  * 2026-10-20). Everything else is kept verbatim; the {zip} tag normalizes it at

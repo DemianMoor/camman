@@ -1,4 +1,4 @@
-// Zip backfill core (0217, P3). contact_attributes.zip is new; partners have been
+// Zip backfill core (0219, P3). contact_attributes.zip is new; partners have been
 // sending zip all along (pml: ~96% of leads) and enrichment dropped it. This
 // recovers it from lead_inbox.raw for contacts whose zip is still NULL.
 //
@@ -31,7 +31,7 @@ export async function planZipBackfill(
     orgId: string | null;
     afterContactId: string | null;
     limit: number;
-    /** false = a pre-0217 database (dry run only): no column, so every contact is zip-less. */
+    /** false = a pre-0219 database (dry run only): no column, so every contact is zip-less. */
     hasZipColumn: boolean;
   },
 ): Promise<{ candidates: ZipCandidate[]; scanned: number; lastContactId: string | null }> {

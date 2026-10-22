@@ -76,7 +76,7 @@
 | `app/(protected)/settings/message-formats/page.tsx`, `components/settings/message-formats-panel.tsx` | P2 | screen |
 | `lib/stages/send-locks.ts` (new) | P2 | `stageHasSent` |
 | `components/campaigns/stage-form.tsx`, `creative-picker-dialog.tsx` | P2/P4 | format picker, custom text, warnings, footer fix |
-| `db/migrations/0217_contact_zip.sql` + meta, `lib/intake/fields.ts`, `lib/drip/enrichment.ts`, `lib/contact-attributes.ts`, `scripts/backfill-contact-zip.ts` | P3 | zip |
+| `db/migrations/0219_contact_zip.sql` + meta, `lib/intake/fields.ts`, `lib/drip/enrichment.ts`, `lib/contact-attributes.ts`, `scripts/backfill-contact-zip.ts` | P3 | zip |
 | `lib/sends/preflight-breakdown.ts` | P4-pre | offer-rule bug |
 | `lib/messages/tag-sql.ts` (new), `lib/sends/tag-rules.ts` (new), `lib/sends/eligibility.ts`, `lib/sends/exclusion-labels.ts`, `lib/sends/recipients.ts`, `lib/sends/kickoff.ts`, `lib/sends/preflight*.ts`, `lib/audience-snapshot.ts` | P4 | regular path |
 | `components/creatives/creative-form.tsx`, `bulk-creative-form.tsx`, `components/messages/tag-picker.tsx` (new) | P4 | editor |
@@ -314,12 +314,12 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 
 ---
 
-## P3 — Zip (migration 0217, card 869fk2a1e)
+## P3 — Zip (migration 0219 — renumbered from 0217 after main shipped 0218 on 2026-10-21; card 869fk2a1e)
 
 ### Task 1: Column, intake field, enrichment, CSV mapping
 
 **Files:**
-- Create `db/migrations/0217_contact_zip.sql` + meta.
+- Create `db/migrations/0219_contact_zip.sql` + meta.
 - Modify `db/schema.ts`; `lib/intake/fields.ts` (add `{ key: "zip", label: "ZIP Code", type: "string", aliases: ["zip_code","zipcode","postal_code","postal"], example: "02134" }`); `lib/drip/enrichment.ts` (`zip: str(f.zip)`); `lib/contact-attributes.ts` (`ATTRIBUTE_FIELDS`); the import-attributes route's column list.
 - Test: `scripts/test-contact-zip.ts`.
 
@@ -337,11 +337,11 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 - Flags: `--dry-run` (default) prints the candidate count, the 5-digit share, and the rows that would change. `--apply` updates in batches of 5,000.
 - **Source rule (owner decision 2026-10-20): the NEWEST lead that CARRIES a zip** — a contact whose latest lead has no zip falls back to an older lead that has one. Leads are reached through `lead_events.inbox_id` (`lead_inbox` has no contact id); the zip is extracted with `normalizeLead` (built-in aliases + the partner key's `field_mapping`), the same extraction enrichment uses. Written only `WHERE ca.zip IS NULL` (idempotent; a known zip is never overwritten). Core: `lib/drip/zip-backfill.ts` (`planZipBackfill`, `applyZipBackfill`, `withDeadlockRetry`).
 - **Leading zero (owner ruling 2026-10-20):** a zip received as a JSON number, or a digits-only value of 3–4 characters, is left-padded to 5 (`2134` → `02134`) by `normalizeZipInput` (`lib/contact-attributes.ts`) — the one rule for enrichment, the CSV import and the backfill.
-- Before 0217 is applied the dry run treats every contact as zip-less (`hasZipColumn: false`); `--apply` refuses.
+- Before 0219 is applied the dry run treats every contact as zip-less (`hasZipColumn: false`); `--apply` refuses.
 
 - [ ] **Step 1:** Preview test: fixtures with raw zip ⇒ apply fills them, a second apply changes 0.
 - [ ] **Step 2:** Docs (`03-data-model`, `drip` intake doc, CHANGELOG). PR.
-  - **Gate:** "Go" ⇒ prod `db:migrate` 0217 ⇒ backfill `--dry-run` (report numbers) ⇒ `--apply` off-hours ⇒ re-count fill. Expected ≈ 96% of `pml` leads.
+  - **Gate:** "Go" ⇒ prod `db:migrate` 0219 ⇒ backfill `--dry-run` (report numbers) ⇒ `--apply` off-hours ⇒ re-count fill. Expected ≈ 96% of `pml` leads.
 
 ---
 

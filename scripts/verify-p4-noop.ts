@@ -82,9 +82,9 @@ async function main() {
       bar(`N1 all ${stages.length} stages resolve to NO_TAG_RULES`, tagged === 0, `${tagged} do not`);
 
       const attrs = new Map<string, Awaited<ReturnType<typeof loadRecipientAttributes>> extends Map<string, infer V> ? V : never>();
-      const ids = [...new Set(rows.map((r) => r.contact_id))];
-      for (let i = 0; i < ids.length; i += 5000) {
-        for (const [k, v] of await loadRecipientAttributes(tx as unknown as typeof db, ids.slice(i, i + 5000))) attrs.set(k, v);
+      for (const [orgId, ids] of Map.groupBy(rows, (r) => r.org_id)) {
+        const got = await loadRecipientAttributes(tx as unknown as typeof db, orgId, [...new Set(ids.map((r) => r.contact_id))]);
+        for (const [k, v] of got) attrs.set(k, v);
       }
       let withAttrs = 0, p4VsLegacy = 0, p4VsStored = 0;
       const storedDiffStages = new Map<number, number>();

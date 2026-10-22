@@ -16,7 +16,7 @@ import { renderMessage, shapeFromStage } from "@/lib/messages/render";
 import { kickoffStageSend } from "@/lib/sends/kickoff";
 import { computeStageReconciliation } from "@/lib/sends/reconcile";
 import { resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
-import { validateRecipientBodies } from "@/lib/sends/personalize";
+import { loadRecipientAttributes, validateRecipientBodies } from "@/lib/sends/personalize";
 
 // Telegram: fake config + a fetch stub that counts alert calls and never leaves the process.
 process.env.TELEGRAM_BOT_TOKEN = "test-token";
@@ -131,6 +131,12 @@ async function kickoff() {
       await new Promise((res) => setTimeout(res, 50)); // the alert is fire-and-forget
       bar("K3 dry-run: sends (not refused), exactly ONE aggregated warning + ONE Telegram alert naming 3 of 3",
         r3.ok && dry.length === 1 && dry[0].includes("3 of 3") && telegramCalls === 1, JSON.stringify({ r3, dry, telegramCalls }));
+
+      // K5 multi-tenancy (CLAUDE.md §3): attributes are read under the org that owns them only.
+      const own = await loadRecipientAttributes(T, orgId, [k1.ids[2]]);
+      const foreign = await loadRecipientAttributes(T, "00000000-0000-0000-0000-000000000000", [k1.ids[2]]);
+      bar("K5 loadRecipientAttributes is org-scoped (own org ⇒ Jose, another org ⇒ nothing)",
+        own.get(k1.ids[2])?.first_name === "Jose" && foreign.size === 0, JSON.stringify({ own: [...own], foreign: [...foreign] }));
 
       // K4 everyone missing ⇒ no_recipients.
       const k4 = await mk("Hi {first_name}", "Reply STOP to opt out", [undefined, "N/A"]);

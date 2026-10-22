@@ -774,7 +774,7 @@ export async function kickoffStageSend(
   // a name can change what a body says — with ONE aggregated dry-run alert.
   let attrs = new Map<string, RecipientData>();
   if (tagged) {
-    attrs = await loadRecipientAttributes(dbc, recipients.map((r) => r.contact_id));
+    attrs = await loadRecipientAttributes(dbc, orgId, recipients.map((r) => r.contact_id));
     const linkStandIn =
       mode === "manual" ? row.short_url : buildRepresentativeTrackedLinkUrl(shortDomain!.domain);
     const gateFor = (body: string) =>

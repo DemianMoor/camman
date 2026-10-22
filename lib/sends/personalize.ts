@@ -14,18 +14,27 @@ type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
  * stageRecipientsSql) so a tag-less stage's recipient SQL stays byte-identical.
  * Contacts with no row are simply absent (⇒ every tag missing).
  */
-export async function loadRecipientAttributes(dbc: DbOrTx, contactIds: string[]): Promise<Map<string, RecipientData>> {
+export async function loadRecipientAttributes(
+  dbc: DbOrTx,
+  orgId: string,
+  contactIds: string[],
+): Promise<Map<string, RecipientData>> {
   const out = new Map<string, RecipientData>();
-  if (contactIds.length === 0) return out;
-  // One bound text parameter cast to uuid[]: a JS array in a Drizzle sql
-  // template would flatten into positional params.
-  const rows = (await dbc.execute(sql`
-    SELECT contact_id, first_name, zip, state FROM contact_attributes
-    WHERE contact_id = ANY(${`{${contactIds.join(",")}}`}::uuid[])
-  `)) as unknown as ({ contact_id: string } & RecipientData)[];
-  for (const r of rows) out.set(r.contact_id, { first_name: r.first_name, zip: r.zip, state: r.state });
+  // Chunked so a large stage never binds one huge parameter. Each chunk is ONE
+  // bound text parameter cast to uuid[]: a JS array in a Drizzle sql template
+  // would flatten into positional params.
+  for (let i = 0; i < contactIds.length; i += ATTR_CHUNK) {
+    const ids = contactIds.slice(i, i + ATTR_CHUNK);
+    const rows = (await dbc.execute(sql`
+      SELECT contact_id, first_name, zip, state FROM contact_attributes
+      WHERE org_id = ${orgId}::uuid AND contact_id = ANY(${`{${ids.join(",")}}`}::uuid[])
+    `)) as unknown as ({ contact_id: string } & RecipientData)[];
+    for (const r of rows) out.set(r.contact_id, { first_name: r.first_name, zip: r.zip, state: r.state });
+  }
   return out;
 }
+
+const ATTR_CHUNK = 5000;
 
 export type ValidateResult =
   | { ok: true; total: number; noStop: number }

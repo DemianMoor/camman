@@ -21,6 +21,9 @@ const FIRST_NAMES = [
   "Abcdefghijklmno", "Abcdefghijklmnop", "Maximilianjohnx", "Maximilianjohnxy", "  Abcdefghijklmno  ",
   "dr. smith", "MCDONALD", "mcdonald", "o'brien-smith", "Ĳsbrand", "ǅemal", "Привет", "Ἀλέξανδρος", "Chloé", "Renée", "François",
   "Ñoño", "Åsa", "Çelik", "Ölaf", "x", "--", "''", "a b",
+  // Review (P4): characters where the DB's letter class and JS \p{L} could disagree.
+  "José", "José", "Jo١", "Ana٣", "०१", "Ｊｏｓｅ", "AnaＡ",
+  "Ⅻ", "JoⅧ", "ǅemal", "Mãria", "Aliـ", "Bo²", "Iñaki", "Đorđe", "Jo​se", "Jo­se",
 ];
 const ZIPS = ["12345", " 12345 ", "12345-6789", "123456789", "1234", "123456", "1234a", "", "00501", "12345-678", "abcde", "12345 6789", "０１２３４"];
 const STATES = ["TX", "tx", " Tx ", "Texas", "texas", "new  york", "New York", "new\tyork", "ZZ", "", "District of Columbia", "D.C.", "Calif", "PR", "puerto rico", "  ca  ", "Wyoming"];

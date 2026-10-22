@@ -68,6 +68,20 @@ export async function recordDripTagSkip(
     exitJourneyId: string | null;
   },
 ): Promise<number> {
+  // FIRST send: close the journey FIRST and write the row only if this call
+  // closed it. Another tick may have claimed the journey (queued its real first
+  // send) or skipped it already; the row lock on drip_journeys serializes both,
+  // so a lead never ends with a skip row beside a real send, or two skip rows.
+  if (i.exitJourneyId != null) {
+    const exited = (await tx.execute(sql`
+      UPDATE drip_journeys
+      SET state = 'exited', closed_at = now(), close_reason = ${i.reason}
+      WHERE id = ${i.exitJourneyId}::uuid AND org_id = ${i.orgId}::uuid
+        AND state = 'routed' AND first_send_at IS NULL
+      RETURNING id
+    `)) as unknown as { id: string }[];
+    if (exited.length === 0) return 0;
+  }
   const written = await insertSkippedSends(tx, {
     orgId: i.orgId,
     campaignId: i.campaignId,
@@ -78,13 +92,5 @@ export async function recordDripTagSkip(
     formatCustom: i.stamp.formatCustom,
     leads: [i.lead],
   });
-  if (i.exitJourneyId != null) {
-    await tx.execute(sql`
-      UPDATE drip_journeys
-      SET state = 'exited', closed_at = now(), close_reason = ${i.reason}
-      WHERE id = ${i.exitJourneyId}::uuid AND org_id = ${i.orgId}::uuid
-        AND state = 'routed' AND first_send_at IS NULL
-    `);
-  }
   return written;
 }

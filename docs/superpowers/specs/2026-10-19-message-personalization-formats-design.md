@@ -48,6 +48,8 @@ All six confirmed; point 3 changed to a block. Further owner corrections, 2026-1
 - **Routing rule `creative_tags` is PERMANENT** (not in the temporary sets): a lead lacking a tag a candidate's first-send message needs, or whose name breaches that campaign's segment limit, falls through to the next candidate or becomes `unroutable`. The rule is ABSENT for a tag-less campaign, so stored routing reasons stay byte-identical. Follow-up children do not affect routing.
 - **First-send skip** writes a `skipped_ineligible` row (`last_error` = `missing_tag:<tag>` / `segment_limit`) AND closes the journey `exited` with the same `close_reason`, in one transaction. **Follow-up skip** writes the row only.
 - **Segment limit applies to personalized drip bodies only.** Drip has never checked segments; adding the check to tag-less bodies would change live sends.
+- **Routing measures what will send:** a campaign's rules come from ALL its active first-send stages (a lead must suit whichever stage its window picks — conservative by design), each evaluated against every active number in the campaign's pool (that number's footer and short domain), most restrictive wins. A send-time skip then means the data or the creative changed after routing.
+- **A tagged tier-0 follow-up skip** writes the row only; the journey is later closed by the lifecycle sweeper as `completed` (not `unengaged`). Accepted.
 - **No-op proof required:** byte-identity on recent drip sends (re-rendered with each recipient's own data) and routing reasons byte-identical (main vs P5) for tag-less campaigns.
 
 ## Recon facts this design rests on (origin/main cdf96d7f, prod 2026-10-19)

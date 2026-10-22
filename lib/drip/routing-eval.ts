@@ -522,11 +522,12 @@ export async function evaluateLeadRouting(
     : null;
 
   // P5: each candidate's personalization rules (first-send stages only).
-  const tagRuleMap = tagRules === "load"
-    ? await loadCampaignTagRules(dbc, orgId, [
-        ...new Set(rows.filter((r) => r.campaign_id != null).map((r) => Number(r.campaign_id))),
-      ])
-    : tagRules;
+  // A campaign missing from the worker's cache (activated mid-tick) is loaded
+  // here — never evaluated without its rule (fail closed).
+  const candidateIds = [...new Set(rows.filter((r) => r.campaign_id != null).map((r) => Number(r.campaign_id)))];
+  const missingIds = tagRules === "load" ? candidateIds : candidateIds.filter((id) => !tagRules.has(id));
+  const tagRuleMap = new Map(tagRules === "load" ? [] : tagRules);
+  for (const [id, r] of await loadCampaignTagRules(dbc, orgId, missingIds)) tagRuleMap.set(id, r);
   const leadData: RecipientData = { first_name: head.attr_first_name, zip: head.attr_zip, state: head.attr_state };
 
   // ── per-campaign rules ────────────────────────────────────────────────────

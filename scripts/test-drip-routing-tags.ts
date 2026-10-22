@@ -101,6 +101,24 @@ async function main() {
       bar("R6 per-tick cache == load mode", JSON.stringify(vc.candidates.map((c) => [c.campaign_id, c.rules, c.detail])) ===
         JSON.stringify(v.candidates.map((c) => [c.campaign_id, c.rules, c.detail])));
 
+      // Review I2: routing measures with the footer of the numbers that will actually
+      // send — the campaign's pool — most restrictive wins.
+      const LONG = "Reply STOP to opt out now!"; // 5 chars longer than the stage footer
+      const prov = await one<{ id: number }>(sql`
+        INSERT INTO sms_providers (sms_provider_id, org_id, name) VALUES (${"tagr-p-" + sfx}, ${orgId}, 'tagr') RETURNING id`);
+      const ph = await one<{ id: number }>(sql`
+        INSERT INTO provider_phones (org_id, provider_id, phone_number, opt_out_footer) VALUES (${orgId}, ${prov.id}, ${"+1995" + sfx}, ${LONG}) RETURNING id`);
+      await tx.execute(sql`INSERT INTO drip_campaign_numbers (campaign_id, provider_phone_id, org_id) VALUES (${p1.id}, ${ph.id}, ${orgId})`);
+      const longFooter = resolveOptOutFooter({ numberFooter: LONG, stageStopText: STOP }).text;
+      const expectL = firstNameMaxLength({ shape, brandName: "Acme", creativeText: tagged, linkUrl: SHORT, stopText: longFooter }, 1);
+      const pooled = (await loadCampaignTagRules(T, orgId, [p1.id])).get(p1.id) as { firstNameMaxLength: number | null };
+      bar(`R7 routing limit uses the pool number's longer footer (L ${expectL} < 12)`,
+        expectL !== null && expectL < 12 && pooled.firstNameMaxLength === expectL, JSON.stringify({ pooled, expectL }));
+
+      // Review M1: a campaign missing from the per-tick cache is loaded, never skipped.
+      const vMiss = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: new Map() }))!;
+      bar("R8 cache miss ⇒ rule still evaluated (fail-closed)", vMiss.candidates.find((c) => c.campaign_id === p1.id)?.rules.creative_tags === "missing");
+
       await tx.execute(sql`UPDATE campaigns SET status = 'archived' WHERE id = ${p2.id}`);
       v = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: "load" }))!;
       const own = v.candidates.filter((c) => c.campaign_id === p1.id);

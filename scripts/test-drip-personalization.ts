@@ -81,6 +81,22 @@ async function db_() {
       const fu = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${child}`);
       bar("S2 follow-up skip ⇒ ONE row only (idempotent), journey untouched by it", w2 === 1 && again === 0 && fu.n === 1);
 
+      // Review I1: a journey another tick already claimed (first send queued) must
+      // get NO skip row — the exit is checked first and gates the insert.
+      const lead2 = await one<{ contact_id: string; phone: string }>(sql`
+        INSERT INTO contacts (org_id, phone_number) VALUES (${org}, ${"+1912" + sfx}) RETURNING id AS contact_id, phone_number AS phone`);
+      const ev2 = await one<{ id: string }>(sql`
+        INSERT INTO lead_events (org_id, contact_id, partner_key_id, partner_slug, interest_tag, received_at)
+        VALUES (${org}, ${lead2.contact_id}, ${keyId}, 'dp', 'DP', now()) RETURNING id`);
+      const j2 = await one<{ id: string }>(sql`
+        INSERT INTO drip_journeys (org_id, campaign_id, contact_id, lead_event_id, state, first_send_at, first_stage_id)
+        VALUES (${org}, ${camp}, ${lead2.contact_id}, ${ev2.id}, 'active', now(), ${stage}) RETURNING id`);
+      const raced = await recordDripTagSkip(tx, { orgId: org, campaignId: camp, stageId: stage, lead: lead2, reason: "segment_limit", renderedText: "x", stamp, exitJourneyId: j2.id });
+      const racedRows = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${stage} AND contact_id = ${lead2.contact_id}`);
+      const j2s = await one<{ state: string }>(sql`SELECT state FROM drip_journeys WHERE id = ${j2.id}`);
+      bar("S4 journey already claimed by another tick ⇒ no skip row, journey untouched", raced === 0 && racedRows.n === 0 && j2s.state === "active",
+        JSON.stringify({ raced, racedRows, j2s }));
+
       const day = new Date(Date.now() - 86400000), dayEnd = new Date(Date.now() + 86400000);
       const capped = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM stage_sends ss WHERE ss.campaign_id = ${camp} AND ${dripDailySendsPredicate(day, dayEnd)}`);
       const exp = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM offer_exposures WHERE contact_id = ${lead.contact_id}`);

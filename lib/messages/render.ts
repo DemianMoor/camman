@@ -8,7 +8,7 @@
 // recipient's NORMALIZED values, then assembleMessage places the blocks. Block
 // values are never re-scanned, so a creative containing "{url}" stays literal.
 
-import { countSegments } from "@/lib/sends/segments";
+import { MAX_SEGMENTS, countSegments } from "@/lib/sends/segments";
 import { T1_TEMPLATE, assembleMessage } from "./format";
 import { TAGS, findTags, type RecipientData, type TagKey } from "./tags";
 
@@ -101,6 +101,57 @@ export function firstNameMaxLength(i: Omit<RenderInput, "recipient">, maxSegment
     if (countSegments(renderWorstCase(i, len)).segments <= maxSegments) return len;
   }
   return null;
+}
+
+/**
+ * What a stage's personalization asks of each recipient (P4, spec §C). The
+ * eligibility layers turn it into SQL (missing_tag_data / segment_limit) and
+ * kickoff renders against it, so a contact is skipped by exactly the rule the
+ * render would apply.
+ * `firstNameMaxLength` is null when {first_name} is not used (no length limit).
+ */
+export interface TagRules {
+  required: TagKey[];
+  firstNameMaxLength: number | null;
+}
+
+/** A stage with no contact tag: no layer, no skip — every current stage. */
+export const NO_TAG_RULES: TagRules = { required: [], firstNameMaxLength: null };
+
+/** The stage cannot send at all — refused at kickoff, never a per-contact skip. */
+export interface TagRulesRefusal {
+  refused: "segment_ceiling_exceeded" | "multi_segment_not_allowed" | "missing_brand";
+  required: TagKey[];
+}
+
+export function isTagRulesRefusal(r: TagRules | TagRulesRefusal): r is TagRulesRefusal {
+  return "refused" in r;
+}
+
+/**
+ * PURE. The tag rules for a stage's rendered shape. Returns NO_TAG_RULES before
+ * doing anything else when the message needs no contact data, which is what
+ * keeps every tag-less stage byte-identical.
+ */
+export function stageTagRules(i: Omit<RenderInput, "recipient"> & { allowMultiSegment: boolean }): TagRules | TagRulesRefusal {
+  const required = requiredContactTags(i);
+  if (required.length === 0) return NO_TAG_RULES;
+  if (requiredTags(i).includes("brand") && TAGS.brand.normalize(i.brandName) === null) {
+    return { refused: "missing_brand", required };
+  }
+  const maxSegments = i.allowMultiSegment ? MAX_SEGMENTS : 1;
+  const refusal = (segments: number): TagRulesRefusal => ({
+    refused: segments > MAX_SEGMENTS ? "segment_ceiling_exceeded" : "multi_segment_not_allowed",
+    required,
+  });
+  if (required.includes("first_name")) {
+    const max = firstNameMaxLength(i, maxSegments);
+    if (max === null) return refusal(countSegments(renderWorstCase(i, 0)).segments);
+    return { required, firstNameMaxLength: max };
+  }
+  // {zip} and {state} have fixed lengths, so their worst case IS every body.
+  const segments = countSegments(renderWorstCase(i)).segments;
+  return segments > maxSegments ? refusal(segments) : { required, firstNameMaxLength: null };
 }
 
 export function checkRecipientBody(body: string, maxSegments: number): { ok: true } | { ok: false; reason: "segment_limit" } {

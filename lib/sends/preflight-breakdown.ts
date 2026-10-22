@@ -16,6 +16,8 @@ import {
   type StageRecipientFilters,
 } from "@/lib/sends/recipients";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
+import { loadStageCountingTagRules } from "@/lib/sends/tag-rules";
+import type { TagKey } from "@/lib/messages/tags";
 
 export type DbOrTx =
   typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -63,6 +65,8 @@ export interface PreflightBreakdown {
     // tells an operator nothing actionable — "excluded 4,102 T-Mobile" does.
     carrier: Record<string, number>;
   };
+  // P4: per required contact tag, how many lack it (not exclusive). `{}` when tag-less.
+  missing_by_tag: Partial<Record<TagKey, number>>;
   estimated_drain_seconds: number | null;
   sender_sends_per_second: number | null;
   blockers: PreflightBlocker[];
@@ -140,6 +144,7 @@ export async function computePreflightBreakdown(
       dedup_1h_predicted: 0,
       carrier: {},
     },
+    missing_by_tag: pf.missing_by_tag,
     estimated_drain_seconds: pf.estimated_drain_seconds,
     sender_sends_per_second: pf.sender_sends_per_second,
     blockers: pf.blockers,
@@ -174,6 +179,8 @@ export async function computePreflightBreakdown(
     offerRulesEnabled: cfg.offer_rules_enabled === true,
     offerCooldownDays: Number(cfg.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
     offerLimitTimes: Number(cfg.offer_limit_times ?? 5),
+    // P4: same rules as preflight/kickoff (NO_TAG_RULES ⇒ no layer).
+    tagRules: await loadStageCountingTagRules(dbc, { orgId, stageId }),
   };
 
   // 3. Per-cause exclusion buckets off the frozen pool (opt-out/filter/split/dedup).
@@ -298,6 +305,7 @@ export async function computePreflightBreakdown(
       dedup_1h_predicted: dedup1h,
       carrier: carrierExcluded,
     },
+    missing_by_tag: pf.missing_by_tag,
     estimated_drain_seconds: pf.estimated_drain_seconds,
     sender_sends_per_second: pf.sender_sends_per_second,
     blockers: pf.blockers,

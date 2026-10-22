@@ -11,6 +11,7 @@ import {
 import type { StageRecipientFilters } from "@/lib/sends/recipients";
 import { splitBucketMatch } from "@/lib/sends/split-bucket";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
+import { loadStageCountingTagRules } from "@/lib/sends/tag-rules";
 
 export type DbOrTx =
   typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -85,7 +86,10 @@ export async function computeStageReconciliation(
     offer_limit_times: number;
   }[];
   const e = elig[0];
-  const exclusions = e
+  // P4: the same personalization rules kickoff materialized with, so the
+  // missing_tag_data / segment_limit buckets reconcile (NO_TAG_RULES ⇒ no layer).
+  const tagRules = e ? await loadStageCountingTagRules(dbc, { orgId, stageId }) : null;
+  const exclusions = e && tagRules
     ? buildStageEligibilityExclusions({
         orgId,
         currentCampaignId: campaignId,
@@ -96,6 +100,7 @@ export async function computeStageReconciliation(
         offerRulesEnabled: e.offer_rules_enabled === true,
         offerCooldownDays: Number(e.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
         offerLimitTimes: Number(e.offer_limit_times ?? 5),
+        tagRules,
       })
     : [];
   const exclUnion = eligibilityUnion(exclusions);

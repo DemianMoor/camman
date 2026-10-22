@@ -19,4 +19,8 @@ export const EXCLUSION_LABELS: Record<LifecycleExclusionKey, string> = {
   freeze_not_due: "freeze not due",
   offer_limit: "offer limit reached",
   offer_cooldown: "offer cooldown",
+  // P4 personalization (spec §C2). Only a stage whose message uses a contact
+  // tag can produce these, and the dialogs show them behind the UI flag.
+  missing_tag_data: "missing data",
+  segment_limit: "segment limit",
 };

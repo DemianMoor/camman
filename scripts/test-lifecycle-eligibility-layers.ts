@@ -14,6 +14,7 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 //        npx tsx --conditions=react-server scripts/test-lifecycle-eligibility-layers.ts
 
 import { sql, type SQL } from "drizzle-orm";
+import { NO_TAG_RULES } from "@/lib/messages/render";
 
 const DAY = 86_400_000;
 const NOW = Date.now();
@@ -226,6 +227,7 @@ async function main() {
         offerRulesEnabled: false,
         offerCooldownDays: 7,
         offerLimitTimes: 5,
+        tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
       });
       const union = eligibilityUnion(layers);
       if (!union) return new Set();
@@ -247,6 +249,7 @@ async function main() {
         offerRulesEnabled: false,
         offerCooldownDays: 7,
         offerLimitTimes: 5,
+        tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
       });
       const l = layers.find((x) => x.key === key);
       if (!l) return new Set();
@@ -323,6 +326,7 @@ async function main() {
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
+      tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
     });
     bar(
       "E10 a campaign with NO offer emits no bought_offer layer",
@@ -354,6 +358,7 @@ async function main() {
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
+      tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
     });
     const keys = layersAll.map((l) => l.key);
     const ranks = keys.map((k) =>

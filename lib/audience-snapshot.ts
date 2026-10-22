@@ -16,6 +16,7 @@ import {
   LIFECYCLE_EXCLUSION_KEYS,
   ZERO_LIFECYCLE_EXCLUSIONS,
   type LifecycleExclusionCounts,
+  type StageOnlyExclusionKey,
   type EligibilityLayer,
   type EligibilityLayerKey,
   type StageEligibilityParams,
@@ -545,7 +546,10 @@ export interface LifecycleAudienceBreakdown {
   // period, and the stage could send to 28. Every lifecycle layer is now an
   // audience exclusion, and the send-time layers stay on as a safety net, so
   // nothing that was blocked before can slip through now.
-  excluded: LifecycleExclusionCounts & {
+  // Omit the P4 personalization keys: tag rules belong to a STAGE (its
+  // creative + shape), so a campaign-level audience never drops anyone for
+  // missing data — the stage-level surfaces report those.
+  excluded: Omit<LifecycleExclusionCounts, StageOnlyExclusionKey> & {
     opted_out: number;
     // Their status is not among the selected chips.
     status_not_selected: number;
@@ -2728,6 +2732,9 @@ export interface StageEligibilityPreviewInput {
     // campaigns.lifecycle_rules. Required, so a new call site cannot forget it
     // and silently preview the legacy predicate for a lifecycle campaign.
     | "lifecycleRules"
+    // P4: the previewed stage's personalization rules (loadTagRules from the
+    // form's values). NO_TAG_RULES ⇒ unchanged.
+    | "tagRules"
   >;
   // Draft mode needs the campaign's planned audience recipe (no frozen pool yet).
   draft?: {
@@ -2849,6 +2856,7 @@ export async function computeStageEligibilityPreview(
     offerRulesEnabled: input.eligibility.offerRulesEnabled === true,
     offerCooldownDays: input.eligibility.offerCooldownDays,
     offerLimitTimes: input.eligibility.offerLimitTimes,
+    tagRules: input.eligibility.tagRules,
   });
   // Look up by key rather than by field: `ex` is an ordered layer list now, so
   // a layer that does not apply is simply absent. EMPTY_CONTACTS keeps the CTE

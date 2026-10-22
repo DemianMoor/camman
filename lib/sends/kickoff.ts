@@ -44,6 +44,7 @@ import {
 } from "@/lib/stage-url";
 import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
+import { NO_TAG_RULES } from "@/lib/messages/render";
 
 export type DbOrTx =
   typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -724,6 +725,9 @@ export async function kickoffStageSend(
       offerRulesEnabled: row.offer_rules_enabled === true,
       offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
       offerLimitTimes: Number(row.offer_limit_times ?? 5),
+      // The interim gate above refuses any contact-tag stage before this runs,
+      // so NO_TAG_RULES is exact here; P4 Task 4 loads the real rules.
+      tagRules: NO_TAG_RULES,
     },
     // Q4: the sending NUMBER's carrier allow-list, applied HERE so an excluded
     // contact never becomes a stage_sends row. ANDs with the campaign-level

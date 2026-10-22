@@ -10,6 +10,8 @@ import {
 } from "@/lib/sends/eligibility";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
+import { countMissingByTag, loadStageCountingTagRules } from "@/lib/sends/tag-rules";
+import type { TagKey } from "@/lib/messages/tags";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
 export type DbOrTx =
@@ -65,6 +67,9 @@ export interface PreflightResult {
   // lib/sends/eligibility.ts. All zero for a legacy stage, and no extra query
   // runs for one.
   excluded_lifecycle: LifecycleExclusionCounts;
+  // P4: per required contact tag, how many of the stage's audience lack it (not
+  // exclusive). `{}` for a tag-less stage.
+  missing_by_tag: Partial<Record<TagKey, number>>;
 }
 
 // Estimated drain time above which the slow-number warning fires (15 min). At a
@@ -172,6 +177,7 @@ export async function preflightStageSend(
       mode,
       recipient_count: 0,
       excluded_lifecycle: { ...ZERO_LIFECYCLE_EXCLUSIONS },
+      missing_by_tag: {},
       blockers: ["no_creative"],
       checks: [{ key: "stage", ok: false, label: "Stage not found" }],
       preview_text: null,
@@ -180,6 +186,11 @@ export async function preflightStageSend(
       warnings: [],
     };
   }
+
+  // P4: the stage's personalization rules — NO_TAG_RULES (no layer, no query)
+  // unless its message uses a contact tag. Counting rules: a stage kickoff
+  // would refuse outright still reports who lacks the data.
+  const tagRules = await loadStageCountingTagRules(dbc, { orgId, stageId });
 
   // Recipient count via the SAME builder the kickoff materializes from.
   const cnt = (await dbc.execute(sql`
@@ -213,6 +224,7 @@ export async function preflightStageSend(
           offerRulesEnabled: row.offer_rules_enabled === true,
           offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
           offerLimitTimes: Number(row.offer_limit_times ?? 5),
+          tagRules,
         },
         // Q4: the same carrier policy kickoff will apply, so the previewed
         // recipient count equals what materializes. Omitting it here would make
@@ -240,12 +252,16 @@ export async function preflightStageSend(
     offerRulesEnabled: row.offer_rules_enabled === true,
     offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
     offerLimitTimes: Number(row.offer_limit_times ?? 5),
+    tagRules,
   }).filter((l) =>
     (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),
   );
   const excludedLifecycle: LifecycleExclusionCounts = {
     ...ZERO_LIFECYCLE_EXCLUSIONS,
   };
+  // A tag-requiring stage always has the missing_tag_data layer, so lcLayers is
+  // non-empty exactly when this needs counting.
+  let missingByTag: Partial<Record<TagKey, number>> = {};
   if (lcLayers.length > 0) {
     // The base is the SAME recipient query WITHOUT the eligibility overlay, so
     // the difference between the two is exactly what the layers removed.
@@ -269,6 +285,7 @@ export async function preflightStageSend(
         allowUnknownCarrier: row.allow_unknown_carrier !== false,
       },
     });
+    missingByTag = await countMissingByTag(dbc, base, tagRules);
     const joins = lcLayers.reduce(
       (acc, l) => sql`${acc}
         left join (${l.sql}) ${sql.raw(`lp_${l.key}`)}
@@ -408,5 +425,6 @@ export async function preflightStageSend(
     estimated_drain_seconds: estimatedDrainSeconds,
     warnings,
     excluded_lifecycle: excludedLifecycle,
+    missing_by_tag: missingByTag,
   };
 }

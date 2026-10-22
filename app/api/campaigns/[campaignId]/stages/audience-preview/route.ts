@@ -12,6 +12,7 @@ import {
   computeStageEligibilityPreview,
 } from "@/lib/audience-snapshot";
 import { can } from "@/lib/permissions";
+import { countingTagRules, loadTagRules } from "@/lib/sends/tag-rules";
 
 // Same gap as the campaign-level preview: a seconds-long read with no ceiling
 // of its own. 60s matches the other heavy read routes.
@@ -37,6 +38,15 @@ const previewSchema = z
     // Null/omitted ⇒ no creative dedup (Edge A): the eligibility breakdown still
     // returns (offer exclusion may apply), with saw_creative = 0.
     creative_id: z.number().int().positive().nullable().optional(),
+    // P4: the stage's message inputs, for the personalization skip count. Only
+    // read when the creative / custom text uses a contact tag; absent ⇒ the
+    // org's default format, the stage-default footer and no number/provider.
+    message_format_id: z.number().int().positive().nullable().optional(),
+    custom_text: z.string().nullable().optional(),
+    stop_text: z.string().nullable().optional(),
+    sms_provider_id: z.number().int().positive().nullable().optional(),
+    provider_phone_id: z.number().int().positive().nullable().optional(),
+    short_url: z.string().nullable().optional(),
   })
   .refine((d) => !(d.include_clickers && d.exclude_clickers), {
     path: ["include_clickers"],
@@ -153,6 +163,19 @@ export async function POST(
   // query; the qualifying set resolves once and the indexed ledgers are cheap
   // joins on top. Reuses the same eligibility layers the send path EXCEPTs, so
   // `will_send` equals what materializes for the same inputs.
+  const tagRules = countingTagRules(
+    await loadTagRules(db, {
+      orgId,
+      campaignId: cid,
+      creativeId: parsed.data.creative_id ?? null,
+      messageFormatId: parsed.data.message_format_id ?? null,
+      customText: parsed.data.custom_text ?? null,
+      stopText: parsed.data.stop_text ?? null,
+      smsProviderId: parsed.data.sms_provider_id ?? null,
+      providerPhoneId: parsed.data.provider_phone_id ?? null,
+      shortUrl: parsed.data.short_url ?? null,
+    }),
+  );
   const eligibility = await computeStageEligibilityPreview({
     orgId,
     campaignId: cid,
@@ -166,6 +189,7 @@ export async function POST(
       offerRulesEnabled: campaignRow[0].offer_rules_enabled === true,
       offerCooldownDays: campaignRow[0].offer_cooldown_days,
       offerLimitTimes: campaignRow[0].offer_limit_times,
+      tagRules,
     },
     draft: isDraft
       ? {

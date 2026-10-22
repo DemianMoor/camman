@@ -85,7 +85,7 @@ async function main() {
       const leadLowerFl = await mkLead(4, { state: "fl" });
 
       const verdictFor = async (leadId: string, campaignId: number) => {
-        const v = await evaluateLeadRouting(tx, { orgId, leadEventId: leadId });
+        const v = await evaluateLeadRouting(tx, { orgId, leadEventId: leadId, tagRules: "load" });
         const c = v!.candidates.find((x) => x.campaign_id === campaignId)!;
         return { v: v!, c };
       };

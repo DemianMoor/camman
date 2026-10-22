@@ -11,6 +11,7 @@ import type { db } from "@/db/client";
 import { buildRepresentativeTrackedLinkUrl } from "@/lib/links/tracked-link";
 import {
   NO_TAG_RULES,
+  campaignTagRules,
   isTagRulesRefusal,
   requiredContactTags,
   shapeFromStage,
@@ -43,7 +44,7 @@ export interface TagRulesSource {
 export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagRules | TagRulesRefusal> {
   if (s.creativeId == null) return NO_TAG_RULES;
   const rows = (await dbc.execute(sql`
-    SELECT cr.text AS creative_text, cr.allow_multi_segment,
+    SELECT cr.text AS tag_creative_text, cr.allow_multi_segment,
            c.link_mode, c.brand_id, b.name AS brand_name,
            coalesce(mf.template, dmf.template) AS format_template,
            coalesce(mf.id, dmf.id) AS format_id,
@@ -60,7 +61,7 @@ export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagR
     WHERE c.id = ${s.campaignId} AND c.org_id = ${s.orgId}::uuid
     LIMIT 1
   `)) as unknown as {
-    creative_text: string | null;
+    tag_creative_text: string | null;
     allow_multi_segment: boolean | null;
     link_mode: string;
     brand_id: number | null;
@@ -80,7 +81,7 @@ export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagR
   });
   // Cheap exit BEFORE any footer / domain lookup: the common case, and the
   // guarantee that a tag-less stage is untouched.
-  if (requiredContactTags({ shape, creativeText: r.creative_text }).length === 0) return NO_TAG_RULES;
+  if (requiredContactTags({ shape, creativeText: r.tag_creative_text }).length === 0) return NO_TAG_RULES;
 
   const descriptor = r.adapter_code ? getDescriptor(r.adapter_code) : null;
   const footer = resolveOptOutFooter({
@@ -103,7 +104,7 @@ export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagR
   return stageTagRules({
     shape,
     brandName: r.brand_name ?? "",
-    creativeText: r.creative_text,
+    creativeText: r.tag_creative_text,
     linkUrl,
     stopText: footer.text,
     allowMultiSegment: r.allow_multi_segment === true,
@@ -183,4 +184,32 @@ export async function countMissingByTag(
     select ${aggs} from (${base}) b left join contact_attributes ca on ca.contact_id = b.contact_id
   `)) as unknown as Record<string, number>[];
   return Object.fromEntries(keys.map((k) => [k, Number(rows[0]?.[`m_${k}`] ?? 0)]));
+}
+
+/**
+ * P5: every live DRIP campaign's rules, from its ACTIVE FIRST-SEND stages only
+ * (a follow-up child never decides routing). Built once per routing tick (the
+ * worker's cache) or per call (the why-not-routed tool). Campaigns whose
+ * stages are all tag-less map to NO_TAG_RULES — the routing rule is then absent.
+ */
+export async function loadCampaignTagRules(
+  dbc: DbOrTx,
+  orgId: string,
+  campaignIds: number[],
+): Promise<Map<number, TagRules | TagRulesRefusal>> {
+  const out = new Map<number, TagRules | TagRulesRefusal>();
+  if (campaignIds.length === 0) return out;
+  const stages = (await dbc.execute(sql`
+    SELECT s.id, s.campaign_id FROM campaign_stages s
+    WHERE s.org_id = ${orgId}::uuid
+      AND s.campaign_id = ANY(${`{${campaignIds.join(",")}}`}::int[])
+      AND s.drip_active IS TRUE AND s.archived_at IS NULL AND s.parent_stage_id IS NULL
+  `)) as unknown as { id: number; campaign_id: number }[];
+  const per = new Map<number, (TagRules | TagRulesRefusal)[]>();
+  for (const st of stages) {
+    const r = await loadStageTagRules(dbc, { orgId, stageId: st.id });
+    per.set(st.campaign_id, [...(per.get(st.campaign_id) ?? []), r]);
+  }
+  for (const id of campaignIds) out.set(id, campaignTagRules(per.get(id) ?? []));
+  return out;
 }

@@ -12,6 +12,7 @@ import {
   loadCampaignJourneyCounts,
   ZERO_COUNTS,
 } from "./routing-eval";
+import { loadCampaignTagRules } from "@/lib/sends/tag-rules";
 
 // The drip routing worker (Drip Phase 4). ZERO SENDS.
 //
@@ -145,6 +146,12 @@ export async function runDripRoutingBatch(
     if (leads.length === 0) continue;
 
     const counts = await loadCampaignJourneyCounts(db, { orgId, now });
+    // P5: every live drip campaign's personalization rules, ONCE per tick.
+    const liveDrip = (await db.execute(sql`
+      SELECT id FROM campaigns
+      WHERE org_id = ${orgId}::uuid AND type = 'drip' AND status IN ('active', 'paused')
+    `)) as unknown as { id: number }[];
+    const tagRules = await loadCampaignTagRules(db, orgId, liveDrip.map((c) => Number(c.id)));
     const recheckAt = new Date(now.getTime() + DRIP_RECHECK_MINUTES * 60_000).toISOString();
 
     for (const lead of leads) {
@@ -154,7 +161,7 @@ export async function runDripRoutingBatch(
         break;
       }
       res.considered++;
-      const verdict = await evaluateLeadRouting(db, { orgId, leadEventId: lead.id, now, counts });
+      const verdict = await evaluateLeadRouting(db, { orgId, leadEventId: lead.id, now, counts, tagRules });
       if (!verdict) continue;
       const outcome = classifyRoutingOutcome(verdict);
 

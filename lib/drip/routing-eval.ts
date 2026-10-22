@@ -6,6 +6,9 @@ import { dripDailySendsPredicate, sendCapacity } from "./daily-sends";
 import type { DbOrTx } from "./groups";
 import { hourStartOf, inAnyWindow } from "./hourly-cap";
 import { hourFullness, loadHourCounts, loadFirstSendWindows, type HourCounts } from "./hourly-room";
+import { isTagRulesRefusal, type TagRules, type TagRulesRefusal } from "@/lib/messages/render";
+import { TAGS, type RecipientData } from "@/lib/messages/tags";
+import { loadCampaignTagRules } from "@/lib/sends/tag-rules";
 
 // Drip routing eligibility (Drip Phase 4).
 //
@@ -125,6 +128,8 @@ interface RawRow {
   in_use_drip: boolean;
   prior_event_count: number;
   attr_gender: string | null;
+  attr_first_name: string | null;
+  attr_zip: string | null;
   attr_state: string | null;
   attr_country: string | null;
   attr_income_band: string | null;
@@ -296,10 +301,43 @@ export async function loadCampaignJourneyCounts(
  * `counts` is the routing worker's per-tick cache (loadCampaignJourneyCounts).
  * Without it — the debugging tool — the counts are read per call, as before.
  */
+/** Each candidate's personalization rules: the worker's per-tick cache, or
+ *  "load" to read them for this call (the why-not-routed tool, tests). */
+export type CampaignTagRulesSource = Map<number, TagRules | TagRulesRefusal> | "load";
+
+/**
+ * PURE (P5). The `creative_tags` verdict for one lead against one campaign's
+ * rules. Called only for a campaign whose first-send message uses a contact
+ * tag; a tag-less campaign gets no rule at all (byte-identical stored reasons).
+ * Not in the temporary sets, so a failure is PERMANENT: the lead falls through
+ * to the next candidate or becomes unroutable.
+ */
+export function creativeTagsVerdict(
+  rules: TagRules | TagRulesRefusal,
+  lead: RecipientData,
+): { verdict: RuleVerdict; detail?: string } {
+  if (isTagRulesRefusal(rules)) {
+    return { verdict: "blocked", detail: `message cannot be sent: ${rules.refused.replace(/_/g, " ")}` };
+  }
+  const contactTags = rules.required.filter((k): k is Exclude<typeof k, "brand"> => k !== "brand");
+  const missing = contactTags.filter((k) => TAGS[k].normalize(lead[k]) === null);
+  if (missing.length > 0) return { verdict: "missing", detail: `missing data: ${missing.join(", ")}` };
+  const max = rules.firstNameMaxLength;
+  const name = contactTags.includes("first_name") ? TAGS.first_name.normalize(lead.first_name) : null;
+  if (max != null && name != null && name.length > max) {
+    return { verdict: "blocked", detail: `segment limit (first_name ${name.length} > ${max})` };
+  }
+  return { verdict: "pass" };
+}
+
 export async function evaluateLeadRouting(
   dbc: DbOrTx,
-  { orgId, leadEventId, now = new Date(), counts }:
-    { orgId: string; leadEventId: string; now?: Date; counts?: CampaignJourneyCounts },
+  { orgId, leadEventId, now = new Date(), counts, tagRules }:
+    {
+      orgId: string; leadEventId: string; now?: Date; counts?: CampaignJourneyCounts;
+      // P5: REQUIRED (CLAUDE.md §11b) — it decides who is routed where.
+      tagRules: CampaignTagRulesSource;
+    },
 ): Promise<LeadRoutingEvaluation | null> {
   const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc(now);
   const rows = (await dbc.execute(sql`
@@ -338,7 +376,8 @@ export async function evaluateLeadRouting(
       (SELECT count(*)::int FROM lead_events pe
        WHERE pe.org_id = ${orgId}::uuid AND pe.contact_id = le.contact_id
          AND pe.received_at < le.received_at) AS prior_event_count,
-      ca2.gender AS attr_gender, ca2.state AS attr_state, ca2.country AS attr_country,
+      ca2.gender AS attr_gender, ca2.first_name AS attr_first_name, ca2.zip AS attr_zip,
+      ca2.state AS attr_state, ca2.country AS attr_country,
       ca2.income_band AS attr_income_band, ca2.kids AS attr_kids, ca2.married AS attr_married,
       CASE WHEN ca2.dob IS NULL THEN NULL
            ELSE extract(year from age((${now.toISOString()}::timestamptz
@@ -481,6 +520,14 @@ export async function evaluateLeadRouting(
           .map((r) => ({ id: Number(r.campaign_id), cap: Number(r.cfg_hourly_cap) })),
       })
     : null;
+
+  // P5: each candidate's personalization rules (first-send stages only).
+  const tagRuleMap = tagRules === "load"
+    ? await loadCampaignTagRules(dbc, orgId, [
+        ...new Set(rows.filter((r) => r.campaign_id != null).map((r) => Number(r.campaign_id))),
+      ])
+    : tagRules;
+  const leadData: RecipientData = { first_name: head.attr_first_name, zip: head.attr_zip, state: head.attr_state };
 
   // ── per-campaign rules ────────────────────────────────────────────────────
   const candidates: CandidateVerdict[] = [];
@@ -709,6 +756,16 @@ export async function evaluateLeadRouting(
       const h = hourFullness(hour.cap, hour.counts);
       rules.hour_capacity = h.full ? "blocked" : "pass";
       if (h.detail) detail.hour_capacity = h.detail;
+    }
+
+    // ⭐ CREATIVE TAGS (P5). ABSENT for a campaign whose first-send message has
+    // no contact tag — not "pass" — so stored reasons and the tool are identical
+    // to before for every tag-less campaign.
+    const tr = tagRuleMap.get(Number(r.campaign_id));
+    if (tr && tr.required.length > 0) {
+      const ct = creativeTagsVerdict(tr, leadData);
+      rules.creative_tags = ct.verdict;
+      if (ct.detail) detail.creative_tags = ct.detail;
     }
 
     const eligible = Object.values(rules).every((v) => v === "pass");

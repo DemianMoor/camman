@@ -123,14 +123,14 @@ async function main() {
     const events = await all<{ id: string; contact_id: string }>(sql`
       SELECT id, contact_id FROM lead_events WHERE org_id = ${orgId}::uuid`);
     const ev = (p: string) => events.find((e) => e.contact_id === id[p])!.id;
-    const vVoip = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip) }))!;
-    const vUnk = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pUnk) }))!;
+    const vVoip = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip), tagRules: "load" }))!;
+    const vUnk = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pUnk), tagRules: "load" }))!;
     bar("D1 blocked voip / unknown leads fail global line_type and are PERMANENT",
       vVoip.global.line_type === "blocked" && vUnk.global.line_type === "blocked"
         && classifyRoutingOutcome(vVoip) === "permanent" && classifyRoutingOutcome(vUnk) === "permanent",
       `voip ${vVoip.global.line_type}/${classifyRoutingOutcome(vVoip)}, unknown ${vUnk.global.line_type}/${classifyRoutingOutcome(vUnk)}`);
-    const vMob = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pMob) }))!;
-    const vV2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip2) }))!;
+    const vMob = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pMob), tagRules: "load" }))!;
+    const vV2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip2), tagRules: "load" }))!;
     bar("D2 mobile and the un-grouped voip pass line_type",
       vMob.global.line_type === "pass" && vV2.global.line_type === "pass",
       `mobile ${vMob.global.line_type}, voip2 ${vV2.global.line_type}`);

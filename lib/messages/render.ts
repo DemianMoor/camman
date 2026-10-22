@@ -154,6 +154,23 @@ export function stageTagRules(i: Omit<RenderInput, "recipient"> & { allowMultiSe
   return segments > maxSegments ? refusal(segments) : { required, firstNameMaxLength: null };
 }
 
+/**
+ * PURE. A DRIP campaign's rules across its first-send stages (P5): any stage may
+ * be the one that sends, so a lead must satisfy all of them — `required` is the
+ * union, `firstNameMaxLength` the tightest (nulls ignored), and any refusal
+ * refuses the campaign. A campaign of tag-less stages is NO_TAG_RULES.
+ */
+export function campaignTagRules(perStage: (TagRules | TagRulesRefusal)[]): TagRules | TagRulesRefusal {
+  const required = [...new Set(perStage.flatMap((r) => r.required))];
+  const refusal = perStage.find(isTagRulesRefusal);
+  if (refusal) return { refused: refusal.refused, required };
+  if (required.length === 0) return NO_TAG_RULES;
+  const lengths = perStage
+    .map((r) => (isTagRulesRefusal(r) ? null : r.firstNameMaxLength))
+    .filter((n): n is number => n != null);
+  return { required, firstNameMaxLength: lengths.length ? Math.min(...lengths) : null };
+}
+
 export function checkRecipientBody(body: string, maxSegments: number): { ok: true } | { ok: false; reason: "segment_limit" } {
   return countSegments(body).segments <= maxSegments ? { ok: true } : { ok: false, reason: "segment_limit" };
 }

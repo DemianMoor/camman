@@ -8,6 +8,7 @@ import {
   DIMENSION_TAB_LABEL,
   REPORT_DIMENSIONS,
 } from "@/lib/reporting/report-dimensions";
+import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 
 // Tab bar for the /reports section. Overview (/reports) is the Keitaro funnel;
 // the five dimension tabs deep-link to /reports/<dimension>. Active state is
@@ -22,7 +23,8 @@ import {
 // of them is a PerformanceReport dimension.
 const TABS: { href: string; label: string; exact: boolean }[] = [
   { href: "/reports", label: "Overview", exact: true },
-  ...REPORT_DIMENSIONS.map((d) => ({
+  // P6: By Format shows only behind the message-formats UI flag (OFF).
+  ...REPORT_DIMENSIONS.filter((d) => d !== "format" || messageFormatsUiEnabled()).map((d) => ({
     href: `/reports/${d}`,
     label: DIMENSION_TAB_LABEL[d],
     exact: false,

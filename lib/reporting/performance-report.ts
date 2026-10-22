@@ -5,6 +5,7 @@ import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-time
 
 import { db } from "@/db/client";
 import {
+  CUSTOM_FORMAT_KEY,
   DIMENSION_NONE_KEY,
   denominatorFor,
   getCountedClickersByCreativeOffer,
@@ -422,14 +423,10 @@ async function dedupeTotalClickers(
 // ---- number / offer / sequence: group the shared stage metrics -------------
 async function groupByStageDimension(
   stages: StageMetrics[],
-  dimension: "number" | "offer" | "sequence",
+  dimension: "number" | "offer" | "sequence" | "format",
   metricsOf: (s: StageMetrics) => PerfMetrics,
 ): Promise<PerfRow[]> {
-  const keyOf = (s: StageMetrics): string => {
-    if (dimension === "number") return s.provider_phone_id == null ? "none" : String(s.provider_phone_id);
-    if (dimension === "offer") return s.offer_id == null ? "none" : String(s.offer_id);
-    return s.stage_number == null ? "none" : String(s.stage_number);
-  };
+  const keyOf = (s: StageMetrics): string => stageDimensionKey(s, dimension);
   const acc = new Map<string, PerfMetrics>();
   for (const s of stages) {
     const k = keyOf(s);
@@ -469,6 +466,18 @@ async function groupByStageDimension(
       })
       .sort((a, b) => b.sent - a.sent);
   }
+  if (dimension === "format") {
+    // P6: the STAGE's format — its name, or "Custom" for owner custom text.
+    const ids = [...acc.keys()].filter((k) => k !== "none" && k !== "custom").map(Number);
+    const names = await formatNames(ids);
+    return [...acc.entries()]
+      .map(([k, m]) => ({
+        key: k,
+        label: k === "custom" ? "Custom" : k === "none" ? "No format" : (names.get(Number(k)) ?? `Format ${k}`),
+        ...m,
+      }))
+      .sort((a, b) => b.sent - a.sent);
+  }
   // sequence
   return [...acc.entries()]
     .map(([k, m]) => ({ key: k, label: k === "none" ? "—" : `Message ${k}`, ...m }))
@@ -486,7 +495,7 @@ async function groupByStageDimension(
 // which is the exact aggregate form of the per-stage denominatorFor() rule.
 async function applyDimensionDistinctClickers(
   orgId: string,
-  dimension: "number" | "offer" | "sequence",
+  dimension: "number" | "offer" | "sequence" | "format",
   b: Bounds,
   rows: PerfRow[],
   stages: StageMetrics[],
@@ -506,11 +515,7 @@ async function applyDimensionDistinctClickers(
 
   // Manual-mode visit counts per dimension key, summed (they cannot be deduped).
   const manualVisits = new Map<string, number>();
-  const keyOf = (s: StageMetrics): string => {
-    if (dimension === "number") return s.provider_phone_id == null ? "none" : String(s.provider_phone_id);
-    if (dimension === "offer") return s.offer_id == null ? "none" : String(s.offer_id);
-    return s.stage_number == null ? "none" : String(s.stage_number);
-  };
+  const keyOf = (s: StageMetrics): string => stageDimensionKey(s, dimension);
   for (const s of stages) {
     if (s.link_mode === "tracked") continue;
     const k = keyOf(s);
@@ -518,7 +523,7 @@ async function applyDimensionDistinctClickers(
   }
 
   for (const row of rows) {
-    const dimKey = row.key === "none" ? DIMENSION_NONE_KEY : Number(row.key);
+    const dimKey = row.key === "none" ? DIMENSION_NONE_KEY : row.key === "custom" ? CUSTOM_FORMAT_KEY : Number(row.key);
     const manual = manualVisits.get(row.key) ?? 0;
     row.counted_clickers = (period.get(dimKey) ?? 0) + manual;
     row.lifetime_clickers = (lifetime.get(dimKey) ?? 0) + manual;
@@ -1252,6 +1257,27 @@ async function providerInfo(ids: number[]) {
       account_label: (r.account_label as string) ?? null,
     });
   }
+  return out;
+}
+
+/** One stage's key under a stage-grain dimension (P6 adds format: id, "custom", or "none"). */
+function stageDimensionKey(s: StageMetrics, dimension: "number" | "offer" | "sequence" | "format"): string {
+  if (dimension === "number") return s.provider_phone_id == null ? "none" : String(s.provider_phone_id);
+  if (dimension === "offer") return s.offer_id == null ? "none" : String(s.offer_id);
+  if (dimension === "format") {
+    if (s.format_custom) return "custom";
+    return s.message_format_id == null ? "none" : String(s.message_format_id);
+  }
+  return s.stage_number == null ? "none" : String(s.stage_number);
+}
+
+async function formatNames(ids: number[]) {
+  const out = new Map<number, string>();
+  if (ids.length === 0) return out;
+  const rows = (await db.execute(sql`
+    SELECT id, name FROM message_formats WHERE id IN (${inList(ids)})
+  `)) as unknown as { id: number; name: string }[];
+  for (const r of rows) out.set(Number(r.id), r.name);
   return out;
 }
 

@@ -8,6 +8,9 @@ export const REPORT_DIMENSIONS = [
   "sequence",
   "hourly",
   "group",
+  // P6: the STAGE's message format (name, or "Custom"). Its Reports tab shows
+  // only behind the message-formats UI flag (reports-tabs / [dimension] page).
+  "format",
 ] as const;
 export type ReportDimension = (typeof REPORT_DIMENSIONS)[number];
 
@@ -18,6 +21,7 @@ export const DIMENSION_LABEL: Record<ReportDimension, string> = {
   sequence: "Message",
   hourly: "Hour",
   group: "Group",
+  format: "Format",
 };
 
 // Tab label in the /reports tab bar.
@@ -27,6 +31,7 @@ export const DIMENSION_TAB_LABEL: Record<ReportDimension, string> = {
   sequence: "By Sequence",
   hourly: "Hourly",
   group: "By Group",
+  format: "By Format",
 };
 
 export function isReportDimension(v: string | null | undefined): v is ReportDimension {

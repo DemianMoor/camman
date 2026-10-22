@@ -40,7 +40,8 @@ export interface TagDef {
 /** Junk placeholders treated as missing. Compared lowercase on the trimmed raw value. */
 export const JUNK_VALUES: readonly string[] = ["n/a", "unknown", "none", "-"];
 
-const FIRST_NAME_MIN = 2;
+/** Minimum LETTERS in a cleaned first name (the SQL twin reads it from here). */
+export const FIRST_NAME_MIN = 2;
 const FIRST_NAME_MAX = 15;
 
 // Letters NFKD does not decompose to ASCII, or decomposes to more than one letter.

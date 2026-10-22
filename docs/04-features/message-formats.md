@@ -1,6 +1,6 @@
 # Message formats (0216)
 
-_Last updated: 2026-10-22 (pre-flag fixes: default race, preflight personalization blocker, skip % on timeout)_
+_Last updated: 2026-10-22 (flag-walk fixes: singular in-use message, By Format sidebar link, Settings link hidden from operators)_
 
 How the brand, the creative text, the link and the opt-out footer are assembled into one SMS. Spec: [docs/superpowers/specs/2026-10-19-message-personalization-formats-design.md](../superpowers/specs/2026-10-19-message-personalization-formats-design.md) (§B). Personalization tags (`{first_name}` …) are part A of the same spec. They render on regular stages since P4 and on drip since P5 (both below).
 
@@ -58,6 +58,7 @@ The rules live in [`lib/messages/format-admin.ts`](../../lib/messages/format-adm
 - **Permissions:**
   - `message_formats.view`: every role.
   - `message_formats.manage`: manager, admin, owner. Never operator; operators only pick from enabled formats.
+  - The `/settings/message-formats` page sits under the Settings layout, which 404s the operator (`providers.view`). The sidebar link uses the same gate, so an operator never sees it; the operator still reads formats through the API for the stage-form picker.
 
 ## Stage choice
 
@@ -122,7 +123,7 @@ Drip renders contact tags per lead: routing rule `creative_tags` (permanent; abs
 
 ## By Format report (P6, 2026-10-22)
 
-`/reports/format` (behind the UI flag) groups performance by the stage's format name, or "Custom". The per-send stamp stays audit only. See [reports-rollup.md](reports-rollup.md#by-format-p6-2026-10-22--tab-behind-the-message-formats-ui-flag).
+`/reports/format` (behind the UI flag, as are its tab and its sidebar link under Reports) groups performance by the stage's format name, or "Custom". The per-send stamp stays audit only. See [reports-rollup.md](reports-rollup.md#by-format-p6-2026-10-22--tab-behind-the-message-formats-ui-flag).
 
 ## Pre-flag fixes (2026-10-22)
 

@@ -42,6 +42,14 @@ All six confirmed; point 3 changed to a block. Further owner corrections, 2026-1
 - **Backend not gated, but a proven no-op.** The eligibility layers, per-recipient render, per-recipient opt-out gate and kickoff validate-all run for every stage. No live creative uses a contact tag, so on every current stage they must change nothing. Proof required in the PR: pre/post byte-identity of prepared (`stage_sends.rendered_text`) rows, and identical preflight counts on 3 live stages.
 - **No migration in P4. Nothing paid.**
 
+## P5 owner rules (2026-10-22)
+
+- **Same flag rule as P4:** any new UI renders only behind `NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED` (OFF). No migration. Nothing paid.
+- **Routing rule `creative_tags` is PERMANENT** (not in the temporary sets): a lead lacking a tag a candidate's first-send message needs, or whose name breaches that campaign's segment limit, falls through to the next candidate or becomes `unroutable`. The rule is ABSENT for a tag-less campaign, so stored routing reasons stay byte-identical. Follow-up children do not affect routing.
+- **First-send skip** writes a `skipped_ineligible` row (`last_error` = `missing_tag:<tag>` / `segment_limit`) AND closes the journey `exited` with the same `close_reason`, in one transaction. **Follow-up skip** writes the row only.
+- **Segment limit applies to personalized drip bodies only.** Drip has never checked segments; adding the check to tag-less bodies would change live sends.
+- **No-op proof required:** byte-identity on recent drip sends (re-rendered with each recipient's own data) and routing reasons byte-identical (main vs P5) for tag-less campaigns.
+
 ## Recon facts this design rests on (origin/main cdf96d7f, prod 2026-10-19)
 
 - **One composer today:** `buildStageSms` ([lib/sends/stage-sms.ts](../../../lib/sends/stage-sms.ts)). Every call site is listed in the plan (P2 / P4 / P5).

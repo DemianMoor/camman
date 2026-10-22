@@ -10,7 +10,8 @@ import { chunkedQuery, streamCsvResponse } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
-import { loadStageCountingTagRules } from "@/lib/sends/tag-rules";
+import { loadStageTagRules } from "@/lib/sends/tag-rules";
+import { isTagRulesRefusal } from "@/lib/messages/render";
 import { recordExportedRecipients } from "@/lib/stages/manual-recipients";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
@@ -108,6 +109,21 @@ export async function GET(
   }
   const stage = rows[0];
 
+  // Owner 2026-10-22: a stage whose message uses a personalization tag cannot
+  // be exported yet — the CSV carries phones only, and the creative pasted into
+  // the provider would ship the literal tag. Blocked until the export gains a
+  // per-recipient rendered `message` column (follow-up card). Tag-less stages
+  // (NO_TAG_RULES) export exactly as before.
+  const tagRules = await loadStageTagRules(db, { orgId, stageId: sid });
+  if (isTagRulesRefusal(tagRules) || tagRules.required.length > 0) {
+    return apiError(
+      409,
+      "This stage uses personalization tags — export not supported",
+      API_ERROR_CODES.CONFLICT,
+      { reason: "personalization_tags_not_exportable" },
+    );
+  }
+
   if (!stage.tracking_id) {
     return apiError(
       409,
@@ -137,9 +153,6 @@ export async function GET(
         WHERE id = ${stage.provider_phone_id} AND org_id = ${orgId} LIMIT 1
       `)) as unknown as { allow_unknown_carrier: boolean }[])
     : [];
-  // P4: an exported CSV is a manual send of the same creative, so it skips who
-  // the send would skip for missing tag data (NO_TAG_RULES ⇒ no change).
-  const tagRules = await loadStageCountingTagRules(db, { orgId, stageId: sid });
   const carrierPolicy = {
     providerPhoneId: stage.provider_phone_id ?? null,
     allowUnknownCarrier: phoneCarrierRows[0]?.allow_unknown_carrier !== false,

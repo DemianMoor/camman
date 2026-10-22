@@ -146,6 +146,18 @@ async function main() {
     const dripSentLocked = await owner.call("PATCH", `/api/campaigns/${dripSentFx.campaignId}/stages/${dripSentFx.stageId}`, { message_format_id: t2.id });
     check("owner: drip stage with a sent row ⇒ 409 format_locked_after_send", dripSentLocked.status === 409 && reason(dripSentLocked) === "format_locked_after_send", JSON.stringify(dripSentLocked));
 
+    // Owner 2026-10-22: CSV export of a stage whose message uses a contact tag is
+    // blocked until the export carries each recipient's rendered body.
+    console.log("── export of a personalized stage");
+    const fxTag = await fixture(owner.orgId!, "regular", false, false);
+    await sql`UPDATE creatives SET text = 'Hi {first_name}' WHERE id = (SELECT creative_id FROM campaign_stages WHERE id = ${fxTag.stageId})`;
+    const expTag = await owner.call("GET", `/api/campaigns/${fxTag.campaignId}/stages/${fxTag.stageId}/export-phones`);
+    check("owner: export of a {first_name} stage ⇒ 409 personalization_tags_not_exportable, clear message",
+      expTag.status === 409 && reason(expTag) === "personalization_tags_not_exportable" &&
+        JSON.stringify(expTag.body).includes("This stage uses personalization tags — export not supported"), JSON.stringify(expTag).slice(0, 300));
+    const expPlain = await owner.call("GET", `/api/campaigns/${fx.campaignId}/stages/${fx.stageId}/export-phones`);
+    check("owner: export of a tag-less stage is not blocked for tags", reason(expPlain) !== "personalization_tags_not_exportable", JSON.stringify(expPlain).slice(0, 200));
+
     console.log("── operator");
     const op = await session("operator");
     const opList = await op.call("GET", "/api/message-formats/list");

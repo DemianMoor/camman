@@ -42,5 +42,19 @@ bar("G5 PATCH applies the drip creative lock regardless of the flag", /decideCre
 const settings = strip(readFileSync("app/(protected)/settings/message-formats/page.tsx", "utf8"));
 bar("G6 Settings page shows the UI-off note", settings.includes("messageFormatsUiEnabled()") && settings.includes("switched off"));
 
+console.log("\nSource guards — P4 creative editor (behind the flag)");
+// Every occurrence must be gated, not just one: count all vs gated.
+const allGated = (src: string, tag: string) => {
+  const all = src.split(`<${tag}`).length - 1;
+  const gated = (src.match(new RegExp(`formatsUi\\s*(?:&&|\\?)[\\s\\S]{0,160}?<${tag}`, "g")) ?? []).length;
+  return all > 0 && all === gated;
+};
+for (const f of ["components/creatives/creative-form.tsx", "components/creatives/bulk-creative-form.tsx"]) {
+  const src = strip(readFileSync(f, "utf8"));
+  bar(`G7 ${f}: tag picker only when the flag is on`, allGated(src, "TagPicker"));
+  bar(`G8 ${f}: worst case + unknown-tag hints only when the flag is on`, allGated(src, "CreativeTagHints"));
+  bar(`G9 ${f}: reads the flag via messageFormatsUiEnabled()`, /const formatsUi\s*=\s*messageFormatsUiEnabled\(\)/.test(src));
+}
+
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

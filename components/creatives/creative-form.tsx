@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -13,6 +13,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 
+import { CreativeTagHints, TagPicker, insertAtCursor } from "@/components/messages/tag-picker";
 import { SpamCheckStrip } from "@/components/spam/spam-check-strip";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +40,7 @@ import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { calculateSmsSegments, containsEmDash } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { useAuth } from "@/components/protected/auth-context";
+import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 import { MAX_SEGMENTS } from "@/lib/sends/segments";
 import { cn } from "@/lib/utils";
 import {
@@ -146,6 +148,9 @@ export function CreativeForm({
   // those roles so the form cannot offer a change the server will reject.
   const { can } = useAuth();
   const canEditCompliance = can("compliance.manage");
+  // P4 tag picker / worst case / unknown-tag hints: behind the message-formats UI flag.
+  const formatsUi = messageFormatsUiEnabled();
+  const textRef = useRef<HTMLTextAreaElement | null>(null);
   const offersApi = useApiCall<{ data: OfferInfo[] }>();
   const [offers, setOffers] = useState<OfferInfo[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(
@@ -256,7 +261,18 @@ export function CreativeForm({
           name="text"
           render={({ field }) => (
             <FormItem>
-              <FormLabel required>SMS body</FormLabel>
+              <div className="flex items-center justify-between gap-2">
+                <FormLabel required>SMS body</FormLabel>
+                {formatsUi && (
+                  <TagPicker
+                    disabled={isSubmitting}
+                    onInsert={(token) => {
+                      if (!textRef.current) return;
+                      form.setValue("text", insertAtCursor(textRef.current, token), { shouldDirty: true, shouldValidate: true });
+                    }}
+                  />
+                )}
+              </div>
               <FormControl>
                 <Textarea
                   rows={5}
@@ -267,6 +283,10 @@ export function CreativeForm({
                     isLongText && "border-red-400 focus-visible:ring-red-400",
                   )}
                   {...field}
+                  ref={(el) => {
+                    field.ref(el);
+                    textRef.current = el;
+                  }}
                 />
               </FormControl>
               <div className={cn("text-xs tabular-nums", counterTone)}>
@@ -285,6 +305,7 @@ export function CreativeForm({
                   </span>
                 )}
               </div>
+              {formatsUi && <CreativeTagHints text={text ?? ""} allowMultiSegment={allowMultiSegment} />}
               {isLongText ? (
                 <FormDescription className="text-red-700 dark:text-red-400">
                   Long creative — over {TEXT_WARN_THRESHOLD} characters may

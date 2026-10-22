@@ -1,6 +1,6 @@
 // scripts/test-message-render.ts — pure suite for lib/messages (no DB).
 // npx tsx scripts/test-message-render.ts
-import { TAGS, findTags, findUnknownTokens, type RecipientData } from "@/lib/messages/tags";
+import { TAGS, expandWorstCase, findTags, findUnknownTokens, type RecipientData } from "@/lib/messages/tags";
 import { SEED_FORMATS, T1_TEMPLATE, validateCustomText, validateTemplate } from "@/lib/messages/format";
 import {
   checkRecipientBody, firstNameMaxLength, renderMessage, renderWorstCase, requiredContactTags, requiredTags, type MessageShape,
@@ -152,6 +152,13 @@ eq("R2.25 custom missing everything", validateCustomText("Hi {first_name}")?.cod
 eq("R2.26 custom without {creative_text}", validateCustomText("Hi {first_name} {url} {stop_text}")?.code, "custom_text_missing_required_block");
 eq("R2.27 custom with all three", validateCustomText("Hi {first_name}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}"), null);
 eq("R2.28 custom unknown token is literal", validateCustomText("{creative_text}{url}{stop_text}{Foo}"), null);
+
+console.log("\nP4 — creative editor worst case (each tag at its worstCase stand-in)");
+eq("R4.1 worst case of \"Hi {first_name}\" is 18 characters", expandWorstCase("Hi {first_name}").length, 18);
+eq("R4.2 every tag expands to its worstCase", expandWorstCase("{first_name}|{zip}|{state}|{brand}"),
+  `${TAGS.first_name.worstCase}|${TAGS.zip.worstCase}|${TAGS.state.worstCase}|${TAGS.brand.worstCase}`);
+eq("R4.3 unknown tokens and blocks are untouched", expandWorstCase("{FirstName} {url} {creative_text}"), "{FirstName} {url} {creative_text}");
+eq("R4.4 text without tags is unchanged", expandWorstCase("Plain text"), "Plain text");
 
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

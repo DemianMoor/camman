@@ -159,6 +159,11 @@ export function findTags(text: string): TagKey[] {
   return out;
 }
 
+/** `text` with every tag replaced by its worst-case stand-in (creative editor). */
+export function expandWorstCase(text: string): string {
+  return text.replace(/\{([a-z_]+)\}/g, (tok, k: string) => (isTagKey(k) ? TAGS[k].worstCase : tok));
+}
+
 /** Brace tokens that are neither a tag nor a block — sent literally; the editor warns. */
 export function findUnknownTokens(text: string): string[] {
   const out: string[] = [];

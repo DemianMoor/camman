@@ -119,3 +119,7 @@ Regular stages render contact tags per recipient. **No live creative uses a cont
 ## Personalization on drip (P5, 2026-10-22)
 
 Drip renders contact tags per lead: routing rule `creative_tags` (permanent; absent for tag-less campaigns), per-lead render in the scheduler and follow-ups, skip rows `missing_tag:<tag>` / `segment_limit`, first-send skip closes the journey `exited`. Details and the no-op proof: [drip-campaigns-routing.md](drip-campaigns-routing.md#personalization-tags-on-drip-p5-2026-10-22).
+
+## By Format report (P6, 2026-10-22)
+
+`/reports/format` (behind the UI flag) groups performance by the stage's format name, or "Custom". The per-send stamp stays audit only. See [reports-rollup.md](reports-rollup.md#by-format-p6-2026-10-22--tab-behind-the-message-formats-ui-flag).

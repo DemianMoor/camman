@@ -72,5 +72,13 @@ for (const f of ["components/campaigns/stage-prepare-dialog.tsx", "components/ca
   bar(`G16 ${f}: reads the flag via messageFormatsUiEnabled()`, /const formatsUi\s*=\s*messageFormatsUiEnabled\(\)/.test(strip(readFileSync(f, "utf8"))));
 }
 
+console.log("\nSource guards — P6 By Format (behind the flag)");
+const tabs = strip(readFileSync("components/reports/reports-tabs.tsx", "utf8"));
+bar("G17 Reports tab bar lists By Format only when the flag is on",
+  /\.filter\(\(d\)\s*=>\s*d\s*!==\s*"format"\s*\|\|\s*messageFormatsUiEnabled\(\)\)/.test(tabs));
+const dimPage = strip(readFileSync("app/(protected)/reports/[dimension]/page.tsx", "utf8"));
+bar("G18 /reports/format is a 404 while the flag is off",
+  /dimension\s*===\s*"format"\s*&&\s*!messageFormatsUiEnabled\(\)\)\s*notFound\(\)/.test(dimPage));
+
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

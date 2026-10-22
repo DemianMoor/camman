@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 
 import { PerformanceReport } from "@/components/reports/performance-report";
 import {
@@ -32,5 +33,7 @@ export default async function ReportDimensionPage({
 }) {
   const { dimension } = await params;
   if (!isReportDimension(dimension)) notFound();
+  // P6: By Format exists only behind the message-formats UI flag (OFF).
+  if (dimension === "format" && !messageFormatsUiEnabled()) notFound();
   return <PerformanceReport dimension={dimension} />;
 }

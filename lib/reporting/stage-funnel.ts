@@ -55,6 +55,10 @@ export interface StageMetrics {
   offer_id: number | null;
   // The stage's creative (campaign_stages.creative_id) — the creative dimension's key.
   creative_id: number | null;
+  // P6 (By Format): the STAGE's message shape — the dimension groups on the
+  // stage, never on the per-send stamp (audit only).
+  message_format_id: number | null;
+  format_custom: boolean;
   brand_id: number | null;
   // Computed metrics (identical to Overview).
   opt_outs: number;
@@ -161,6 +165,8 @@ export async function getStageMetricsInRange(
       offer_id: campaigns.offer_id,
       brand_id: campaigns.brand_id,
       creative_id: campaign_stages.creative_id,
+      message_format_id: campaign_stages.message_format_id,
+      format_custom: sql<boolean>`(${campaign_stages.custom_text} IS NOT NULL)`,
       stage_number: campaign_stages.stage_number,
       stage_label: campaign_stages.label,
       provider_phone_id: campaign_stages.provider_phone_id,
@@ -202,6 +208,8 @@ export async function getStageMetricsInRange(
             offer_id: campaigns.offer_id,
             brand_id: campaigns.brand_id,
             creative_id: campaign_stages.creative_id,
+            message_format_id: campaign_stages.message_format_id,
+            format_custom: sql<boolean>`(${campaign_stages.custom_text} IS NOT NULL)`,
             stage_number: campaign_stages.stage_number,
             stage_label: campaign_stages.label,
             provider_phone_id: campaign_stages.provider_phone_id,
@@ -262,6 +270,8 @@ export async function getStageMetricsInRange(
         offer_id: r.offer_id ?? null,
         brand_id: r.brand_id ?? null,
         creative_id: r.creative_id ?? null,
+        message_format_id: r.message_format_id ?? null,
+        format_custom: r.format_custom === true,
         opt_outs: 0,
         total_sent: 0,
         reached: null,
@@ -295,6 +305,8 @@ export async function getStageMetricsInRange(
       offer_id: r.offer_id ?? null,
       brand_id: r.brand_id ?? null,
       creative_id: r.creative_id ?? null,
+      message_format_id: r.message_format_id ?? null,
+      format_custom: r.format_custom === true,
       opt_outs: 0,
       total_sent: 0,
       reached: null,

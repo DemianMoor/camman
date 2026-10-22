@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-10-11_
+_Last updated: 2026-10-22 (P6: By Format dimension)_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -251,3 +251,7 @@ Guard: [scripts/verify-overview-phone-line.ts](../../scripts/verify-overview-pho
 - **Legacy rollup:** [`scripts/test-report-rollup.ts`](../../scripts/test-report-rollup.ts) still validates the (now-unused) Phase-1 rollup aggregates.
 - **Operator-API grading fields (2026-09-14):** [`scripts/test-grading-rates.ts`](../../scripts/test-grading-rates.ts) (pure rate math), [`scripts/verify-operator-grading.ts`](../../scripts/verify-operator-grading.ts) (every dimension's `reached` and deduped clicker totals vs independent SQL; read-only on prod), [`scripts/verify-operator-grading-http.ts`](../../scripts/verify-operator-grading-http.ts) (the routes over HTTP with a session, plus a recipient-phone / `contact_id` sweep carrying its own can-go-red controls).
 - ⚠️ **By Group is slow at ANY range** (measured 2026-09-14): its click-weight query walks every scored-human click (163K) and probes `stage_sends` once per click — 49s for one day, 55s for two — so with its sibling weight queries running in parallel it intermittently exceeds the 2-minute statement timeout (`57014`). Pre-existing, and `verify-lifetime-display.ts` / `test-performance-report.ts` can hit it. The reach weights run AFTER that parallel batch, not inside it, so they add no contention to it. `verify-operator-grading.ts` reports a By Group timeout as SKIPPED, never as a pass.
+
+## By Format (P6, 2026-10-22 — tab behind the message-formats UI flag)
+
+`dimension=format` groups the shared stage-metrics pass on the **stage's** message shape: `campaign_stages.message_format_id` → the format's name, or **"Custom"** when the stage has owner custom text (`CUSTOM_FORMAT_KEY`), or "No format". The per-send stamp (`stage_sends.message_format_id` / `format_custom`) is **audit only** and is not read — the format locks once a stage is materialized (regular) / sends (drip), so the stage's shape IS what its sends used. Distinct clickers at format grain use the same `counted_clickers` join (`DIMENSION_SQL.format`, [`lib/reporting/counted-clickers.ts`](../../lib/reporting/counted-clickers.ts)). Like every stage-grain tab, the rows partition the same stages as the Overview, so additive metrics (sent, opt-outs, sales, revenue, cost) sum to the Overview totals exactly; the clicker total adds manual-mode Keitaro visits, as By Offer / By Number do. The `/reports/format` tab and page exist only when `NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED` is on; `GET /api/reports/performance?dimension=format` works regardless.

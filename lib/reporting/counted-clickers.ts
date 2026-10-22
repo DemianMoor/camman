@@ -475,7 +475,10 @@ export function countedClickersSubquery(
 // ~+66ms on a route already issuing several queries.
 // =============================================================================
 
-export type ReportDimensionKey = "number" | "offer" | "sequence";
+/** P6 By Format: the key of the "Custom" row (stages with owner custom text). */
+export const CUSTOM_FORMAT_KEY = -2;
+
+export type ReportDimensionKey = "number" | "offer" | "sequence" | "format";
 
 // GROUP BY target per dimension. `sequence` and `number` live on the stage;
 // `offer` lives on the campaign.
@@ -490,6 +493,11 @@ const DIMENSION_SQL: Record<
   sequence: {
     join: sql`JOIN campaign_stages cs ON cs.id = cc.stage_id`,
     column: sql`cs.stage_number`,
+  },
+  // P6: the STAGE's format; a custom-text stage is its own key (CUSTOM_FORMAT_KEY).
+  format: {
+    join: sql`JOIN campaign_stages cs ON cs.id = cc.stage_id`,
+    column: sql`CASE WHEN cs.custom_text IS NOT NULL THEN ${CUSTOM_FORMAT_KEY}::int ELSE cs.message_format_id END`,
   },
   offer: {
     join: sql`JOIN campaigns ca ON ca.id = cc.campaign_id`,

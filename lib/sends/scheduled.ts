@@ -427,7 +427,8 @@ const PERMANENT_REFUSALS: ReadonlySet<KickoffRefusal> = new Set([
   "multi_segment_not_allowed",
   "segment_ceiling_exceeded",
   "missing_opt_out_language",
-  "tags_not_supported_yet",
+  // P4: a parity bug does not heal on retry — mark missed, a human looks.
+  "per_recipient_render_failed",
   "missing_brand",
   "no_sender_number",
 ]);

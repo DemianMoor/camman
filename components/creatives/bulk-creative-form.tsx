@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Plus, Trash2, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,11 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
+import { CreativeTagHints, TagPicker, insertAtCursor } from "@/components/messages/tag-picker";
 import { SpamCheckStrip } from "@/components/spam/spam-check-strip";
 import { calculateSmsSegments, containsEmDash } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 import { cn } from "@/lib/utils";
 import {
   BULK_CREATE_MAX,
@@ -104,6 +106,9 @@ export function BulkCreativeForm({
   const [funnelStage, setFunnelStage] =
     useState<CreativeFunnelStage>("unknown");
   const [rows, setRows] = useState<Row[]>(() => [newRow()]);
+  // P4 tag picker / worst case / unknown-tag hints: behind the message-formats UI flag.
+  const formatsUi = messageFormatsUiEnabled();
+  const textRefs = useRef(new Map<number, HTMLTextAreaElement>());
   const [sharedError, setSharedError] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
 
@@ -320,6 +325,15 @@ export function BulkCreativeForm({
                 <span className="text-xs font-medium text-muted-foreground">
                   Creative #{i + 1}
                 </span>
+                {formatsUi && (
+                  <TagPicker
+                    disabled={isSubmitting}
+                    onInsert={(token) => {
+                      const el = textRefs.current.get(row.id);
+                      if (el) updateRow(row.id, insertAtCursor(el, token));
+                    }}
+                  />
+                )}
                 <Button
                   type="button"
                   variant="ghost"
@@ -336,6 +350,10 @@ export function BulkCreativeForm({
               <Textarea
                 rows={3}
                 placeholder="Message text"
+                ref={(el) => {
+                  if (el) textRefs.current.set(row.id, el);
+                  else textRefs.current.delete(row.id);
+                }}
                 value={row.text}
                 onChange={(e) => updateRow(row.id, e.target.value)}
                 disabled={isSubmitting}
@@ -365,6 +383,8 @@ export function BulkCreativeForm({
                   </span>
                 ) : null}
               </div>
+              {/* Bulk-created creatives are single-segment (allow_multi_segment stays off). */}
+              {formatsUi && <CreativeTagHints text={row.text} allowMultiSegment={false} />}
               {count?.emDash ? (
                 <div className="flex items-start gap-1.5 pt-1 text-xs text-amber-700 dark:text-amber-400">
                   <TriangleAlert

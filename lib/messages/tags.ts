@@ -40,7 +40,8 @@ export interface TagDef {
 /** Junk placeholders treated as missing. Compared lowercase on the trimmed raw value. */
 export const JUNK_VALUES: readonly string[] = ["n/a", "unknown", "none", "-"];
 
-const FIRST_NAME_MIN = 2;
+/** Minimum LETTERS in a cleaned first name (the SQL twin reads it from here). */
+export const FIRST_NAME_MIN = 2;
 const FIRST_NAME_MAX = 15;
 
 // Letters NFKD does not decompose to ASCII, or decomposes to more than one letter.
@@ -157,6 +158,11 @@ export function findTags(text: string): TagKey[] {
     if (isTagKey(m[1]) && !out.includes(m[1])) out.push(m[1]);
   }
   return out;
+}
+
+/** `text` with every tag replaced by its worst-case stand-in (creative editor). */
+export function expandWorstCase(text: string): string {
+  return text.replace(/\{([a-z_]+)\}/g, (tok, k: string) => (isTagKey(k) ? TAGS[k].worstCase : tok));
 }
 
 /** Brace tokens that are neither a tag nor a block — sent literally; the editor warns. */

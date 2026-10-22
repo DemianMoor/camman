@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-21_
+_Last updated: 2026-10-22_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -82,9 +82,10 @@ sequenceDiagram
   participant R as /r/[code]
   participant Score as score-pending cron
   Op->>Kick: kickoff stage (tracked, send_approved)
-  Kick->>Kick: render with the stage's message shape (0216: format template or custom text, lib/messages/render.ts)<br/>tagged message ⇒ refuse tags_not_supported_yet (interim until P4)
+  Kick->>Kick: render with the stage's message shape (0216: format template or custom text, lib/messages/render.ts)<br/>P4: loadStageTagRules (NO_TAG_RULES for a tag-less stage ⇒ one body, unchanged)
   Kick->>Mint: per recipient → links + link_destinations
-  Kick->>Kick: EXCEPT eligibility layers, in EXCLUSION_PRIORITY order<br/>(lifecycle campaign: suppressed, bought_offer, freeze_not_due; then creative, in_flight, offer)
+  Kick->>Kick: EXCEPT eligibility layers, in EXCLUSION_PRIORITY order<br/>(lifecycle campaign: suppressed, bought_offer, freeze_not_due; then creative, in_flight, offer;<br/>tagged stage: missing_tag_data, segment_limit)
+  Kick->>Kick: tagged stage only: load contact_attributes, validate-all renders EVERY body first<br/>(missing tag / over segments ⇒ per_recipient_render_failed + Telegram, 0 rows; no STOP: txr refuses, dry-run = 1 alert)
   Kick->>Kick: INSERT stage_sends + stage_send_lifecycle in ONE statement<br/>(rendered_text frozen, send_token=id; message_format_id / format_custom stamped; status-at-send stamped from contact_engagement)
   Kick->>Kick: last window landed: stamp materialized_at + status draft→pending (skipped if status_set_manually)
   Op->>Drain: drain (SEND_ENABLED + approved + !paused + breakers)

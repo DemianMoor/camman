@@ -17,6 +17,8 @@ import {
   exclDialogState,
   type ExclTimingInput,
 } from "@/lib/campaigns/excl-timing-warning";
+import { ActivationTagWarning } from "@/components/campaigns/activation-tag-warning";
+import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 import { cn } from "@/lib/utils";
 
 export type CampaignTransition =
@@ -86,6 +88,9 @@ export interface StatusChangeDialogProps {
   // could be confirmed before its warning appeared would be worse than one
   // that waits (owner decision, 2026-09-25).
   exclTiming?: ExclTimingInput | null;
+  // P4: lets an `activate` list personalized stages over the skip threshold
+  // (behind the message-formats UI flag; never holds the confirm button).
+  campaignId?: number | null;
 }
 
 export function StatusChangeDialog({
@@ -95,7 +100,9 @@ export function StatusChangeDialog({
   onCancel,
   onConfirm,
   exclTiming,
+  campaignId,
 }: StatusChangeDialogProps) {
+  const formatsUi = messageFormatsUiEnabled();
   const copy = transition ? COPY[transition] : null;
   // Only `activate` freezes the audience, so only it can have this gap.
   const { awaiting: awaitingExcl, warn: warnExcl } = exclDialogState(
@@ -126,6 +133,9 @@ export function StatusChangeDialog({
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
             <span>{EXCL_TIMING_WARNING_TEXT}</span>
           </div>
+        ) : null}
+        {formatsUi && transition === "activate" && campaignId != null ? (
+          <ActivationTagWarning campaignId={campaignId} />
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={isPending}>Cancel</AlertDialogCancel>

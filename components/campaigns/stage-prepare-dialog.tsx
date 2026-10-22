@@ -18,6 +18,8 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { EXCLUSION_LABELS } from "@/lib/sends/exclusion-labels";
+import { SKIP_WARN_PCT, tagSkipShare } from "@/lib/messages/skip-share";
+import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 import type { PreflightResult as ServerPreflightResult } from "@/lib/sends/preflight";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
@@ -54,7 +56,12 @@ type PreflightResult = {
   // type rather than re-listing the buckets, so a bucket added server-side
   // shows up here instead of silently going missing (spec §8.3).
   excluded_lifecycle?: ServerPreflightResult["excluded_lifecycle"];
+  // P4: per required contact tag, how many lack it.
+  missing_by_tag?: ServerPreflightResult["missing_by_tag"];
 };
+
+// P4 buckets — shown only behind the message-formats UI flag.
+const TAG_BUCKETS = ["missing_tag_data", "segment_limit"] as const;
 
 export function StagePrepareDialog({
   target,
@@ -81,6 +88,7 @@ export function StagePrepareDialog({
   const { execute: preflightExec } = preflightApi;
 
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const formatsUi = messageFormatsUiEnabled();
   // Live materialization progress (rows written so far), polled while the
   // approve-send call runs so the operator sees movement, not a frozen button.
   const [materialized, setMaterialized] = useState(0);
@@ -297,7 +305,13 @@ export function StagePrepareDialog({
             {/* Why the lifecycle layers removed people — one line, reasons in
                 EXCLUSION_PRIORITY order, zero-count reasons omitted. */}
             {preflight.excluded_lifecycle &&
-            Object.values(preflight.excluded_lifecycle).some((n) => n > 0) ? (
+            (
+              Object.keys(EXCLUSION_LABELS) as (keyof typeof EXCLUSION_LABELS)[]
+            ).some(
+              (k) =>
+                (formatsUi || !(TAG_BUCKETS as readonly string[]).includes(k)) &&
+                (preflight.excluded_lifecycle?.[k] ?? 0) > 0,
+            ) ? (
               <div className="text-xs text-muted-foreground">
                 <span className="font-medium text-foreground">Excluded: </span>
                 {(
@@ -305,6 +319,8 @@ export function StagePrepareDialog({
                     EXCLUSION_LABELS,
                   ) as (keyof typeof EXCLUSION_LABELS)[]
                 )
+                  // Flag OFF ⇒ exactly the pre-P4 reasons.
+                  .filter((k) => formatsUi || !(TAG_BUCKETS as readonly string[]).includes(k))
                   .filter((k) => (preflight.excluded_lifecycle?.[k] ?? 0) > 0)
                   .map(
                     (k) =>
@@ -313,6 +329,8 @@ export function StagePrepareDialog({
                   .join(" · ")}
               </div>
             ) : null}
+
+            {formatsUi ? <PrepareTagSkips preflight={preflight} /> : null}
 
             {/* Message preview + segment count (link added per recipient). */}
             {preflight.preview_text ? (
@@ -391,5 +409,35 @@ export function StagePrepareDialog({
         )}
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+// P4: which tags were missing, and the >50% warning (spec R1, point 1). Behind
+// the message-formats UI flag (the caller gates it); a warning, never a block.
+function PrepareTagSkips({ preflight }: { preflight: PreflightResult }) {
+  const missing = Object.entries(preflight.missing_by_tag ?? {}).filter(([, n]) => (n ?? 0) > 0);
+  const share = tagSkipShare({
+    willSend: preflight.recipient_count,
+    missingData: preflight.excluded_lifecycle?.missing_tag_data ?? 0,
+    segmentLimit: preflight.excluded_lifecycle?.segment_limit ?? 0,
+  });
+  if (missing.length === 0 && share.skipped === 0) return null;
+  return (
+    <div className="space-y-1 text-xs text-muted-foreground">
+      {missing.length > 0 ? (
+        <div>
+          <span className="font-medium text-foreground">Missing data: </span>
+          {missing.map(([k, n]) => `{${k}} ${(n ?? 0).toLocaleString()}`).join(" · ")}
+        </div>
+      ) : null}
+      {share.pct > SKIP_WARN_PCT ? (
+        <div className="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span>
+            {share.pct}% of this stage&apos;s audience would be skipped (missing data or too long). You can still prepare it.
+          </span>
+        </div>
+      ) : null}
+    </div>
   );
 }

@@ -18,6 +18,7 @@ import {
   buildStageEligibilityExclusions,
   eligibilityUnion,
 } from "@/lib/sends/eligibility";
+import { NO_TAG_RULES } from "@/lib/messages/render";
 
 let pass = 0;
 let fail = 0;
@@ -82,6 +83,7 @@ async function main() {
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
+      tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
     });
     const eligible = applyEligibilityExcept(base, ex);
     const eligibleRows = await exec(
@@ -128,6 +130,7 @@ async function main() {
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
+      tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
     });
     const baseCount = Number(
       (await exec(drizzleSql`SELECT count(*)::int AS n FROM (${base}) b`))[0].n,
@@ -159,6 +162,7 @@ async function main() {
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
+      tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
     });
     const exOfferOn = buildStageEligibilityExclusions({
       orgId,
@@ -170,6 +174,7 @@ async function main() {
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
+      tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
     });
     check(
       "Test 3 — offer toggle OFF: no offer layer, creative dedup STILL applies",
@@ -226,6 +231,7 @@ async function main() {
         offerCooldownDays: 7,
         offerLimitTimes: 5,
         lifecycleRules: false,
+        tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
       };
 
       // Reality: the exact send query (base EXCEPT layers, then split).
@@ -264,6 +270,7 @@ async function main() {
         offerRulesEnabled: false,
         offerCooldownDays: 7,
         offerLimitTimes: 5,
+        tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
       });
       const u = eligibilityUnion(layers);
       const previewWillSend = drizzleSql`

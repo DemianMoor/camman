@@ -17,6 +17,7 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 //        npx tsx --conditions=react-server scripts/test-offer-limit-cooldown.ts
 
 import { sql, type SQL } from "drizzle-orm";
+import { NO_TAG_RULES } from "@/lib/messages/render";
 
 const DAY = 86_400_000;
 const NOW = Date.now();
@@ -173,6 +174,7 @@ async function main() {
         offerRulesEnabled: opts.offerRulesEnabled ?? true,
         offerCooldownDays: opts.cooldown ?? 7,
         offerLimitTimes: opts.limit ?? 5,
+        tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
       });
     const hits = async (key: string, opts = {}) => {
       const l = layersFor(opts).find((x) => x.key === key);

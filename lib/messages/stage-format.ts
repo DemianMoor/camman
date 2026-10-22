@@ -55,15 +55,18 @@ export type StageFormatDecision =
  *     and leaving it for a format all require it;
  *   • custom text must contain {creative_text}, {url} and {stop_text};
  *   • a format must be enabled, active and the org's own (`formatUsable`);
- *   • after the stage has sent, the shape is locked (all stages — By Format
- *     attribution is per stage).
+ *   • once the stage is locked (stageFormatLocked) the shape cannot change
+ *     (all stages — By Format attribution is per stage).
  * `current` is null on create.
  */
+export { stageFormatLocked } from "@/lib/stages/format-lock";
+
 export function decideStageFormatChange(i: {
   current: StageFormatColumns | null;
   input: { message_format_id?: number | null; custom_text?: string | null };
   canCompliance: boolean;
-  hasSent: boolean;
+  /** stageFormatLocked(...) for an existing stage; false on create. */
+  locked: boolean;
   /** Is input.message_format_id enabled + active in this org? Ignored when not sent. */
   formatUsable: boolean;
 }): StageFormatDecision {
@@ -94,10 +97,10 @@ export function decideStageFormatChange(i: {
       message: "That message format is disabled or does not exist.",
     };
   }
-  if (i.hasSent) {
+  if (i.locked) {
     return {
       ok: false, status: 409, reason: "format_locked_after_send", field: wantsCustom ? "custom_text" : "message_format_id",
-      message: `This stage has already sent, so its message format is locked. ${FORMAT_LOCKED_TEXT}.`,
+      message: `This stage's messages are already prepared or sent, so its message format is locked. ${FORMAT_LOCKED_TEXT}.`,
     };
   }
   return wantsCustom

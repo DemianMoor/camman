@@ -25,6 +25,7 @@ import "./_env-preload";
 //      [--campaign <id>]
 
 import { sql } from "drizzle-orm";
+import { NO_TAG_RULES } from "@/lib/messages/render";
 
 const argCampaign = (() => {
   const i = process.argv.indexOf("--campaign");
@@ -194,6 +195,7 @@ async function main() {
     offerRulesEnabled: false,
     offerCooldownDays: 7,
     offerLimitTimes: 5,
+    tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
   });
   for (const l of layers) {
     t = performance.now();

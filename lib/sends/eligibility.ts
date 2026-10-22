@@ -1,5 +1,8 @@
 import { sql, type SQL } from "drizzle-orm";
 
+import { firstNameCleanLengthSql, tagMissingSql } from "@/lib/messages/tag-sql";
+import type { TagRules } from "@/lib/messages/render";
+import { TAGS } from "@/lib/messages/tags";
 import { purchasedOfferContacts } from "@/lib/sale-attribution";
 
 // ── Content-dedup eligibility (Phase 2, migration 0086/0087) ──────────────────
@@ -62,6 +65,11 @@ export interface StageEligibilityParams {
   // the outside. Required turns that into a compile error that enumerates the
   // callers for you.
   lifecycleRules: boolean;
+  // P4: what the stage's personalization asks of each recipient
+  // (loadStageTagRules). NO_TAG_RULES for a stage with no contact tag — then no
+  // layer is built and nothing changes. REQUIRED (CLAUDE.md §11b): it decides
+  // who is skipped, and a path that forgot it would count people the send skips.
+  tagRules: TagRules;
 }
 
 // Every exclusion layer, in the order they are applied and reported. Adding a
@@ -89,6 +97,10 @@ export const EXCLUSION_PRIORITY = [
   "creative",
   "in_flight",
   "offer",
+  // P4 personalization (spec §C2). LAST: a contact excluded for any reason
+  // above is reported under that reason, not as missing data.
+  "missing_tag_data",
+  "segment_limit",
 ] as const;
 
 export type EligibilityLayerKey = (typeof EXCLUSION_PRIORITY)[number];
@@ -111,6 +123,9 @@ export const LIFECYCLE_EXCLUSION_KEYS = EXCLUSION_PRIORITY.filter(
 );
 
 export type LifecycleExclusionKey = (typeof LIFECYCLE_EXCLUSION_KEYS)[number];
+
+/** P4 keys that only a STAGE can produce (its tag rules); a campaign-level audience never has them. */
+export type StageOnlyExclusionKey = "missing_tag_data" | "segment_limit";
 
 /**
  * Per-reason counters for the lifecycle layers. EVERY surface that reports why
@@ -275,6 +290,51 @@ export function offerRuleLayers(p: {
   ]);
 }
 
+/**
+ * The PERSONALIZATION layers (P4, spec §C2), built from the stage's TagRules.
+ *   missing_tag_data — no contact_attributes row, or a required contact tag is
+ *                      missing (tagMissingSql: the SQL twin of the renderer's
+ *                      normalize, parity-tested).
+ *   segment_limit    — {first_name} is valid but longer than the length L at
+ *                      which the stage's worst-case body still fits.
+ * Empty for NO_TAG_RULES, so a tag-less stage's SQL is unchanged.
+ */
+export function tagExclusionLayers(p: { orgId: string; tagRules: TagRules }): EligibilityLayer[] {
+  const contactTags = p.tagRules.required.filter(
+    (k): k is Exclude<typeof k, "brand"> => k !== "brand",
+  );
+  if (contactTags.length === 0) return [];
+  const anyMissing = contactTags
+    .map((k) => tagMissingSql(k, "ca"))
+    .reduce((acc, m) => sql`${acc} OR ${m}`);
+  const layers: EligibilityLayer[] = [
+    {
+      key: "missing_tag_data",
+      sql: sql`
+        SELECT c.id AS contact_id FROM contacts c
+        LEFT JOIN contact_attributes ca ON ca.contact_id = c.id
+        WHERE c.org_id = ${p.orgId}::uuid
+          AND (ca.contact_id IS NULL OR ${anyMissing})
+      `,
+    },
+  ];
+  const max = p.tagRules.firstNameMaxLength;
+  // A valid name is at most TAGS.first_name.maxLength long, so L at that max
+  // can never exclude anyone — skip the layer rather than run it for zero.
+  if (contactTags.includes("first_name") && max != null && max < TAGS.first_name.maxLength) {
+    layers.push({
+      key: "segment_limit",
+      sql: sql`
+        SELECT ca.contact_id FROM contact_attributes ca
+        WHERE ca.org_id = ${p.orgId}::uuid
+          AND NOT ${tagMissingSql("first_name", "ca")}
+          AND ${firstNameCleanLengthSql("ca")} > ${max}::int
+      `,
+    });
+  }
+  return layers;
+}
+
 export function buildStageEligibilityExclusions(
   p: StageEligibilityParams,
 ): StageEligibilityExclusions {
@@ -344,6 +404,7 @@ export function buildStageEligibilityExclusions(
   if (creative) layers.push({ key: "creative", sql: creative });
   if (inFlight) layers.push({ key: "in_flight", sql: inFlight });
   if (offer) layers.push({ key: "offer", sql: offer });
+  layers.push(...tagExclusionLayers({ orgId: p.orgId, tagRules: p.tagRules }));
   return orderLayers(layers);
 }
 

@@ -1,6 +1,6 @@
 # Feature — Campaigns, Stages & Creatives
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-22_
 
 ## 1. Purpose
 The campaign core: a **campaign** is a long-running container with a frozen audience and a `manual`/`tracked` link mode; **stages** are the individual SMS-send events under it (one creative each); **creatives** are reusable SMS copy. All three carry auto-generated immutable **tracking IDs** for external analytics.
@@ -142,3 +142,7 @@ Auto-generated, **immutable**, separate from `id` and `human_id`.
 ## 7. Extension points / limitations
 - No multi-variant creative testing beyond the per-stage A/B split.
 - Checkout-click and sales counts on stages are **manual-only** (no CSV path yet).
+
+## Personalization tags in the creative editor (P4, behind the message-formats UI flag)
+
+`<TagPicker>` / `<CreativeTagHints>` ([`components/messages/tag-picker.tsx`](../../components/messages/tag-picker.tsx)) on the single and bulk creative forms: insert a tag at the cursor; "Worst case: N characters · S segments" (each tag at its worst-case stand-in, `expandWorstCase`; red when S > 1 and multi-segment is off); "unknown tag {X} — will be sent literally" for any other brace token. Rendered only when `NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED` is on. How tagged stages send: [message-formats.md](message-formats.md#personalization-on-regular-stages-p4-2026-10-22).

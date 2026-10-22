@@ -109,8 +109,11 @@ async function main() {
       const rTag = await kickoffStageSend(tx as unknown as typeof db, { orgId, campaignId, stageId: sTag });
       const nTag = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM stage_sends WHERE stage_id = ${sTag}`);
       await new Promise((r) => setTimeout(r, 50)); // the alert is fire-and-forget
-      check("M4.1 regular stage with {first_name} ⇒ refused tags_not_supported_yet, 0 rows, 1 Telegram alert",
-        !rTag.ok && rTag.reason === "tags_not_supported_yet" && nTag.n === 0 && telegramCalls === 1,
+      // P4 replaced the interim refusal with per-recipient rendering: this
+      // fixture's recipients have no contact_attributes, so every one is
+      // skipped as missing data and nothing is prepared — no alert, no row.
+      check("M4.1 regular stage with {first_name}, recipients without data ⇒ no_recipients, 0 rows, 0 alerts",
+        !rTag.ok && rTag.reason === "no_recipients" && nTag.n === 0 && telegramCalls === 0,
         JSON.stringify({ rTag, rows: nTag.n, telegramCalls }));
 
       const sBrand = await mkCase(6, "{brand} says hi", { formatId: t2.id });

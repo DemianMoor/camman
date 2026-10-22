@@ -10,6 +10,7 @@ import { chunkedQuery, streamCsvResponse } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
+import { loadStageCountingTagRules } from "@/lib/sends/tag-rules";
 import { recordExportedRecipients } from "@/lib/stages/manual-recipients";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
@@ -136,6 +137,9 @@ export async function GET(
         WHERE id = ${stage.provider_phone_id} AND org_id = ${orgId} LIMIT 1
       `)) as unknown as { allow_unknown_carrier: boolean }[])
     : [];
+  // P4: an exported CSV is a manual send of the same creative, so it skips who
+  // the send would skip for missing tag data (NO_TAG_RULES ⇒ no change).
+  const tagRules = await loadStageCountingTagRules(db, { orgId, stageId: sid });
   const carrierPolicy = {
     providerPhoneId: stage.provider_phone_id ?? null,
     allowUnknownCarrier: phoneCarrierRows[0]?.allow_unknown_carrier !== false,
@@ -177,6 +181,7 @@ export async function GET(
             offerRulesEnabled: stage.offer_rules_enabled === true,
             offerCooldownDays: Number(stage.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
             offerLimitTimes: Number(stage.offer_limit_times ?? 5),
+            tagRules,
           },
           limit: effectiveLimit,
           offset,

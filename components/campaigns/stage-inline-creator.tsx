@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { toastApiError } from "@/lib/api/toast-error";
 import { utcToCampaignLocalInput } from "@/lib/campaign-timezone";
+import { stageFormatLocked } from "@/lib/stages/format-lock";
 import { useAuth } from "@/components/protected/auth-context";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
@@ -60,6 +61,7 @@ export interface EditableStage {
   message_format_id: number | null;
   custom_text: string | null;
   has_sent: boolean;
+  materialized_at?: string | null;
   include_no_status: boolean;
   include_clickers: boolean;
   exclude_clickers: boolean;
@@ -335,6 +337,14 @@ export function StageInlineEditor({
             behavioralTier={isEdit ? stage!.behavioral_tier : null}
             sentAt={isEdit ? stage!.sent_at : null}
             hasSent={isEdit ? stage!.has_sent : false}
+            formatLocked={
+              isEdit &&
+              stageFormatLocked({
+                isDrip: campaignType === "drip",
+                materialized: stage!.materialized_at != null,
+                hasSent: stage!.has_sent,
+              })
+            }
             armed={
               isEdit &&
               !!stage!.send_approved &&

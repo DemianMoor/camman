@@ -35,8 +35,10 @@ import {
   buildLandingPageUrl,
   isBrandLandingHost,
 } from "@/lib/landing-page-url";
-import { formatStamp, renderMessage, requiredContactTags, requiredTags, shapeFromStage } from "@/lib/messages/render";
-import { NO_RECIPIENT, TAGS } from "@/lib/messages/tags";
+import { formatStamp, isTagRulesRefusal, renderMessage, requiredTags, shapeFromStage } from "@/lib/messages/render";
+import { NO_RECIPIENT, TAGS, type RecipientData } from "@/lib/messages/tags";
+import { loadRecipientAttributes, validateRecipientBodies } from "@/lib/sends/personalize";
+import { loadStageTagRules } from "@/lib/sends/tag-rules";
 import {
   buildStageFullUrl,
   isGuideknLpUrl,
@@ -115,10 +117,10 @@ export type KickoffRefusal =
   // Request does NOT append one on API sends. ENFORCED for txr; other API
   // providers only dry-run (log + alert) during the 30-day observation window.
   | "missing_opt_out_language"
-  // 0216 interim (P2 → P4): the creative or custom text uses a personalization
-  // CONTACT tag ({first_name} {zip} {state}) and per-recipient rendering has not
-  // shipped yet. Fail closed rather than send the literal tag. Removed in P4.
-  | "tags_not_supported_yet"
+  // P4: a tagged stage rendered a body the eligibility layers should have
+  // prevented (a missing tag, or over the segment limit) — a parity bug between
+  // the SQL twins and the renderer. Fail closed: nothing is inserted.
+  | "per_recipient_render_failed"
   // 0216: the message uses {brand} and the campaign has no brand.
   | "missing_brand"
   // Ahoi's send() requires a `source` number (spec §5 carry, Section 2 final
@@ -337,17 +339,16 @@ export async function kickoffStageSend(
   // it. T1 is byte-identical to the pre-format body.
   const shape = shapeFromStage(row);
   const stamp = formatStamp(shape);
-  // INTERIM (P2 → P4): per-recipient tag rendering is not built yet. A stage
-  // whose message uses a CONTACT tag is refused, never sent with the literal
-  // tag. {brand} renders now — it is campaign data, not contact data.
-  const tags = requiredContactTags({ shape, creativeText: row.creative_text });
-  if (tags.length > 0) {
-    void notifyTelegram(
-      `⚠️ Stage not sent: campaign "${row.campaign_name ?? String(campaignId)}" · stage ${row.stage_number != null ? `#${row.stage_number}` : `id ${stageId}`} ` +
-        `uses personalization tags (${tags.map((t) => `{${t}}`).join(", ")}) that can't be sent yet. Remove them from the creative or custom text.`,
-    ).catch(() => {});
-    return { ok: false, reason: "tags_not_supported_yet" };
+  // P4: the stage's personalization rules. NO_TAG_RULES (the cheap exit, no
+  // footer/domain lookup) for every stage whose message has no contact tag —
+  // that stage keeps the one-body path below, byte-identical. A tagged stage
+  // that cannot send at all (segment / brand) refuses here.
+  const tagRulesOrRefusal = await loadStageTagRules(dbc, { orgId, stageId });
+  if (isTagRulesRefusal(tagRulesOrRefusal)) {
+    return { ok: false, reason: tagRulesOrRefusal.refused };
   }
+  const tagRules = tagRulesOrRefusal;
+  const tagged = tagRules.required.length > 0;
   // {brand} renders from the campaign's brand; with no brand there is nothing
   // to render, so refuse cleanly (permanent until a brand is set).
   if (
@@ -356,11 +357,12 @@ export async function kickoffStageSend(
   ) {
     return { ok: false, reason: "missing_brand" };
   }
-  const renderBody = (linkUrl: string | null): string => {
-    const r = renderMessage({
-      shape, brandName, creativeText: row.creative_text, linkUrl, stopText: footer.text, recipient: NO_RECIPIENT,
-    });
-    // Unreachable while the tag gate above holds: with no tag, nothing is missing.
+  const renderFor = (linkUrl: string | null, recipient: RecipientData) =>
+    renderMessage({ shape, brandName, creativeText: row.creative_text, linkUrl, stopText: footer.text, recipient });
+  const renderBody = (linkUrl: string | null, recipient: RecipientData = NO_RECIPIENT): string => {
+    const r = renderFor(linkUrl, recipient);
+    // Unreachable: a tag-less body cannot miss a tag, and every tagged
+    // recipient passed validate-all (below) with the same data.
     if (!r.ok) throw new Error(`kickoff: render refused (${r.reason}: ${r.tag}) for stage ${stageId}`);
     return r.body;
   };
@@ -375,8 +377,9 @@ export async function kickoffStageSend(
   let providerKey: string | null = null;
 
   if (mode === "manual") {
-    // Freeze the pasted short_url into every row, no minting.
-    manualText = renderBody(row.short_url);
+    // Freeze the pasted short_url into every row, no minting. A tagged stage
+    // renders per recipient instead (manualText unused).
+    if (!tagged) manualText = renderBody(row.short_url);
   } else {
     // Tracked: enforce readiness + resolve provider/credential/domain/destination.
     if (!row.stage_tracking_id || !row.campaign_tracking_id) {
@@ -583,72 +586,77 @@ export async function kickoffStageSend(
     }
   }
 
-  // ---- Segment policy preflight (G8 + spec §4). Rendered text is
-  // recipient-invariant WITHIN a stage — see the plan's design note — so one
-  // representative count is accurate for every recipient. Checked BEFORE any
-  // recipient enumeration/materialization so a misconfigured creative refuses
-  // cheaply, same pattern as the mode-specific guards above.
-  const representativeText =
-    mode === "manual"
-      ? manualText
-      : renderBody(buildRepresentativeTrackedLinkUrl(shortDomain!.domain));
-  // CamMan renders the opt-out footer INTO the body — the RESOLVED footer, which
-  // may come from the number, the provider or the stage (Q3) — so
-  // representativeText IS the on-wire text, including its true length.
-  const segCheck = countSegments(representativeText);
-  if (segCheck.segments > MAX_SEGMENTS) {
-    return { ok: false, reason: "segment_ceiling_exceeded" };
-  }
-  if (segCheck.segments > 1 && !row.creative_allow_multi_segment) {
-    return { ok: false, reason: "multi_segment_not_allowed" };
-  }
+  // A TAGGED stage skips this block: its bodies differ per recipient, so its
+  // segment refusal came from stageTagRules above and its per-body checks run
+  // in validate-all after enumeration. A tag-less stage runs it unchanged.
+  if (!tagged) {
+    // ---- Segment policy preflight (G8 + spec §4). Rendered text is
+    // recipient-invariant WITHIN a stage — see the plan's design note — so one
+    // representative count is accurate for every recipient. Checked BEFORE any
+    // recipient enumeration/materialization so a misconfigured creative refuses
+    // cheaply, same pattern as the mode-specific guards above.
+    const representativeText =
+      mode === "manual"
+        ? manualText
+        : renderBody(buildRepresentativeTrackedLinkUrl(shortDomain!.domain));
+    // CamMan renders the opt-out footer INTO the body — the RESOLVED footer, which
+    // may come from the number, the provider or the stage (Q3) — so
+    // representativeText IS the on-wire text, including its true length.
+    const segCheck = countSegments(representativeText);
+    if (segCheck.segments > MAX_SEGMENTS) {
+      return { ok: false, reason: "segment_ceiling_exceeded" };
+    }
+    if (segCheck.segments > 1 && !row.creative_allow_multi_segment) {
+      return { ok: false, reason: "multi_segment_not_allowed" };
+    }
 
-  // ---- Opt-out-language guard (compliance backstop). Every message MUST carry
-  // opt-out language. CamMan owns the footer unless a connection type declares
-  // appendsOwnOptOut (no adapter does today). Checked against the RESOLVED
-  // winner — see the gate note below. ENFORCED for txr now;
-  // other API providers run DRY (log + best-effort alert, no refusal) for a
-  // 30-day observation window before enforcement is widened.
-  //
-  // ⚠️ Q3: the subject of this check is THE TEXT THAT SHIPS. Before the footer
-  // chain existed, the rendered body always carried campaign_stages.stop_text,
-  // so checking the body and checking stop_text were the same thing. They are
-  // not any more — a number- or provider-level footer out-ranks the stage — and
-  // validating a field that LOST the resolution would pass a message whose
-  // actual opt-out wording was never inspected. optOutGateSubject returns the
-  // rendered body when CamMan appends, or the provider's KNOWN appended text
-  // when the provider does, and reports `verifiable: false` when a provider
-  // claims to append but declares no known wording. Unverifiable FAILS CLOSED:
-  // a compliance gate that cannot demonstrate a STOP keyword must refuse.
-  const gate = optOutGateSubject({
-    renderedBody: representativeText,
-    resolved: footer,
-    providerKnownAppendedText: providerDescriptor?.defaultOptOutFooter,
-  });
-  if (!gate.verifiable || !hasOptOutLanguage(gate.subject)) {
-    const guardKey =
-      providerKey ??
-      (await resolveProviderKeyForGuard(dbc, row.sms_provider_id, orgId));
-    // An unverifiable provider-appended footer is refused for EVERY provider,
-    // not just txr: the dry-run carve-out below exists for stages whose own
-    // wording is missing, which an operator can fix by editing text. There is
-    // no operator fix for "this connection type says it appends something we
-    // have never seen", so it cannot be waved through.
-    if (!gate.verifiable) {
-      return { ok: false, reason: "missing_opt_out_language" };
+    // ---- Opt-out-language guard (compliance backstop). Every message MUST carry
+    // opt-out language. CamMan owns the footer unless a connection type declares
+    // appendsOwnOptOut (no adapter does today). Checked against the RESOLVED
+    // winner — see the gate note below. ENFORCED for txr now;
+    // other API providers run DRY (log + best-effort alert, no refusal) for a
+    // 30-day observation window before enforcement is widened.
+    //
+    // ⚠️ Q3: the subject of this check is THE TEXT THAT SHIPS. Before the footer
+    // chain existed, the rendered body always carried campaign_stages.stop_text,
+    // so checking the body and checking stop_text were the same thing. They are
+    // not any more — a number- or provider-level footer out-ranks the stage — and
+    // validating a field that LOST the resolution would pass a message whose
+    // actual opt-out wording was never inspected. optOutGateSubject returns the
+    // rendered body when CamMan appends, or the provider's KNOWN appended text
+    // when the provider does, and reports `verifiable: false` when a provider
+    // claims to append but declares no known wording. Unverifiable FAILS CLOSED:
+    // a compliance gate that cannot demonstrate a STOP keyword must refuse.
+    const gate = optOutGateSubject({
+      renderedBody: representativeText,
+      resolved: footer,
+      providerKnownAppendedText: providerDescriptor?.defaultOptOutFooter,
+    });
+    if (!gate.verifiable || !hasOptOutLanguage(gate.subject)) {
+      const guardKey =
+        providerKey ??
+        (await resolveProviderKeyForGuard(dbc, row.sms_provider_id, orgId));
+      // An unverifiable provider-appended footer is refused for EVERY provider,
+      // not just txr: the dry-run carve-out below exists for stages whose own
+      // wording is missing, which an operator can fix by editing text. There is
+      // no operator fix for "this connection type says it appends something we
+      // have never seen", so it cannot be waved through.
+      if (!gate.verifiable) {
+        return { ok: false, reason: "missing_opt_out_language" };
+      }
+      if (guardKey === "txr") {
+        return { ok: false, reason: "missing_opt_out_language" };
+      }
+      console.warn(
+        `[optout-guard][dryrun] stage ${stageId} (campaign ${campaignId}, provider ${guardKey ?? "unknown"}) ` +
+          `would be REFUSED: rendered body has no opt-out language (STOP). Not enforced for non-txr yet.`,
+      );
+      void notifyTelegram(
+        `⚠️ Opt-out guard (DRY-RUN): campaign "${row.campaign_name ?? String(campaignId)}" · stage ${row.stage_number != null ? `#${row.stage_number}` : `id ${stageId}`}${row.label ? ` "${row.label}"` : ""} — provider ${guardKey ?? "unknown"} ` +
+          `has NO opt-out language ("STOP") in the rendered body. Enforcement is txr-only for now; this counts toward ` +
+          `the 30-day dry-run before enabling it for other providers. Add opt-out text to the stage's stop_text.`,
+      ).catch(() => {});
     }
-    if (guardKey === "txr") {
-      return { ok: false, reason: "missing_opt_out_language" };
-    }
-    console.warn(
-      `[optout-guard][dryrun] stage ${stageId} (campaign ${campaignId}, provider ${guardKey ?? "unknown"}) ` +
-        `would be REFUSED: rendered body has no opt-out language (STOP). Not enforced for non-txr yet.`,
-    );
-    void notifyTelegram(
-      `⚠️ Opt-out guard (DRY-RUN): campaign "${row.campaign_name ?? String(campaignId)}" · stage ${row.stage_number != null ? `#${row.stage_number}` : `id ${stageId}`}${row.label ? ` "${row.label}"` : ""} — provider ${guardKey ?? "unknown"} ` +
-        `has NO opt-out language ("STOP") in the rendered body. Enforcement is txr-only for now; this counts toward ` +
-        `the 30-day dry-run before enabling it for other providers. Add opt-out text to the stage's stop_text.`,
-    ).catch(() => {});
   }
 
   // ---- 0174: a grouped lane may only materialize once its GROUP has resolved
@@ -724,6 +732,9 @@ export async function kickoffStageSend(
       offerRulesEnabled: row.offer_rules_enabled === true,
       offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
       offerLimitTimes: Number(row.offer_limit_times ?? 5),
+      // P4: skip whoever lacks the data or would breach the segment limit —
+      // NO_TAG_RULES (no layer) for a tag-less stage.
+      tagRules,
     },
     // Q4: the sending NUMBER's carrier allow-list, applied HERE so an excluded
     // contact never becomes a stage_sends row. ANDs with the campaign-level
@@ -756,6 +767,58 @@ export async function kickoffStageSend(
     return { ok: false, reason: "no_recipients" };
   }
 
+  // ---- P4 validate-all (TAGGED stages only, spec §C3). Render EVERY recipient
+  // before anything is inserted, with a length-exact link stand-in. The
+  // eligibility layers already skipped whoever lacks data, so a failure is a
+  // parity bug: fail closed and alert. The opt-out gate runs per body here —
+  // a name can change what a body says — with ONE aggregated dry-run alert.
+  let attrs = new Map<string, RecipientData>();
+  if (tagged) {
+    attrs = await loadRecipientAttributes(dbc, orgId, recipients.map((r) => r.contact_id));
+    const linkStandIn =
+      mode === "manual" ? row.short_url : buildRepresentativeTrackedLinkUrl(shortDomain!.domain);
+    const gateFor = (body: string) =>
+      optOutGateSubject({
+        renderedBody: body,
+        resolved: footer,
+        providerKnownAppendedText: providerDescriptor?.defaultOptOutFooter,
+      });
+    const v = validateRecipientBodies({
+      recipients,
+      attrs,
+      render: (d) => renderFor(linkStandIn, d),
+      maxSegments: row.creative_allow_multi_segment ? MAX_SEGMENTS : 1,
+      hasStop: (body) => {
+        const g = gateFor(body);
+        return g.verifiable && hasOptOutLanguage(g.subject);
+      },
+    });
+    const stageName = `campaign "${row.campaign_name ?? String(campaignId)}" · stage ${row.stage_number != null ? `#${row.stage_number}` : `id ${stageId}`}${row.label ? ` "${row.label}"` : ""}`;
+    if (!v.ok) {
+      console.error(`[kickoff] per-recipient render failed for stage ${stageId}: ${v.detail}`);
+      void notifyTelegram(
+        `🛑 Stage not sent: ${stageName} — a personalized message failed to render (${v.detail}). ` +
+          `The skip rules and the renderer disagree; nothing was prepared. Investigate before retrying.`,
+      ).catch(() => {});
+      return { ok: false, reason: v.reason };
+    }
+    if (v.noStop > 0) {
+      // Verifiability depends on the footer only, never on the recipient.
+      if (!gateFor("").verifiable) return { ok: false, reason: "missing_opt_out_language" };
+      const guardKey =
+        providerKey ?? (await resolveProviderKeyForGuard(dbc, row.sms_provider_id, orgId));
+      if (guardKey === "txr") return { ok: false, reason: "missing_opt_out_language" };
+      console.warn(
+        `[optout-guard][dryrun] stage ${stageId} (campaign ${campaignId}, provider ${guardKey ?? "unknown"}) ` +
+          `${v.noStop} of ${v.total} rendered bodies have no opt-out language (STOP). Not enforced for non-txr yet.`,
+      );
+      void notifyTelegram(
+        `⚠️ Opt-out guard (DRY-RUN): ${stageName} — provider ${guardKey ?? "unknown"}: ${v.noStop} of ${v.total} ` +
+          `rendered bodies have NO opt-out language ("STOP"). Enforcement is txr-only for now. Add opt-out text to the stage's stop_text.`,
+      ).catch(() => {});
+    }
+  }
+
   // ---- Materialize in committed windows until done or the budget is hit.
   let materialized = 0;
   let complete = true;
@@ -778,7 +841,7 @@ export async function kickoffStageSend(
             contactId: r.contact_id,
             phone: r.phone_number,
             linkId: null,
-            renderedText: manualText,
+            renderedText: tagged ? renderBody(row.short_url, attrs.get(r.contact_id) ?? NO_RECIPIENT) : manualText,
             leadId: id,
             carrierNorm: r.carrier_norm ?? null,
             providerPhoneId: row.provider_phone_id,
@@ -823,7 +886,7 @@ export async function kickoffStageSend(
             contactId: t.contactId,
             phone: t.phone,
             linkId: link.id,
-            renderedText: renderBody(buildTrackedLinkUrl(sd.domain, link.code)),
+            renderedText: renderBody(buildTrackedLinkUrl(sd.domain, link.code), attrs.get(t.contactId) ?? NO_RECIPIENT),
             leadId: t.sendToken,
             carrierNorm: t.carrierNorm,
             providerPhoneId: row.provider_phone_id,

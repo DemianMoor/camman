@@ -30,7 +30,7 @@ import { loadStageUrlContext } from "@/lib/stage-url-context";
 import { deleteStage } from "@/lib/stages/delete-stage";
 import { recomputeStageTotalCost } from "@/lib/stages/total-cost";
 import { decideCreativeChange, stageHasSent } from "@/lib/stages/send-locks";
-import { decideStageFormatChange, isFormatUsable } from "@/lib/messages/stage-format";
+import { decideStageFormatChange, isFormatUsable, stageFormatLocked } from "@/lib/messages/stage-format";
 import {
   generateCampaignTrackingId,
   generateStageTrackingId,
@@ -405,6 +405,8 @@ export async function PATCH(
       message_format_id: campaign_stages.message_format_id,
       custom_text: campaign_stages.custom_text,
       campaign_type: campaigns.type,
+      // P4: a REGULAR stage's format locks once materialized (spec R4).
+      materialized_at: campaign_stages.materialized_at,
       // Brand -> numbers (1a) grandfathering: an existing mismatched stage
       // stays editable unless the number itself is changing.
       current_provider_phone_id: campaign_stages.provider_phone_id,
@@ -448,15 +450,21 @@ export async function PATCH(
   const wantsShape = input.message_format_id != null || input.custom_text != null;
   const creativeChanging =
     input.creative_id !== undefined && input.creative_id !== current.creative_id;
+  const isDrip = current.campaign_type === "drip";
+  // Only a drip stage's locks read sent rows (format + creative); a regular
+  // stage's format lock reads materialized_at (spec R4, P4).
   const hasSent =
-    wantsShape || (creativeChanging && current.campaign_type === "drip")
-      ? await stageHasSent(db, sid)
-      : false;
+    isDrip && (wantsShape || creativeChanging) ? await stageHasSent(db, sid) : false;
+  const formatLocked = stageFormatLocked({
+    isDrip,
+    materialized: current.materialized_at != null,
+    hasSent,
+  });
   const shape = decideStageFormatChange({
     current: { message_format_id: current.message_format_id, custom_text: current.custom_text },
     input: { message_format_id: input.message_format_id, custom_text: input.custom_text },
     canCompliance: can(role, "compliance.manage"),
-    hasSent,
+    locked: formatLocked,
     formatUsable:
       input.custom_text == null && input.message_format_id != null
         ? await isFormatUsable(db, orgId, input.message_format_id)
@@ -473,7 +481,7 @@ export async function PATCH(
   }
   Object.assign(updates, shape.set);
   const creativeLock = decideCreativeChange({
-    isDrip: current.campaign_type === "drip",
+    isDrip,
     currentCreativeId: current.creative_id,
     inputCreativeId: input.creative_id,
     hasSent,

@@ -8,6 +8,7 @@ import {
   buildStageEligibilityExclusions,
 } from "@/lib/sends/eligibility";
 import { splitBucketMatch } from "@/lib/sends/split-bucket";
+import type { TagRules } from "@/lib/messages/render";
 
 // Content-dedup overlay (Phase 2). When provided, the stage's recipients also
 // subtract the eligibility exclusions (saw-this-creative-elsewhere [+ in-flight],
@@ -27,6 +28,9 @@ export interface StageEligibilityOverlay {
   offerRulesEnabled: boolean;
   offerCooldownDays: number;
   offerLimitTimes: number;
+  // P4: the stage's personalization rules (loadStageTagRules /
+  // countingTagRules). NO_TAG_RULES for a tag-less stage. Required (§11b).
+  tagRules: TagRules;
 }
 
 import {
@@ -243,6 +247,7 @@ export function stageRecipientsSql(opts: {
         offerCooldownDays: opts.eligibility.offerCooldownDays,
         offerLimitTimes: opts.eligibility.offerLimitTimes,
         lifecycleRules: opts.eligibility.lifecycleRules,
+        tagRules: opts.eligibility.tagRules,
       })
     : [];
 

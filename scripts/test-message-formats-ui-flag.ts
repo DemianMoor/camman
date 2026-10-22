@@ -56,5 +56,21 @@ for (const f of ["components/creatives/creative-form.tsx", "components/creatives
   bar(`G9 ${f}: reads the flag via messageFormatsUiEnabled()`, /const formatsUi\s*=\s*messageFormatsUiEnabled\(\)/.test(src));
 }
 
+console.log("\nSource guards — P4 skip counts + warnings (behind the flag)");
+const stageForm = strip(readFileSync("components/campaigns/stage-form.tsx", "utf8"));
+bar("G10 stage form: 'N% would be skipped' only when the flag is on", allGated(stageForm, "TagSkipLine "));
+bar("G11 stage form: flag OFF ⇒ the preview request carries no extra fields and no new re-fire trigger",
+  /const previewShapeKey\s*=\s*formatsUi\s*\?[\s\S]{0,400}:\s*""/.test(stageForm));
+const prep = strip(readFileSync("components/campaigns/stage-prepare-dialog.tsx", "utf8"));
+bar("G12 Prepare dialog: tag skip panel only when the flag is on", allGated(prep, "PrepareTagSkips "));
+bar("G13 Prepare dialog: flag OFF ⇒ the missing data / segment limit buckets are filtered out",
+  (prep.match(/formatsUi\s*\|\|\s*!\(TAG_BUCKETS/g) ?? []).length === 2);
+const status = strip(readFileSync("components/campaigns/status-change-dialog.tsx", "utf8"));
+bar("G14 activation dialog: >50% warning only when the flag is on", allGated(status, "ActivationTagWarning "));
+bar("G15 activation dialog: the warning never holds the confirm button", /disabled=\{isPending \|\| awaitingExcl\}/.test(status));
+for (const f of ["components/campaigns/stage-prepare-dialog.tsx", "components/campaigns/status-change-dialog.tsx"]) {
+  bar(`G16 ${f}: reads the flag via messageFormatsUiEnabled()`, /const formatsUi\s*=\s*messageFormatsUiEnabled\(\)/.test(strip(readFileSync(f, "utf8"))));
+}
+
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

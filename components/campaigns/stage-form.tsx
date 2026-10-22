@@ -71,6 +71,7 @@ import {
 import { T1_TEMPLATE } from "@/lib/messages/format";
 import { renderWorstCase, type MessageShape } from "@/lib/messages/render";
 import { messageFormatsUiEnabled, stageFormatPayload } from "@/lib/messages/ui-flag";
+import { SKIP_WARN_PCT, tagSkipShare } from "@/lib/messages/skip-share";
 import { CREATIVE_LOCKED_TEXT } from "@/lib/stages/lock-copy";
 import {
   StageFormatField,
@@ -234,6 +235,8 @@ type AudiencePreview = {
     will_send: number | null;
     truncated: boolean;
     offer_excluded: boolean;
+    // Per-reason exclusions; P4 reads missing_tag_data / segment_limit.
+    excluded_lifecycle?: Record<string, number>;
   };
 };
 
@@ -913,6 +916,18 @@ export function StageForm({
     useState<AudiencePreview | null>(null);
   const [audienceError, setAudienceError] = useState<string | null>(null);
   const [audienceLoading, setAudienceLoading] = useState(false);
+  // P4: the message inputs the personalization skip count needs. Flag OFF ⇒ ""
+  // — the request body and the effect's re-fire triggers stay exactly pre-P4.
+  const previewShapeKey = formatsUi
+    ? JSON.stringify({
+        message_format_id: watchedFormatId ?? null,
+        custom_text: watchedCustomText ?? null,
+        stop_text: watchedStopText ?? null,
+        sms_provider_id: watchedProviderId ?? null,
+        provider_phone_id: watchedPhoneId ?? null,
+        short_url: watchedShortUrl ?? null,
+      })
+    : "";
 
   useEffect(() => {
     // ⚠️ A drip stage has no frozen pool, so this preview can only ever return
@@ -936,6 +951,7 @@ export function StageForm({
             // Drives the content-dedup eligibility breakdown (saw-this-creative
             // / will-send). Null ⇒ no creative dedup (Edge A).
             creative_id: watchedCreativeId ?? null,
+            ...(previewShapeKey ? JSON.parse(previewShapeKey) : {}),
           }),
         },
       );
@@ -963,6 +979,7 @@ export function StageForm({
     watchedCreativeId,
     previewApi.execute,
     campaignType,
+    previewShapeKey,
   ]);
 
   // Mutex enforcement for the clicker toggles
@@ -2178,6 +2195,9 @@ export function StageForm({
                             </span>
                           </span>
                         ) : null}
+                        {formatsUi ? (
+                          <TagSkipLine eligibility={audiencePreview.eligibility} />
+                        ) : null}
                         <span className="font-medium text-foreground">
                           Will send:{" "}
                           <span className="font-mono tabular-nums">
@@ -2877,5 +2897,21 @@ function FilterChip({
     >
       {label}
     </button>
+  );
+}
+
+// P4 (spec R1): "N% would be skipped (missing data X · segment limit Y)".
+// Behind the message-formats UI flag (the caller gates it); amber above the
+// threshold — a warning, never a block.
+function TagSkipLine({ eligibility }: { eligibility: { will_send: number | null; excluded_lifecycle?: Record<string, number> } }) {
+  const missingData = eligibility.excluded_lifecycle?.missing_tag_data ?? 0;
+  const segmentLimit = eligibility.excluded_lifecycle?.segment_limit ?? 0;
+  const share = tagSkipShare({ willSend: eligibility.will_send ?? 0, missingData, segmentLimit });
+  if (share.skipped === 0) return null;
+  return (
+    <span className={cn(share.pct > SKIP_WARN_PCT && "text-amber-700 dark:text-amber-400")}>
+      {share.pct}% would be skipped (missing data {missingData.toLocaleString()} · segment limit{" "}
+      {segmentLimit.toLocaleString()})
+    </span>
   );
 }

@@ -2798,6 +2798,7 @@ export default function CampaignDetailPage() {
       <StatusChangeDialog
         transition={campaignTransition}
         campaignName={campaign.name}
+        campaignId={campaign.id}
         isPending={campaignStatusApi.isLoading}
         onCancel={() => setCampaignTransition(null)}
         onConfirm={handleCampaignTransition}

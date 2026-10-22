@@ -41,7 +41,13 @@ export function TagPicker({ onInsert, disabled }: { onInsert: (token: string) =>
 /** Insert `token` at the textarea's cursor (replacing any selection) and return the new value. */
 export function insertAtCursor(el: HTMLTextAreaElement, token: string): string {
   el.setRangeText(token, el.selectionStart, el.selectionEnd, "end");
-  el.focus();
+  // Refocus AFTER the menu has closed (it settles focus on close), with the
+  // cursor right after the inserted tag.
+  const caret = el.selectionEnd;
+  setTimeout(() => {
+    el.focus();
+    el.setSelectionRange(caret, caret);
+  }, 0);
   return el.value;
 }
 

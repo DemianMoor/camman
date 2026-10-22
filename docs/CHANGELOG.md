@@ -2184,3 +2184,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-22 — P4 message personalization on regular campaigns: tag rules + missing_tag_data / segment_limit eligibility layers (SQL twins, parity-tested), kickoff per-recipient render + validate-all + per-body opt-out gate, interim tags_not_supported_yet removed for regular; regular format lock at materialized_at; tag picker / worst case / skip % / >50% warnings behind NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED (OFF); no migration — 04-features/message-formats, campaigns-stages-creatives, sms-send-pipeline, 05-flows, 07-conventions, CLAUDE.md §10h
 
 2026-10-22 — HOTFIX: GET /api/campaigns/<draft>/stages returned 500 for every draft campaign with >= 1 stage since 69cac487 (2026-07-03): the shared split filter hashes contact_id, which the draft batch (computeStageAudienceCountsBatchForDraft) never selected. qualified now carries flagged.contact_id — CHANGELOG only
+
+2026-10-22 — Stage CSV export blocked (409 personalization_tags_not_exportable) when the stage's message uses a contact tag; tag-less export unchanged — 04-features/message-formats

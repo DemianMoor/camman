@@ -77,6 +77,21 @@ export function renderMessage(i: RenderInput): RenderResult {
 }
 
 /**
+ * The body a recipient WOULD have got, with each tag they lack left literal
+ * ("Hi {first_name}") — stored on a skip row so the operator sees what was
+ * attempted (P5). Never sent.
+ */
+export function renderAttempted(i: RenderInput): string {
+  const or = (k: TagKey, v: string | null) => v ?? `{${k}}`;
+  return assemble(i, {
+    first_name: or("first_name", TAGS.first_name.normalize(i.recipient.first_name)),
+    zip: or("zip", TAGS.zip.normalize(i.recipient.zip)),
+    state: or("state", TAGS.state.normalize(i.recipient.state)),
+    brand: or("brand", TAGS.brand.normalize(i.brandName)),
+  });
+}
+
+/**
  * Body with every contact tag at its worst case (first_name at
  * `firstNameLength`, default its max). {brand} uses the real brand when there is
  * one (fixed per stage) and its worst case otherwise (creative editor).

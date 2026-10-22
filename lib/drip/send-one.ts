@@ -11,8 +11,9 @@ import {
   type ResolvedOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
 import { getDescriptor } from "@/lib/sends/providers/registry";
-import { formatStamp, renderMessage, type MessageShape } from "@/lib/messages/render";
-import { NO_RECIPIENT } from "@/lib/messages/tags";
+import { formatStamp, type MessageShape } from "@/lib/messages/render";
+import type { RecipientData } from "@/lib/messages/tags";
+import { DripTagSkip, renderDripBody } from "./personalize-drip";
 import { mintDripLeadLink } from "./mint";
 
 type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -50,6 +51,10 @@ export interface DripSendInput {
   creativeText: string;
   /** 0216: the stage's message shape (REQUIRED — every caller decides). */
   shape: MessageShape;
+  /** P5: this lead's attributes (NO_RECIPIENT for a tag-less message). REQUIRED. */
+  recipient: RecipientData;
+  /** P5: the creative's allow_multi_segment — the personalized-body segment allowance. REQUIRED. */
+  allowMultiSegment: boolean;
   brandName: string;
   brandId: number | null;
   brandLandingHost: string | null;
@@ -110,16 +115,18 @@ export async function dispatchDripSend(
   // and a send with no link_id is unattributable — worse than silence.
   if (!minted.ok) throw new MintRefused(minted.reason, minted.message);
 
-  const rendered = renderMessage({
+  const rendered = renderDripBody({
     shape: input.shape,
     brandName: input.brandName,
     creativeText: input.creativeText,
     linkUrl: minted.linkUrl,
     stopText: input.footer.text,
-    recipient: NO_RECIPIENT,
+    recipient: input.recipient,
+    allowMultiSegment: input.allowMultiSegment,
   });
-  // Callers refuse a tagged message before dispatch (interim, P2 → P5).
-  if (!rendered.ok) throw new GateRefused(`render refused: ${rendered.reason} ${rendered.tag}`);
+  // P5: missing data / over the segment limit ⇒ the caller's transaction rolls
+  // back (the link with it) and the caller records the skip.
+  if (!rendered.ok) throw new DripTagSkip(rendered.reason, rendered.attempted);
   const body = rendered.body;
   const stamp = formatStamp(input.shape);
 

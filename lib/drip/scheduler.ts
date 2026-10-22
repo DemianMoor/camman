@@ -13,9 +13,11 @@ import {
   optOutGateSubject,
   resolveOptOutFooter,
 } from "@/lib/sends/opt-out-footer";
-import { formatStamp, renderMessage, shapeFromStage } from "@/lib/messages/render";
-import { NO_RECIPIENT } from "@/lib/messages/tags";
-import { notifyDripSkips, skipIfTagged, tallySkip, type DripSkipTally } from "./skip-send";
+import { formatStamp, requiredContactTags, shapeFromStage } from "@/lib/messages/render";
+import { NO_RECIPIENT, type RecipientData } from "@/lib/messages/tags";
+import { notifyDripSkips, skipIfMissingBrand, tallySkip, type DripSkipTally } from "./skip-send";
+import { DripTagSkip, recordDripTagSkip, renderDripBody } from "./personalize-drip";
+import { loadRecipientAttributes } from "@/lib/sends/personalize";
 import { orderForHour } from "./hourly-cap";
 import {
   clearIneligibleHourAssignments, prepareHourly, realHasHeadroom, recordSendRefusal,
@@ -189,7 +191,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
                s.creative_id, s.stop_text, s.short_url, s.landing_page_id,
                s.tracking_id AS stage_tracking_id, s.full_url,
                s.message_format_id, s.custom_text, mf.template AS format_template,
-               cr.text AS creative_text,
+               cr.text AS creative_text, cr.allow_multi_segment,
                lp.kind AS lp_kind, lp.slug AS lp_slug,
                lp.external_url AS lp_external_url, lp.status AS lp_status
         FROM campaign_stages s
@@ -209,6 +211,7 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       `)) as unknown as (StageWindow & {
         stage_id: number; creative_id: number | null; stop_text: string | null;
         short_url: string | null; landing_page_id: number | null; creative_text: string | null;
+        allow_multi_segment: boolean | null;
         full_url: string | null;
         stage_tracking_id: string | null;
         message_format_id: number | null; custom_text: string | null; format_template: string | null;
@@ -230,18 +233,23 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
       // 0216: the stage's message shape renders every body and stamps every row.
       const shape = shapeFromStage(stage);
       const stamp = formatStamp(shape);
-      // INTERIM (P2 → P5): tag rendering is not built yet. Each lead gets ONE
-      // skipped_ineligible row (idempotent) and its journey stays routed, so it
-      // sends normally once the tag is removed from the creative / custom text.
-      const tagged = await skipIfTagged(db, {
+      // {brand} with no campaign brand: nobody can be sent — one row per lead,
+      // journeys stay routed until a brand is set.
+      const noBrand = await skipIfMissingBrand(db, {
         orgId, campaignId, stageId: stage.stage_id, creativeText: stage.creative_text, shape,
         brandName: head.brand_name ?? "", leads,
       });
-      if (tagged !== null) {
-        res.tagsSkipped += tagged.written;
-        tallySkip(skipTally, { stageId: stage.stage_id, campaignName: head.campaign_name ?? String(campaignId), result: tagged });
+      if (noBrand !== null) {
+        res.tagsSkipped += noBrand.written;
+        tallySkip(skipTally, { stageId: stage.stage_id, campaignName: head.campaign_name ?? String(campaignId), result: noBrand });
         continue;
       }
+      // P5: a personalized message renders per lead. Attributes are read only
+      // for a tagged message, so a tag-less stage runs exactly as before.
+      const personalized = requiredContactTags({ shape, creativeText: stage.creative_text }).length > 0;
+      const attrs = personalized
+        ? await loadRecipientAttributes(db, orgId, leads.map((l) => l.contact_id))
+        : new Map<string, RecipientData>();
 
       // ── caps, counted over the ET day as a RANGE (never a functional
       // predicate on sent_at — R15) ──────────────────────────────────────
@@ -352,16 +360,18 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
             });
             if (!r.ok) throw new MintRefused(r.reason, r.message);
 
-            const rendered = renderMessage({
+            const rendered = renderDripBody({
               shape,
               brandName: head.brand_name ?? "",
               creativeText: stage.creative_text!,
               linkUrl: r.linkUrl,
               stopText: footer.text,
-              recipient: NO_RECIPIENT,
+              recipient: attrs.get(lead.contact_id) ?? NO_RECIPIENT,
+              allowMultiSegment: stage.allow_multi_segment === true,
             });
-            // Unreachable while the interim tag gate above holds.
-            if (!rendered.ok) throw new GateRefused(`render refused: ${rendered.reason} ${rendered.tag}`);
+            // Missing data / over the segment limit: roll back (the minted link
+            // goes with it) and record the skip below.
+            if (!rendered.ok) throw new DripTagSkip(rendered.reason, rendered.attempted);
             const body = rendered.body;
 
             // ⭐ THE GATE, PER MESSAGE, ON THE FINAL TEXT.
@@ -433,6 +443,23 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
           }
           if (e instanceof JourneyAlreadyQueued) {
             res.alreadyQueued++;
+            continue;
+          }
+          if (e instanceof DripTagSkip) {
+            // ⭐ FIRST-SEND SKIP (owner 2026-10-22): the row AND the journey
+            // closed `exited` with the same reason, in one transaction.
+            const written = await db.transaction((tx) =>
+              recordDripTagSkip(tx, {
+                orgId, campaignId, stageId: stage.stage_id, lead,
+                reason: e.reason, renderedText: e.attempted, stamp,
+                exitJourneyId: lead.journey_id,
+              }),
+            );
+            res.tagsSkipped += written;
+            tallySkip(skipTally, {
+              stageId: stage.stage_id, campaignName: head.campaign_name ?? String(campaignId),
+              result: { reason: e.reason, written },
+            });
             continue;
           }
           if (e instanceof GateRefused) {

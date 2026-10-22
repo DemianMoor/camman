@@ -124,7 +124,9 @@ export async function updateFormat(
         ok: false,
         error: {
           status: 409,
-          message: `${count} live stage${count === 1 ? "" : "s"} use this format. Switch them to another format first.`,
+          message: count === 1
+            ? "1 live stage uses this format. Switch it to another format first."
+            : `${count} live stages use this format. Switch them to another format first.`,
           reason: "format_in_use",
           details: { count },
         },

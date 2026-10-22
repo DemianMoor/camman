@@ -1274,7 +1274,11 @@ export async function computeStageAudienceCountsBatchForDraft(
         st.stage_id,
         st.split_index,
         st.split_total,
-        row_number() over (partition by st.stage_id order by flagged.contact_id) - 1 as rn
+        -- BATCH_SPLIT_FILTER hashes contact_id (stable split bucket, 69cac487).
+        -- This CTE carried only the old row_number "rn", so every draft
+        -- campaign's GET /stages failed with 42703 from 2026-07-03 until the
+        -- 2026-10-22 hotfix (scripts/test-draft-stage-counts-batch.ts).
+        flagged.contact_id
       from st
       join flagged on
         flagged.has_opt_out = false

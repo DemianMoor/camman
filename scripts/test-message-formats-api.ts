@@ -73,7 +73,8 @@ async function main() {
   }
 
   /** campaign (+ creative + stage) in the org; optionally a SENT row on the stage. */
-  async function fixture(orgId: string, type: "regular" | "drip", sent: boolean) {
+  // materialized: stamps campaign_stages.materialized_at — the REGULAR format lock (spec R4, P4).
+  async function fixture(orgId: string, type: "regular" | "drip", sent: boolean, materialized: boolean) {
     const sfx = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
     const [cre] = await sql<{ id: number }[]>`
       INSERT INTO creatives (slug, org_id, text, status) VALUES (${"t216-" + sfx}, ${orgId}::uuid, 'Hi there', 'active') RETURNING id`;
@@ -83,7 +84,8 @@ async function main() {
       INSERT INTO campaigns (org_id, slug, name, status, type, link_mode)
       VALUES (${orgId}::uuid, ${"t216-" + sfx}, 't216', 'draft', ${type}, 'manual') RETURNING id`;
     const [st] = await sql<{ id: number }[]>`
-      INSERT INTO campaign_stages (org_id, campaign_id, creative_id) VALUES (${orgId}::uuid, ${camp.id}, ${cre.id}) RETURNING id`;
+      INSERT INTO campaign_stages (org_id, campaign_id, creative_id, materialized_at)
+      VALUES (${orgId}::uuid, ${camp.id}, ${cre.id}, ${materialized ? sql`now()` : null}) RETURNING id`;
     if (sent) {
       const [c] = await sql<{ id: string }[]>`INSERT INTO contacts (org_id, phone_number) VALUES (${orgId}::uuid, ${"+1903" + sfx.slice(-7)}) RETURNING id`;
       await sql`INSERT INTO stage_sends (id, org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status, sent_at)
@@ -109,7 +111,7 @@ async function main() {
     const mkDef = await owner.call("POST", `/api/message-formats/${mk.body.id}/make-default`);
     check("owner: make a disabled format default ⇒ 409 format_disabled", mkDef.status === 409 && reason(mkDef) === "format_disabled", JSON.stringify(mkDef));
 
-    const fx = await fixture(owner.orgId!, "regular", false);
+    const fx = await fixture(owner.orgId!, "regular", false, false);
     const stages = await owner.call("GET", `/api/campaigns/${fx.campaignId}/stages`);
     const row = ((stages.body.data as Record<string, unknown>[]) ?? [])[0] ?? {};
     check("owner: stage list carries message_format_id (= default), custom_text null, has_sent false",
@@ -125,7 +127,7 @@ async function main() {
     check("owner: set custom text ⇒ 200, stored, format cleared", setCustom.status === 200 && stored.custom_text === custom && stored.message_format_id === null,
       `${setCustom.status} ${JSON.stringify(setCustom.body).slice(0, 200)} ${JSON.stringify(stored)}`);
 
-    const fxSent = await fixture(owner.orgId!, "regular", true);
+    const fxSent = await fixture(owner.orgId!, "regular", true, true);
     const sentList = await owner.call("GET", `/api/campaigns/${fxSent.campaignId}/stages`);
     const sentRow = ((sentList.body.data as Record<string, unknown>[]) ?? [])[0] ?? {};
     check("owner: has_sent true once a sent row exists (stage list)", sentRow.has_sent === true, JSON.stringify(sentRow).slice(0, 200));
@@ -133,6 +135,16 @@ async function main() {
     check("owner: change format after send ⇒ 409 format_locked_after_send", locked.status === 409 && reason(locked) === "format_locked_after_send", JSON.stringify(locked));
     const echo = await owner.call("PATCH", `/api/campaigns/${fxSent.campaignId}/stages/${fxSent.stageId}`, { message_format_id: fmts[0].id, label: "echo" });
     check("owner: echo of the same format after send ⇒ 200", echo.status === 200, JSON.stringify(echo).slice(0, 200));
+    // P4 (spec R4): a REGULAR stage locks once materialized, before any send.
+    const fxPrepared = await fixture(owner.orgId!, "regular", false, true);
+    const prepLocked = await owner.call("PATCH", `/api/campaigns/${fxPrepared.campaignId}/stages/${fxPrepared.stageId}`, { message_format_id: t2.id });
+    check("owner: regular stage materialized, not yet sent ⇒ 409 format_locked_after_send", prepLocked.status === 409 && reason(prepLocked) === "format_locked_after_send", JSON.stringify(prepLocked));
+    const dripPrepared = await fixture(owner.orgId!, "drip", false, true);
+    const dripPrepOk = await owner.call("PATCH", `/api/campaigns/${dripPrepared.campaignId}/stages/${dripPrepared.stageId}`, { message_format_id: t2.id });
+    check("owner: drip stage materialized, not yet sent ⇒ 200 (drip locks at first send)", dripPrepOk.status === 200, JSON.stringify(dripPrepOk).slice(0, 200));
+    const dripSentFx = await fixture(owner.orgId!, "drip", true, false);
+    const dripSentLocked = await owner.call("PATCH", `/api/campaigns/${dripSentFx.campaignId}/stages/${dripSentFx.stageId}`, { message_format_id: t2.id });
+    check("owner: drip stage with a sent row ⇒ 409 format_locked_after_send", dripSentLocked.status === 409 && reason(dripSentLocked) === "format_locked_after_send", JSON.stringify(dripSentLocked));
 
     console.log("── operator");
     const op = await session("operator");
@@ -143,13 +155,13 @@ async function main() {
     const opFmts = (opList.body.data as { id: number }[]) ?? [];
     const opPatch = await op.call("PATCH", `/api/message-formats/${opFmts[0]?.id}`, { name: "x" });
     check("operator: PATCH format ⇒ 403", opPatch.status === 403, `${opPatch.status}`);
-    const opFx = await fixture(op.orgId!, "regular", false);
+    const opFx = await fixture(op.orgId!, "regular", false, false);
     const opCustom = await op.call("PATCH", `/api/campaigns/${opFx.campaignId}/stages/${opFx.stageId}`, { custom_text: custom });
     check("operator: set custom text ⇒ 403 compliance_field_locked", opCustom.status === 403 && reason(opCustom) === "compliance_field_locked", JSON.stringify(opCustom));
     const opT2 = (opFmts as { id: number; name?: string }[]).find((f) => f.name?.startsWith("T2"));
     const opPick = await op.call("PATCH", `/api/campaigns/${opFx.campaignId}/stages/${opFx.stageId}`, { message_format_id: opT2?.id });
     check("operator: pick another enabled format ⇒ 200", opPick.status === 200, JSON.stringify(opPick).slice(0, 200));
-    const drip = await fixture(op.orgId!, "drip", true);
+    const drip = await fixture(op.orgId!, "drip", true, false);
     const swap = await op.call("PATCH", `/api/campaigns/${drip.campaignId}/stages/${drip.stageId}`, { creative_id: drip.otherCreativeId });
     check("operator: drip creative change after send ⇒ 409 creative_locked_after_send", swap.status === 409 && reason(swap) === "creative_locked_after_send", JSON.stringify(swap));
   } finally {

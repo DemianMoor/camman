@@ -290,8 +290,10 @@ export interface StageFormProps {
   // send-scheduled flow). NULL = not yet sent (editable / reschedulable, even
   // if a prior scheduled attempt was missed).
   sentAt?: string | null;
-  /** 0216: the stage has ≥1 sent message — locks its format (and a drip stage's creative). */
+  /** 0216: the stage has ≥1 sent message — locks a drip stage's creative. */
   hasSent?: boolean;
+  /** Spec R4 (stageFormatLocked): regular = materialized, drip = sent. Locks the format picker. */
+  formatLocked?: boolean;
   // Edit-mode only: the stage is ARMED — pre-materialized for a future schedule
   // (Approve-Send flow) but not yet released. The Scheduled field locks just like
   // a fired send; the operator must "Cancel armed send" to reschedule. NULL/false
@@ -433,6 +435,7 @@ export function StageForm({
   behavioralTier,
   sentAt,
   hasSent = false,
+  formatLocked = false,
   armed,
   onSplit,
   campaign,
@@ -1584,7 +1587,7 @@ export function StageForm({
                       form.setValue("custom_text", next.custom_text, { shouldDirty: true });
                     }}
                     canCustom={canEditCompliance}
-                    locked={hasSent}
+                    locked={formatLocked}
                     disabled={isSubmitting}
                   />
                   {shapeWarnings.map((w) => (

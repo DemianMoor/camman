@@ -750,7 +750,7 @@ export async function POST(
     current: null,
     input: { message_format_id: input.message_format_id, custom_text: input.custom_text },
     canCompliance: can(role, "compliance.manage"),
-    hasSent: false,
+    locked: false, // a new stage has nothing prepared or sent
     formatUsable:
       input.custom_text == null && input.message_format_id != null
         ? await isFormatUsable(db, orgId, input.message_format_id)

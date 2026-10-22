@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-22_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -285,3 +285,7 @@ Best-effort Telegram alerts on breaker trips / poller failures. If `TELEGRAM_BOT
 - See memory notes: live-fire is owner-gated and has not been exercised end-to-end.
 - **Ahoi opt-out intake is complete (Phase 1 Section 4) but Ahoi sending is still gated.** All 3 opt-out layers (inbound webhook, CDR poll, DLR opt-out-error) write `opt_outs`; the go-live harness (`scripts/test-ahoi-optout-golive-harness.ts`) proves suppression end-to-end through the real preflight. `SEND_ENABLED` for Ahoi requires BOTH that harness green AND a one-time manual real-STOP smoke test (documented in the harness script's header) — the flip itself is a separate, gated, out-of-band step, not part of any code change.
 - **Text Request (`txr`) send + DLR + opt-out intake are built (Phases 2–4) and inert until go-live.** `supports_api_send=false`, so the drain never reaches the adapter. What exists: a real `POST /messages` send that captures `segments_count`; per-message `status_callback` DLR capture with DIRECT `?ss=` reconcile; a messages poll and a contacts poll as backstops; account-webhook health with auto-reactivate; and a six-channel opt-out intake writing `opt_outs` through a mirror of the Ahoi write path (see E6/E7 in [05-flows.md](../05-flows.md) and the `txr` entry in [07-conventions.md](../07-conventions.md)). Remaining go-live steps, all deliberately out-of-band: apply migrations `0121`–`0124`; set the number's `dashboard_id` + `credential_id` + `max_sends_per_second` (25 for the TFN); run the operator-triggered hook registration (which also mints the `inbound_webhook_token` the `status_callback` needs — **until it exists no callback is requested at all**); then flip `supports_api_send` with a first real send to the owner's number only. Verified so far: `tsc` clean and 131 checks across `scripts/test-textrequest-{send,dlr,poll,optout}.ts` — no live send has been fired since Phase 0.
+
+## Per-recipient rendering (P4, 2026-10-22)
+
+A regular stage whose message uses a contact tag is rendered per recipient at kickoff. Recipients missing data or over the segment limit are skipped by the `missing_tag_data` / `segment_limit` eligibility layers; every remaining body is rendered and checked before any row is inserted (`per_recipient_render_failed` fails the whole stage closed); the opt-out gate runs per body. A tag-less stage (every live stage today) keeps the single-body path unchanged. Details: [message-formats.md](message-formats.md#personalization-on-regular-stages-p4-2026-10-22).

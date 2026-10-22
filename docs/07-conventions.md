@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-21_
+_Last updated: 2026-10-22_
 
 ## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
 
@@ -4905,3 +4905,10 @@ Every SMS body is assembled by `lib/messages/` — `tags.ts` (personalization ta
 - **Drive it from contacts, never from group membership.** Walking the flagged groups' memberships probes `contacts` once per member: 414,666 probes, 1.9 s warm / 5.2 s cold for pml-aca + pml-medicare, paid inside every segment evaluation. The contacts-driven shape reads only voip/unknown contacts through `contacts_org_linetype_eligible_idx`, and an uncorrelated `EXISTS` makes it a one-time 0.05 ms no-op while no group in the org has a box unchecked.
 - **It is only as right as `contacts.line_type`.** That column is a copy of `phone_lookups`, written by `syncContactsForPhones` when a lookup completes — which misses any contact created AFTER its lookup. Drip intake is exactly that case, so 421K drip contacts read `unknown` while their lookup said `mobile`. Unchecking "Allow unknown" on such a group would have blocked almost every real mobile lead. Any new path that creates a contact for an already-looked-up phone must copy the row itself (as `lib/drip/enrichment.ts` now does); `scripts/backfill-contact-line-type.ts` repairs history. Order for turning the gate on: intake fix deployed → backfill → only then uncheck a box.
 - **Deduplication.** The EXCEPT makes `buildGroupMembershipClause` return a set; it used to return one row per membership. Every consumer already deduplicated (`INTERSECT` / `bool_or` / `count(distinct …)`); a new consumer must not `count(*)` it expecting membership rows.
+
+## Personalization tags: one registry, SQL twins, tag-less is a no-op (P4, 2026-10-22)
+
+- **One registry.** [`lib/messages/tags.ts`](../lib/messages/tags.ts) defines every tag, its normalizer, junk values, transliteration and worst case. The SQL twins in [`lib/messages/tag-sql.ts`](../lib/messages/tag-sql.ts) are GENERATED from it (every list is a bound parameter; arrays travel as one string + `string_to_array`), and `scripts/test-tag-sql-parity.ts` asserts identical missing-ness and cleaned length on a corpus of at least 60 values. Change a normalizer ⇒ run the parity test: a drift means the preview's skip count describes a different audience than the render sends to.
+- **Whitespace is spelled out.** Postgres `\s` follows the locale (NBSP differs from JS), so the twin uses an explicit class equal to JS `\s`. `[[:alpha:]]` (an untransliterable letter ⇒ missing) is locale-dependent: prod and preview are both ICU `en_US.UTF-8`.
+- **Tag-less is a no-op by construction.** `stageTagRules` / `loadTagRules` return `NO_TAG_RULES` before any footer/domain lookup when the message has no contact tag; then no layer is built and kickoff keeps its one-body path. Never join `contact_attributes` into `stageRecipientsSql`: that would change every stage's SQL. Kickoff loads attributes separately, only for tagged stages.
+- **The format-lock trigger differs by campaign type** (`stageFormatLocked`): regular = `materialized_at IS NOT NULL`, drip = first sent row.

@@ -2180,3 +2180,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-21 — Carrier triage ≥250-contact unresolved-string Telegram alert: every 30-min tick → once per ET day from 09:00 ET (alert_state gate) — 04-features/phone-lookup-carrier
 
 2026-10-22 — Preflight breakdown: config query now selects offer_rules_enabled / offer_cooldown_days / offer_limit_times, so dedup_1h_predicted and the per-carrier bucket apply the campaign offer rules like kickoff (were silently on the legacy rule) — CHANGELOG only (no doc described the gap)
+
+2026-10-22 — P4 message personalization on regular campaigns: tag rules + missing_tag_data / segment_limit eligibility layers (SQL twins, parity-tested), kickoff per-recipient render + validate-all + per-body opt-out gate, interim tags_not_supported_yet removed for regular; regular format lock at materialized_at; tag picker / worst case / skip % / >50% warnings behind NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED (OFF); no migration — 04-features/message-formats, campaigns-stages-creatives, sms-send-pipeline, 05-flows, 07-conventions, CLAUDE.md §10h

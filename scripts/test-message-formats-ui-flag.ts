@@ -80,5 +80,13 @@ const dimPage = strip(readFileSync("app/(protected)/reports/[dimension]/page.tsx
 bar("G18 /reports/format is a 404 while the flag is off",
   /dimension\s*===\s*"format"\s*&&\s*!messageFormatsUiEnabled\(\)\)\s*notFound\(\)/.test(dimPage));
 
+console.log("\nSource guards — sidebar (flag walk 10-22)");
+const nav = strip(readFileSync("components/protected/nav-config.ts", "utf8"));
+bar("G19 sidebar Reports lists By Format only when the flag is on",
+  /\.\.\.\(messageFormatsUiEnabled\(\)\s*\?\s*\[\s*\{\s*label:\s*"By Format",\s*href:\s*"\/reports\/format"/.test(nav));
+bar("G20 sidebar Message Formats link uses the Settings layout's gate (providers.view), so an operator never gets a link to a 404",
+  /label:\s*"Message Formats",\s*href:\s*"\/settings\/message-formats",\s*permission:\s*"providers\.view"/.test(nav)
+  && /requirePagePermission\("providers\.view"\)/.test(strip(readFileSync("app/(protected)/settings/layout.tsx", "utf8"))));
+
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

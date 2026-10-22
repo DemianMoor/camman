@@ -53,6 +53,8 @@ async function main() {
       const inUse = await updateFormat(tx, orgId, f, { is_enabled: false });
       bar("M2.8 in-use disable refused ⇒ 409 format_in_use, details.count = 1",
         !inUse.ok && inUse.error.status === 409 && inUse.error.reason === "format_in_use" && inUse.error.details?.count === 1);
+      bar("M2.8b …and the message is singular for one stage (\"1 live stage uses\")",
+        !inUse.ok && inUse.error.message.startsWith("1 live stage uses this format."), inUse.ok ? "" : inUse.error.message);
 
       const edit = await updateFormat(tx, orgId, f, { template: "{creative_text} {brand}<new_row>{url}<new_row>{stop_text}", name: "T4 renamed" });
       bar("M2.9 editing an in-use template is allowed (future renders only)", edit.ok && edit.row.name === "T4 renamed");

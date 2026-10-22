@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 
 import { isEntityAvailable } from "@/lib/feature-flags";
+import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 import type { Permission } from "@/lib/permissions";
 
 export type NavItem = {
@@ -135,6 +136,11 @@ export const navGroups: NavGroup[] = [
       // Partner-facing lead performance (Drip P7). Same permission as every
       // other report; the page and its API re-check server-side.
       { label: "By Partner", href: "/reports/partners", icon: Handshake, permission: "campaigns.view" },
+      // By Format (0216 P6) — behind the message-formats UI flag, like its tab
+      // and its page (a 404 while the flag is off).
+      ...(messageFormatsUiEnabled()
+        ? [{ label: "By Format", href: "/reports/format", icon: MessageSquare, permission: "campaigns.view" as const }]
+        : []),
     ],
   },
   {
@@ -259,10 +265,13 @@ export const navGroups: NavGroup[] = [
       // form's single text field was removed, since a brand may hold several.
       // Message formats (0216): how brand / creative / link / opt-out text are
       // assembled. Everyone who reaches Settings may view; manager+ manages.
+      // Gated on providers.view, not message_formats.view: the operator holds
+      // the latter (the stage form lists formats) but the Settings layout
+      // 404s them, so the link must follow the layout's gate.
       {
         label: "Message Formats",
         href: "/settings/message-formats",
-        permission: "message_formats.view",
+        permission: "providers.view",
         icon: MessageSquare,
       },
       {

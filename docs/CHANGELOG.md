@@ -2192,3 +2192,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-22 — P6 By Format report: dimension=format groups on the STAGE's format (name / "Custom"), per-send stamp audit only; tab + /reports/format behind NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED (OFF), API unrestricted; no migration — 04-features/reports-rollup, message-formats
 
 2026-10-22 — Pre-flag fixes: make-default serialized per org (no unique-index 500), preflight personalization blocker for a tagged stage kickoff would refuse, skip % hidden on preview timeout; trailing-row trimming verified (no change) — 04-features/message-formats
+
+2026-10-22 — Flag-walk fixes: "1 live stage uses" in the format_in_use message; By Format sidebar link behind NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED; Settings → Message Formats link gated on providers.view (operators got a link to a 404) — 04-features/message-formats

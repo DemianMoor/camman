@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-21 (global `line_type` rule, 0218); 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
+_Last updated: 2026-10-22 (P5: `creative_tags` routing rule, per-lead personalization, tag skip rows); 2026-10-21 (global `line_type` rule, 0218); 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -697,3 +697,11 @@ insert.
 either tracking ID cannot be resolved, the lead is skipped, counted in
 `mintRefused`, and logged with the reason; the journey stays `routed` so the next
 tick retries after the configuration is fixed.
+
+## Personalization tags on drip (P5, 2026-10-22)
+
+- **Routing rule `creative_tags` (PERMANENT).** `loadCampaignTagRules` ([`lib/sends/tag-rules.ts`](../../lib/sends/tag-rules.ts)) reads each live campaign's ACTIVE FIRST-SEND stages (a follow-up child never decides routing) and `campaignTagRules` combines them: union of required tags, tightest first-name length, any stage refusal refuses the campaign. `creativeTagsVerdict` ([`lib/drip/routing-eval.ts`](../../lib/drip/routing-eval.ts)): a missing tag ⇒ `missing` ("missing data: first_name"), a name longer than the campaign's limit ⇒ `blocked` ("segment limit (first_name 15 > 12)"), a refusal ⇒ `blocked`. Not in the temporary sets, so the lead falls through to the next candidate or becomes `unroutable`; the O3 hour fallback never picks it. `evaluateLeadRouting`'s `tagRules` is REQUIRED: the worker passes a per-tick cache, the why-not-routed tool passes `"load"`. **The rule is ABSENT for a campaign whose first-send message has no contact tag**, so stored routing reasons are byte-identical for every tag-less campaign.
+- **Senders render per lead** (`renderDripBody`, [`lib/drip/personalize-drip.ts`](../../lib/drip/personalize-drip.ts)). Attributes are read only for a tagged message. A lead whose data no longer fits (creative changed after routing, data changed) is skipped: one `skipped_ineligible` row, `last_error` = `missing_tag:<tag>` / `segment_limit`, `rendered_text` = the attempted body with the missing tag left literal. **A first-send skip also closes the journey `exited` with the same `close_reason`, in the same transaction; a follow-up skip writes the row only.** The minted link rolls back with the send.
+- **Segment limit applies to personalized drip bodies only** (`allow_multi_segment` ⇒ up to 4, else 1). Drip never checked segments; a tag-less body ships exactly as before.
+- Skip rows cost nothing, count toward no cap and create no exposure. One Telegram per stage per tick, counting only NEW skips. `{brand}` with no campaign brand still skips via `skipIfMissingBrand` (journey stays routed).
+- No-op proof on prod: `scripts/verify-p5-noop.ts` (read-only).

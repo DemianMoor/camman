@@ -615,7 +615,7 @@ sequenceDiagram
   R->>R: runDripRoutingBatch → drip_journeys (routed_at)<br/>global rules incl. line_type (0218 group gate) ⇒ unroutable
   R-)S: poke (routed > 0)
   S->>S: hourly-cap maintenance (0209): clear ineligible, then per capped campaign<br/>assign fresh → able to send? → close past hours (OFF) → release backlog → room
-  S->>S: runDripSchedulerBatch → due query (assigned journeys, ≤ room) → mint + gate + pending stage_sends<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)
+  S->>S: runDripSchedulerBatch → due query (assigned journeys, ≤ room) → mint + gate + pending stage_sends<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)<br/>P5 tagged message: render per lead; missing data / over segments ⇒ rollback, then skipped_ineligible row + journey exited (follow-ups: row only)
   S-)D: poke (inserted > 0)
   D->>D: runScheduledSends dripOnly (no Phase A, drip stages only)<br/>per-phone lease, pending→sending claim, 1-h dedup
   D->>TX: send (sent_at)

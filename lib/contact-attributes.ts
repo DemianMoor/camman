@@ -23,6 +23,7 @@ export const ATTRIBUTE_FIELDS = [
   { field: "email", label: "Email" },
   { field: "address", label: "Address" },
   { field: "state", label: "State" },
+  { field: "zip", label: "ZIP code" },
   { field: "country", label: "Country" },
   { field: "gender", label: "Gender" },
   { field: "dob", label: "Date of birth" },
@@ -187,6 +188,21 @@ export function normalizeGender(raw: string | null | undefined): string | null {
   return null;
 }
 
+/**
+ * A zip as STORED (0219): as received, trimmed — except a value that lost its
+ * leading zero. A JSON number (2134) or a digits-only cell of 3–4 characters
+ * (spreadsheets drop the zero too) is left-padded to 5 digits (owner ruling
+ * 2026-10-20). Everything else is kept verbatim; the {zip} tag normalizes it at
+ * render. Shared by enrichment (normalizeLead), the CSV import and therefore the
+ * backfill — one rule for every write path.
+ */
+export function normalizeZipInput(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const v = (typeof raw === "number" ? String(Math.trunc(raw)) : String(raw)).trim();
+  if (!v) return null;
+  return /^\d{3,4}$/.test(v) ? v.padStart(5, "0") : v;
+}
+
 /** Normalize one CSV cell for the given attribute field. */
 export function normalizeAttributeValue(
   field: AttributeField,
@@ -204,6 +220,8 @@ export function normalizeAttributeValue(
       return normalizeIncomeBand(raw);
     case "gender":
       return normalizeGender(raw);
+    case "zip":
+      return normalizeZipInput(raw);
     default: {
       const v = (raw ?? "").trim();
       return v.length > 0 ? v : null;

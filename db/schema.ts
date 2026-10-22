@@ -3421,7 +3421,7 @@ export const stage_sends = pgTable(
     index("stage_sends_org_provider_phone_sent_idx")
       .on(table.org_id, table.provider_phone_id)
       .where(sql`status = 'sent'`),
-    // Migration 0219: one contact-id range of sent rows, for the batched nightly
+    // Migration 0220: one contact-id range of sent rows, for the batched nightly
     // contact-engagement recount. The migration adds `INCLUDE (campaign_id)` so
     // the facts and offers reads are index-only; drizzle-orm 0.45.2 cannot
     // express INCLUDE (see stage_sends_org_provider_phone_sent_idx above).
@@ -4892,6 +4892,8 @@ export const contact_attributes = pgTable(
     last_name: text("last_name"),
     address: text("address"),
     state: text("state"),
+    // 0219: as received (trimmed); the {zip} tag normalizes at render.
+    zip: text("zip"),
     country: text("country"),
     // Stored normalized (lowercase, trimmed) at the write boundary. No unique
     // constraint — see the header note.

@@ -132,6 +132,11 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production backfill of the content-dedup ledgers",
   },
   {
+    file: "backfill-contact-zip.ts",
+    viaLibrary: true,
+    why: "owner-gated production backfill of contact_attributes.zip (migration 0219) from lead_inbox.raw; dry-run default (READ ONLY transactions), writes only behind --apply, through lib/drip/zip-backfill (so it carries no write token of its own); only rows still zip IS NULL",
+  },
+  {
     file: "backfill-conversion-events.ts",
     viaLibrary: true,
     why: "one-shot production backfill; writes only behind --apply (writes via lib/conversions/ingest, so it carries no write token of its own)",
@@ -233,7 +238,7 @@ const EXCLUSIONS: ReadonlyArray<{
   },
   {
     file: "apply-stage-sends-contact-sent-index-concurrent.ts",
-    why: "builds migration 0219's stage_sends contact-range index with CREATE INDEX CONCURRENTLY (cannot run inside drizzle-kit's transaction); owner-approved 2026-10-21; dry run by default, --apply only 05:00-05:50 UTC unless --off-window (owner's go), issues only CREATE INDEX (and DROP INDEX of its own INVALID half-build with --drop-invalid)",
+    why: "builds migration 0220's stage_sends contact-range index with CREATE INDEX CONCURRENTLY (cannot run inside drizzle-kit's transaction); owner-approved 2026-10-21; dry run by default, --apply only 05:00-05:50 UTC unless --off-window (owner's go), issues only CREATE INDEX (and DROP INDEX of its own INVALID half-build with --drop-invalid)",
   },
   {
     file: "measure-engagement-batch-plans.ts",

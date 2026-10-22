@@ -34,7 +34,12 @@ import { kickoffStageSend } from "@/lib/sends/kickoff";
 import { autoMoveStageStatus, logAutoStatusMove, type AutoStatusMove } from "@/lib/stages/auto-status";
 
 const TAG = "__wt-stage-auto-status-test__";
-const OPERATOR_EMAIL = "operator-test@exuma.io";
+// A THROWAWAY operator, not operator-test@exuma.io: that account holds TWO
+// memberships (owner of an empty org + operator of the demo org) and the API's
+// membership lookup is LIMIT 1 without an ORDER BY, so it could resolve the
+// wrong org and every route answered 404 (2026-10-20). A fresh user gets
+// exactly one membership from the signup trigger, demoted to operator here.
+const OPERATOR_EMAIL = `t-autostatus-${Date.now()}@example.com`;
 
 let pass = 0;
 let fail = 0;
@@ -66,14 +71,10 @@ async function main() {
   const admin = createClient(supabaseUrl, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-  const users = await admin.auth.admin.listUsers({ perPage: 200 });
-  const operator = users.data?.users.find((u) => u.email === OPERATOR_EMAIL);
-  if (!operator) {
-    throw new Error(`${OPERATOR_EMAIL} is not on the preview project; run verify-operator-access.ts once`);
-  }
   const password = `Op-${Math.random().toString(36).slice(2)}-${Date.now()}`;
-  const reset = await admin.auth.admin.updateUserById(operator.id, { password });
-  if (reset.error) throw new Error(`password reset failed: ${reset.error.message}`);
+  const created = await admin.auth.admin.createUser({ email: OPERATOR_EMAIL, password, email_confirm: true });
+  if (created.error || !created.data.user) throw new Error(`createUser failed: ${created.error?.message}`);
+  const operatorId = created.data.user.id;
 
   // The routes read the SSR auth cookies.
   const cookieJar = new Map<string, string>();
@@ -102,25 +103,23 @@ async function main() {
   const dbc = db as unknown as Parameters<typeof kickoffStageSend>[0];
 
   let campaignId: number | null = null;
+  let fixtureOrgId: string | null = null;
   try {
-    const seed = (
-      await db.execute(sql`
-        SELECT m.org_id, m.role, c.brand_id, cr.id AS creative_id
-        FROM org_members m
-        JOIN campaigns c ON c.org_id = m.org_id AND c.brand_id IS NOT NULL
-        JOIN creatives cr ON cr.org_id = m.org_id AND cr.text IS NOT NULL
-        WHERE m.user_id = ${signIn.data.user.id} AND m.role = 'operator' AND m.is_active
-        ORDER BY length(cr.text)
-        LIMIT 1`)
-    )[0] as { org_id: string; role: string; brand_id: number; creative_id: number } | undefined;
-    if (!seed) throw new Error("test user has no org with a branded campaign and a creative");
-    const orgId = seed.org_id;
+    // The signup trigger made ONE org + an owner membership; demote it and seed it.
+    const orgId: string = ((await db.execute(sql`
+      SELECT org_id FROM org_members WHERE user_id = ${operatorId}::uuid`)) as unknown as { org_id: string }[])[0].org_id;
+    fixtureOrgId = orgId;
+    await db.execute(sql`UPDATE org_members SET role = 'operator' WHERE user_id = ${operatorId}::uuid`);
+    const sfx = String(Date.now());
+    const brandId = ((await db.execute(sql`
+      INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}::uuid, ${"tas-" + sfx}, 'TAS brand') RETURNING id`)) as unknown as { id: number }[])[0].id;
+    const creativeId = ((await db.execute(sql`
+      INSERT INTO creatives (slug, org_id, text, status) VALUES (${"tas-" + sfx}, ${orgId}::uuid, 'Hi there', 'active') RETURNING id`)) as unknown as { id: number }[])[0].id;
+    const seed = { org_id: orgId, brand_id: brandId, creative_id: creativeId };
     const contacts = (await db.execute(sql`
-      SELECT id FROM contacts
-      WHERE org_id = ${orgId} AND is_archived = false
-        AND id NOT IN (SELECT contact_id FROM opt_outs WHERE org_id = ${orgId})
-      LIMIT 5`)) as unknown as { id: string }[];
-    if (contacts.length < 5) throw new Error("need >=5 usable contacts");
+      INSERT INTO contacts (org_id, phone_number)
+      SELECT ${orgId}::uuid, '+1907' || ${sfx.slice(-6)} || g FROM generate_series(1, 5) g
+      RETURNING id`)) as unknown as { id: string }[];
 
     const cid = Number(
       (
@@ -183,7 +182,7 @@ async function main() {
     if (probe.status !== 200) {
       throw new Error(`the API does not resolve the fixture org for ${OPERATOR_EMAIL} (GET stages → ${probe.status})`);
     }
-    console.log(`fixture: org role ${seed.role}, campaign ${cid}, stage ${stageId}, pool ${contacts.length}\n`);
+    console.log(`fixture: org role operator (throwaway user), campaign ${cid}, stage ${stageId}, pool ${contacts.length}\n`);
 
     // The abort route's writes, in its order (app/api/campaigns/[campaignId]/
     // stages/[stageId]/send/abort/route.ts). Steps 7 and 9 call the route itself.
@@ -304,6 +303,14 @@ async function main() {
       await db.execute(sql`DELETE FROM campaign_stages WHERE campaign_id = ${campaignId}`);
       await db.execute(sql`DELETE FROM campaigns WHERE id = ${campaignId}`);
     }
+    // The throwaway operator and its trigger-created org (single member by construction).
+    if (fixtureOrgId != null) {
+      await db.execute(sql`DELETE FROM org_members WHERE user_id = ${operatorId}::uuid`);
+      await db.execute(sql`DELETE FROM organizations WHERE id = ${fixtureOrgId}::uuid`);
+    }
+    await admin.auth.admin.deleteUser(operatorId);
+    const left = (await db.execute(sql`SELECT count(*)::int AS n FROM organizations WHERE id = ${fixtureOrgId}::uuid`)) as unknown as { n: number }[];
+    check("teardown: fixture org removed", fixtureOrgId == null || left[0].n === 0);
     await pg.end({ timeout: 5 });
   }
 

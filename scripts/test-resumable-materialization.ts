@@ -41,6 +41,7 @@ async function main() {
   // typed-enough handle for the kickoff (which only calls .execute/.transaction)
   const dbc = db as unknown as Parameters<typeof kickoffStageSend>[0];
 
+  let createdContactIds: string[] = [];
   let campaignId: number | null = null;
   try {
     // ---- Fixture prerequisites: reuse existing org/brand/creative/contacts ----
@@ -48,16 +49,22 @@ async function main() {
       await db.execute(sql`
         SELECT c.org_id, c.brand_id, cr.id AS creative_id
         FROM campaigns c
-        JOIN creatives cr ON cr.org_id = c.org_id AND cr.text IS NOT NULL
+        -- A SHORT ASCII creative: this test is about materialization, and an
+        -- arbitrary preview creative can render past 1 segment (kickoff then
+        -- refuses multi_segment_not_allowed before anything materializes).
+        JOIN creatives cr ON cr.org_id = c.org_id AND cr.text ~ '^[ -~]{1,60}$'
         WHERE c.brand_id IS NOT NULL
         LIMIT 1`)
     )[0] as { org_id: string; brand_id: number; creative_id: number };
     const orgId = seed.org_id;
+    // FRESH contacts, deleted in teardown. Reusing arbitrary preview contacts made
+    // this flaky: one picked contact could be excluded by its own state (in-flight
+    // elsewhere, lifecycle, carrier) and materialize 5 of 6 (seen 2026-10-20).
     const contacts = (await db.execute(sql`
-      SELECT id, phone_number FROM contacts
-      WHERE org_id = ${orgId} AND is_archived = false
-        AND id NOT IN (SELECT contact_id FROM opt_outs WHERE org_id = ${orgId})
-      LIMIT 6`)) as unknown as { id: string; phone_number: string }[];
+      INSERT INTO contacts (org_id, phone_number)
+      SELECT ${orgId}::uuid, '+1908' || ${String(Date.now()).slice(-6)} || g FROM generate_series(1, 6) g
+      RETURNING id, phone_number`)) as unknown as { id: string; phone_number: string }[];
+    createdContactIds = contacts.map((c) => c.id);
     if (contacts.length < 6) throw new Error("need >=6 usable contacts");
     const N = contacts.length;
 
@@ -190,6 +197,10 @@ async function main() {
       await db.execute(sql`DELETE FROM campaign_audience_pool WHERE campaign_id = ${campaignId}`);
       await db.execute(sql`DELETE FROM campaign_stages WHERE campaign_id = ${campaignId}`);
       await db.execute(sql`DELETE FROM campaigns WHERE id = ${campaignId}`);
+    }
+    if (createdContactIds.length > 0) {
+      await db.execute(sql`DELETE FROM stage_sends WHERE contact_id = ANY(${`{${createdContactIds.join(",")}}`}::uuid[])`);
+      await db.execute(sql`DELETE FROM contacts WHERE id = ANY(${`{${createdContactIds.join(",")}}`}::uuid[])`);
     }
     await pg.end({ timeout: 5 });
   }

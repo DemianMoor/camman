@@ -2206,6 +2206,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "zip": {
+          "name": "zip",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {

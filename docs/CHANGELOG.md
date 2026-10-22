@@ -2,7 +2,9 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
-2026-10-21 — Migrations 0219 (`stage_sends_org_contact_sent_idx` (org_id, contact_id, sent_at) INCLUDE (campaign_id) WHERE status='sent', for the batched engagement recount; prod build via scripts/apply-stage-sends-contact-sent-index-concurrent.ts) and 0220 (`cron_step_runs`, infra table for the step duration monitor, unused until it ships); read-only plan measurement scripts/measure-engagement-batch-plans.ts — docs/03-data-model.md, docs/CHANGELOG.md
+2026-10-22 — P3 zip (migration **0219**; renumbered from 0217 after main shipped 0218, additive; preview-only until the owner's go): `contact_attributes.zip`; `zip` lead field (aliases + partner field_mapping) stored trimmed by enrichment (`upsertLeadAttributes`, COALESCE) and by the CSV attribute import; `scripts/backfill-contact-zip.ts` (+ `lib/drip/zip-backfill.ts`) recovers zip from `lead_inbox.raw` for NULL-zip contacts, dry-run default, idempotent. `scripts/export-t1-corpus.ts` takes `[sinceIso]` and exports the format stamp. Tests: test-contact-zip (Z1-Z7), test-zip-backfill (B1-B5) — docs/03-data-model.md, docs/04-features/drip-lead-enrichment.md, docs/04-features/partner-lead-intake.md, docs/partners/lead-intake.md (generated), docs/CHANGELOG.md
+
+2026-10-21 — Migrations 0220 (`stage_sends_org_contact_sent_idx` (org_id, contact_id, sent_at) INCLUDE (campaign_id) WHERE status='sent', for the batched engagement recount; prod build via scripts/apply-stage-sends-contact-sent-index-concurrent.ts) and 0221 (`cron_step_runs`, infra table for the step duration monitor, unused until it ships); read-only plan measurement scripts/measure-engagement-batch-plans.ts — docs/03-data-model.md, docs/CHANGELOG.md
 
 2026-10-21 — refresh-contact-engagement nightly run was killed at maxDuration 300 s inside the day rollup (10-20, 10-21), so the recount — which had committed — paged as 50 h stale. Recount heartbeats now stamped right after the recount commits; the Group × Lifecycle and Lifecycle day rollups get their own heartbeats + alert keys (`contact-engagement-group-rollup` / `-day-rollup`) whose alert names the step. Stopgap limits: maxDuration 800 (Pro + Fluid), statement_timeout 600 s, lease 14 min; per-step durationMs logged. Test: scripts/test-engagement-db.ts C3 — docs/04-features/contact-lifecycle.md, docs/04-features/crons.md, docs/CHANGELOG.md
 
@@ -2176,3 +2178,7 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-19 — Offer Group Report lifecycle cohorts: Sent window 90d → 30d (migration 0215 rebuilds offer_group_lifecycle_mv with *_sent_30d; overall Sent 90d unchanged) — 03-data-model, 04-features/offer-group-report
 
 2026-10-19 — Offer Group Report: Group column frozen (sticky) during horizontal scroll — 04-features/offer-group-report
+
+2026-10-21 — Carrier triage ≥250-contact unresolved-string Telegram alert: every 30-min tick → once per ET day from 09:00 ET (alert_state gate) — 04-features/phone-lookup-carrier
+
+2026-10-22 — Preflight breakdown: config query now selects offer_rules_enabled / offer_cooldown_days / offer_limit_times, so dedup_1h_predicted and the per-carrier bucket apply the campaign offer rules like kickoff (were silently on the legacy rule) — CHANGELOG only (no doc described the gap)

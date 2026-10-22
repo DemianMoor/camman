@@ -36,6 +36,10 @@ async function main() {
         INSERT INTO sms_providers (sms_provider_id, org_id, name, supports_api_send)
         VALUES (${"kseg-" + sfx}, ${orgId}, ${"kseg"}, true) RETURNING id`);
       await tx.execute(sql`INSERT INTO provider_credentials (org_id, provider_id, brand_id, api_key) VALUES (${orgId}, ${prov.id}, NULL, ${"k"})`);
+      // A sending number: kickoff refuses a stage without one (no_sender_number),
+      // which made every case below fail before reaching the segment check.
+      const phone = await one<{ id: number }>(sql`
+        INSERT INTO provider_phones (org_id, provider_id, brand_id, phone_number) VALUES (${orgId}, ${prov.id}, ${brand.id}, ${"+1906" + sfx}) RETURNING id`);
 
       const camp = await one<{ id: number }>(sql`
         INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id, tracking_id)
@@ -53,12 +57,14 @@ async function main() {
           VALUES (${"kseg-cre-" + sfx + "-" + opts.n}, ${orgId}, ${opts.text}, 'active', ${opts.allowMultiSegment})
           RETURNING id`);
         const trackingId = `9_99_kseg_${sfx}_s${opts.n}`;
-        const fullUrl = `https://www.guidekn.com/lp/knd?sub_id3=${trackingId}`;
+        // Neutral host: a guidekn URL must match the fixture brand's landing host/path (0212 trigger),
+        // and this test is about segments, not destinations.
+        const fullUrl = `https://offer.example.com/x?sub_id3=${trackingId}`;
         const stage = await one<{ id: number }>(sql`
           INSERT INTO campaign_stages
-            (org_id, campaign_id, stage_number, creative_id, sms_provider_id, send_approved,
+            (org_id, campaign_id, stage_number, creative_id, sms_provider_id, provider_phone_id, send_approved,
              tracking_id, full_url, include_no_status, stop_text, scheduled_at)
-          VALUES (${orgId}, ${campaignId}, ${opts.n}, ${cre.id}, ${prov.id}, true,
+          VALUES (${orgId}, ${campaignId}, ${opts.n}, ${cre.id}, ${prov.id}, ${phone.id}, true,
              ${trackingId}, ${fullUrl}, true, ${"STOP"}, now())
           RETURNING id`);
         const contact = await one<{ id: string }>(sql`

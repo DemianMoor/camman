@@ -2190,3 +2190,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-22 — P5 personalization on drip: routing rule creative_tags (permanent; absent for tag-less campaigns), per-lead render in scheduler + follow-ups, skip rows missing_tag:<tag> / segment_limit (first-send skip ⇒ journey exited), segment check on personalized bodies only, interim tags_not_supported_yet removed; no migration, no UI change — 04-features/drip-campaigns-routing, message-formats, 05-flows, CLAUDE.md §10h
 
 2026-10-22 — P6 By Format report: dimension=format groups on the STAGE's format (name / "Custom"), per-send stamp audit only; tab + /reports/format behind NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED (OFF), API unrestricted; no migration — 04-features/reports-rollup, message-formats
+
+2026-10-22 — Pre-flag fixes: make-default serialized per org (no unique-index 500), preflight personalization blocker for a tagged stage kickoff would refuse, skip % hidden on preview timeout; trailing-row trimming verified (no change) — 04-features/message-formats

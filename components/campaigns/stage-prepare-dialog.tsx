@@ -421,7 +421,7 @@ function PrepareTagSkips({ preflight }: { preflight: PreflightResult }) {
     missingData: preflight.excluded_lifecycle?.missing_tag_data ?? 0,
     segmentLimit: preflight.excluded_lifecycle?.segment_limit ?? 0,
   });
-  if (missing.length === 0 && share.skipped === 0) return null;
+  if (missing.length === 0 && (!share || share.skipped === 0)) return null;
   return (
     <div className="space-y-1 text-xs text-muted-foreground">
       {missing.length > 0 ? (
@@ -430,7 +430,7 @@ function PrepareTagSkips({ preflight }: { preflight: PreflightResult }) {
           {missing.map(([k, n]) => `{${k}} ${(n ?? 0).toLocaleString()}`).join(" · ")}
         </div>
       ) : null}
-      {share.pct > SKIP_WARN_PCT ? (
+      {share && share.pct > SKIP_WARN_PCT ? (
         <div className="flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-amber-700 dark:text-amber-400">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
           <span>

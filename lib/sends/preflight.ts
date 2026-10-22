@@ -10,7 +10,8 @@ import {
 } from "@/lib/sends/eligibility";
 import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { stageRecipientsSql } from "@/lib/sends/recipients";
-import { countMissingByTag, loadStageCountingTagRules } from "@/lib/sends/tag-rules";
+import { countMissingByTag, countingTagRules, loadStageTagRules } from "@/lib/sends/tag-rules";
+import { isTagRulesRefusal } from "@/lib/messages/render";
 import type { TagKey } from "@/lib/messages/tags";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
 
@@ -34,7 +35,18 @@ export type PreflightBlocker =
   | "provider_sends_disabled"
   | "no_sender_number" // API-send stage has no provider_phone_id assigned
   | "no_credentials"
-  | "no_short_domain";
+  | "no_short_domain"
+  // P4 (minor #9): a PERSONALIZED message kickoff refuses for the whole stage —
+  // the same reasons kickoff returns, so the checklist and the send agree.
+  | "segment_ceiling_exceeded"
+  | "multi_segment_not_allowed"
+  | "missing_brand";
+
+const PERSONALIZATION_REFUSAL_LABEL: Record<"segment_ceiling_exceeded" | "multi_segment_not_allowed" | "missing_brand", string> = {
+  segment_ceiling_exceeded: "Personalized message is longer than the segment ceiling, even with no name",
+  multi_segment_not_allowed: "Personalized message needs more than 1 segment — allow multi-segment on the creative or shorten it",
+  missing_brand: "Message uses {brand} but the campaign has no brand",
+};
 
 export interface PreflightCheck {
   key: string;
@@ -190,7 +202,8 @@ export async function preflightStageSend(
   // P4: the stage's personalization rules — NO_TAG_RULES (no layer, no query)
   // unless its message uses a contact tag. Counting rules: a stage kickoff
   // would refuse outright still reports who lacks the data.
-  const tagRules = await loadStageCountingTagRules(dbc, { orgId, stageId });
+  const rawTagRules = await loadStageTagRules(dbc, { orgId, stageId });
+  const tagRules = countingTagRules(rawTagRules);
 
   // Recipient count via the SAME builder the kickoff materializes from.
   const cnt = (await dbc.execute(sql`
@@ -339,6 +352,13 @@ export async function preflightStageSend(
     `Recipients: ${recipientCount.toLocaleString()}`,
     "no_recipients",
   );
+  // P4 (minor #9): only a PERSONALIZED stage gets this check — a tag-less
+  // stage's checklist is unchanged.
+  if (isTagRulesRefusal(rawTagRules)) {
+    add("personalization", false, PERSONALIZATION_REFUSAL_LABEL[rawTagRules.refused], rawTagRules.refused);
+  } else if (rawTagRules.required.length > 0) {
+    add("personalization", true, "Personalized message fits");
+  }
 
   if (mode === "tracked") {
     add(

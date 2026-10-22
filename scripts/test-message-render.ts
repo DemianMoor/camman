@@ -6,6 +6,7 @@ import {
   checkRecipientBody, firstNameMaxLength, renderMessage, renderWorstCase, requiredContactTags, requiredTags, type MessageShape,
 } from "@/lib/messages/render";
 import { buildStageSms } from "@/lib/sends/stage-sms";
+import { tagSkipShare } from "@/lib/messages/skip-share";
 
 let fail = 0;
 const bar = (n: string, ok: boolean, d = "") => {
@@ -159,6 +160,27 @@ eq("R4.2 every tag expands to its worstCase", expandWorstCase("{first_name}|{zip
   `${TAGS.first_name.worstCase}|${TAGS.zip.worstCase}|${TAGS.state.worstCase}|${TAGS.brand.worstCase}`);
 eq("R4.3 unknown tokens and blocks are untouched", expandWorstCase("{FirstName} {url} {creative_text}"), "{FirstName} {url} {creative_text}");
 eq("R4.4 text without tags is unchanged", expandWorstCase("Plain text"), "Plain text");
+
+console.log("\nMinor #1 — trailing rows (owner 2026-10-19: trailing blank rows are trimmed)");
+{
+  const links = ["https://x.co/r/ABC", "", null];
+  const footers = ["Reply STOP to opt out", "", "   "];
+  let endsNl = 0;
+  const trailingSpace: string[] = [];
+  for (const f of SEED_FORMATS) for (const linkUrl of links) for (const stopText of footers) {
+    const shape = { kind: "template" as const, formatId: 1, template: f.template };
+    const r = renderMessage({ shape, brandName: "Acme", creativeText: "Hi there", linkUrl, stopText, recipient: { first_name: null, zip: null, state: null } });
+    if (!r.ok) continue;
+    if (r.body.endsWith("\n")) endsNl++;
+    if (/ $/.test(r.body)) trailingSpace.push(f.name.split(" ")[0]);
+  }
+  eq("R5.1 no seeded format × (link present / empty / null) × (footer / empty / blank) ever ends in a newline", endsNl, 0);
+  eq("R5.2 the only trailing space: T2 with an empty footer (its literal space before {stop_text})", [...new Set(trailingSpace)], ["T2"]);
+}
+
+console.log("\nMinor #11 — skip share with no will_send (the preview timed out)");
+eq("R6.1 will_send null ⇒ no share (nothing to show)", tagSkipShare({ willSend: null, missingData: 3, segmentLimit: 0 }), null);
+eq("R6.2 will_send 5, skipped 5 ⇒ 50%", tagSkipShare({ willSend: 5, missingData: 4, segmentLimit: 1 }), { skipped: 5, pct: 50 });
 
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

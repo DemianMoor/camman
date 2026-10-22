@@ -63,11 +63,11 @@ export function ActivationTagWarning({ campaignId }: { campaignId: number }) {
           excluded_lifecycle?: Record<string, number>;
         };
         const share = tagSkipShare({
-          willSend: e.will_send ?? 0,
+          willSend: e.will_send,
           missingData: e.excluded_lifecycle?.missing_tag_data ?? 0,
           segmentLimit: e.excluded_lifecycle?.segment_limit ?? 0,
         });
-        if (share.pct > SKIP_WARN_PCT) {
+        if (share && share.pct > SKIP_WARN_PCT) {
           found.push({ name: s.label ?? `Stage ${s.stage_number ?? s.id}`, pct: share.pct });
         }
       }

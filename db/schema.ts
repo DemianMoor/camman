@@ -1079,6 +1079,15 @@ export const contact_groups = pgTable(
     // from R3 without hard-coded ids. A system group can never be a partner
     // entry (CHECK below).
     system_role: text("system_role"),
+    // Line-type gate (migration 0218). false = a contact in this ACTIVE group
+    // whose contacts.line_type is voip / unknown is dropped from every campaign
+    // audience and is never routed into a drip journey — in EVERY campaign, not
+    // only ones that select this group (strictest group wins, like the lifecycle
+    // overrides). Selection-time only: queued sends and frozen pools are not
+    // touched. Landlines are always blocked by messaging_status; toll_free is
+    // not gated. See lib/contact-groups/line-type-gate.ts.
+    allow_voip: boolean("allow_voip").notNull().default(true),
+    allow_unknown: boolean("allow_unknown").notNull().default(true),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -4876,6 +4885,8 @@ export const contact_attributes = pgTable(
     last_name: text("last_name"),
     address: text("address"),
     state: text("state"),
+    // 0219: as received (trimmed); the {zip} tag normalizes at render.
+    zip: text("zip"),
     country: text("country"),
     // Stored normalized (lowercase, trimmed) at the write boundary. No unique
     // constraint — see the header note.

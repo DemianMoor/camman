@@ -255,7 +255,26 @@ async function recordBatchError(matchKeys: string[], error: string): Promise<voi
 
 // Brief §9.3: any still-unresolved string affecting >= threshold contacts is a
 // high-impact gap that shouldn't hide. contact_count is derived on read (by key).
+//
+// DAILY DIGEST, not a per-tick alert (owner, 2026-10-21): the cron runs every 30
+// min and this condition persists for days, so it re-posted the same list 48×/day.
+// At most once per ET calendar day, on the first run from 09:00 ET. The gate reads
+// alert_state.last_notified_at (durable — a per-process flag resets on cold start)
+// and is stamped only after Telegram confirms delivery, so a failed send retries on
+// the next tick. withCronLease makes this single-runner, so no claim race.
+const HIGH_VOLUME_ALERT_KEY = "carrier_triage_high_volume";
+
 async function alertHighVolumeUnresolved(): Promise<void> {
+  const [gate] = await db.execute<{ due: boolean }>(sql`
+    SELECT extract(hour FROM now() AT TIME ZONE 'America/New_York') >= 9
+       AND NOT EXISTS (
+         SELECT 1 FROM alert_state
+         WHERE alert_key = ${HIGH_VOLUME_ALERT_KEY}
+           AND last_notified_at >= date_trunc('day', now() AT TIME ZONE 'America/New_York')
+                                   AT TIME ZONE 'America/New_York'
+       ) AS due`);
+  if (!gate?.due) return;
+
   const counts = await contactCountsByMatchKey();
   const unresolved = await db.execute<{ match_key: string; raw_example: string }>(sql`
     SELECT match_key, raw_example FROM carrier_classify_queue
@@ -269,7 +288,12 @@ async function alertHighVolumeUnresolved(): Promise<void> {
   if (hot.length === 0) return;
 
   const lines = hot.map((r) => `• ${r.raw.slice(0, 50)} — ${r.count} contacts`).join("\n");
-  await notifyTelegram(
-    `⚠️ Carrier triage: ${hot.length} unresolved carrier string(s) each affect ≥${HIGH_VOLUME_CONTACTS} contacts:\n${lines}`,
+  const delivered = await notifyTelegram(
+    `⚠️ Carrier triage (daily): ${hot.length} unresolved carrier string(s) each affect ≥${HIGH_VOLUME_CONTACTS} contacts:\n${lines}`,
   );
+  if (!delivered) return;
+  await db.execute(sql`
+    INSERT INTO alert_state (alert_key, org_id, state, since, last_notified_at)
+    VALUES (${HIGH_VOLUME_ALERT_KEY}, NULL, 'firing', now(), now())
+    ON CONFLICT (alert_key) DO UPDATE SET last_notified_at = now()`);
 }

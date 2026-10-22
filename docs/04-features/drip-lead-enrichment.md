@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
+_Last updated: 2026-10-22 (zip attribute, 0219); 2026-10-21 (the contact gets its lookup line_type at creation; 0218 gate); 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -40,6 +40,16 @@ only.
 The asymmetry decides it: discarding is **irreversible and already paid for** (the row is deleted
 and the lookup is spent), while keeping costs one row. `line_type` is stamped on the lead event and
 counted in its own column, so Phase 4 can filter a population it can actually see.
+
+Intake still keeps voip/unknown; **filtering them is a per-group choice** made at selection time —
+the contact group's **Allow VoIP / Allow unknown** boxes (migration 0218,
+[contacts-and-groups.md](contacts-and-groups.md#allowed-number-types-migration-0218)).
+
+**⚠️ The contact gets the lookup's `line_type` / `carrier_norm` when enrichment creates it**
+(2026-10-20). The worker's `syncContactsForPhones` copy runs when the lookup completes — before the
+contact exists — so until this fix every drip contact kept `unknown` / `Unidentified` (421K of them,
+repaired by `scripts/backfill-contact-line-type.ts`). Segment rules on phone type / carrier and the
+0218 gate read the contact's copy, so it has to be right at creation.
 
 **⚠️ "unknown" means two different things** — Telnyx looked and could not classify (8,526 numbers),
 *or* the number was never looked up at all (8,413 contacts). A rule that discarded "unknown" would
@@ -206,3 +216,9 @@ transaction and the status write is the commit point. A re-run after a crash bet
 and "mark processed" is a no-op, because `lead_events` carries a partial `UNIQUE (inbox_id)` and the
 insert is `ON CONFLICT DO NOTHING`. Contact and attribute writes are upserts;
 `COALESCE(EXCLUDED.x, existing)` means a later, sparser lead can never blank a value already known.
+
+## ZIP code (0219, 2026-10-20)
+
+`zip` is a canonical lead field (`lib/intake/fields.ts`; aliases `zip_code`, `zipcode`, `postal_code`, `postal`, `postcode`; a partner key's `field_mapping` wins). `normalizeLead` stores it **trimmed, as received** — except a zip that lost its leading zero: a JSON number or a digits-only value of 3–4 characters is left-padded to 5 (`2134` → `02134`; `normalizeZipInput`, shared with the CSV import and the backfill); the `{zip}` personalization tag normalizes at render (5 digits, ZIP+4 cut — `lib/messages/tags.ts`). The attribute upsert is `upsertLeadAttributes` (same COALESCE rule: a lead without a zip never blanks a known one).
+
+Before 0219 enrichment dropped zip although partner `pml` sends it on ~96% of leads. `scripts/backfill-contact-zip.ts` recovers it from `lead_inbox.raw` for contacts whose zip is still NULL, using the same extraction (`lib/drip/zip-backfill.ts`; newest lead carrying a zip wins). Dry run by default (READ ONLY); `--apply` writes per batch, idempotent, never overwrites a known zip. Owner-gated on prod, off-hours (~300 MB read).

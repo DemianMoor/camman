@@ -123,8 +123,18 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production rollout of carrier resolver v2 (docs/04-features/phone-lookup-carrier.md); dry-run default, writes only behind --apply, snapshots contacts.carrier_norm to a rollback table first",
   },
   {
+    file: "backfill-contact-line-type.ts",
+    viaLibrary: true,
+    why: "one-shot production repair of stale contacts.line_type / carrier_norm (migration 0218 prerequisite); dry-run default, writes only behind --apply, through lib/telnyx/sync-contacts (so it carries no write token of its own)",
+  },
+  {
     file: "backfill-content-dedup-exposures.ts",
     why: "one-shot production backfill of the content-dedup ledgers",
+  },
+  {
+    file: "backfill-contact-zip.ts",
+    viaLibrary: true,
+    why: "owner-gated production backfill of contact_attributes.zip (migration 0219) from lead_inbox.raw; dry-run default (READ ONLY transactions), writes only behind --apply, through lib/drip/zip-backfill (so it carries no write token of its own); only rows still zip IS NULL",
   },
   {
     file: "backfill-conversion-events.ts",

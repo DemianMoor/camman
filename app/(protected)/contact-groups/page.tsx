@@ -68,6 +68,9 @@ type ContactGroup = {
   partner_id: number | null;
   partner_name: string | null;
   system_role: "drip_intake" | "drip_sandbox" | null;
+  // Line-type gate (migration 0218).
+  allow_voip: boolean;
+  allow_unknown: boolean;
   // Lifecycle overrides (migration 0187); null = inherit the org value.
   freeze_after_messages: number | null;
   freeze_cadence_days: number | null;
@@ -622,6 +625,8 @@ export default function ContactGroupsPage() {
               suppress_after_days: editing.suppress_after_days,
               suppress_min_freeze_messages: editing.suppress_min_freeze_messages,
               partner_id: editing.partner_id,
+              allow_voip: editing.allow_voip,
+              allow_unknown: editing.allow_unknown,
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}

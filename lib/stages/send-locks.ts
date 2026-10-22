@@ -27,6 +27,8 @@ export function decideCreativeChange(i: {
   inputCreativeId: number | null | undefined;
   hasSent: boolean;
 }): { ok: true } | { ok: false; reason: "creative_locked_after_send"; message: string } {
+  // Always on, whatever the message-formats UI flag says (owner 2026-10-20):
+  // only the greyed-out picker in the stage form is behind the flag.
   if (!i.isDrip || !i.hasSent || i.inputCreativeId === undefined || i.inputCreativeId === i.currentCreativeId) {
     return { ok: true };
   }

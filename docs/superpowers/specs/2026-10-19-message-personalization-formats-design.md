@@ -72,7 +72,7 @@ One entry per tag. A new tag is one entry here, plus (if it is a contact field) 
 | key | label | scope | source | maxLength | worstCase |
 |---|---|---|---|---|---|
 | `first_name` | First name | contact | `contact_attributes.first_name` | 15 | `"X".repeat(15)` |
-| `zip` | ZIP code | contact | `contact_attributes.zip` (0217) | 5 | `"00000"` |
+| `zip` | ZIP code | contact | `contact_attributes.zip` (0219) | 5 | `"00000"` |
 | `state` | State | contact | `contact_attributes.state` | 2 | `"XX"` |
 | `brand` | Brand | campaign | `brands.name` via `campaigns.brand_id` (A5) | 20 | `"X".repeat(20)` (live max 9) |
 
@@ -293,7 +293,7 @@ A parity test runs both sides over a fixture corpus (accents, ligatures, Cyrilli
   - **BEFORE INSERT trigger:** when both columns are NULL, set `message_format_id := ensure_message_formats(NEW.org_id)`. This keeps the 96 test fixtures and new orgs working without touching `handle_new_user`.
 - **`stage_sends`**: `message_format_id int NULL` (no FK) and `format_custom boolean NOT NULL DEFAULT false`. Both are metadata-only adds.
 
-**0217**: `contact_attributes.zip text NULL`.
+**0219** (planned as 0217; renumbered after main shipped 0218): `contact_attributes.zip text NULL`.
 
 Skip reasons need no schema change: eligibility layer keys, `skipped_ineligible` + `last_error`, and the `drip_journeys.reason` JSON.
 
@@ -302,7 +302,7 @@ Skip reasons need no schema change: eligibility layer keys, `skipped_ineligible`
 | Doc | What changes |
 |---|---|
 | `docs/04-features/` | new `message-formats.md`; `drip-campaigns-routing.md` (rule `creative_tags`); the creatives/sends feature docs |
-| `docs/03-data-model.md` | schema + ERD (0216/0217) |
+| `docs/03-data-model.md` | schema + ERD (0216/0219) |
 | `docs/05-flows.md` | render step in the send flows |
 | `docs/07-conventions.md` | the tag registry as the single source; T1 byte-identity; the format lock |
 | `docs/CHANGELOG.md` | every phase |

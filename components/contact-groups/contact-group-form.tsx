@@ -120,6 +120,8 @@ export function ContactGroupForm({
       suppress_after_days: initialValues?.suppress_after_days ?? null,
       suppress_min_freeze_messages: initialValues?.suppress_min_freeze_messages ?? null,
       partner_id: initialValues?.partner_id ?? null,
+      allow_voip: initialValues?.allow_voip ?? true,
+      allow_unknown: initialValues?.allow_unknown ?? true,
     },
   });
 
@@ -287,6 +289,43 @@ export function ContactGroupForm({
             }}
           />
         ) : null}
+
+        <div className="space-y-2 rounded-md border p-3">
+          <div>
+            <p className="text-sm font-medium">Allowed number types</p>
+            <p className="text-xs text-muted-foreground">
+              Unchecking a type keeps this group&apos;s contacts of that type out of every
+              campaign audience and drip routing, not only campaigns that select this group.
+              Messages already queued still send. Landlines are never sent to.
+            </p>
+          </div>
+          {(
+            [
+              { name: "allow_voip", label: "Allow VoIP numbers" },
+              { name: "allow_unknown", label: "Allow unknown numbers (type not identified)" },
+            ] as const
+          ).map((f) => (
+            <FormField
+              key={f.name}
+              control={form.control}
+              name={f.name}
+              render={({ field }) => (
+                <FormItem>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="size-4"
+                      checked={field.value ?? true}
+                      onChange={(e) => field.onChange(e.target.checked)}
+                      disabled={isSubmitting}
+                    />
+                    {f.label}
+                  </label>
+                </FormItem>
+              )}
+            />
+          ))}
+        </div>
 
         <div className="space-y-3 rounded-md border p-3">
           <div>

@@ -115,6 +115,7 @@ export async function computePreflightBreakdown(
            (SELECT g.source_stage_ids FROM campaign_stage_split_groups g
              WHERE g.id = s.split_group_id) AS source_stage_ids,
            s.creative_id, c.offer_id, c.exclude_prior_offer_contacts, c.lifecycle_rules,
+           c.offer_rules_enabled, c.offer_cooldown_days, c.offer_limit_times,
            s.provider_phone_id, pp.allow_unknown_carrier
     FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
     LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id

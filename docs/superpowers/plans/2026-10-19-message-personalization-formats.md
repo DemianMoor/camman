@@ -349,9 +349,9 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 
 **Files:** Modify `lib/sends/preflight-breakdown.ts:112-123,173`. Test: `scripts/test-preflight-breakdown-offer-rules.ts`.
 
-- [ ] **Step 1:** Failing preview test: a campaign with `offer_rules_enabled=true` and a contact inside the cooldown. The breakdown's dedup/carrier figures must exclude it, which they currently don't.
-- [ ] **Step 2:** Select `offer_rules_enabled`, `offer_cooldown_days` and `offer_limit_times` in the config query and pass them through.
-- [ ] **Step 3:** Before/after on 3 live stages via a read-only run of `computePreflightBreakdown` (choose stages with `offer_rules_enabled`). The PR description gets a table of stage id, before and after per bucket. CHANGELOG. PR, merge on green.
+- [x] **Step 1:** Failing preview test: a campaign with `offer_rules_enabled=true` and a contact inside the cooldown. The breakdown's dedup/carrier figures must exclude it, which they currently don't.
+- [x] **Step 2:** Select `offer_rules_enabled`, `offer_cooldown_days` and `offer_limit_times` in the config query and pass them through.
+- [x] **Step 3:** Before/after on 3 live stages via a read-only run of `computePreflightBreakdown` (choose stages with `offer_rules_enabled`). The PR description gets a table of stage id, before and after per bucket. CHANGELOG. PR, merge on green.
 
 ---
 

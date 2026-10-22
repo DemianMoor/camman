@@ -2,7 +2,7 @@
 
 _Last updated: 2026-10-22 (P4: tags on regular stages; regular format lock at materialized_at)_
 
-How the brand, the creative text, the link and the opt-out footer are assembled into one SMS. Spec: [docs/superpowers/specs/2026-10-19-message-personalization-formats-design.md](../superpowers/specs/2026-10-19-message-personalization-formats-design.md) (§B). Personalization tags (`{first_name}` …) are part A of the same spec. They render on regular stages since P4 (below) and on drip from P5; until P5 a tagged DRIP message is skipped (see Interim below).
+How the brand, the creative text, the link and the opt-out footer are assembled into one SMS. Spec: [docs/superpowers/specs/2026-10-19-message-personalization-formats-design.md](../superpowers/specs/2026-10-19-message-personalization-formats-design.md) (§B). Personalization tags (`{first_name}` …) are part A of the same spec. They render on regular stages since P4 and on drip since P5 (both below).
 
 ## The one renderer
 
@@ -84,7 +84,7 @@ The rules live in [`lib/messages/format-admin.ts`](../../lib/messages/format-adm
 
 Every `stage_sends` row records the shape that rendered it in `message_format_id` (the format) or `format_custom = true`. A pre-0216 row is `NULL` / `false`. The stamp fields are **required** on `StageSendInsertRow` and `DripSendInput`.
 
-## Interim: `tags_not_supported_yet` (drip only, until P5)
+## Interim: `tags_not_supported_yet` (REMOVED — history)
 
 Until per-recipient rendering ships, a message whose creative or custom text uses a **contact** tag (`{first_name}` `{zip}` `{state}`; `requiredContactTags` > 0) is never sent with the literal tag. `{brand}` is campaign data and **renders now** (spec A5) — a creative such as "Hello from {brand}" sends with the campaign's brand name:
 
@@ -94,7 +94,7 @@ Until per-recipient rendering ships, a message whose creative or custom text use
 | drip first send | `skipIfTagged` ([`lib/drip/skip-send.ts`](../../lib/drip/skip-send.ts)) writes one `skipped_ineligible` row per lead with `last_error = 'tags_not_supported_yet'`. The row is idempotent, so a re-selected lead writes nothing new. **The journey is not closed**: it stays `routed` and sends once the tag is removed. |
 | drip follow-up | same row; `already_sent` then stops re-selection |
 
-P4 removed the regular branch; P5 removes the drip branch.
+P4 removed the regular branch and P5 the drip branch; `tags_not_supported_yet` no longer exists in `lib/sends/` or `lib/drip/`. `missing_brand` remains (below).
 
 **`missing_brand`.** A message that uses `{brand}` on a campaign with no brand is refused cleanly (regular: kickoff refusal `missing_brand`, permanent for the scheduled path; drip: one idempotent `skipped_ineligible` row per lead with `last_error = 'missing_brand'`), never thrown.
 
@@ -115,3 +115,7 @@ Regular stages render contact tags per recipient. **No live creative uses a cont
 - **Kickoff** (tagged stages only): enumerate with the rules, then load the recipients' attributes (a separate read, so `stageRecipientsSql` is untouched), then **validate-all** renders every body first. A missing tag or a segment breach is a parity bug ⇒ `per_recipient_render_failed` (permanent refusal) + Telegram, 0 rows. The opt-out gate runs per body: txr refuses, dry-run providers get ONE aggregated alert ("N of M rendered bodies have no STOP"). Regular skips are counts only, no rows.
 - **CSV export is blocked for a tagged stage** (owner, 2026-10-22): `GET …/export-phones` returns `409` with `reason: personalization_tags_not_exportable` and "This stage uses personalization tags — export not supported". The CSV carries phones only, so a manual send would ship the literal tag. Follow-up: the export gains a per-recipient rendered `message` column (tagged stages only).
 - **UI** (behind the flag): creative editor tag picker + "Worst case: N characters · S segments" + unknown-tag warning; stage form "N% would be skipped (missing data X · segment limit Y)"; Prepare dialog missing-by-tag; activation dialog lists stages over 50% (a warning, never a block; `lib/messages/skip-share.ts`). With the flag OFF the Prepare dialog filters the two new buckets out.
+
+## Personalization on drip (P5, 2026-10-22)
+
+Drip renders contact tags per lead: routing rule `creative_tags` (permanent; absent for tag-less campaigns), per-lead render in the scheduler and follow-ups, skip rows `missing_tag:<tag>` / `segment_limit`, first-send skip closes the journey `exited`. Details and the no-op proof: [drip-campaigns-routing.md](drip-campaigns-routing.md#personalization-tags-on-drip-p5-2026-10-22).

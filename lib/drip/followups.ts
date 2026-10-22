@@ -14,7 +14,11 @@ import { closeJourneyUnengaged } from "./lifecycle";
 import { numbersWithHeadroom, pickNumber } from "./numbers";
 import { dispatchDripSend, GateRefused, MintRefused } from "./send-one";
 import { shapeFromStage } from "@/lib/messages/render";
-import { notifyDripSkips, skipIfTagged, tallySkip, type DripSkipTally } from "./skip-send";
+import { notifyDripSkips, skipIfMissingBrand, tallySkip, type DripSkipTally } from "./skip-send";
+import { DripTagSkip, recordDripTagSkip } from "./personalize-drip";
+import { loadRecipientAttributes } from "@/lib/sends/personalize";
+import { formatStamp, requiredContactTags } from "@/lib/messages/render";
+import { NO_RECIPIENT } from "@/lib/messages/tags";
 
 // Behavioural follow-up scheduling (Drip Phase 6).
 //
@@ -73,6 +77,7 @@ interface CandidateRow {
   child_tier: number;
   child_minutes: number;
   child_creative_text: string | null;
+  child_allow_multi_segment: boolean | null;
   child_creative_id: number | null;
   child_stop_text: string | null;
   child_tracking_id: string | null;
@@ -149,7 +154,8 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
                j.first_send_at, j.first_stage_id,
                ch.id AS child_stage_id, ch.behavioral_tier AS child_tier,
                ch.drip_followup_minutes AS child_minutes,
-               cr.text AS child_creative_text, ch.creative_id AS child_creative_id,
+               cr.text AS child_creative_text, cr.allow_multi_segment AS child_allow_multi_segment,
+               ch.creative_id AS child_creative_id,
                ch.stop_text AS child_stop_text, ch.tracking_id AS child_tracking_id,
                ch.full_url AS child_full_url,
                ch.message_format_id AS child_message_format_id,
@@ -262,23 +268,27 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
       if (due.at > now) { res.notDue++; continue; }
       if (!r.child_creative_text) { res.mintRefused++; continue; }
 
-      // 0216 INTERIM (P2 → P5): tag rendering is not built yet. Skip THIS
-      // follow-up with a reason row (already_sent then stops re-selection); the
-      // journey itself is not touched.
+      // {brand} with no campaign brand ⇒ a reason row (already_sent then stops
+      // re-selection); the journey itself is not touched.
       const shape = shapeFromStage({
         message_format_id: r.child_message_format_id,
         custom_text: r.child_custom_text,
         format_template: r.child_format_template,
       });
-      const tagged = await skipIfTagged(db, {
+      const noBrand = await skipIfMissingBrand(db, {
         orgId, campaignId: r.campaign_id, stageId: r.child_stage_id,
         creativeText: r.child_creative_text, shape, brandName: r.brand_name ?? "", leads: [r],
       });
-      if (tagged !== null) {
-        res.tagsSkipped += tagged.written;
-        tallySkip(skipTally, { stageId: r.child_stage_id, campaignName: r.campaign_name ?? String(r.campaign_id), result: tagged });
+      if (noBrand !== null) {
+        res.tagsSkipped += noBrand.written;
+        tallySkip(skipTally, { stageId: r.child_stage_id, campaignName: r.campaign_name ?? String(r.campaign_id), result: noBrand });
         continue;
       }
+      // P5: a personalized follow-up renders with this lead's data; read only
+      // when the message has a contact tag (tag-less: unchanged).
+      const recipient = requiredContactTags({ shape, creativeText: r.child_creative_text }).length > 0
+        ? ((await loadRecipientAttributes(db, orgId, [r.contact_id])).get(r.contact_id) ?? NO_RECIPIENT)
+        : NO_RECIPIENT;
 
       // ⭐ FRESH READ of both stop controls right before queuing. The candidate
       // query's campaign_paused is as old as the tick, and the org gate above
@@ -335,6 +345,8 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
             creativeId: r.child_creative_id,
             creativeText: r.child_creative_text!,
             shape,
+            recipient,
+            allowMultiSegment: r.child_allow_multi_segment === true,
             brandName: r.brand_name ?? "",
             brandId: r.brand_id,
             brandLandingHost: r.brand_landing_host,
@@ -375,6 +387,20 @@ export async function runDripFollowups(now = new Date()): Promise<FollowupResult
           console.error(`[drip-followups] opt-out gate REFUSED journey ${r.journey_id} ` +
             `(child ${r.child_stage_id}): ${e.message}`);
           res.gateRefused++; continue;
+        }
+        if (e instanceof DripTagSkip) {
+          // ⭐ FOLLOW-UP SKIP (owner 2026-10-22): the row only — already_sent then
+          // stops re-selection; the journey is not closed here.
+          const written = await db.transaction((tx) =>
+            recordDripTagSkip(tx, {
+              orgId, campaignId: r.campaign_id, stageId: r.child_stage_id, lead: r,
+              reason: e.reason, renderedText: e.attempted, stamp: formatStamp(shape),
+              exitJourneyId: null,
+            }),
+          );
+          res.tagsSkipped += written;
+          tallySkip(skipTally, { stageId: r.child_stage_id, campaignName: r.campaign_name ?? String(r.campaign_id), result: { reason: e.reason, written } });
+          continue;
         }
         const code = (e as { cause?: { code?: string } })?.cause?.code;
         if (code !== "23505") throw e;

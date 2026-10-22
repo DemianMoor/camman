@@ -59,17 +59,14 @@ export async function insertSkippedSends(
 }
 
 /**
- * 0216 INTERIM (P2 → P5): per-recipient tag rendering is not built yet, so a
- * drip message that needs CONTACT data ({first_name} {zip} {state}) is never
- * sent, and neither is a {brand} message whose campaign has no brand. Returns
- * null when the message can render (send normally); otherwise writes ONE
- * skipped_ineligible row per lead — reason `tags_not_supported_yet` or
- * `missing_brand`, idempotent — and returns the reason and how many rows were
- * NEW (only new rows are alerted: see tallySkip / notifyDripSkips). Journeys are NOT
- * touched: a first send stays routed and goes out once the message is fixed.
+ * A {brand} message whose campaign has no brand cannot render for anyone: ONE
+ * skipped_ineligible row per lead, reason `missing_brand`, idempotent; returns
+ * the reason and how many rows were NEW (only new rows are alerted). Journeys
+ * are NOT touched: a first send stays routed and goes out once a brand is set.
+ * Contact tags are rendered per lead since P5 (lib/drip/personalize-drip.ts).
  * Both drip producers call this BEFORE minting (scripts/test-format-interim.ts).
  */
-export async function skipIfTagged(
+export async function skipIfMissingBrand(
   tx: DripTx,
   i: {
     orgId: string;
@@ -83,12 +80,8 @@ export async function skipIfTagged(
   },
 ): Promise<{ reason: string; written: number } | null> {
   const tags = requiredTags({ shape: i.shape, creativeText: i.creativeText });
-  const reason = tags.some((t) => TAGS[t].scope === "contact")
-    ? "tags_not_supported_yet"
-    : tags.includes("brand") && TAGS.brand.normalize(i.brandName) === null
-      ? "missing_brand"
-      : null;
-  if (reason === null) return null;
+  if (!tags.includes("brand") || TAGS.brand.normalize(i.brandName) !== null) return null;
+  const reason = "missing_brand";
   const written = await insertSkippedSends(tx, {
     orgId: i.orgId, campaignId: i.campaignId, stageId: i.stageId, reason,
     renderedText: i.creativeText, ...formatStamp(i.shape), leads: i.leads,
@@ -119,10 +112,14 @@ export async function notifyDripSkips(t: DripSkipTally): Promise<number> {
   for (const [stageId, s] of t) {
     const why = s.reason === "missing_brand"
       ? "uses {brand} but the campaign has no brand"
-      : "uses personalization tags ({first_name}/{zip}/{state}) that can't be sent yet";
+      : s.reason === "segment_limit"
+        ? "is too long for the segment limit once personalized"
+        : `needs data the lead does not have (${s.reason.replace(/^missing_tag:/, "{")}})`;
     await notifyTelegram(
       `⚠️ Drip: ${s.leads} lead${s.leads === 1 ? "" : "s"} not sent on campaign "${s.campaignName}" · stage id ${stageId} — the message ${why}. ` +
-        `They wait (first sends) or are skipped (follow-ups) until the message is fixed; each lead is reported once.`,
+        (s.reason === "missing_brand"
+        ? `They wait (first sends) or are skipped (follow-ups) until a brand is set; each lead is reported once.`
+        : `First sends are closed (journey exited), follow-ups skipped; each lead is reported once.`),
     ).catch(() => false);
     sent++;
   }

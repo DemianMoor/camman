@@ -151,7 +151,7 @@ async function main() {
     };
 
     const verdictFor = async (evId: string) =>
-      evaluateLeadRouting(db, { orgId, leadEventId: evId });
+      evaluateLeadRouting(db, { orgId, leadEventId: evId, tagRules: "load" });
 
     // ── posture ON (restored in finally) ─────────────────────────────────
     await db.execute(sql`

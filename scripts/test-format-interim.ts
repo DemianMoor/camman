@@ -1,6 +1,7 @@
-// scripts/test-format-interim.ts — 0216 INTERIM drip behaviour (M4.3+): a drip
-// message that uses a personalization tag is skipped with ONE
-// skipped_ineligible row (reason tags_not_supported_yet), journeys untouched.
+// scripts/test-format-interim.ts — drip skip-row helper (M4.3+). Since P5 a
+// CONTACT tag renders per lead (scripts/test-drip-personalization.ts); this
+// helper only covers {brand} with no campaign brand: ONE skipped_ineligible
+// row per lead (reason missing_brand), journeys untouched.
 // Preview DB, rolled back + source guards on the call order.
 //   node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-format-interim.ts
 //
@@ -13,7 +14,7 @@ import "./_require-preview-db"; // MUST be second
 import { readFileSync } from "node:fs";
 import { sql } from "drizzle-orm";
 import { db, sql as pgConn } from "@/db/client";
-import { notifyDripSkips, skipIfTagged, tallySkip, type DripSkipTally } from "@/lib/drip/skip-send";
+import { notifyDripSkips, skipIfMissingBrand, tallySkip, type DripSkipTally } from "@/lib/drip/skip-send";
 import { T1_TEMPLATE } from "@/lib/messages/format";
 
 let failed = 0;
@@ -33,15 +34,15 @@ const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:]
 async function main() {
   console.log("Source guards");
   const sched = strip(readFileSync("lib/drip/scheduler.ts", "utf8"));
-  check("G1 scheduler: skipIfTagged runs before the lead's link is minted",
-    sched.includes("skipIfTagged(") && sched.indexOf("skipIfTagged(") < sched.indexOf("mintDripLeadLink("));
+  check("G1 scheduler: skipIfMissingBrand runs before the lead's link is minted",
+    sched.includes("skipIfMissingBrand(") && sched.indexOf("skipIfMissingBrand(") < sched.indexOf("mintDripLeadLink("));
   const fol = strip(readFileSync("lib/drip/followups.ts", "utf8"));
-  check("G2 follow-ups: skipIfTagged runs before dispatchDripSend",
-    fol.includes("skipIfTagged(") && fol.indexOf("skipIfTagged(") < fol.indexOf("dispatchDripSend("));
+  check("G2 follow-ups: skipIfMissingBrand runs before dispatchDripSend",
+    fol.includes("skipIfMissingBrand(") && fol.indexOf("skipIfMissingBrand(") < fol.indexOf("dispatchDripSend("));
   check("G4 both producers tally and alert the tick's NEW skips", sched.includes("notifyDripSkips(") && fol.includes("notifyDripSkips(") && sched.includes("tallySkip(") && fol.includes("tallySkip("));
   check("G3 the skip never touches journeys (no journey close)", !strip(readFileSync("lib/drip/skip-send.ts", "utf8")).includes("drip_journeys"));
 
-  console.log("\nskipIfTagged (preview, rolled back)");
+  console.log("\nskipIfMissingBrand (preview, rolled back)");
   try {
     await db.transaction(async (tx) => {
       const sfx = Date.now().toString().slice(-8);
@@ -55,32 +56,34 @@ async function main() {
       const leads = [await mk(1), await mk(2)];
       const t1 = { kind: "template" as const, formatId: 7, template: T1_TEMPLATE };
 
-      const none = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi there", shape: t1, brandName: "G", leads });
+      const none = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi there", shape: t1, brandName: "G", leads });
       check("M4.3 untagged message ⇒ null (send normally), no rows", none === null);
-      const brandOnly = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi from {brand}", shape: t1, brandName: "G", leads });
+      const brandOnly = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi from {brand}", shape: t1, brandName: "G", leads });
       check("M4.3b {brand} only ⇒ null (renders from the campaign, sends normally)", brandOnly === null);
       const nbStage = (await one<{ id: number }>(sql`INSERT INTO campaign_stages (org_id, campaign_id) VALUES (${org}, ${camp}) RETURNING id`)).id;
-      const noBrand = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: nbStage, creativeText: "Hi from {brand}", shape: t1, brandName: " ", leads });
+      const noBrand = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: nbStage, creativeText: "Hi from {brand}", shape: t1, brandName: " ", leads });
       const nbRows = (await tx.execute(sql`SELECT DISTINCT last_error FROM stage_sends WHERE stage_id = ${nbStage}`)) as unknown as { last_error: string }[];
       check("M4.3c {brand} with an EMPTY campaign brand ⇒ skip rows with reason missing_brand (no throw)",
         noBrand?.written === 2 && noBrand.reason === "missing_brand" && nbRows.length === 1 && nbRows[0].last_error === "missing_brand", JSON.stringify({ noBrand, nbRows }));
 
-      const first = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, brandName: "G", leads });
-      const again = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, brandName: "G", leads });
+      const tagOnly = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {first_name}", shape: t1, brandName: "G", leads });
+      check("M4.4a a CONTACT tag is no longer this helper's business (P5 renders it per lead) ⇒ null", tagOnly === null);
+      const first = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {brand}", shape: t1, brandName: " ", leads });
+      const again = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: stage, creativeText: "Hi {brand}", shape: t1, brandName: " ", leads });
       const rows = (await tx.execute(sql`
         SELECT status, last_error, message_format_id, format_custom, link_id FROM stage_sends WHERE stage_id = ${stage}`)) as unknown as
         { status: string; last_error: string; message_format_id: number | null; format_custom: boolean; link_id: number | null }[];
-      check("M4.4 drip first send, tagged ⇒ one skipped_ineligible row per lead, reason tags_not_supported_yet, stamped, no link",
-        first?.written === 2 && rows.length === 2 && rows.every((r) => r.status === "skipped_ineligible" && r.last_error === "tags_not_supported_yet"
+      check("M4.4 drip first send, {brand} with no brand ⇒ one skipped_ineligible row per lead, reason missing_brand, stamped, no link",
+        first?.written === 2 && rows.length === 2 && rows.every((r) => r.status === "skipped_ineligible" && r.last_error === "missing_brand"
           && r.message_format_id === 7 && r.format_custom === false && r.link_id === null), JSON.stringify(rows));
       check("M4.5 re-selected next tick ⇒ no second row (idempotent)", again?.written === 0);
 
       const child = (await one<{ id: number }>(sql`INSERT INTO campaign_stages (org_id, campaign_id) VALUES (${org}, ${camp}) RETURNING id`)).id;
-      const custom = { kind: "custom" as const, text: "{zip}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}" };
-      const fu = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: child, creativeText: "Hi", shape: custom, brandName: "G", leads: [leads[0]] });
+      const custom = { kind: "custom" as const, text: "{brand}<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}" };
+      const fu = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: child, creativeText: "Hi", shape: custom, brandName: " ", leads: [leads[0]] });
       const fuRow = await one<{ n: number; custom: boolean }>(sql`
         SELECT count(*)::int AS n, bool_and(format_custom) AS custom FROM stage_sends WHERE stage_id = ${child} AND status = 'skipped_ineligible'`);
-      check("M4.6 drip follow-up whose CUSTOM text has a tag ⇒ one skip row (already_sent then stops re-selection), format_custom",
+      check("M4.6 drip follow-up whose CUSTOM text needs {brand} (no brand) ⇒ one skip row (already_sent then stops re-selection), format_custom",
         fu?.written === 1 && fuRow.n === 1 && fuRow.custom === true, JSON.stringify({ fu, fuRow }));
       // Review fix: ONE statement per batch (the existing-skip set read once), not one per lead.
       const many = await Promise.all(Array.from({ length: 50 }, (_, k) => mk(100 + k)));
@@ -92,17 +95,17 @@ async function main() {
           return Reflect.get(target, key, recv);
         },
       });
-      const wrote = await skipIfTagged(counting, { orgId: org, campaignId: camp, stageId: bigStage, creativeText: "Hi {zip}", shape: t1, brandName: "G", leads: many });
+      const wrote = await skipIfMissingBrand(counting, { orgId: org, campaignId: camp, stageId: bigStage, creativeText: "Hi {brand}", shape: t1, brandName: " ", leads: many });
       check("M4.7 50 leads ⇒ 50 rows in ONE statement", wrote?.written === 50 && statements === 1, JSON.stringify({ wrote, statements }));
-      const half = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: bigStage, creativeText: "Hi {zip}", shape: t1, brandName: "G", leads: [...many.slice(0, 10), await mk(999)] });
+      const half = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: bigStage, creativeText: "Hi {brand}", shape: t1, brandName: " ", leads: [...many.slice(0, 10), await mk(999)] });
       check("M4.8 a batch mixing already-skipped and new leads writes only the new one", half?.written === 1, JSON.stringify(half));
-      // Ruling 3 (owner 2026-10-19): the interim drip skip ALERTS once per (stage, lead), never every tick —
+      // Ruling 3 (owner 2026-10-19): a drip skip ALERTS once per (stage, lead), never every tick —
       // one Telegram per stage per tick, counting only NEWLY skipped leads.
       telegramCalls = 0;
       const tally: DripSkipTally = new Map();
       const alertStage = (await one<{ id: number }>(sql`INSERT INTO campaign_stages (org_id, campaign_id) VALUES (${org}, ${camp}) RETURNING id`)).id;
       const tick = async () => {
-        const r = await skipIfTagged(tx, { orgId: org, campaignId: camp, stageId: alertStage, creativeText: "Hi {first_name}", shape: t1, brandName: "G", leads: many.slice(0, 5) });
+        const r = await skipIfMissingBrand(tx, { orgId: org, campaignId: camp, stageId: alertStage, creativeText: "Hi {brand}", shape: t1, brandName: " ", leads: many.slice(0, 5) });
         tallySkip(tally, { stageId: alertStage, campaignName: "fi", result: r });
         return notifyDripSkips(tally);
       };

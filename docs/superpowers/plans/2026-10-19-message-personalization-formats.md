@@ -482,6 +482,9 @@ The representative-body block at `kickoff.ts:543-616` is replaced by steps 1 and
 
 ## P5 — Tags on drip
 
+**Owner rules (2026-10-22, spec "P5 owner rules"):** flag rule as P4; `creative_tags` permanent; first-send skip ⇒ row + journey `exited`; follow-up skip ⇒ row only; segment limit on personalized bodies only. **Task 5 (no-op proof, read-only on prod):** recent drip sends re-rendered with recipient data == stored; `evaluateLeadRouting` main vs P5 on recent leads ⇒ identical verdicts.
+
+
 ### Task 1: Routing rule `creative_tags`
 
 **Files:** Modify `lib/drip/routing-eval.ts` (candidate SQL loads first-send stage texts/shape/allow_multi/brand; per-candidate rule before `eligible` at ~:693; `ca2.first_name`, `ca2.zip` selected), `lib/drip/routing.ts` (per-run cache of each candidate's `TagRules`). Test: `scripts/test-drip-routing-tags.ts`.

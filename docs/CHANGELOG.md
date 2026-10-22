@@ -2186,3 +2186,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-22 — HOTFIX: GET /api/campaigns/<draft>/stages returned 500 for every draft campaign with >= 1 stage since 69cac487 (2026-07-03): the shared split filter hashes contact_id, which the draft batch (computeStageAudienceCountsBatchForDraft) never selected. qualified now carries flagged.contact_id — CHANGELOG only
 
 2026-10-22 — Stage CSV export blocked (409 personalization_tags_not_exportable) when the stage's message uses a contact tag; tag-less export unchanged — 04-features/message-formats
+
+2026-10-22 — P5 personalization on drip: routing rule creative_tags (permanent; absent for tag-less campaigns), per-lead render in scheduler + follow-ups, skip rows missing_tag:<tag> / segment_limit (first-send skip ⇒ journey exited), segment check on personalized bodies only, interim tags_not_supported_yet removed; no migration, no UI change — 04-features/drip-campaigns-routing, message-formats, 05-flows, CLAUDE.md §10h

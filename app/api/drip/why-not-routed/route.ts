@@ -85,7 +85,7 @@ export async function GET(req: NextRequest) {
 
   // Explain the most recent arrival — live, against today's campaigns.
   const latest = events[0] as { id: string };
-  const verdict = await evaluateLeadRouting(db, { orgId, leadEventId: latest.id });
+  const verdict = await evaluateLeadRouting(db, { orgId, leadEventId: latest.id, tagRules: "load" });
 
   return NextResponse.json({
     phone,

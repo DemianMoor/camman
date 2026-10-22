@@ -11,6 +11,7 @@ import type { db } from "@/db/client";
 import { buildRepresentativeTrackedLinkUrl } from "@/lib/links/tracked-link";
 import {
   NO_TAG_RULES,
+  campaignTagRules,
   isTagRulesRefusal,
   requiredContactTags,
   shapeFromStage,
@@ -19,7 +20,7 @@ import {
   type TagRulesRefusal,
 } from "@/lib/messages/render";
 import { tagMissingSql } from "@/lib/messages/tag-sql";
-import type { TagKey } from "@/lib/messages/tags";
+import { TAGS, TAG_KEYS, type TagKey } from "@/lib/messages/tags";
 import { resolveOptOutFooter } from "@/lib/sends/opt-out-footer";
 import { getDescriptor } from "@/lib/sends/providers/registry";
 import { resolveShortDomainForSend } from "@/lib/sends/resolve-short-domain";
@@ -43,7 +44,7 @@ export interface TagRulesSource {
 export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagRules | TagRulesRefusal> {
   if (s.creativeId == null) return NO_TAG_RULES;
   const rows = (await dbc.execute(sql`
-    SELECT cr.text AS creative_text, cr.allow_multi_segment,
+    SELECT cr.text AS tag_creative_text, cr.allow_multi_segment,
            c.link_mode, c.brand_id, b.name AS brand_name,
            coalesce(mf.template, dmf.template) AS format_template,
            coalesce(mf.id, dmf.id) AS format_id,
@@ -60,7 +61,7 @@ export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagR
     WHERE c.id = ${s.campaignId} AND c.org_id = ${s.orgId}::uuid
     LIMIT 1
   `)) as unknown as {
-    creative_text: string | null;
+    tag_creative_text: string | null;
     allow_multi_segment: boolean | null;
     link_mode: string;
     brand_id: number | null;
@@ -80,7 +81,7 @@ export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagR
   });
   // Cheap exit BEFORE any footer / domain lookup: the common case, and the
   // guarantee that a tag-less stage is untouched.
-  if (requiredContactTags({ shape, creativeText: r.creative_text }).length === 0) return NO_TAG_RULES;
+  if (requiredContactTags({ shape, creativeText: r.tag_creative_text }).length === 0) return NO_TAG_RULES;
 
   const descriptor = r.adapter_code ? getDescriptor(r.adapter_code) : null;
   const footer = resolveOptOutFooter({
@@ -103,7 +104,7 @@ export async function loadTagRules(dbc: DbOrTx, s: TagRulesSource): Promise<TagR
   return stageTagRules({
     shape,
     brandName: r.brand_name ?? "",
-    creativeText: r.creative_text,
+    creativeText: r.tag_creative_text,
     linkUrl,
     stopText: footer.text,
     allowMultiSegment: r.allow_multi_segment === true,
@@ -184,3 +185,68 @@ export async function countMissingByTag(
   `)) as unknown as Record<string, number>[];
   return Object.fromEntries(keys.map((k) => [k, Number(rows[0]?.[`m_${k}`] ?? 0)]));
 }
+
+/**
+ * P5: every live DRIP campaign's rules, from its ACTIVE FIRST-SEND stages only
+ * (a follow-up child never decides routing). Built once per routing tick (the
+ * worker's cache) or per call (the why-not-routed tool).
+ *
+ * ⭐ MEASURED WITH THE NUMBERS THAT WILL SEND. A drip stage has no number of its
+ * own — the scheduler picks one per lead from the campaign's pool — so each
+ * tagged stage is evaluated once per active pool number (its footer, its
+ * short-domain override) and the MOST RESTRICTIVE wins (campaignTagRules).
+ * Routing then never admits a lead the send would skip for length. An empty
+ * pool falls back to the stage's own inputs.
+ *
+ * Cheap for the common case: one query finds the stages whose creative or
+ * custom text carries a contact tag; tag-less campaigns map to NO_TAG_RULES
+ * without any per-stage work.
+ */
+export async function loadCampaignTagRules(
+  dbc: DbOrTx,
+  orgId: string,
+  campaignIds: number[],
+): Promise<Map<number, TagRules | TagRulesRefusal>> {
+  const out = new Map<number, TagRules | TagRulesRefusal>();
+  if (campaignIds.length === 0) return out;
+  const ids = `{${campaignIds.join(",")}}`;
+  const tagged = (await dbc.execute(sql`
+    SELECT s.campaign_id, s.creative_id, s.message_format_id, s.custom_text, s.stop_text, s.short_url
+    FROM campaign_stages s
+    LEFT JOIN creatives cr ON cr.id = s.creative_id AND cr.org_id = s.org_id
+    WHERE s.org_id = ${orgId}::uuid
+      AND s.campaign_id = ANY(${ids}::int[])
+      AND s.drip_active IS TRUE AND s.archived_at IS NULL AND s.parent_stage_id IS NULL
+      AND (cr.text ~ ${CONTACT_TAG_RE} OR s.custom_text ~ ${CONTACT_TAG_RE})
+  `)) as unknown as {
+    campaign_id: number; creative_id: number | null; message_format_id: number | null;
+    custom_text: string | null; stop_text: string | null; short_url: string | null;
+  }[];
+  const pool = tagged.length === 0 ? [] : ((await dbc.execute(sql`
+    SELECT n.campaign_id, pp.id AS phone_id, pp.provider_id
+    FROM drip_campaign_numbers n
+    JOIN provider_phones pp ON pp.id = n.provider_phone_id AND pp.org_id = n.org_id AND pp.status = 'active'
+    JOIN sms_providers sp ON sp.id = pp.provider_id AND sp.status = 'active'
+    WHERE n.org_id = ${orgId}::uuid AND n.campaign_id = ANY(${ids}::int[])
+  `)) as unknown as { campaign_id: number; phone_id: number; provider_id: number }[]);
+  const per = new Map<number, (TagRules | TagRulesRefusal)[]>();
+  for (const st of tagged) {
+    const numbers = pool.filter((n) => n.campaign_id === st.campaign_id);
+    const senders = numbers.length > 0
+      ? numbers.map((n) => ({ phone: n.phone_id as number | null, provider: n.provider_id as number | null }))
+      : [{ phone: null, provider: null }];
+    for (const n of senders) {
+      const r = await loadTagRules(dbc, {
+        orgId, campaignId: st.campaign_id, creativeId: st.creative_id,
+        messageFormatId: st.message_format_id, customText: st.custom_text, stopText: st.stop_text,
+        smsProviderId: n.provider, providerPhoneId: n.phone, shortUrl: st.short_url,
+      });
+      per.set(st.campaign_id, [...(per.get(st.campaign_id) ?? []), r]);
+    }
+  }
+  for (const id of campaignIds) out.set(id, campaignTagRules(per.get(id) ?? []));
+  return out;
+}
+
+/** A contact-tag token, generated from the registry (exact lowercase keys, as findTags). */
+const CONTACT_TAG_RE = String.raw`\{(` + TAG_KEYS.filter((k) => TAGS[k].scope === "contact").join("|") + String.raw`)\}`;

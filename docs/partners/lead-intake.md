@@ -53,6 +53,7 @@ kept**, not discarded, so nothing is lost if you send more than the list below.
 | `email` | Email | email | no | `email_address`, `mail` | `jane@example.com` | Stored lowercased and trimmed. Not a unique key; the phone number is the identity. |
 | `address` | Address | string | no | `street`, `address1`, `address_line_1` | `123 Main St` |  |
 | `state` | State | string | no | `st`, `region`, `province` | `TX` |  |
+| `zip` | ZIP Code | string | no | `zip_code`, `zipcode`, `postal_code`, `postal`, `postcode` | `02134` | US ZIP or ZIP+4. Stored as received. |
 | `country` | Country | string | no | `country_code` | `US` |  |
 | `gender` | Gender | enum | no | `sex` | `female` | Allowed: `male` · `female` · `other` |
 | `dob` | Date of Birth | date | no | `date_of_birth`, `birth_date`, `birthday` | `1985-04-17` | ISO 8601 (YYYY-MM-DD). Omit or send an empty value when unknown. Epoch placeholders such as 1970-01-01 are treated as unknown and discarded. |

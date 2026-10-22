@@ -357,6 +357,15 @@ Create `scripts/test-stage-format-copy-guard.ts`, and add it to `check:guards`.
 
 ## P4 — Tags on regular campaigns
 
+**Owner rules (2026-10-22, spec "P4 owner rules"):** all new UI in Tasks 1 and 5 renders only behind `NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED` (OFF) — extend `scripts/test-message-formats-ui-flag.ts` with a source guard per surface. Backend is not gated but must be a no-op on every current stage (Task 6). No migration. Nothing paid.
+
+### Task 0: Regular-stage format lock → `materialized_at IS NOT NULL`
+
+**Files:** Modify `lib/messages/stage-format.ts` (`decideStageFormatChange` input `hasSent` → `locked`), `app/api/campaigns/[campaignId]/stages/[stageId]/route.ts` (regular: `materialized_at IS NOT NULL`; drip: `stageHasSent`). Test: `scripts/test-stage-format-rules.ts` (M3.5–M3.7 renamed to the lock, plus M3.16 regular materialized-but-unsent ⇒ 409, M3.17 drip materialized-but-unsent ⇒ ok) and a source bar on the route.
+
+- [ ] **Step 1:** Failing M3.16/M3.17 + source bar. **Step 2:** Implement. ✓. Commit.
+
+
 ### Task 1: Creative editor: tag picker, worst case, unknown tokens
 
 **Files:** Create `components/messages/tag-picker.tsx`. Modify `components/creatives/creative-form.tsx`, `bulk-creative-form.tsx`.
@@ -462,6 +471,12 @@ The representative-body block at `kickoff.ts:543-616` is replaced by steps 1 and
 
 - [ ] **Step 1:** Playwright check on preview (fixture campaign with 60% missing): the warning is shown and Activate stays clickable.
 - [ ] **Step 2:** Docs (`04-features` creatives + sends, `05-flows`, `07-conventions` tag registry, CLAUDE.md §10h tags, CHANGELOG). PR.
+
+### Task 6: No-op proof on live data (read-only, in the PR)
+
+- [ ] **Step 1:** Confirm read-only that no active/non-archived creative or stage `custom_text` contains a contact tag (`{first_name}` `{zip}` `{state}`).
+- [ ] **Step 2:** Byte-identity: for N recently prepared regular stages, re-render every `stage_sends` row with the P4 per-recipient path (the recipient's own attributes, stored link + footer) and compare to the stored `rendered_text` — 0 diffs.
+- [ ] **Step 3:** Preflight counts: `computePreflightBreakdown` on 3 live stages with main's code vs P4's code in one READ ONLY transaction — every bucket identical, `missing_tag_data` = `segment_limit` = 0.
 
 ---
 

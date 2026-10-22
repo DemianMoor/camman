@@ -7,7 +7,7 @@ Status: RECON APPROVED by the owner 2026-10-19 (answers 1–5, approvals and blo
 - **R1 Regular campaigns get tag support too.** The stage editor shows "N% would be skipped" from the audience preview. Activation shows a **warning, never a block**, when more than 50% of a stage's audience would be skipped.
 - **R2 Missing tag at drip routing is PERMANENT.** The lead falls through to the next-priority campaign; if no campaign fits, it becomes `unroutable`.
 - **R3 Regular skips are eligibility-layer counts only — no `stage_sends` rows.** Drip writes `stage_sends` rows with `status='skipped_ineligible'` and the reason in `last_error`.
-- **R4 Format lock.** A stage's message format locks after its first send, with the same rule and the same server guard as the drip creative lock (A9). Before the first send, both stay editable.
+- **R4 Format lock.** A stage's message format locks once the stage is committed to a send. **Regular stages: `materialized_at IS NOT NULL`** (the rendered bodies already exist, so changing the format would no longer change the messages — owner, 2026-10-20, applied in P4). **Drip stages: sent ≥ 1**, with the same rule and the same server guard as the drip creative lock (A9). Before that, both stay editable.
 - **R5 Custom stage text is owner-only (`compliance.manage`)**, the same as `stop_text`. Operators pick from enabled templates only.
 - **Approved:**
   - the opt-out check moves to per-recipient in kickoff; dry-run providers get **one aggregated Telegram alert per stage**
@@ -30,11 +30,17 @@ All six confirmed; point 3 changed to a block. Further owner corrections, 2026-1
 - **Permission set:** `message_formats.manage` excludes the operator (B1).
 
 1. **Where the >50% warning appears.** In two places: the campaign status dialog for draft → active (for every existing stage whose creative uses tags), and the stage Prepare dialog. Both are non-blocking.
-2. **The format lock covers ALL stages, regular and drip** (sent ≥ 1). By Format revenue is attributed per stage (Keitaro rows), so a format changed after a regular stage has sent would relabel its history. The creative lock stays drip-only, per A9.
+2. **The format lock covers ALL stages, regular and drip** — regular from `materialized_at IS NOT NULL`, drip from sent ≥ 1 (R4; the regular trigger changed from sent ≥ 1 in P4). By Format revenue is attributed per stage (Keitaro rows), so a format changed after a regular stage has sent would relabel its history. The creative lock stays drip-only, per A9.
 3. **A custom-text stage still requires a creative.** The exposure ledger, content dedup, By Creative and kickoff's `no_creative` gate all key on it. **CHANGED by the owner 2026-10-19: block, not warn.** Custom text must contain `{creative_text}` (see B4).
 4. **The drip routing rule also covers the segment limit**, not only missing data. A lead whose first name is too long for any first-send stage of a campaign falls through at routing rather than being admitted and then skipped.
 5. **A drip FIRST send skipped at send time** (the creative changed after routing) writes the skipped row and closes the journey: `state='exited'`, `close_reason` = the same reason string. Without the close, the scheduler would pick the journey up again on the next tick.
 6. **Unknown brace tokens stay literal.** Tag keys match exactly (lowercase). Live creative 637 contains `{FirstName}` and keeps rendering exactly as today. The creative editor warns "unknown tag {FirstName} — will be sent literally" but does not refuse the save.
+
+## P4 owner rules (2026-10-22)
+
+- **UI behind the flag.** Every new P4 UI surface — tag picker, worst-case length, "N% would be skipped", the >50% warnings, the skip buckets in the Prepare/status dialogs — renders only when `NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED` is on. It stays OFF.
+- **Backend not gated, but a proven no-op.** The eligibility layers, per-recipient render, per-recipient opt-out gate and kickoff validate-all run for every stage. No live creative uses a contact tag, so on every current stage they must change nothing. Proof required in the PR: pre/post byte-identity of prepared (`stage_sends.rendered_text`) rows, and identical preflight counts on 3 live stages.
+- **No migration in P4. Nothing paid.**
 
 ## Recon facts this design rests on (origin/main cdf96d7f, prod 2026-10-19)
 
@@ -274,7 +280,7 @@ A parity test runs both sides over a fixture corpus (accents, ligatures, Cyrilli
 ### C4. Locks and permissions
 
 - `lib/stages/send-locks.ts` holds `stageHasSent`.
-- Format lock: 409 `format_locked_after_send`, applied to all stages (point 2). Creative lock: drip only. Custom text: `compliance.manage`.
+- Format lock: 409 `format_locked_after_send`, applied to all stages (point 2): regular when `materialized_at IS NOT NULL`, drip when sent ≥ 1 (`stageHasSent`). Creative lock: drip only. Custom text: `compliance.manage`.
 - Every new route is classified in `lib/authz/route-map.ts`.
 
 ## D. Schema

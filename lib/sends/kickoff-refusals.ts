@@ -68,10 +68,12 @@ export const KICKOFF_REFUSAL: Record<KickoffRefusal, { status: number; message: 
     status: 400,
     message: "This message uses {brand} but the campaign has no brand — set the campaign's brand before sending",
   },
-  tags_not_supported_yet: {
-    status: 400,
+  // P4: the skip rules and the renderer disagreed for a personalized message —
+  // a bug, not an operator error. Nothing was prepared; an alert went out.
+  per_recipient_render_failed: {
+    status: 500,
     message:
-      "This message uses personalization tags ({first_name}, {zip}, {state}) that can't be sent yet — remove them from the creative or the custom text",
+      "A personalized message failed to render for one of the recipients — nothing was prepared. This is a bug; it has been reported",
   },
   no_sender_number: {
     status: 400,

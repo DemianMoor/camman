@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-10-19_
+_Last updated: 2026-10-23_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -18,6 +18,35 @@ opened via a **"Group Report"** link on each row of the Offers list
 ([app/(protected)/offers/page.tsx](../../app/(protected)/offers/page.tsx)),
 before the row's `⋯` actions dropdown. Visible to anyone with `offers.view`
 (viewer role and up) — same permission as the rest of the offer registry.
+
+**Second entry point — Reports → "Offers x Group"** (`/reports/offer-groups`,
+added 2026-10-23): the same report behind an offer dropdown instead of a route
+param, so it can be reached without going through Offers. The by-offer
+`/reports/offer` tab is a different report and is unchanged.
+
+- **One component, one API call.** Both screens render
+  [components/reports/offer-group-report.tsx](../../components/reports/offer-group-report.tsx)
+  (`<OfferGroupReport offerId heading>`), which fetches
+  `GET /api/offers/[offerId]/report` exactly as before. Only the `heading` slot
+  differs: the offers page passes its back link + "Group Report — <offer>" title;
+  the Reports tab passes the offer name. Same columns, footer, benchmark,
+  manual-stage labels, notes, staleness warning, lifecycle checkbox, Refresh and
+  CSV — by construction, not by copy.
+- **Offer dropdown:** [components/reports/offers-by-group-report.tsx](../../components/reports/offers-by-group-report.tsx)
+  uses the existing `<OfferPicker>` (search + pinned + recent). Options come from
+  `/api/offers/list?pageSize=500&showArchived=true` — **active and archived**
+  offers (archived ones suffixed "(archived)"), since an archived offer's history
+  is still reportable. Pins/recents are the shared `"offers"` namespace of
+  `usePickerPrefs` (localStorage, per browser) — the same lists as the campaign
+  editor and /creatives.
+- **No data filters** — no date range, no group/provider/brand filter; the offer
+  is the only control. The selected offer is in `?offer=<id>` (deep-linkable,
+  like Landing Pages). Changing the offer remounts the report (`key={offerId}`),
+  so sort order and the lifecycle checkbox reset and a previous offer's rows
+  never show under the new name.
+- **Gating:** sidebar item + tab use `campaigns.view` like every report; the data
+  route still checks `offers.view`. Both are in every role from viewer up.
+- The offers-screen entry point is kept for now; removing it is a separate step.
 
 ## Metric definitions (LOCKED)
 
@@ -471,8 +500,8 @@ Telegram report's Warsaw-time cron — see [crons.md](crons.md)).
 
 ## UI
 
-[app/(protected)/offers/[id]/report/page.tsx](../../app/(protected)/offers/[id]/report/page.tsx)
-— a lightweight custom sortable table (not the `DataTable` wrapper, which can't
+[components/reports/offer-group-report.tsx](../../components/reports/offer-group-report.tsx)
+(rendered by both entry points above) — a lightweight custom sortable table (not the `DataTable` wrapper, which can't
 pin rows or foot a table; justified by the small per-offer row count).
 
 - **Columns:** Group · Sends · RPM · Net RPM · EPC · CTR % · Sales · Opt-out % · Net
@@ -569,7 +598,13 @@ registration as a sale, and nothing here is waiting for a backfill.
   and the read-back that proves they applied. One caller only.
 - `app/api/offers/[id]/report/route.ts` — the API route.
 - `app/api/cron/refresh-offer-group-report/route.ts` — the twice-daily refresh cron.
-- `app/(protected)/offers/[id]/report/page.tsx` — the report page.
+- `components/reports/offer-group-report.tsx` — the report UI (table, footer,
+  benchmark, notes, CSV), shared by both entry points.
+- `app/(protected)/offers/[id]/report/page.tsx` — offers-screen wrapper (back
+  link + title).
+- `app/(protected)/reports/offer-groups/page.tsx` +
+  `components/reports/offers-by-group-report.tsx` — the Reports → "Offers x
+  Group" tab (offer dropdown + the shared report).
 - `app/(protected)/offers/page.tsx` — the "Group Report" entry-point link.
 - `vercel.json` — cron registration.
 - `scripts/verify-offer-group-attribution.ts` — the only gate on this work;

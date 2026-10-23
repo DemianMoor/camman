@@ -15,11 +15,12 @@ import { messageFormatsUiEnabled } from "@/lib/messages/ui-flag";
 // derived from the pathname so it stays correct on refresh and matches the
 // sidebar's Reports group.
 //
-// Delivery, Audience Stats, Landing Pages, Lifecycle and Group x Lifecycle are listed
+// Delivery, Audience Stats, Landing Pages, Offers x Group, Lifecycle and Group x Lifecycle are listed
 // explicitly rather than through REPORT_DIMENSIONS: like Overview each has its
 // own route and its own column set (delivery receipts; offer results per
 // contact group from the offer group report matviews; per-landing-page results
-// for one offer on a send-date basis; per-cohort metrics from
+// for one offer on a send-date basis; the offer group report for one offer;
+// per-cohort metrics from
 // the per-send lifecycle stamp; per-group sendable/available counts), so none
 // of them is a PerformanceReport dimension.
 const TABS: { href: string; label: string; exact: boolean }[] = [
@@ -33,6 +34,7 @@ const TABS: { href: string; label: string; exact: boolean }[] = [
   { href: "/reports/delivery", label: "Delivery", exact: false },
   { href: "/reports/audience", label: "Audience Stats", exact: false },
   { href: "/reports/landing-pages", label: "Landing Pages", exact: false },
+  { href: "/reports/offer-groups", label: "Offers x Group", exact: false },
   { href: "/reports/partners", label: "By Partner", exact: false },
   { href: "/reports/lifecycle", label: "Lifecycle", exact: false },
   { href: "/reports/group-lifecycle", label: "Group × Lifecycle", exact: false },

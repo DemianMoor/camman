@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { sql } from "drizzle-orm";
+import { lifecycleStampInsertSql } from "@/lib/engagement/lifecycle-stamp";
 
 import type { db } from "@/db/client";
 import { notifyTelegram } from "@/lib/alerts/telegram";
@@ -1044,14 +1045,7 @@ export async function bulkInsertStageSends(
         ON CONFLICT (stage_id, contact_id) WHERE status IN ('pending', 'sending')
         DO NOTHING
         RETURNING id, org_id, contact_id
-      ), stamp AS (
-        INSERT INTO stage_send_lifecycle (stage_send_id, org_id, status)
-        SELECT ins.id, ins.org_id, coalesce(ce.status, 'new')
-        FROM ins
-        LEFT JOIN contact_engagement ce
-          ON ce.contact_id = ins.contact_id AND ce.org_id = ins.org_id
-        ON CONFLICT (stage_send_id) DO NOTHING
-      )
+      ), stamp AS (${lifecycleStampInsertSql(sql`ins`)})
       SELECT id FROM ins
     `)) as unknown as { id: string }[];
     inserted += Array.isArray(res) ? res.length : 0;

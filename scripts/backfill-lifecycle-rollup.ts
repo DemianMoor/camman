@@ -15,6 +15,7 @@ import "./_env-preload";
 // Run:
 //   npx tsx --conditions=react-server scripts/backfill-lifecycle-rollup.ts --days 92
 //   npx tsx --conditions=react-server scripts/backfill-lifecycle-rollup.ts --days 92 --chunk 3
+//   npx tsx --conditions=react-server scripts/backfill-lifecycle-rollup.ts --days 92 --org <uuid>
 
 const arg = (n: string) => {
   const i = process.argv.indexOf(`--${n}`);
@@ -34,11 +35,17 @@ async function main() {
   const host = new URL(process.env.DATABASE_URL ?? "postgres://x@unknown/x")
     .hostname;
 
-  const orgs = (await db.execute(
-    sql`SELECT id FROM organizations ORDER BY created_at`,
-  )) as unknown as { id: string }[];
-  if (orgs.length !== 1) throw new Error(`${orgs.length} orgs — assumes one`);
-  const orgId = orgs[0].id;
+  // `--org` names the org explicitly; without it the run refuses unless there
+  // is exactly one, so it can never silently fill only part of the data.
+  // (Production gained two empty "Trigger Test" orgs on 2026-10-15.)
+  let orgId = arg("org");
+  if (!orgId) {
+    const orgs = (await db.execute(
+      sql`SELECT id FROM organizations ORDER BY created_at`,
+    )) as unknown as { id: string }[];
+    if (orgs.length !== 1) throw new Error(`${orgs.length} orgs — pass --org <uuid>`);
+    orgId = orgs[0].id;
+  }
 
   const day = (back: number) =>
     formatInCampaignTimezone(

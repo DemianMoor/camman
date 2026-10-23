@@ -161,6 +161,30 @@ async function main() {
     await stamp(7, "freeze");
     // i = 8 deliberately unstamped.
 
+    // ⭐ ONE DRIP SEND, stamped HOT (drip is stamped since 2026-10-23). It must
+    // land in the Drip row only — never in Hot, Total or Unclassified.
+    const dripCamp = await one<{ id: number }>(sql`
+      INSERT INTO campaigns (org_id, slug, name, status, type, link_mode, brand_id, offer_id)
+      VALUES (${org}, ${`lrd-${tag}`}, ${`LRD ${tag}`}, 'active', 'drip', 'tracked',
+              ${brand.id}, ${offer.id}) RETURNING id`);
+    const dripStage = (
+      await one<{ id: number }>(sql`
+        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, stop_text, total_cost, sms_count, opt_out_count)
+        VALUES (${org}, ${dripCamp.id}, 1, 'STOP', '0.0000', 0, 0) RETURNING id`)
+    ).id;
+    const dripSend = (
+      await one<{ id: string }>(sql`
+        INSERT INTO stage_sends
+          (org_id, campaign_id, stage_id, contact_id, phone, rendered_text,
+           status, sent_at, cost_per_sms)
+        VALUES (${org}, ${dripCamp.id}, ${dripStage}, ${contacts[0]}::uuid, ${phones[0]},
+                'hi', 'sent', ${sentAt}, '0.0300')
+        RETURNING id`)
+    ).id;
+    await db.execute(sql`
+      INSERT INTO stage_send_lifecycle (stage_send_id, org_id, status)
+      VALUES (${dripSend}::uuid, ${org}, 'hot')`);
+
     // ── links + clicks ──────────────────────────────────────────────────────
     const mkLink = async (i: number, stageId: number, suffix: string) =>
       (
@@ -184,6 +208,23 @@ async function main() {
     await mkClick(await mkLink(1, stageB, "foreign"), "human", true);
     await mkClick(await mkLink(2, stageA, "bot"), "bot", true);
 
+    // ⭐ NEW CLICKERS. Contact 0 clicks twice: its stage-A (hot) link, then a
+    // minute later its drip link. Its engagement row records the FIRST of the
+    // two as first_click_at — so the hot send is a new clicker and the drip
+    // send is a clicker but not a new one.
+    const dripLink = await mkLink(0, dripStage, "drip");
+    await db.execute(sql`
+      INSERT INTO clicks (org_id, link_id, clicked_at, classification, scored_at)
+      VALUES (${org}, ${dripLink}, now() + interval '1 minute', 'human', now())`);
+    await db.execute(sql`
+      INSERT INTO contact_engagement
+        (contact_id, org_id, status, status_changed_at, freeze_cadence_days, thresholds,
+         first_click_at, last_click_at)
+      SELECT ${contacts[0]}::uuid, ${org}, 'hot', now(), 14, '{}'::jsonb,
+             min(ck.clicked_at), max(ck.clicked_at)
+      FROM clicks ck JOIN links lk ON lk.id = ck.link_id
+      WHERE lk.contact_id = ${contacts[0]}::uuid AND ck.classification = 'human'`);
+
     // ── sales ───────────────────────────────────────────────────────────────
     const mkConv = async (
       i: number,
@@ -201,6 +242,9 @@ async function main() {
                 ${etSale.id}, ${status}, ${revenue}, now())`);
     await mkConv(3, "approved", "30.0000", "s3");
     await mkConv(5, "approved", "12.0000", "s5");
+    // A SECOND, pending purchase on contact 5: one more PURCHASE, no more sale
+    // (still one buyer) and no more revenue (pending is not approved revenue).
+    await mkConv(5, "pending", "9.0000", "s5b");
 
     // ── the opt-out ─────────────────────────────────────────────────────────
     const optOut = await one<{ id: number }>(sql`
@@ -253,6 +297,40 @@ async function main() {
       total.sends === 8,
       `total ${total.sends}, 9 sends exist`,
     );
+    const grand = row("grand_total");
+    const drip = row("drip");
+    bar(
+      "A5 ⭐ Grand total = Total + Unclassified + Drip = every send, on every column",
+      grand.sends === 10 &&
+        grand.sends === total.sends + unclass.sends + drip.sends &&
+        grand.clickers === total.clickers + unclass.clickers + drip.clickers &&
+        grand.sales === total.sales + unclass.sales + drip.sales &&
+        grand.purchases === total.purchases + unclass.purchases + drip.purchases &&
+        grand.opt_outs === total.opt_outs + unclass.opt_outs + drip.opt_outs &&
+        near(Number(grand.revenue), Number(total.revenue) + Number(unclass.revenue) + Number(drip.revenue)) &&
+        near(Number(grand.cost), 0.26),
+      `grand sends ${grand.sends}, cost ${grand.cost} (expect 10 / 0.21 + 0.02 + 0.03)`,
+    );
+    bar(
+      "A6 ⭐ a drip send stamped hot is in Drip, NOT in Hot",
+      drip.sends === 1 && near(Number(drip.cost), 0.03) && hot.sends === 2,
+      `drip ${drip.sends} (cost ${drip.cost}), hot ${hot.sends}`,
+    );
+    bar(
+      "A7 ⭐ New clickers: the send carrying the contact's FIRST-ever human click counts",
+      hot.clickers === 1 && hot.new_clickers === 1,
+      `hot clickers ${hot.clickers}, new ${hot.new_clickers}`,
+    );
+    bar(
+      "A8 ⭐ …and the same contact's LATER click is a clicker but not a new one",
+      drip.clickers === 1 && drip.new_clickers === 0,
+      `drip clickers ${drip.clickers}, new ${drip.new_clickers}`,
+    );
+    bar(
+      "A9 Total and Grand total sum New clickers like any count (1 each)",
+      total.new_clickers === 1 && grand.new_clickers === 1,
+      `total ${total.new_clickers}, grand ${grand.new_clickers}`,
+    );
     bar(
       "A4 Clickers = hot + warm, Non-clickers = the other four",
       row("clickers").sends === hot.sends + warm.sends &&
@@ -292,6 +370,22 @@ async function main() {
       "C3 ⭐ a send in BOTH takes the ledger's revenue, never both sources",
       near(Number(cold.revenue), 42),
       "12 from contact 5's ledger row, nothing added for its sale_status",
+    );
+    bar(
+      "C5 ⭐ Purchases counts EVENTS: contact 5's second (pending) purchase is a purchase, not a sale",
+      cold.sales === 3 && cold.purchases === 4,
+      `sales ${cold.sales}, purchases ${cold.purchases} (expect 3 / 4 = 1 + 1 fallback + 2)`,
+    );
+    bar(
+      "C6 …and adds no revenue, because pending is not approved revenue",
+      near(Number(cold.revenue), 42),
+      `${cold.revenue}`,
+    );
+    bar(
+      "C7 ROI = (revenue − cost) ÷ cost, per row",
+      near(cold.roi ?? NaN, (42 - Number(cold.cost)) / Number(cold.cost)) &&
+        near(hot.roi ?? NaN, -1),
+      `cold ${cold.roi}, hot ${hot.roi} (no revenue ⇒ −100%)`,
     );
     bar(
       "C4 CR divides sales by CLICKERS, and is null when nobody clicked",

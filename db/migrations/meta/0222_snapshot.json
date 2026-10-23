@@ -1,6 +1,6 @@
 {
   "id": "0222a000-0222-4222-8222-000000000222",
-  "prevId": "0219a000-0219-4219-8219-000000000219",
+  "prevId": "0220a000-0220-4220-8220-000000000220",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -9017,6 +9017,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "campaign_kind": {
+          "name": "campaign_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'regular'"
+        },
         "cohort": {
           "name": "cohort",
           "type": "text",
@@ -9037,8 +9044,22 @@
           "notNull": true,
           "default": 0
         },
+        "new_clickers": {
+          "name": "new_clickers",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "sales": {
           "name": "sales",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "purchases": {
+          "name": "purchases",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
@@ -9118,6 +9139,7 @@
           "columns": [
             "org_id",
             "et_day",
+            "campaign_kind",
             "cohort"
           ]
         }
@@ -9127,7 +9149,11 @@
       "checkConstraints": {
         "lifecycle_day_rollup_cohort_check": {
           "name": "lifecycle_day_rollup_cohort_check",
-          "value": "cohort IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed', '__unclassified__')"
+          "value": "cohort IN ('new', 'cold', 'hot', 'warm', 'warm_31_60', 'warm_61_120', 'freeze', 'suppressed', '__unclassified__')"
+        },
+        "lifecycle_day_rollup_campaign_kind_check": {
+          "name": "lifecycle_day_rollup_campaign_kind_check",
+          "value": "campaign_kind IN ('regular', 'drip')"
         }
       },
       "isRLSEnabled": true

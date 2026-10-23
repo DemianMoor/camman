@@ -2,6 +2,16 @@
 
 _Last updated: 2026-10-23_
 
+## ⭐ A migration number is reserved by rebasing on origin/main the moment the file is created (2026-10-23)
+
+On 2026-10-23 three branches each minted `0220`, and one was applied to the shared preview DB with the same journal `when` another branch had picked. Drizzle applies only journal entries whose `when` is **greater** than the newest one already applied, so a migration numbered or timed below main's latest is **skipped silently** wherever main's migrations already ran. Preview and prod show nothing wrong; the schema change simply is not there.
+
+- **The moment you create a migration file,** fetch and rebase (or merge) `origin/main`, then take the next number after main's highest and a `when` greater than main's latest (the usual +86400000). Not at PR time: by then another branch may hold the number.
+- **Put the number on the ClickUp card** for the work, so a parallel session sees it is taken before it looks at git.
+- **If main moves first,** re-take the next free number and bump `when` again before merging.
+- **Guarded:** [scripts/test-migration-numbering-guard.ts](../scripts/test-migration-numbering-guard.ts) in `check:guards` (CI fetches `origin/main`). It fails a branch whose new migration (a) reuses a number that exists on `origin/main`, or (b) has a `when` not greater than main's latest. It cannot see another unmerged branch; the card is what covers that.
+- **Never renumber a migration that is already on main or applied to prod.** It is history: renumber the branch that has not landed.
+
 ## ⭐ Read-only checks are TRANSACTION-scoped on their own connection — never a session SET on DATABASE_URL (2026-10-23)
 
 `DATABASE_URL` is Supavisor's **transaction** pooler (:6543). A session-level `SET` sent through it sticks to the shared server backend, not to your script, and every later client of that backend — the live app included — inherits it.

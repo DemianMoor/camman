@@ -109,7 +109,7 @@ async function main() {
       { day: today, status: "cold", clicks: false },
       { day: today, status: "cold", clicks: false },
     ];
-    const phones = fictionalPhones(plan.length + 1);
+    const phones = fictionalPhones(plan.length + 3);
     await refuseIfPhonesInUse(db, phones);
 
     const sendIds: string[] = [];
@@ -305,6 +305,88 @@ async function main() {
       total2.sends === total.sends - Number(d2Sends) && Number(d2Sends) > 0,
       `${total.sends} − ${d2Sends} (deleted ${D2}) = ${total2.sends}`,
     );
+
+    // ── PART T — late money on a day OLDER than the 14-day window ───────────
+    //
+    // ⭐ The 10-23 audit's lost $183: conversions that landed on a send after
+    // its day had left the nightly window were stored nowhere the report reads.
+    // Two old days, one send each. Only the one that receives a conversion
+    // after the last run may be recomputed — and must be.
+    console.log("\nPART T — an older day that changed is recomputed, an unchanged one is not");
+    const O1 = dayN(30);
+    const O2 = dayN(31);
+    const oldSend: Record<string, string> = {};
+    for (const [k, d] of [O1, O2].entries()) {
+      const st = await mkStage(10 + k);
+      const cid = (
+        await one<{ id: string }>(sql`
+          INSERT INTO contacts (org_id, phone_number, line_type)
+          VALUES (${org}, ${phones[plan.length + 1 + k]}, 'mobile') RETURNING id`)
+      ).id;
+      oldSend[d] = (
+        await one<{ id: string }>(sql`
+          INSERT INTO stage_sends
+            (org_id, campaign_id, stage_id, contact_id, phone, rendered_text,
+             status, sent_at, cost_per_sms)
+          VALUES (${org}, ${camp.id}, ${st}, ${cid}::uuid, ${phones[plan.length + 1 + k]},
+                  'hi', 'sent', ${fromZonedTime(`${d}T14:30:00`, TZ).toISOString()}::timestamptz,
+                  '0.0100')
+          RETURNING id`)
+      ).id;
+    }
+    await refreshLifecycleDayRollup(db, { orgId, from: O2, to: O1 });
+    const computedAt = async (d: string) =>
+      (
+        await one<{ at: string | null }>(sql`
+          SELECT max(computed_at)::text AS at FROM lifecycle_day_rollup
+          WHERE org_id = ${org} AND et_day = ${d}::date`)
+      ).at;
+    const o2Before = await computedAt(O2);
+    const etT = await one<{ id: number }>(sql`
+      INSERT INTO event_types (org_id, key, label, is_purchase, counts_revenue)
+      VALUES (${org}, 'sale', 'Sale', true, true) RETURNING id`);
+    await db.execute(sql`
+      INSERT INTO conversion_events
+        (org_id, keitaro_event_id, keitaro_status, keitaro_type, stage_send_id,
+         event_type_id, status, revenue, occurred_at)
+      VALUES (${org}, ${`${tag}-late`}, 'sale', 'sale', ${oldSend[O1]}::uuid,
+              ${etT.id}, 'approved', '25.0000', now())`);
+
+    const nightly = await refreshLifecycleDayRollup(db, { orgId });
+    bar(
+      "T1 ⭐ the nightly run names the older day that received a conversion",
+      nightly.dirtyDays.includes(O1),
+      `dirtyDays ${JSON.stringify(nightly.dirtyDays)}`,
+    );
+    const o1Rev = (
+      await one<{ r: string; p: number }>(sql`
+        SELECT coalesce(sum(revenue), 0)::text AS r, coalesce(sum(purchases), 0)::int AS p
+        FROM lifecycle_day_rollup WHERE org_id = ${org} AND et_day = ${O1}::date`)
+    );
+    bar(
+      "T2 ⭐ …and its stored revenue and purchases now include it",
+      Number(o1Rev.r) === 25 && Number(o1Rev.p) === 1,
+      `revenue ${o1Rev.r}, purchases ${o1Rev.p}`,
+    );
+    bar(
+      "T3 an older day with no change is NOT recomputed",
+      !nightly.dirtyDays.includes(O2) && (await computedAt(O2)) === o2Before,
+      `${O2} computed_at ${o2Before} → ${await computedAt(O2)}`,
+    );
+    const again = await refreshLifecycleDayRollup(db, { orgId });
+    bar(
+      "T4 a second run with nothing new recomputes no older day",
+      again.dirtyDays.length === 0,
+      `dirtyDays ${JSON.stringify(again.dirtyDays)}`,
+    );
+    const hybT = await getLifecycleReportHybrid({ orgId, from: today, to: today });
+    bar(
+      "T5 ⭐ the same conversion is in the footer's 'earned in this period on earlier sends'",
+      Number(hybT.outside_basis.earlier_sends_revenue) === 25 &&
+        hybT.outside_basis.earlier_sends_purchases === 1 &&
+        hybT.outside_basis.unattributed_conversions === 0,
+      JSON.stringify(hybT.outside_basis),
+    );
   } finally {
     if (orgId) {
       const name =
@@ -317,6 +399,9 @@ async function main() {
         console.error(`REFUSING TEARDOWN: org ${orgId} lacks the marker`);
         fail++;
       } else {
+        await db.execute(
+          sql`DELETE FROM conversion_events WHERE org_id = ${orgId}::uuid`,
+        );
         await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
       }
       const left = await one<{ n: string }>(sql`
@@ -324,7 +409,8 @@ async function main() {
               + (SELECT count(*) FROM contacts WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM stage_sends WHERE org_id = ${orgId}::uuid)
               + (SELECT count(*) FROM lifecycle_day_rollup WHERE org_id = ${orgId}::uuid)
-              + (SELECT count(*) FROM clicks WHERE org_id = ${orgId}::uuid)) AS n`);
+              + (SELECT count(*) FROM clicks WHERE org_id = ${orgId}::uuid)
+              + (SELECT count(*) FROM conversion_events WHERE org_id = ${orgId}::uuid)) AS n`);
       console.log(`\nTeardown: ${left.n} row(s) left`);
       if (Number(left.n) !== 0) fail++;
     }

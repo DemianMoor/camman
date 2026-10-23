@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-21 (per-step heartbeats; nightly run limits 800 s / 600 s / 14-min lease)_
+_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -550,7 +550,48 @@ is gated on `campaigns.view`; the settings route stays denied.
 ### 3k. The cohort report (`/reports/lifecycle`, PR 5)
 
 One row per lifecycle cohort, by send date in ET: sends, clickers, CTR, sales,
-CR, revenue, EPC, opt-outs, cost and CPC. The Opt-out column shows the count with
+purchases, CR, revenue, EPC, opt-outs, cost, CPC and ROI.
+**Sales = buyers** (sends with ≥1 purchase); **Purchases = purchase events** on
+those sends (pending + approved, same ledger-primary rule; a legacy
+`sale_status`-only sale counts 1), so a buyer who pays twice is 1 sale and 2
+purchases — measured 10-23: 847 buyers, 1,064 purchases in 09-23→10-22.
+**ROI = (revenue − cost) ÷ cost**, `null` when nothing was spent.
+**New clickers** = sends whose human click (on that send's own link) was the
+contact's first-ever human click — `min(clicked_at)` on the send's links
+`<= contact_engagement.first_click_at`, or `first_click_at IS NULL` (the job
+has not seen a click from them yet, so this one is the first). A contact is a
+new clicker at most once, so the column sums across days.
+**Cost / new clicker = (cost − revenue) ÷ new clickers**; blank with no new
+clickers, and *"pays for itself"* when revenue exceeds cost (never a negative
+cost). Fold arithmetic: `scripts/test-lifecycle-fold.ts` PART D; the SQL:
+`test-lifecycle-report.ts` A7–A9.
+
+⚠️ **The new-clicker work is a SECOND CTE over the clicked pairs, and
+`clicked` is `MATERIALIZED`.** Folding the first-click time into `clicked`
+(a `LATERAL min()` per link + `GROUP BY`) made the planner walk all 7.2M
+`links` rows via the `(stage, contact, send_token)` index: 65 s against
+17–23 s for 2026-10-22, past the route's 60 s — and today is always computed
+live. Fenced, the same day measured 6.6–15 s against 9.4–27.7 s for the
+previous statement. (Note: at current data the planner runs `clicked` as a
+parallel seq scan of `links` hash-joined to human clicks, not the per-stage
+probe described below; that was already true before this change.)
+
+**Warm is split** into `warm_31_60` / `warm_61_120` by days since the contact's
+last human click **at send time**: `reportCohortSql` reads the stamp's own
+`last_click_at` against the send's `sent_at`, with `WARM_SPLIT_DAYS = 60` in
+the evaluator's interval arithmetic — exactly 60×24 h is still 31–60, one
+second more is 61–120, the same convention that keeps exactly 30 days Hot.
+The cohort itself still comes from the stamp; the split only divides Warm. A
+warm stamp with no `last_click_at` (written before 0220 and not backfilled)
+shows as **"Warm (no click time)"**, hidden when empty, rather than being
+guessed into a bucket. Boundaries 30/31, 60/61, 120/121 (plus +1 s at each
+edge) run through the real evaluator then the split:
+`scripts/test-lifecycle-warm-split.ts`, red-proven (flipping `>=` to `>` turns
+B4 red). Historical warm stamps were filled by
+[scripts/backfill-lifecycle-last-click.ts](../../scripts/backfill-lifecycle-last-click.ts)
+(dry-run default; only `status = 'warm' AND last_click_at IS NULL`; value =
+latest human click at or before `sent_at`; tested by
+`scripts/test-lifecycle-last-click-backfill.ts`). The Opt-out column shows the count with
 the rate in parentheses — `1,234 (2.50%)`; with zero sends the rate is `null`
 and only the count is shown. **EPC = revenue / clickers** and **CPC = cost /
 clickers**, both over this tab's own Clickers (raw human clicks per send), so
@@ -569,8 +610,34 @@ every time you looked at it. Measured on stage 4791 nineteen hours after its
 send: stamped hot 1,306 / warm 1,526, live hot 1,315 / warm 1,517 — nine
 contacts had already moved.
 
-Rows, in order: the six statuses, then `Clickers` (hot + warm) and
-`Non-clickers` (the rest), then `Total`, then `Unclassified`.
+Rows, in order: New, Cold, Hot, Warm 31–60, Warm 61–120, (Warm — no click
+time, only when non-empty), Freeze, Suppressed, then `Clickers` (hot + every
+warm row) and
+`Non-clickers` (the rest), then `Total`, then `Unclassified`, then `Drip`,
+then `Grand total`.
+
+- ⚠️ **Drip is a campaign KIND, not a cohort** (owner, 2026-10-23). Every row
+  above `Drip` reads **regular** campaigns only; `Drip` is every send of a
+  `campaigns.type = 'drip'` campaign whatever its stamp. Drip sends ARE stamped
+  (below), so the row can be split by cohort later without new history — but it
+  is shown as one row. Until 10-23 drip sends were not stamped at all, and the
+  whole drip programme sat in `Unclassified` (233,240 sends / 559 sales /
+  $4,650 in 09-23→10-22 — measured: drip sends = Unclassified on all 17 days
+  since drip launched). The rollup keys cells by `campaign_kind` for this.
+- **Every sendable producer stamps in the same statement.** One helper,
+  `lifecycleStampInsertSql` ([lib/engagement/lifecycle-stamp.ts](../../lib/engagement/lifecycle-stamp.ts)),
+  used by kickoff's bulk insert and both drip producers (`lib/drip/scheduler.ts`
+  first sends, `lib/drip/send-one.ts` follow-ups). `skipped_ineligible` rows
+  (`lib/drip/skip-send.ts`) are never sent and are not stamped. Source guard +
+  the helper's SQL: `scripts/test-lifecycle-stamp.ts`. Drip sends from
+  2026-10-06 until the deploy were stamped once by the reconstruction (§3k2).
+
+- ⚠️ **`Total` is the stamped cohorts only; `Grand total` is every send**
+  (`Total` + `Unclassified`; owner, 2026-10-23). Before Grand total existed,
+  Total was the only bottom line and read **$24,575 of a $29,226 period** — the
+  Unclassified row (233,240 sends, $4,650) sat below it, uncounted. Arithmetic
+  pinned by `scripts/test-lifecycle-fold.ts` (pure) and bar A5 of
+  `scripts/test-lifecycle-report.ts`.
 
 - **`Unclassified` is a real row**, counting sends with no
   `stage_send_lifecycle` row. Omit it and the cohorts silently fail to sum to
@@ -587,7 +654,7 @@ otherwise be read as something else:
 
 | Footer line | Why it is there |
 | --- | --- |
-| Sales/CR/Revenue **attributed only** | ~1,038 attributed sales across 3.88M sends. Unlabelled, that reads as catastrophic performance rather than as an attribution gap. |
+| Sales/Purchases/CR/Revenue **by send date** | A conversion counts on the send whose link was clicked, whenever it arrives. So the rows include later conversions on this period's sends and EXCLUDE conversions arriving in the period on earlier sends. The next footer line prints that second amount (`earlier_sends_revenue`, plus any conversion tied to no send), read from `conversion_events` by `occurred_at` in `getLifecycleOutsideBasis`. Measured 09-23→10-22: $950 earned on earlier sends, $0 unattributed. (This line used to say "attributed only — most conversions are not", which the 10-23 audit disproved: 1,080 of Keitaro's 1,086 conversions in that period carry a `stage_send_id`; the 6 dropped at ingest are $3.33.) |
 | **CTR uses raw human clicks** | Overview uses `counted_clickers`, which lags the scoring cron. The same period gave 125 here and 112 there on stage 4791 at 19 h. An unexplained discrepancy between two tabs is worse than either number. |
 | **Cost includes opt-out cost** | An opt-out reply is billed like a send, so a cohort with more opt-outs costs more per send. That is the point of the column, but only if the reader knows it. |
 | **EPC and CPC divide by this tab's Clickers** | Overview's EPC divides by `counted_clickers` and uses all revenue; this one uses attributed revenue over raw human clickers. Unlabelled, the two EPCs would read as a contradiction. |
@@ -662,8 +729,10 @@ reasons this tab does not foot with Overview.
 
 ### 3k3. The day rollup (migration 0192)
 
-`lifecycle_day_rollup` holds one row per **(org, ET day, cohort)**:
-`sends`, `clickers`, `sales`, `revenue`, `opt_outs`, `cost`, `reconstructed`.
+`lifecycle_day_rollup` holds one row per **(org, ET day, campaign kind,
+cohort)** (kind added in 0220): `sends`, `clickers`, `new_clickers`, `sales`,
+`purchases`, `revenue`, `opt_outs`, `cost`, `reconstructed`. Rows written
+before 0220 carry `purchases = 0` / `new_clickers = 0` until recomputed.
 [lib/reporting/lifecycle-rollup.ts](../../lib/reporting/lifecycle-rollup.ts).
 
 **One definition, two grains.** `lifecycleDayRowsSql` is `lifecycleReportSql`
@@ -686,7 +755,16 @@ plus one day computed on the spot.
 
 **Written by the engagement job's nightly full run** (06:35 UTC / 02:35 ET),
 recomputing a **14-day trailing window** so late-scored clicks, conversions on
-the 15-minute poll and opt-outs that arrive days later still land. It runs
+the 15-minute poll and opt-outs that arrive days later still land — **plus any
+OLDER day that received a conversion (created or updated) or an opt-out
+attribution since the previous run** (`findDirtyDaysBefore`; "since" = the
+table's newest `computed_at`, read before the window is rewritten). The window
+alone was a cliff: the 10-23 audit found three conversions ($183) on
+09-29 / 10-02 / 10-03 sends that arrived after those days left it, stored
+nowhere the report reads. Late *clicks* on older days are not chased (rare,
+and scanning `clicks` nightly is the cost the rollup avoids). Only a run with
+no explicit range does this; `backfill-lifecycle-rollup.ts` recomputes exactly
+the range it is given. Bars T1–T5 in `scripts/test-lifecycle-rollup.ts`. It runs
 **outside** the refresh transaction: the rollup is a read-side convenience, and
 a reporting query must never be able to roll back `contact_engagement`, which
 the send path reads. A rollup failure is logged and withholds nothing.
@@ -707,6 +785,14 @@ Days older than the nightly window are filled once by
 chunked so each statement stays short and the run is resumable.
 
 ### 3k2. The reconstruction, and what it cannot know
+
+> **Second use, 2026-10-24 quiet window:** drip sends from 2026-10-06 (drip
+> launch) until drip stamping deployed had no stamp at all; the same replay
+> filled them. Since 2026-10-23 the script also writes `last_click_at` (the
+> replayed last human click as of the day's end — the instant the status was
+> evaluated at), and selects each day's sends by a half-open `sent_at` range:
+> the earlier `(sent_at AT TIME ZONE …)::date = day` wrapped the indexed column
+> and seq-scanned all of `stage_sends` once per day.
 
 [scripts/backfill-lifecycle-reconstruction.ts](../../scripts/backfill-lifecycle-reconstruction.ts)
 fills `stage_send_lifecycle` for the sends that predate live stamping, marking

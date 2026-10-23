@@ -12,12 +12,14 @@ import {
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import type {
   LifecycleMetrics,
+  LifecycleOutsideBasis,
   LifecycleReport,
 } from "@/lib/reporting/lifecycle-report";
 
 type Report = LifecycleReport & {
   rollup_computed_at: string | null;
   live_days: number;
+  outside_basis: LifecycleOutsideBasis;
 };
 import { cn } from "@/lib/utils";
 
@@ -28,25 +30,36 @@ const ROW_LABEL: Record<string, string> = {
   new: "New",
   cold: "Cold",
   hot: "Hot",
-  warm: "Warm",
+  warm_31_60: "Warm 31–60",
+  warm_61_120: "Warm 61–120",
+  warm: "Warm (no click time)",
   freeze: "Freeze",
   suppressed: "Suppressed",
   clickers: "Clickers (hot + warm)",
   non_clickers: "Non-clickers",
   total: "Total",
   unclassified: "Unclassified",
+  drip: "Drip",
+  grand_total: "Grand total",
 };
 const ROW_ORDER = [
-  "new", "cold", "hot", "warm", "freeze", "suppressed",
-  "clickers", "non_clickers", "total", "unclassified",
+  "new", "cold", "hot", "warm_31_60", "warm_61_120", "warm", "freeze", "suppressed",
+  "clickers", "non_clickers", "total", "unclassified", "drip", "grand_total",
 ];
-const RULE_BEFORE = new Set(["clickers", "total", "unclassified"]);
+const RULE_BEFORE = new Set(["clickers", "total", "unclassified", "grand_total"]);
+const EMPHASIS = new Set(["total", "grand_total"]);
+// Metric cells per row — the suppressed row prints one dash per column.
+const METRIC_COLUMNS = 14;
+// Rows hidden when empty: a warm stamp with no click time exists only until the
+// last_click_at backfill reaches it, and a zero row there would read as data.
+const HIDE_WHEN_EMPTY = new Set(["warm"]);
 
 const pct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(2)}%`);
 const money = (v: string) =>
   `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const num = (v: number) => v.toLocaleString();
 const moneyOrDash = (v: number | null) => (v === null ? "—" : money(String(v)));
+const roiPct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(1)}%`);
 
 export function LifecycleReport() {
   // Lazy initialisers: reading the clock in the render body is impure, and the
@@ -105,7 +118,7 @@ export function LifecycleReport() {
           />
         </div>
         <span className="pb-2 text-xs text-muted-foreground">
-          ET dates, max 92 days
+          ET dates, max 92 days · by send date
         </span>
       </div>
 
@@ -122,20 +135,25 @@ export function LifecycleReport() {
                 <th className="px-3 py-2 text-right font-medium">Sends</th>
                 <th className="px-3 py-2 text-right font-medium">Clickers</th>
                 <th className="px-3 py-2 text-right font-medium">CTR</th>
+                <th className="px-3 py-2 text-right font-medium">New clickers</th>
                 <th className="px-3 py-2 text-right font-medium">Sales*</th>
+                <th className="px-3 py-2 text-right font-medium">Purchases*</th>
                 <th className="px-3 py-2 text-right font-medium">CR*</th>
                 <th className="px-3 py-2 text-right font-medium">Revenue*</th>
                 <th className="px-3 py-2 text-right font-medium">EPC*</th>
                 <th className="px-3 py-2 text-right font-medium">Opt-out</th>
                 <th className="px-3 py-2 text-right font-medium">Cost</th>
                 <th className="px-3 py-2 text-right font-medium">CPC</th>
+                <th className="px-3 py-2 text-right font-medium">ROI</th>
+                <th className="px-3 py-2 text-right font-medium">Cost / new clicker</th>
               </tr>
             </thead>
             <tbody className="tabular-nums">
               {ROW_ORDER.map((key) => {
                 const r: LifecycleMetrics | undefined = byRow.get(key);
+                if (HIDE_WHEN_EMPTY.has(key) && !(r && r.sends > 0)) return null;
                 const suppressed = key === "suppressed";
-                const emphasis = key === "total";
+                const emphasis = EMPHASIS.has(key);
                 return (
                   <tr
                     key={key}
@@ -163,7 +181,7 @@ export function LifecycleReport() {
                         structurally empty, and a 0 would read as a measurement. */}
                     {suppressed ? (
                       <>
-                        {Array.from({ length: 10 }).map((_, i) => (
+                        {Array.from({ length: METRIC_COLUMNS }).map((_, i) => (
                           <td key={i} className="px-3 py-2 text-right">—</td>
                         ))}
                       </>
@@ -172,7 +190,9 @@ export function LifecycleReport() {
                         <td className="px-3 py-2 text-right">{num(r?.sends ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{num(r?.clickers ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.ctr ?? null)}</td>
+                        <td className="px-3 py-2 text-right">{num(r?.new_clickers ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{num(r?.sales ?? 0)}</td>
+                        <td className="px-3 py-2 text-right">{num(r?.purchases ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.cr ?? null)}</td>
                         <td className="px-3 py-2 text-right">{money(r?.revenue ?? "0")}</td>
                         <td className="px-3 py-2 text-right">{moneyOrDash(r?.epc ?? null)}</td>
@@ -186,6 +206,25 @@ export function LifecycleReport() {
                         </td>
                         <td className="px-3 py-2 text-right">{money(r?.cost ?? "0")}</td>
                         <td className="px-3 py-2 text-right">{moneyOrDash(r?.cpc ?? null)}</td>
+                        <td
+                          className={cn(
+                            "px-3 py-2 text-right",
+                            r?.roi != null && r.roi < 0 && "text-destructive",
+                          )}
+                        >
+                          {roiPct(r?.roi ?? null)}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {!r || r.new_clickers === 0 ? (
+                            "—"
+                          ) : r.pays_for_itself ? (
+                            <span className="text-emerald-700 dark:text-emerald-400">
+                              pays for itself
+                            </span>
+                          ) : (
+                            moneyOrDash(r.cost_per_new_clicker)
+                          )}
+                        </td>
                       </>
                     )}
                   </tr>
@@ -204,11 +243,31 @@ export function LifecycleReport() {
           above it is otherwise read as something it is not. */}
       <div className="grid gap-1 text-xs text-muted-foreground">
         <p>
-          <span className="font-medium">*Attributed only.</span> Sales, CR,
-          Revenue and EPC count conversions attributed to an individual send. Most
-          conversions are not, so these read far below the true totals — a low
-          CR here is an attribution gap, not performance.
+          <span className="font-medium">*By send date.</span> Sales, Purchases,
+          CR, Revenue and EPC count the conversions on the sends in this period —
+          each conversion is matched to the send whose link was clicked, whenever
+          it arrives. So a conversion that arrives later still counts on its
+          send&apos;s day, and one that arrives in this period on an earlier send
+          is not in the rows above.
         </p>
+        {data?.outside_basis ? (
+          <p>
+            <span className="font-medium">Not in the rows above:</span>{" "}
+            {money(data.outside_basis.earlier_sends_revenue)} revenue (
+            {num(data.outside_basis.earlier_sends_purchases)} purchases) earned in
+            this period on sends before it
+            {data.outside_basis.unattributed_conversions > 0 ? (
+              <>
+                , and {money(data.outside_basis.unattributed_revenue)} from{" "}
+                {num(data.outside_basis.unattributed_conversions)} conversions not
+                tied to any send
+              </>
+            ) : (
+              <>; every conversion in this period is tied to a send</>
+            )}
+            .
+          </p>
+        ) : null}
         <p>
           <span className="font-medium">One status per contact per day.</span>{" "}
           A contact&apos;s cohort is the status stamped when the message was
@@ -219,6 +278,24 @@ export function LifecycleReport() {
           same source the lifecycle engine evaluates against. Overview uses{" "}
           <code>counted_clickers</code>, which lags, so the two tabs show
           different CTRs for the same period.
+        </p>
+        <p>
+          <span className="font-medium">Total is the regular-campaign cohorts
+          above it; Grand total is every send in the period</span> — Total plus
+          Unclassified plus Drip. Drip campaigns are one row of their own, not
+          split into cohorts.
+          Sales counts buyers (sends with at least one purchase); Purchases counts
+          every purchase event, so a buyer who pays twice is 1 sale and 2
+          purchases. ROI is (revenue − cost) ÷ cost.
+        </p>
+        <p>
+          <span className="font-medium">Warm is split by days since the
+          contact&apos;s last human click when the message was sent</span> — 31–60
+          and 61–120 (Hot is 30 days or less). <span className="font-medium">New
+          clickers</span> are sends whose click was the contact&apos;s first human
+          click ever. <span className="font-medium">Cost / new clicker</span> is
+          (cost − revenue) ÷ new clickers; it is blank with no new clickers and
+          reads &quot;pays for itself&quot; when revenue exceeds cost.
         </p>
         <p>
           <span className="font-medium">Cost includes opt-out cost</span> — a
@@ -238,7 +315,8 @@ export function LifecycleReport() {
           rollup; today is counted live.</span>{" "}
           So today&apos;s row is current to the second, while a closed day
           reflects the last nightly recompute — which re-runs a 14-day trailing
-          window, so late clicks, conversions and opt-outs still land.
+          window, plus any older day that received a conversion or opt-out
+          since the previous run, so late money still lands.
         </p>
         {data?.rollup_computed_at ? (
           <p>

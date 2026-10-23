@@ -9,8 +9,10 @@ import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 import postgres from "postgres";
 
+import { toSessionModeUrl } from "@/lib/db/session-url";
+
 async function main() {
-  const pg = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
+  const pg = postgres(toSessionModeUrl(process.env.DATABASE_URL!), { prepare: false, max: 1 });
   try {
     await pg.unsafe(`SET lock_timeout = '5s'`);
 

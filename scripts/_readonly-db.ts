@@ -16,7 +16,7 @@
 //   await withReadOnlyDb(async (tx) => console.log(await tx`SELECT count(*) FROM contacts`));
 import postgres from "postgres";
 
-import { toSessionModeUrl } from "@/lib/reporting/refresh-session";
+import { toSessionModeUrl } from "@/lib/db/session-url";
 
 export async function withReadOnlyDb<T>(fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
   const raw = process.env.DATABASE_URL;

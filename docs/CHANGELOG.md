@@ -2203,3 +2203,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-22 — Flag-walk fixes: "1 live stage uses" in the format_in_use message; By Format sidebar link behind NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED; Settings → Message Formats link gated on providers.view (operators got a link to a 404) — 04-features/message-formats
 
 2026-10-23 — Read-only scripts: withReadOnlyDb helper (session-mode connection + BEGIN READ ONLY) and test-session-set-guard in check:guards (no default_transaction_read_only / SET SESSION) after a leaked session SET failed 340 prod writes on 10-22 — 07-conventions
+
+2026-10-23 — Session-SET guard extended to every session-level SET (G5: only on a dedicated toSessionModeUrl + max:1 connection, else SET LOCAL); toSessionModeUrl moved to dependency-free lib/db/session-url.ts; verify-drip-routing-production / test-report-rollup / apply-0099 / apply-lookup-migrations / apply-offer-cooldown fixed — 07-conventions

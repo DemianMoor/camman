@@ -3,6 +3,7 @@ import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import { db } from "@/db/client";
+import { toSessionModeUrl } from "@/lib/db/session-url";
 import { notifyTelegram } from "@/lib/alerts/telegram";
 
 // =============================================================================
@@ -104,21 +105,9 @@ const REFRESH_WORK_MEM_KB = 393216; // 384 * 1024, what pg_settings should read 
 export const REFRESH_STATEMENT_TIMEOUT = "180s";
 const REFRESH_STATEMENT_TIMEOUT_MS = 180000;
 
-/**
- * Supavisor exposes the SAME database on two ports: 6543 transaction-pooled,
- * 5432 session-pooled. Derive rather than adding an env var, so there is no
- * second connection string to set in Vercel, drift from DATABASE_URL, or fail
- * to rotate. A URL that is already session-mode or direct (port 5432) is passed
- * through untouched.
- *
- * `prepare=false` is a transaction-pooler workaround and is dropped here.
- */
-export function toSessionModeUrl(raw: string): string {
-  const url = new URL(raw);
-  if (url.port === "6543") url.port = "5432";
-  url.searchParams.delete("prepare");
-  return url.toString();
-}
+// Moved to lib/db/session-url.ts (dependency-free, so scripts can import it);
+// re-exported here for existing importers.
+export { toSessionModeUrl };
 
 /** Which connection actually ran the refreshes, and what was actually in force on it. */
 export type RefreshConnection = {

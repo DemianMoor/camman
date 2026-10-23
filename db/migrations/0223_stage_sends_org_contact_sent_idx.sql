@@ -1,4 +1,4 @@
--- 0219: stage_sends (org_id, contact_id, sent_at) INCLUDE (campaign_id) WHERE status = 'sent'.
+-- 0223 (was 0219, then 0220): stage_sends (org_id, contact_id, sent_at) INCLUDE (campaign_id) WHERE status = 'sent'.
 -- Additive only. Backs the BATCHED nightly contact-engagement recount (plan approved
 -- 2026-10-21): each batch reads one contact-id range of sent rows. No index reached
 -- stage_sends by contact_id for sent rows, so a batch fell back to walking all of

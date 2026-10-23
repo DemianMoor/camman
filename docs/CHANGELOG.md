@@ -2182,3 +2182,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-21 — Carrier triage ≥250-contact unresolved-string Telegram alert: every 30-min tick → once per ET day from 09:00 ET (alert_state gate) — 04-features/phone-lookup-carrier
 
 2026-10-22 — Preflight breakdown: config query now selects offer_rules_enabled / offer_cooldown_days / offer_limit_times, so dedup_1h_predicted and the per-carrier bucket apply the campaign offer rules like kickoff (were silently on the legacy rule) — CHANGELOG only (no doc described the gap)
+
+2026-10-23 — Renumbered this branch's migrations 0220/0221 → 0223/0224 (main holds 0220_lifecycle_report_fixes; 0222 reserved by PR #396), journal when 1795910400000 / 1795996800000 — 03-data-model

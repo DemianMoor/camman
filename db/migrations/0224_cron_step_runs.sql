@@ -1,4 +1,4 @@
--- 0220: cron_step_runs — one row per execution of a scheduled job STEP, written at
+-- 0224 (was 0220, then 0221): cron_step_runs — one row per execution of a scheduled job STEP, written at
 -- START and completed at FINISH. Additive only; nothing reads or writes it until the
 -- duration monitor ships (plan approved 2026-10-21, step 3).
 --

@@ -1,4 +1,4 @@
-// Builds migration 0220's stage_sends_org_contact_sent_idx WITHOUT a write lock,
+// Builds migration 0223's stage_sends_org_contact_sent_idx WITHOUT a write lock,
 // using CREATE INDEX CONCURRENTLY (which cannot run inside drizzle-kit's migration
 // transaction). Owner-approved 2026-10-21 (batched contact-engagement recount plan).
 //
@@ -10,7 +10,7 @@
 // a SHARE lock for the whole build and would block sending.
 //
 // ORDER (production): run this with --apply FIRST; then `npm run db:migrate` —
-// 0220's plain CREATE INDEX IF NOT EXISTS no-ops and the migration is recorded in
+// 0223's plain CREATE INDEX IF NOT EXISTS no-ops and the migration is recorded in
 // the chain. Mirrors scripts/apply-offer-cooldown-covering-index-concurrent.ts.
 // Measure before/after with scripts/measure-engagement-batch-plans.ts.
 //

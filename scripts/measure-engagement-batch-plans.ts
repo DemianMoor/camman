@@ -14,7 +14,7 @@
 // contact either way. --full also times the CURRENT single-pass reads (no contact
 // range) — the comparator for "batched total no slower than today's single pass".
 //
-// Weight: a batch reads tens of MB with the 0220 index and ~1 GB without it;
+// Weight: a batch reads tens of MB with the 0223 index and ~1 GB without it;
 // --full reads ~5 GB (the nightly job's own read). Anything heavy belongs in the
 // quiet window, 05:00–06:00 UTC (docs/07-conventions.md, heavy prod verification).
 //

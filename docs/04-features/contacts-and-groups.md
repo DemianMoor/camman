@@ -1,6 +1,6 @@
 # Feature — Contacts, Contact Groups, Opt-outs/ins & Clickers
 
-_Last updated: 2026-10-21 (allowed number types — line-type gate, 0218)_
+_Last updated: 2026-10-23 (contact_group_id not validated on edit; create limit 100)_
 
 ## 1. Purpose
 The central phone registry and the suppression/engagement records attached to it. Contacts are the atomic audience unit (scaling to millions); contact groups are tags; opt-outs/ins and clickers are the status signals that audience filters and segment rules read.
@@ -37,6 +37,7 @@ The central phone registry and the suppression/engagement records attached to it
 
 ## 6. Rules & edge cases
 - A contact may belong to many groups; tags are direct (not via segments).
+- **`contact_group_id` is immutable.** Create validates it (letters/digits/`-`/`_`, max **100** — `CONTACT_GROUP_ID_MAX` in [`lib/validators/contact-groups.ts`](../../lib/validators/contact-groups.ts); the column itself is unbounded `text`). Edit does NOT validate it: the edit form uses `contactGroupEditFormSchema` (create minus the id) and `PATCH` strips it from the body. Drip intake mints `drip:<org uuid>:<partner-tag>` (always > 40 chars and containing `:`), which the create rules can never produce — the `drip:` namespace is pipeline-only. Until 2026-10-23 the edit form validated with the create schema (max 40), so no drip group could be saved.
 - Opt-outs are **append-only** — multiple rows per contact over time (different sources/scopes) are expected.
 - Contact-status import maps free text → `opt_out` / `suppressed` / `scrubbed` reasons ([`lib/imports/contact-status.ts`](../../lib/imports/contact-status.ts)).
 - Permissions: upload = operator+; delete = manager+ (`contacts.delete`, `opt_outs.delete`, etc.).

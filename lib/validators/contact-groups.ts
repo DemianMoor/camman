@@ -6,13 +6,20 @@ export { nullIfEmpty } from "./_helpers";
 // Same shape; the conceptual change (folders-for-segments → tags-on-contacts)
 // is invisible at this layer.
 
+/**
+ * Max length of a contact_group_id. The column is unbounded `text`; drip intake
+ * mints `drip:<org uuid>:<partner-tag>` (lib/drip/groups.ts), already 42 chars
+ * before the name, so the old max(40) refused every drip group's own id.
+ */
+export const CONTACT_GROUP_ID_MAX = 100;
+
 export const contactGroupCreateSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(120),
   contact_group_id: z
     .string()
     .trim()
     .min(1, "contact_group_id is required")
-    .max(40)
+    .max(CONTACT_GROUP_ID_MAX)
     .regex(
       /^[A-Za-z0-9_-]+$/,
       "contact_group_id may only contain letters, digits, hyphens, and underscores",
@@ -54,7 +61,14 @@ export const LIFECYCLE_OVERRIDE_KEYS = [
 ] as const;
 export type LifecycleOverrideKey = (typeof LIFECYCLE_OVERRIDE_KEYS)[number];
 
-export const contactGroupUpdateSchema = contactGroupCreateSchema
+// contact_group_id is immutable: not validated on edit, and stripped (Zod drops
+// unknown keys) from a PATCH body that carries it. Validating it here refused
+// to save any group whose id the create rules would not mint today.
+export const contactGroupEditFormSchema = contactGroupCreateSchema.omit({
+  contact_group_id: true,
+});
+
+export const contactGroupUpdateSchema = contactGroupEditFormSchema
   .partial()
   .refine((data) => Object.values(data).some((v) => v !== undefined), {
     message: "At least one field must be provided",

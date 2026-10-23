@@ -29,6 +29,7 @@ import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
   contactGroupCreateSchema,
+  contactGroupEditFormSchema,
   type ContactGroupFormValues,
   type LifecycleOverrideKey,
 } from "@/lib/validators/contact-groups";
@@ -109,7 +110,10 @@ export function ContactGroupForm({
   const [groupPreview, setGroupPreview] = useState<PreviewResult | null>(null);
 
   const form = useForm<ContactGroupFormValues>({
-    resolver: zodResolver(contactGroupCreateSchema),
+    // Edit omits the immutable contact_group_id (drip ids exceed the create rules).
+    resolver: zodResolver(
+      (isEdit ? contactGroupEditFormSchema : contactGroupCreateSchema) as typeof contactGroupCreateSchema,
+    ),
     defaultValues: {
       name: initialValues?.name ?? "",
       contact_group_id: initialValues?.contact_group_id ?? "",

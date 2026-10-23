@@ -2211,3 +2211,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-23 — Read-only scripts: withReadOnlyDb helper (session-mode connection + BEGIN READ ONLY) and test-session-set-guard in check:guards (no default_transaction_read_only / SET SESSION) after a leaked session SET failed 340 prod writes on 10-22 — 07-conventions
 
 2026-10-23 — Session-SET guard extended to every session-level SET (G5: only on a dedicated toSessionModeUrl + max:1 connection, else SET LOCAL); toSessionModeUrl moved to dependency-free lib/db/session-url.ts; verify-drip-routing-production / test-report-rollup / apply-0099 / apply-lookup-migrations / apply-offer-cooldown fixed — 07-conventions
+
+2026-10-23 — test-migration-numbering-guard in check:guards (a branch's new migration must not reuse an origin/main number and must have a journal `when` above main's latest; CI fetches origin/main); convention: reserve the number by rebasing on origin/main when the file is created, number on the ClickUp card — 07-conventions

@@ -10,6 +10,7 @@ Compare an offer's landing pages: one row for each page that received sends for 
 |---|---|
 | Page | [app/(protected)/reports/landing-pages/page.tsx](<../../app/(protected)/reports/landing-pages/page.tsx>) — a literal segment, so it wins over `[dimension]` |
 | API | [app/api/reports/landing-pages/route.ts](../../app/api/reports/landing-pages/route.ts) — `GET ?offer_id=&from=&to=&split_brand=1`; without `offer_id` it returns the offer list. `campaigns.view`, `maxDuration = 60`, **no range cap** |
+| Access | `campaigns.view` (viewer and up) **and** the operator route map: `reports/landing-pages` is `{ methods: ["GET"] }` in [lib/authz/route-map.ts](../../lib/authz/route-map.ts). No `token` entry, so personal API tokens are denied. ⚠️ #390 shipped without the map line, which 403'd operators until the follow-up fix (2026-10-23). |
 | Data | [lib/reporting/landing-page-report.ts](../../lib/reporting/landing-page-report.ts) `getLandingPageReport` |
 | Table | [components/reports/landing-page-report.tsx](../../components/reports/landing-page-report.tsx) — hand-rolled like Delivery; ratios via `derive()` in [report-metrics.tsx](../../components/reports/report-metrics.tsx) |
 | Sales % rule | [lib/reporting/landing-page-metrics.ts](../../lib/reporting/landing-page-metrics.ts) `salesPctOfReached` |

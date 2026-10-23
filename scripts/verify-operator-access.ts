@@ -418,6 +418,7 @@ async function main() {
     "/traffic-types",
     "/reports",
     "/reports/delivery",
+    "/reports/landing-pages",
     "/sends/today",
   ];
 

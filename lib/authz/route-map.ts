@@ -380,6 +380,11 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // Lifecycle cohort report (PR 5). GET only, like its siblings.
   "reports/lifecycle": { methods: ["GET"], token: ["GET"] },
   "reports/group-lifecycle": { methods: ["GET"], token: ["GET"] },
+  // Landing Page Results (/reports/landing-pages, 1amdve282rw): per-page results
+  // for one offer. GET only (the file exports no writer). Shipped unclassified in
+  // #390, which 403'd the operator from a nav item it can see. No `token`: API
+  // token access was not part of the ask — absent means denied for tokens.
+  "reports/landing-pages": { methods: ["GET"] },
   "reports/partners": null, // drip / partner intake -- hidden from the operator
   "reports/performance": { methods: ["GET"], token: ["GET"] },
   "reports/rebuild-counted-clickers": null, // maintenance job, not a report

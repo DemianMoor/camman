@@ -341,12 +341,16 @@ async function main() {
       for (let i = 0; i < created.contacts.length; i += 5) {
         const batch = created.contacts.slice(i, i + 5);
         const cl = sql.join(batch.map((x) => sql`${x}::uuid`), sql`, `);
-        await db.execute(sql`SET statement_timeout = '120s'`);
-        await db.execute(sql`DELETE FROM drip_journeys WHERE contact_id IN (${cl})`);
-        await db.execute(sql`DELETE FROM lead_events WHERE contact_id IN (${cl})`);
-        await db.execute(sql`DELETE FROM opt_outs WHERE contact_id IN (${cl})`);
-        await db.execute(sql`DELETE FROM contact_attributes WHERE contact_id IN (${cl})`);
-        await db.execute(sql`DELETE FROM contacts WHERE id IN (${cl})`);
+        // SET LOCAL inside the batch's transaction: a plain SET on the shared
+        // pool would stick to that backend and leak to the app (2026-10-22).
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
+          await tx.execute(sql`DELETE FROM drip_journeys WHERE contact_id IN (${cl})`);
+          await tx.execute(sql`DELETE FROM lead_events WHERE contact_id IN (${cl})`);
+          await tx.execute(sql`DELETE FROM opt_outs WHERE contact_id IN (${cl})`);
+          await tx.execute(sql`DELETE FROM contact_attributes WHERE contact_id IN (${cl})`);
+          await tx.execute(sql`DELETE FROM contacts WHERE id IN (${cl})`);
+        });
       }
     }
     if (created.keys.length) {

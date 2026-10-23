@@ -14,6 +14,8 @@ config({ path: resolve(process.cwd(), ".env.local") });
 import { readFileSync } from "node:fs";
 import postgres from "postgres";
 
+import { toSessionModeUrl } from "@/lib/db/session-url";
+
 const LOCK_TIMEOUT = "5s";
 const MAX_LOCK_RETRIES = 5;
 const LOCK_NOT_AVAILABLE = "55P03";
@@ -41,9 +43,10 @@ const CONCURRENT_INDEXES: Array<[string, string]> = [
 ];
 
 async function main() {
-  const pg = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
+  const pg = postgres(toSessionModeUrl(process.env.DATABASE_URL!), { prepare: false, max: 1 });
   try {
-    // Session GUC on the single pooled connection — a blocked lock aborts (55P03)
+    // Session GUC on a DEDICATED session-mode connection (never the shared
+    // transaction pooler — a session SET there leaks to the app; 2026-10-22) — a blocked lock aborts (55P03)
     // instead of queueing; runWithLockRetry then retries.
     await pg.unsafe(`SET lock_timeout = '${LOCK_TIMEOUT}'`);
     console.log(`lock_timeout = ${LOCK_TIMEOUT}\n`);

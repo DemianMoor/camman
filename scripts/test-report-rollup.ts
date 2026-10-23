@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
+import { toSessionModeUrl } from "@/lib/db/session-url";
 import { stageHourAggregate, groupHourAggregate } from "@/lib/reporting/rollup";
 
 // READ-ONLY verification of the rollup aggregation logic against live data.
@@ -35,7 +36,9 @@ function check(name: string, ok: boolean, detail: string) {
 }
 
 async function main() {
-  const pg = postgres(process.env.DATABASE_URL!, { prepare: false });
+  // Dedicated session-mode connection: the session SET below must not land on
+  // a shared transaction-pooler backend (it would leak to the app; 2026-10-22).
+  const pg = postgres(toSessionModeUrl(process.env.DATABASE_URL!), { prepare: false, max: 1 });
   const db = drizzle(pg);
   try {
     await db.execute(sql`set statement_timeout = '40s'`);

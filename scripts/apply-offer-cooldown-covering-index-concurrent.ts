@@ -34,6 +34,8 @@ import { resolve } from "node:path";
 config({ path: resolve(process.cwd(), ".env.local") });
 import postgres from "postgres";
 
+import { toSessionModeUrl } from "@/lib/db/session-url";
+
 const NAME = "contact_offer_campaigns_org_offer_contact_sent_idx";
 const DDL =
   `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${NAME} ` +
@@ -41,13 +43,6 @@ const DDL =
 const APPLY = process.argv.includes("--apply");
 const VERIFY = process.argv.includes("--verify");
 const DROP_INVALID = process.argv.includes("--drop-invalid");
-
-function sessionUrl(raw: string): string {
-  const u = new URL(raw);
-  if (u.port === "6543") u.port = "5432";
-  u.searchParams.delete("prepare");
-  return u.toString();
-}
 
 async function main() {
   const raw = process.env.DATABASE_URL!;
@@ -67,7 +62,7 @@ async function main() {
     console.error(`REFUSING — --apply runs only in the quiet window (start 05:00–05:50 UTC); now ${now.toISOString()}`);
     process.exit(1);
   }
-  const pg = postgres(sessionUrl(raw), { prepare: false, max: 1 });
+  const pg = postgres(toSessionModeUrl(raw), { prepare: false, max: 1 });
   const host = new URL(raw).hostname;
   console.log(`${APPLY ? "APPLYING to" : VERIFY ? "VERIFYING on" : "DRY RUN against"} ${host}\n`);
   try {

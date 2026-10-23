@@ -1538,7 +1538,7 @@
     {
       "idx": 219,
       "version": "7",
-      "when": 1795737600000,
+      "when": 1795824000000,
       "tag": "0222_contact_group_mobile_only_default",
       "breakpoints": true
     }

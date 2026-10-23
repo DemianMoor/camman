@@ -2194,3 +2194,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-22 — Pre-flag fixes: make-default serialized per org (no unique-index 500), preflight personalization blocker for a tagged stage kickoff would refuse, skip % hidden on preview timeout; trailing-row trimming verified (no change) — 04-features/message-formats
 
 2026-10-22 — Flag-walk fixes: "1 live stage uses" in the format_in_use message; By Format sidebar link behind NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED; Settings → Message Formats link gated on providers.view (operators got a link to a 404) — 04-features/message-formats
+
+2026-10-23 — Read-only scripts: withReadOnlyDb helper (session-mode connection + BEGIN READ ONLY) and test-session-set-guard in check:guards (no default_transaction_read_only / SET SESSION) after a leaked session SET failed 340 prod writes on 10-22 — 07-conventions

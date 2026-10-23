@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -623,6 +623,42 @@ sequenceDiagram
   D->>TX: send (sent_at)
   Note over E,D: A poke that meets a held lease only records poke_requested_at —<br/>the holder re-runs (≥ 5 s after its last start) before releasing.
   Note over S: cron run only: [lead-latency] per-minute line,<br/>heartbeats (pokes never stamp them)
+```
+
+## L4. Carrier-rejection ledger (0225, `5,20,35,50 * * * *` + daily `15 4 * * *`)
+
+Derived from delivery receipts; nothing on the receipt intake paths changes. Read by
+nothing until PR 2 (eligibility). See [04-features/carrier-rejected-numbers.md](04-features/carrier-rejected-numbers.md).
+
+```mermaid
+sequenceDiagram
+  participant Cron as Vercel Cron
+  participant R as /api/cron/carrier-rejections
+  participant L as lib/carrier-rejection/ledger.ts
+  participant DB as Postgres
+  Cron->>R: GET (Bearer CRON_SECRET) [?mode=rebuild daily · ?mode=full on demand]
+  R->>DB: withCronLease('carrier-rejections', 14 min)
+  alt incremental
+    L->>DB: BEGIN; read watermark (refuse if NULL — no full rebuild yet)
+    L->>DB: txr/ahi/tls receipts received in (wm − 1 h, now − 2 min]
+    Note over L,DB: classify via code map, fold to ONE outcome per message,<br/>join stage_sends (status='sent') for phone + sent_at
+    L->>DB: upsert carrier_phone_delivery (latest delivered) + carrier_rejections
+    L->>DB: recompute carrier_rejected_phones under org thresholds
+    L->>DB: watermark = to; COMMIT
+  else rebuild (daily)
+    loop 3-day chunks over the last 14 days of receipts
+      L->>DB: BEGIN; same ingest (rejections replaced, delivery merged); COMMIT
+    end
+    L->>DB: delete stale rejections sent in the window; recompute ALL; advance watermark
+  else full (on demand, resumable)
+    loop 3-day chunks over ALL receipt history, until the 600 s budget
+      L->>DB: BEGIN; same ingest + persist cursor; COMMIT
+    end
+    Note over L,DB: budget hit → return complete:false, next call resumes
+    L->>DB: delete rows not re-derived; ANALYZE; recompute; CREATE watermark; clear cursor
+  end
+  R->>DB: recordHeartbeat (incremental / rebuild)
+  R-->>Cron: 200 · on throw: Tier-1 Telegram + 500
 ```
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)

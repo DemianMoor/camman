@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-24_
 
 ## ⭐ A migration number is reserved by rebasing on origin/main the moment the file is created (2026-10-23)
 
@@ -4940,3 +4940,12 @@ Every SMS body is assembled by `lib/messages/` — `tags.ts` (personalization ta
 - **Whitespace is spelled out.** Postgres `\s` follows the locale (NBSP differs from JS), so the twin uses an explicit class equal to JS `\s`. `[[:alpha:]]` (an untransliterable letter ⇒ missing) is locale-dependent: prod and preview are both ICU `en_US.UTF-8`.
 - **Tag-less is a no-op by construction.** `stageTagRules` / `loadTagRules` return `NO_TAG_RULES` before any footer/domain lookup when the message has no contact tag; then no layer is built and kickoff keeps its one-body path. Never join `contact_attributes` into `stageRecipientsSql`: that would change every stage's SQL. Kickoff loads attributes separately, only for tagged stages.
 - **The format-lock trigger differs by campaign type** (`stageFormatLocked`): regular = `materialized_at IS NOT NULL`, drip = first sent row.
+
+## Carrier rejections: one code map, one outcome per message, three providers that report differently (0225, 2026-10-24)
+
+- **Classes live only in [lib/carrier-rejection/codes.ts](../lib/carrier-rejection/codes.ts).** The ledger SQL is generated from it; the Settings table (PR 3) will render it. Do not retype a code list anywhere else. The one deliberate exception is [scripts/verify-carrier-rejections.ts](../scripts/verify-carrier-rejections.ts), whose reference SQL retypes the lists *on purpose* so a ledger defect cannot hide in the check.
+- **Count messages, never receipt events.** Text Request writes one failure twice (webhook + poll, different codes). Counting events turned the default rule's 24.5K numbers into 64.8K.
+- **Providers put the failure in different places.** txr: `status='undelivered'`, poll code in `error_code`, webhook code ONLY in `raw_body` (`error_code` column NULL). Ahoi: `status='error'`, never `'undelivered'`, reason in `error`. Tells: `status='undelivered'`, reason in `error_message`. A filter on `'undelivered'` alone silently drops every Ahoi rejection, which is what `lib/reporting/delivery.ts` does today (ClickUp 1amdve2850w).
+- **TextHub DLRs are never read** for this purpose — they are fabricated.
+- **Not an opt-out.** The ledger is applied as an eligibility filter only while `org_settings.carrier_rejection_suppression_enabled` is on; nothing writes `opt_outs`.
+- **Don't self-join a large CTE on a key.** CTE row estimates are tiny, so `o LEFT JOIN (SELECT … FROM o GROUP BY phone)` was planned as a ~1M x ~700K nested loop and cancelled at 600 s on prod. Use a window (`max(...) FILTER (...) OVER (PARTITION BY ...)`), or materialize into a table and `ANALYZE` it — the ledger rebuild `ANALYZE`s before its recompute for the same reason.

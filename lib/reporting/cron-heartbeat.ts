@@ -132,6 +132,23 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 24 * 16, // weekly cadence, ~2 missed runs
     label: "clickers propagate rebuild (weekly)",
   },
+  // Carrier-rejected numbers ledger (0225, app/api/cron/carrier-rejections).
+  // Both passes stamp only when they actually ran — they refuse until a FULL
+  // rebuild (?mode=full, on demand) has created the watermark, so "never
+  // backfilled" surfaces here too. The grace covers the gap between deploy and
+  // the initial backfill. Both are watched hourly by tells-monitors.
+  carrierRejectionIncremental: {
+    job_name: "carrier-rejections-incremental",
+    max_age_hours: 1, // 15-min cadence, ~3 missed runs
+    label: "Carrier-rejection ledger (15-min)",
+    first_run_grace_hours: 24,
+  },
+  carrierRejectionRebuild: {
+    job_name: "carrier-rejections-rebuild",
+    max_age_hours: 50, // daily cadence, ~2 missed runs
+    label: "Carrier-rejection full rebuild (daily)",
+    first_run_grace_hours: 30,
+  },
   // The offer-report matview refresh. Its route ALREADY handles failure well —
   // try/catch, a Tier-1 alert, a 500 so the scheduler flags red, and it stamps
   // report_refresh_log only after both refreshes succeed, so a failure leaves a

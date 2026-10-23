@@ -3629,6 +3629,14 @@ export const org_settings = pgTable("org_settings", {
   // skips a candidate whose current hour is full and diverts to the next same-tag candidate
   // with hourly room; never defers. Off = day-level only. Rollback = set false.
   drip_routing_hour_overflow: boolean("drip_routing_hour_overflow").notNull().default(false),
+  // Migration 0225: carrier-rejected numbers. On = numbers in
+  // carrier_rejected_phones are excluded from new audiences, drip routing and
+  // stage materialization. NOT an opt-out — off makes them eligible again, no
+  // data lost. Thresholds: CHECK org_settings_carrier_rejection_thresholds_check.
+  carrier_rejection_suppression_enabled: boolean("carrier_rejection_suppression_enabled").notNull().default(false),
+  carrier_rejection_hard_threshold: smallint("carrier_rejection_hard_threshold").notNull().default(2),
+  carrier_rejection_soft_threshold: smallint("carrier_rejection_soft_threshold").notNull().default(3),
+  carrier_rejection_soft_window_days: smallint("carrier_rejection_soft_window_days").notNull().default(30),
   sends_paused_at: timestamp("sends_paused_at", { withTimezone: true }),
   sends_paused_by: uuid("sends_paused_by"),
   created_at: timestamp("created_at", { withTimezone: true })
@@ -4438,6 +4446,73 @@ export const stage_delivery_rollup = pgTable(
 );
 
 export type StageDeliveryRollup = typeof stage_delivery_rollup.$inferSelect;
+
+// ---- Carrier-rejected numbers (migration 0225, ClickUp 1amdve2850v) ----------
+// Derived from the txr / Ahoi / Tells delivery receipts (TextHub excluded).
+// Written ONLY by lib/carrier-rejection/ledger.ts. Not an opt-out: eligibility
+// reads carrier_rejected_phones only when
+// org_settings.carrier_rejection_suppression_enabled is on.
+
+// One row per REJECTED MESSAGE. sent_at is the message's, not the receipt's.
+export const carrier_rejections = pgTable(
+  "carrier_rejections",
+  {
+    stage_send_id: uuid("stage_send_id")
+      .primaryKey()
+      .references(() => stage_sends.id, { onDelete: "cascade" }),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    phone: text("phone").notNull(),
+    provider: text("provider").notNull(),
+    severity: text("severity").notNull(),
+    code: text("code").notNull(),
+    sent_at: timestamp("sent_at", { withTimezone: true }).notNull(),
+    refreshed_at: timestamp("refreshed_at", { withTimezone: true }).notNull().defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("carrier_rejections_org_phone_sent_idx").on(table.org_id, table.phone, table.sent_at),
+    check("carrier_rejections_provider_check", sql`${table.provider} IN ('txr', 'ahi', 'tls')`),
+    check("carrier_rejections_severity_check", sql`${table.severity} IN ('hard', 'soft')`),
+  ],
+);
+
+// Per phone: sent_at of its latest DELIVERED message — a delivery resets the counts.
+export const carrier_phone_delivery = pgTable(
+  "carrier_phone_delivery",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    phone: text("phone").notNull(),
+    last_delivered_sent_at: timestamp("last_delivered_sent_at", { withTimezone: true }).notNull(),
+    refreshed_at: timestamp("refreshed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.org_id, table.phone] })],
+);
+
+// The numbers that currently meet the rule (computed regardless of the toggle).
+export const carrier_rejected_phones = pgTable(
+  "carrier_rejected_phones",
+  {
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    phone: text("phone").notNull(),
+    hard_count: integer("hard_count").notNull(),
+    // Soft rejections inside the org's soft window, as of evaluated_at.
+    soft_count: integer("soft_count").notNull(),
+    last_rejected_at: timestamp("last_rejected_at", { withTimezone: true }).notNull(),
+    last_code: text("last_code").notNull(),
+    last_provider: text("last_provider").notNull(),
+    flagged_at: timestamp("flagged_at", { withTimezone: true }).notNull().defaultNow(),
+    evaluated_at: timestamp("evaluated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.org_id, table.phone] })],
+);
+
+export type CarrierRejectedPhone = typeof carrier_rejected_phones.$inferSelect;
 
 // ---- Contact lifecycle / engagement (migration 0187) -------------------------
 // Spec: docs/superpowers/specs/2026-09-22-contact-lifecycle-status-design.md.

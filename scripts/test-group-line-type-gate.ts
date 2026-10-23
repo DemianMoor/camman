@@ -2,6 +2,7 @@ import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { createPartnerWithKey } from "./_partner-fixture";
 import { fictionalPhones, refuseIfPhonesInUse } from "./_fictional-phones";
+import { readFileSync } from "node:fs";
 import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
@@ -30,6 +31,7 @@ import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
 //   C1 a group inserted without flags is mobile-only (0222 column defaults)
 //   C2 drip intake's auto-created partner×tag group is mobile-only (explicit false×3)
 //   C3 re-resolving an existing partner×tag group never resets its flags
+//   M1 replaying the 0222 file (rolled back) backfills toll-free off only in mobile-only groups
 //
 // Own throwaway org; every row is torn down by id and the residue is counted.
 
@@ -101,6 +103,27 @@ async function main() {
     const bareFlags = await flagsOf(bare);
     bar("C1 a group inserted without flags is mobile-only (column defaults)", fmt(bareFlags) === "false/false/false", fmt(bareFlags));
     await db.execute(sql`DELETE FROM contact_groups WHERE id = ${bare}`);
+
+    // M1: replay the 0222 file itself (it is re-runnable) in a ROLLED-BACK
+    // transaction over two fixture groups: a mobile-only one (allow_unknown =
+    // false) loses toll-free, an open one keeps it.
+    const mFile = readFileSync("db/migrations/0222_contact_group_mobile_only_default.sql", "utf8")
+      .split("--> statement-breakpoint").map((x) => x.trim()).filter(Boolean);
+    let m1 = "";
+    await db.transaction(async (tx) => {
+      const mk = async (key: string, unknown: boolean) => ((await tx.execute(sql`
+        INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free)
+        VALUES (${orgId}::uuid, ${key + "-" + sfx}, ${key}, true, ${unknown}, true) RETURNING id`)) as unknown as { id: number }[])[0].id;
+      const mOnly = await mk("m1-mobile-only", false);
+      const mOpen = await mk("m1-open", true);
+      for (const stmt of mFile) await tx.execute(sql.raw(stmt));
+      const r = (await tx.execute(sql`
+        SELECT (SELECT allow_toll_free FROM contact_groups WHERE id = ${mOnly}) AS only_tf,
+               (SELECT allow_toll_free FROM contact_groups WHERE id = ${mOpen}) AS open_tf`)) as unknown as { only_tf: boolean; open_tf: boolean }[];
+      m1 = `${r[0].only_tf}/${r[0].open_tf}`;
+      tx.rollback();
+    }).catch((e: unknown) => { if (!String(e).includes("Rollback")) throw e; });
+    bar("M1 0222's backfill blocks toll-free in mobile-only groups and leaves the rest", m1 === "false/true", `mobile-only/open toll_free = ${m1}`);
 
     // Groups: STRICT holds mob/voip/unk/tf; OPEN holds all five. A campaign selects OPEN only.
     // Explicit flags: since 0222 the column defaults are mobile-only.

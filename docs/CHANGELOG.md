@@ -2205,3 +2205,5 @@ still computes and reports, it just never refuses. **No migration.**
 2026-10-23 — Read-only scripts: withReadOnlyDb helper (session-mode connection + BEGIN READ ONLY) and test-session-set-guard in check:guards (no default_transaction_read_only / SET SESSION) after a leaked session SET failed 340 prod writes on 10-22 — 07-conventions
 
 2026-10-23 — Session-SET guard extended to every session-level SET (G5: only on a dedicated toSessionModeUrl + max:1 connection, else SET LOCAL); toSessionModeUrl moved to dependency-free lib/db/session-url.ts; verify-drip-routing-production / test-report-rollup / apply-0099 / apply-lookup-migrations / apply-offer-cooldown fixed — 07-conventions
+
+2026-10-23 — Migration 0222: contact_groups.allow_toll_free (gate + drip routing), all three line-type flags default false (new groups mobile-only); drip partner×tag groups false×3, system groups true×3, UI create requires the flags (form: unknown on); toll-free backfilled off where allow_unknown = false — 03-data-model, 04-features/contacts-and-groups, 07-conventions

@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT)_
+_Last updated: 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -528,6 +528,8 @@ sequenceDiagram
 ## L. "Texted in the last…" rule — nightly trial (Task 3 T5, 05:20 UTC)
 
 `/api/cron/texted-rule-trial` ([lib/segments/texted-rule-trial.ts](../lib/segments/texted-rule-trial.ts)). Fourteen consecutive clean nights must pass before the first segment switch (owner, 2026-10-03).
+
+**One-shot, 2026-10-24 only:** `/api/cron/lifecycle-backfill` (`*/5 5,6 24 10 *`) runs the Lifecycle report backfills inside 05:00–06:20 UTC and posts a before/after Telegram line — see [04-features/contact-lifecycle.md](04-features/contact-lifecycle.md) §3k2. A no-op at every other time.
 
 ```mermaid
 sequenceDiagram

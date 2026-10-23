@@ -263,11 +263,14 @@ async function main() {
       /d\.unstamped === 0/.test(src) && !/readFileSync|writeFileSync/.test(src),
       "a cursor file lies after a partial failure",
     );
+    // The day's SQL moved to lib/engagement/lifecycle-reconstruct-day.ts
+    // (2026-10-23, shared with the one-shot quiet-window cron).
+    const daySrc = readFileSync("lib/engagement/lifecycle-reconstruct-day.ts", "utf-8");
     bar(
       "T5 the suppressed→freeze coercion is in the INSERT, not only the report",
       /INSERT INTO stage_send_lifecycle[\s\S]{0,400}WHEN f\.status = 'suppressed' THEN 'freeze'/.test(
-        src,
-      ),
+        daySrc,
+      ) && src.includes("reconstructLifecycleDay("),
     );
   } finally {
     if (orgId) {

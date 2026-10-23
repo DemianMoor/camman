@@ -66,12 +66,9 @@ interface DayResult {
 
 async function main() {
   const { db } = await import("@/db/client");
-  const { evaluationSelectSql } = await import("@/lib/engagement/status-sql");
-  const { createThresholdTempTables } = await import(
-    "@/lib/engagement/thresholds-sql"
+  const { reconstructLifecycleDay } = await import(
+    "@/lib/engagement/lifecycle-reconstruct-day"
   );
-  const { HUMAN_CLICK } = await import("@/lib/reporting/counted-clickers");
-  const { etDayBounds } = await import("@/lib/reporting/delivery-rollup");
   const { loadLifecycleSettings } = await import("@/lib/engagement/settings-io");
 
   const host = new URL(process.env.DATABASE_URL ?? "postgres://x@unknown/x")
@@ -152,132 +149,20 @@ async function main() {
     };
 
     // ONE TRANSACTION PER ET DAY, so a failure loses one day, not the run.
+    // The day's SQL lives in lib/engagement/lifecycle-reconstruct-day.ts, shared
+    // with the one-shot quiet-window cron.
     await db.transaction(async (tx) => {
-      const org = sql`${orgId}::uuid`;
-      // ⚠️ THE DAY'S END, COMPUTED IN JS BY THE SHARED HELPER. Written as
-      // `(<date> + 1) AT TIME ZONE 'America/New_York'` in SQL it lands EIGHT
-      // HOURS EARLY — Postgres casts the date to timestamptz in the session
-      // zone, converts TO ET, and returns a naive timestamp compared as UTC, so
-      // asOf was 16:00 ET. Every day was then evaluated against truncated
-      // message counts and clicks, and every send after 16:00 ET fell out of
-      // the facts entirely and reconstructed to nothing.
-      const bounds = etDayBounds({ from: d.et_day, to: d.et_day });
-      const asOf = sql`${bounds.toExclusiveUtc.toISOString()}::timestamptz`;
-      const dayStart = sql`${bounds.fromUtc.toISOString()}::timestamptz`;
-
-      await tx.execute(sql`
-        CREATE TEMP TABLE rc_target ON COMMIT DROP AS
-        SELECT ss.id AS stage_send_id, ss.contact_id
-        FROM stage_sends ss
-        WHERE ss.org_id = ${org} AND ss.status = 'sent'
-          -- ⚠️ A HALF-OPEN RANGE ON RAW sent_at (2026-10-23). The expression
-          -- form (sent_at AT TIME ZONE …)::date = day wraps the indexed column
-          -- and seq-scans all of stage_sends once per day.
-          AND ss.sent_at >= ${dayStart} AND ss.sent_at < ${asOf}
-          AND NOT EXISTS (
-            SELECT 1 FROM stage_send_lifecycle l WHERE l.stage_send_id = ss.id
-          )`);
-      await tx.execute(sql`ANALYZE rc_target`);
-
-      await tx.execute(sql`
-        CREATE TEMP TABLE rc_clicks ON COMMIT DROP AS
-        SELECT l.contact_id,
-               min(ck.clicked_at) AS first_click_at,
-               max(ck.clicked_at) AS last_click_at
-        FROM clicks ck
-        JOIN links l ON l.id = ck.link_id
-        WHERE ${HUMAN_CLICK} AND ck.org_id = ${org}
-          AND ck.clicked_at <= ${asOf} AND ck.scored_at <= ${asOf}
-          AND l.contact_id IN (SELECT contact_id FROM rc_target)
-        GROUP BY l.contact_id`);
-      await tx.execute(sql`ANALYZE rc_clicks`);
-
-      await tx.execute(sql`
-        CREATE TEMP TABLE rc_facts ON COMMIT DROP AS
-        SELECT ss.contact_id,
-               count(*)::int AS msgs_total,
-               count(*) FILTER (WHERE cl.last_click_at IS NULL OR ss.sent_at > cl.last_click_at)::int AS msgs_since_click,
-               count(*) FILTER (WHERE ss.sent_at > ${asOf} - interval '7 days')::int AS msgs_7d,
-               count(*) FILTER (WHERE ss.sent_at > ${asOf} - interval '14 days')::int AS msgs_14d,
-               count(*) FILTER (WHERE ss.sent_at > ${asOf} - interval '30 days')::int AS msgs_30d,
-               count(*) FILTER (WHERE ss.sent_at > ${asOf} - interval '90 days')::int AS msgs_90d,
-               min(ss.sent_at) AS first_sent_at,
-               max(ss.sent_at) AS last_sent_at
-        FROM stage_sends ss
-        LEFT JOIN rc_clicks cl ON cl.contact_id = ss.contact_id
-        WHERE ss.org_id = ${org} AND ss.status = 'sent' AND ss.sent_at <= ${asOf}
-          AND ss.contact_id IN (SELECT contact_id FROM rc_target)
-        GROUP BY ss.contact_id`);
-      await tx.execute(sql`ANALYZE rc_facts`);
-
-      await createThresholdTempTables(tx, orgId);
-
-      await tx.execute(sql`
-        CREATE TEMP TABLE rc_eval ON COMMIT DROP AS
-        SELECT f.contact_id,
-               NULL::text AS prev_status,
-               NULL::timestamptz AS prev_status_changed_at,
-               NULL::timestamptz AS prev_freeze_entered_at,
-               f.msgs_total, f.msgs_since_click,
-               f.msgs_7d, f.msgs_14d, f.msgs_30d, f.msgs_90d,
-               f.first_sent_at, f.last_sent_at,
-               cl.first_click_at, cl.last_click_at,
-               NULL::timestamptz AS calc_freeze_started_at,
-               0::int AS calc_freeze_msgs,
-               o.hot_days, o.warm_days,
-               coalesce(g.freeze_after_messages, o.freeze_after_messages) AS freeze_after_messages,
-               coalesce(g.freeze_cadence_days, o.freeze_cadence_days) AS freeze_cadence_days,
-               coalesce(g.suppress_after_days, o.suppress_after_days) AS suppress_after_days,
-               coalesce(g.suppress_min_freeze_messages, o.suppress_min_freeze_messages) AS suppress_min_freeze_messages,
-               coalesce(g.override_group_ids, '{}'::int[]) AS override_group_ids
-        FROM rc_facts f
-        LEFT JOIN rc_clicks cl ON cl.contact_id = f.contact_id
-        LEFT JOIN eng_grp_thr g ON g.contact_id = f.contact_id
-        CROSS JOIN eng_org_thr o`);
-      await tx.execute(sql`ANALYZE rc_eval`);
-
-      await tx.execute(sql`
-        CREATE TEMP TABLE rc_final ON COMMIT DROP AS
-        ${evaluationSelectSql(sql`rc_eval`, asOf, "backfill")}`);
-
-      // ⚠️ SUPPRESSED IS NEVER WRITTEN (spec §10). A contact the facts imply is
-      // suppressed becomes 'freeze' — the status they must have been in to get
-      // there — because suppression could not have happened before launch.
-      const coerced = (await tx.execute(sql`
-        SELECT count(*)::int AS n FROM rc_final WHERE status = 'suppressed'`)) as unknown as { n: number }[];
-      r.suppressedCoerced = Number(coerced[0]?.n ?? 0);
-
-      const dist = (await tx.execute(sql`
-        SELECT CASE WHEN f.status = 'suppressed' THEN 'freeze' ELSE f.status END AS status,
-               count(*)::int AS n
-        FROM rc_target t JOIN rc_final f ON f.contact_id = t.contact_id
-        GROUP BY 1`)) as unknown as { status: string; n: number }[];
-      r.byStatus = Object.fromEntries(dist.map((x) => [x.status, Number(x.n)]));
-
-      const unclass = (await tx.execute(sql`
-        SELECT count(*)::int AS n FROM rc_target t
-        WHERE NOT EXISTS (SELECT 1 FROM rc_final f WHERE f.contact_id = t.contact_id)`)) as unknown as { n: number }[];
-      r.unclassified = Number(unclass[0]?.n ?? 0);
-
-      if (APPLY) {
-        const ins = (await tx.execute(sql`
-          INSERT INTO stage_send_lifecycle
-            (stage_send_id, org_id, status, reconstructed, last_click_at)
-          SELECT t.stage_send_id, ${org},
-                 CASE WHEN f.status = 'suppressed' THEN 'freeze' ELSE f.status END,
-                 true,
-                 -- The replayed last human click as of the day's end — the same
-                 -- instant the status was evaluated at (0220, the Warm split).
-                 f.last_click_at
-          FROM rc_target t JOIN rc_final f ON f.contact_id = t.contact_id
-          ON CONFLICT (stage_send_id) DO NOTHING
-          RETURNING stage_send_id`)) as unknown as unknown[];
-        r.written = ins.length;
-      } else {
-        // Dry run: what WOULD be written.
-        r.written = Object.values(r.byStatus).reduce((a, b) => a + b, 0);
-        throw new Error("__ROLLBACK__");
-      }
+      const out = await reconstructLifecycleDay(tx, {
+        orgId: orgId!,
+        day: d.et_day,
+        apply: APPLY,
+      });
+      r.written = out.written;
+      r.byStatus = out.byStatus;
+      r.suppressedCoerced = out.suppressedCoerced;
+      r.unclassified = out.unclassified;
+      // Dry run: everything above was computed; roll it back.
+      if (!APPLY) throw new Error("__ROLLBACK__");
     }).catch((e) => {
       if (!(e instanceof Error) || e.message !== "__ROLLBACK__") throw e;
     });

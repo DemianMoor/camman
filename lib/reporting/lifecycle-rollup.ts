@@ -81,9 +81,9 @@ export async function refreshLifecycleDayRollup(
 
   const inserted = (await dbc.execute(sql`
     INSERT INTO lifecycle_day_rollup
-      (org_id, et_day, cohort, sends, clickers, sales, revenue, opt_outs, cost,
-       reconstructed, computed_at)
-    SELECT ${org}, d.et_day, d.row, d.sends, d.clickers, d.sales,
+      (org_id, et_day, cohort, sends, clickers, sales, purchases, revenue,
+       opt_outs, cost, reconstructed, computed_at)
+    SELECT ${org}, d.et_day, d.row, d.sends, d.clickers, d.sales, d.purchases,
            d.revenue::numeric, d.opt_outs, d.cost::numeric, d.reconstructed, now()
     FROM (${lifecycleDayRowsSql({ orgId: opts.orgId, from, to })}) d
     RETURNING et_day`)) as unknown as unknown[];
@@ -139,6 +139,7 @@ export async function getLifecycleReportHybrid(opts: {
                sum(sends)::int AS sends,
                sum(clickers)::int AS clickers,
                sum(sales)::int AS sales,
+               sum(purchases)::int AS purchases,
                sum(revenue)::text AS revenue,
                sum(opt_outs)::int AS opt_outs,
                sum(cost)::text AS cost,
@@ -168,6 +169,7 @@ export async function getLifecycleReportHybrid(opts: {
             sends: Number(prev.sends) + Number(r.sends),
             clickers: Number(prev.clickers) + Number(r.clickers),
             sales: Number(prev.sales) + Number(r.sales),
+            purchases: Number(prev.purchases) + Number(r.purchases),
             revenue: String(Number(prev.revenue) + Number(r.revenue)),
             opt_outs: Number(prev.opt_outs) + Number(r.opt_outs),
             cost: String(Number(prev.cost) + Number(r.cost)),

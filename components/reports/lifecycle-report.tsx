@@ -35,18 +35,23 @@ const ROW_LABEL: Record<string, string> = {
   non_clickers: "Non-clickers",
   total: "Total",
   unclassified: "Unclassified",
+  grand_total: "Grand total",
 };
 const ROW_ORDER = [
   "new", "cold", "hot", "warm", "freeze", "suppressed",
-  "clickers", "non_clickers", "total", "unclassified",
+  "clickers", "non_clickers", "total", "unclassified", "grand_total",
 ];
-const RULE_BEFORE = new Set(["clickers", "total", "unclassified"]);
+const RULE_BEFORE = new Set(["clickers", "total", "unclassified", "grand_total"]);
+const EMPHASIS = new Set(["total", "grand_total"]);
+// Metric cells per row — the suppressed row prints one dash per column.
+const METRIC_COLUMNS = 12;
 
 const pct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(2)}%`);
 const money = (v: string) =>
   `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const num = (v: number) => v.toLocaleString();
 const moneyOrDash = (v: number | null) => (v === null ? "—" : money(String(v)));
+const roiPct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(1)}%`);
 
 export function LifecycleReport() {
   // Lazy initialisers: reading the clock in the render body is impure, and the
@@ -123,19 +128,21 @@ export function LifecycleReport() {
                 <th className="px-3 py-2 text-right font-medium">Clickers</th>
                 <th className="px-3 py-2 text-right font-medium">CTR</th>
                 <th className="px-3 py-2 text-right font-medium">Sales*</th>
+                <th className="px-3 py-2 text-right font-medium">Purchases*</th>
                 <th className="px-3 py-2 text-right font-medium">CR*</th>
                 <th className="px-3 py-2 text-right font-medium">Revenue*</th>
                 <th className="px-3 py-2 text-right font-medium">EPC*</th>
                 <th className="px-3 py-2 text-right font-medium">Opt-out</th>
                 <th className="px-3 py-2 text-right font-medium">Cost</th>
                 <th className="px-3 py-2 text-right font-medium">CPC</th>
+                <th className="px-3 py-2 text-right font-medium">ROI</th>
               </tr>
             </thead>
             <tbody className="tabular-nums">
               {ROW_ORDER.map((key) => {
                 const r: LifecycleMetrics | undefined = byRow.get(key);
                 const suppressed = key === "suppressed";
-                const emphasis = key === "total";
+                const emphasis = EMPHASIS.has(key);
                 return (
                   <tr
                     key={key}
@@ -163,7 +170,7 @@ export function LifecycleReport() {
                         structurally empty, and a 0 would read as a measurement. */}
                     {suppressed ? (
                       <>
-                        {Array.from({ length: 10 }).map((_, i) => (
+                        {Array.from({ length: METRIC_COLUMNS }).map((_, i) => (
                           <td key={i} className="px-3 py-2 text-right">—</td>
                         ))}
                       </>
@@ -173,6 +180,7 @@ export function LifecycleReport() {
                         <td className="px-3 py-2 text-right">{num(r?.clickers ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.ctr ?? null)}</td>
                         <td className="px-3 py-2 text-right">{num(r?.sales ?? 0)}</td>
+                        <td className="px-3 py-2 text-right">{num(r?.purchases ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.cr ?? null)}</td>
                         <td className="px-3 py-2 text-right">{money(r?.revenue ?? "0")}</td>
                         <td className="px-3 py-2 text-right">{moneyOrDash(r?.epc ?? null)}</td>
@@ -186,6 +194,14 @@ export function LifecycleReport() {
                         </td>
                         <td className="px-3 py-2 text-right">{money(r?.cost ?? "0")}</td>
                         <td className="px-3 py-2 text-right">{moneyOrDash(r?.cpc ?? null)}</td>
+                        <td
+                          className={cn(
+                            "px-3 py-2 text-right",
+                            r?.roi != null && r.roi < 0 && "text-destructive",
+                          )}
+                        >
+                          {roiPct(r?.roi ?? null)}
+                        </td>
                       </>
                     )}
                   </tr>
@@ -219,6 +235,13 @@ export function LifecycleReport() {
           same source the lifecycle engine evaluates against. Overview uses{" "}
           <code>counted_clickers</code>, which lags, so the two tabs show
           different CTRs for the same period.
+        </p>
+        <p>
+          <span className="font-medium">Total is the stamped cohorts above it;
+          Grand total is every send in the period</span>, including Unclassified.
+          Sales counts buyers (sends with at least one purchase); Purchases counts
+          every purchase event, so a buyer who pays twice is 1 sale and 2
+          purchases. ROI is (revenue − cost) ÷ cost.
         </p>
         <p>
           <span className="font-medium">Cost includes opt-out cost</span> — a

@@ -59,14 +59,18 @@ export type LifecycleRow =
   | "clickers"
   | "non_clickers"
   | "total"
-  | "unclassified";
+  | "unclassified"
+  | "grand_total";
 
 export interface LifecycleMetrics {
   row: LifecycleRow;
   sends: number;
   clickers: number;
   ctr: number | null;
+  /** Sends with ≥1 purchase — buyers. */
   sales: number;
+  /** Purchase EVENTS on those sends; ≥ sales when a buyer pays more than once. */
+  purchases: number;
   cr: number | null;
   revenue: string;
   /** revenue / clickers — attributed revenue only, like `revenue`. */
@@ -76,6 +80,8 @@ export interface LifecycleMetrics {
   cost: string;
   /** cost / clickers. */
   cpc: number | null;
+  /** (revenue − cost) / cost; null when nothing was spent. */
+  roi: number | null;
   /** true when ANY send in this row was reconstructed rather than stamped live. */
   reconstructed: boolean;
 }
@@ -109,6 +115,7 @@ export interface LifecycleReportRow {
   sends: number;
   clickers: number;
   sales: number;
+  purchases: number;
   revenue: string;
   opt_outs: number;
   cost: string;
@@ -306,6 +313,7 @@ function lifecycleSql(
     ledger AS (
       SELECT ce.stage_send_id AS id,
              bool_or(${purchasedClause()}) AS purchased,
+             count(*) FILTER (WHERE ${purchasedClause()})::int AS purchases,
              coalesce(sum(ce.revenue) FILTER (
                WHERE et.counts_revenue AND ce.status = 'approved'
              ), 0) AS revenue
@@ -331,6 +339,13 @@ function lifecycleSql(
                WHEN lg.id IS NULL AND s.sale_status IN ('lead', 'sale') THEN 1
                ELSE 0
              END AS is_sale,
+             -- Purchase EVENTS, on the same ledger-primary rule: the legacy
+             -- column can only ever say "one".
+             CASE
+               WHEN lg.id IS NOT NULL THEN lg.purchases
+               WHEN s.sale_status IN ('lead', 'sale') THEN 1
+               ELSE 0
+             END AS purchases,
              coalesce(lg.revenue, 0) AS ledger_revenue,
              (op.id IS NOT NULL) AS opted_out,
              -- The stage cost model at send grain: rate × (1 + opted out).
@@ -353,6 +368,7 @@ function lifecycleSql(
            count(*)::int AS sends,
            count(*) FILTER (WHERE clicked)::int AS clickers,
            sum(is_sale)::int AS sales,
+           sum(purchases)::int AS purchases,
            coalesce(sum(ledger_revenue), 0)::text AS revenue,
            count(*) FILTER (WHERE opted_out)::int AS opt_outs,
            coalesce(sum(cost), 0)::text AS cost,
@@ -369,7 +385,7 @@ export function foldLifecycleRows(
 ): LifecycleReport {
   const by = new Map(rows.map((r) => [r.row, r]));
   const zero = {
-    sends: 0, clickers: 0, sales: 0, revenue: "0",
+    sends: 0, clickers: 0, sales: 0, purchases: 0, revenue: "0",
     opt_outs: 0, cost: "0", reconstructed: false,
   };
   const pick = (k: string) => by.get(k) ?? zero;
@@ -379,6 +395,7 @@ export function foldLifecycleRows(
     const sends = parts.reduce((a, p) => a + Number(p.sends), 0);
     const clickers = parts.reduce((a, p) => a + Number(p.clickers), 0);
     const sales = parts.reduce((a, p) => a + Number(p.sales), 0);
+    const purchases = parts.reduce((a, p) => a + Number(p.purchases ?? 0), 0);
     const opt_outs = parts.reduce((a, p) => a + Number(p.opt_outs), 0);
     const revenue = parts.reduce((a, p) => a + Number(p.revenue), 0);
     const cost = parts.reduce((a, p) => a + Number(p.cost), 0);
@@ -390,6 +407,7 @@ export function foldLifecycleRows(
       // sends is a statement nobody measured.
       ctr: sends > 0 ? clickers / sends : null,
       sales,
+      purchases,
       cr: clickers > 0 ? sales / clickers : null,
       revenue: revenue.toFixed(4),
       epc: clickers > 0 ? revenue / clickers : null,
@@ -397,6 +415,7 @@ export function foldLifecycleRows(
       opt_out_rate: sends > 0 ? opt_outs / sends : null,
       cost: cost.toFixed(4),
       cpc: clickers > 0 ? cost / clickers : null,
+      roi: cost > 0 ? (revenue - cost) / cost : null,
       reconstructed: parts.some((p) => p.reconstructed),
     };
   };
@@ -410,8 +429,18 @@ export function foldLifecycleRows(
   // a reader would assume the tool was broken rather than that history is
   // missing.
   const unclassified = build("unclassified", ["__unclassified__"]);
+  // ⚠️ TOTAL IS THE STAMPED COHORTS ONLY; GRAND TOTAL IS EVERY SEND. Total
+  // stays the sum of the rows above it (owner, 2026-10-23), so it cannot be
+  // read as all sends — that is what Grand total is for. The 10-23 audit found
+  // Total alone reading $24,575 of a $29,226 period.
+  const grandTotal = build("grand_total", [
+    ...LIFECYCLE_COHORTS,
+    "__unclassified__",
+  ]);
 
-  const all = [...cohortRows, clickers, nonClickers, total, unclassified];
+  const all = [
+    ...cohortRows, clickers, nonClickers, total, unclassified, grandTotal,
+  ];
   return {
     rows: all,
     has_reconstructed: all.some((r) => r.reconstructed),

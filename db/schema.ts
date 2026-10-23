@@ -4664,6 +4664,11 @@ export const stage_send_lifecycle = pgTable(
     status: text("status").notNull(),
     // true = rebuilt from history by the 60-day backfill, not stamped live.
     reconstructed: boolean("reconstructed").notNull().default(false),
+    // The contact's last human click as known when the stamp was written
+    // (contact_engagement.last_click_at), or replayed from clicks by a backfill.
+    // The Lifecycle report's Warm split reads it (0220). NULL = never clicked,
+    // or a stamp written before 0220 and not backfilled.
+    last_click_at: timestamp("last_click_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -4695,13 +4700,23 @@ export const lifecycle_day_rollup = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     et_day: date("et_day").notNull(),
-    // The six statuses plus '__unclassified__' for sends with no stamp — a real
-    // value rather than NULL, so missing history stays visible instead of
-    // becoming a zero, and the read needs no coalesce.
+    // 'regular' | 'drip' (0220). Drip sends are stamped like any other but
+    // report as their own "Drip" row, so the kind — not the cohort — splits them.
+    campaign_kind: text("campaign_kind").notNull().default("regular"),
+    // The lifecycle statuses (Warm split into warm_31_60 / warm_61_120 by days
+    // since the last human click, 0220; plain 'warm' = no click time recorded)
+    // plus '__unclassified__' for sends with no stamp — a real value rather
+    // than NULL, so missing history stays visible instead of becoming a zero,
+    // and the read needs no coalesce.
     cohort: text("cohort").notNull(),
     sends: integer("sends").notNull().default(0),
     clickers: integer("clickers").notNull().default(0),
+    // Sends whose human click was the contact's FIRST-ever human click (0220).
+    new_clickers: integer("new_clickers").notNull().default(0),
+    // Sends with ≥1 purchase — buyers, not purchase events.
     sales: integer("sales").notNull().default(0),
+    // Purchase EVENTS (pending/approved) on those sends (0220).
+    purchases: integer("purchases").notNull().default(0),
     revenue: numeric("revenue", { precision: 14, scale: 4 })
       .notNull()
       .default("0"),
@@ -4717,12 +4732,16 @@ export const lifecycle_day_rollup = pgTable(
   (table) => [
     primaryKey({
       name: "lifecycle_day_rollup_pkey",
-      columns: [table.org_id, table.et_day, table.cohort],
+      columns: [table.org_id, table.et_day, table.campaign_kind, table.cohort],
     }),
     index("lifecycle_day_rollup_computed_at_idx").on(table.computed_at),
     check(
       "lifecycle_day_rollup_cohort_check",
-      sql`${table.cohort} IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed', '__unclassified__')`,
+      sql`${table.cohort} IN ('new', 'cold', 'hot', 'warm', 'warm_31_60', 'warm_61_120', 'freeze', 'suppressed', '__unclassified__')`,
+    ),
+    check(
+      "lifecycle_day_rollup_campaign_kind_check",
+      sql`${table.campaign_kind} IN ('regular', 'drip')`,
     ),
   ],
 );

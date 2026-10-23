@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-21 (per-step heartbeats; nightly run limits 800 s / 600 s / 14-min lease)_
+_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI; migration 0220)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -550,7 +550,12 @@ is gated on `campaigns.view`; the settings route stays denied.
 ### 3k. The cohort report (`/reports/lifecycle`, PR 5)
 
 One row per lifecycle cohort, by send date in ET: sends, clickers, CTR, sales,
-CR, revenue, EPC, opt-outs, cost and CPC. The Opt-out column shows the count with
+purchases, CR, revenue, EPC, opt-outs, cost, CPC and ROI.
+**Sales = buyers** (sends with ≥1 purchase); **Purchases = purchase events** on
+those sends (pending + approved, same ledger-primary rule; a legacy
+`sale_status`-only sale counts 1), so a buyer who pays twice is 1 sale and 2
+purchases — measured 10-23: 847 buyers, 1,064 purchases in 09-23→10-22.
+**ROI = (revenue − cost) ÷ cost**, `null` when nothing was spent. The Opt-out column shows the count with
 the rate in parentheses — `1,234 (2.50%)`; with zero sends the rate is `null`
 and only the count is shown. **EPC = revenue / clickers** and **CPC = cost /
 clickers**, both over this tab's own Clickers (raw human clicks per send), so
@@ -570,7 +575,15 @@ send: stamped hot 1,306 / warm 1,526, live hot 1,315 / warm 1,517 — nine
 contacts had already moved.
 
 Rows, in order: the six statuses, then `Clickers` (hot + warm) and
-`Non-clickers` (the rest), then `Total`, then `Unclassified`.
+`Non-clickers` (the rest), then `Total`, then `Unclassified`, then
+`Grand total`.
+
+- ⚠️ **`Total` is the stamped cohorts only; `Grand total` is every send**
+  (`Total` + `Unclassified`; owner, 2026-10-23). Before Grand total existed,
+  Total was the only bottom line and read **$24,575 of a $29,226 period** — the
+  Unclassified row (233,240 sends, $4,650) sat below it, uncounted. Arithmetic
+  pinned by `scripts/test-lifecycle-fold.ts` (pure) and bar A5 of
+  `scripts/test-lifecycle-report.ts`.
 
 - **`Unclassified` is a real row**, counting sends with no
   `stage_send_lifecycle` row. Omit it and the cohorts silently fail to sum to
@@ -662,8 +675,10 @@ reasons this tab does not foot with Overview.
 
 ### 3k3. The day rollup (migration 0192)
 
-`lifecycle_day_rollup` holds one row per **(org, ET day, cohort)**:
-`sends`, `clickers`, `sales`, `revenue`, `opt_outs`, `cost`, `reconstructed`.
+`lifecycle_day_rollup` holds one row per **(org, ET day, campaign kind,
+cohort)** (kind added in 0220): `sends`, `clickers`, `new_clickers`, `sales`,
+`purchases`, `revenue`, `opt_outs`, `cost`, `reconstructed`. Rows written
+before 0220 carry `purchases = 0` / `new_clickers = 0` until recomputed.
 [lib/reporting/lifecycle-rollup.ts](../../lib/reporting/lifecycle-rollup.ts).
 
 **One definition, two grains.** `lifecycleDayRowsSql` is `lifecycleReportSql`

@@ -378,6 +378,60 @@ function lifecycleSql(
   `;
 }
 
+/**
+ * The money the rows above CANNOT contain, for the footer's reconciliation.
+ *
+ * The rows are on SEND-DATE basis: a conversion counts on the send whose link
+ * was clicked, whenever it arrives. So a period's rows include conversions that
+ * arrive after it on its own sends, and exclude conversions that arrive inside
+ * it on EARLIER sends. The 10-23 audit measured that second set at $950 for
+ * 09-23→10-22 — real money a reader looking for "what I earned this month"
+ * would otherwise go hunting for. Conversions tied to no send at all are listed
+ * separately (none in that period). Both are read from the ledger by
+ * occurred_at, which is small, so this is cheap.
+ */
+export interface LifecycleOutsideBasis {
+  /** Approved revenue that occurred in the period on sends dated before it. */
+  earlier_sends_revenue: string;
+  earlier_sends_purchases: number;
+  /** Conversions in the period with no stage_send_id. */
+  unattributed_revenue: string;
+  unattributed_conversions: number;
+}
+
+export async function getLifecycleOutsideBasis(opts: {
+  orgId: string;
+  from: string;
+  to: string;
+}): Promise<LifecycleOutsideBasis> {
+  const org = sql`${opts.orgId}::uuid`;
+  const { fromUtc, toExclusiveUtc } = etDayBounds({ from: opts.from, to: opts.to });
+  const windowStart = sql`${fromUtc.toISOString()}::timestamptz`;
+  const windowEnd = sql`${toExclusiveUtc.toISOString()}::timestamptz`;
+  const rows = (await db.execute(sql`
+    SELECT
+      coalesce(sum(ce.revenue) FILTER (
+        WHERE ss.id IS NOT NULL AND ss.sent_at < ${windowStart}
+          AND et.counts_revenue AND ce.status = 'approved'), 0)::text
+        AS earlier_sends_revenue,
+      count(*) FILTER (
+        WHERE ss.id IS NOT NULL AND ss.sent_at < ${windowStart}
+          AND ${purchasedClause()})::int AS earlier_sends_purchases,
+      coalesce(sum(ce.revenue) FILTER (
+        WHERE ce.stage_send_id IS NULL
+          AND et.counts_revenue AND ce.status = 'approved'), 0)::text
+        AS unattributed_revenue,
+      count(*) FILTER (WHERE ce.stage_send_id IS NULL)::int
+        AS unattributed_conversions
+    FROM conversion_events ce
+    LEFT JOIN event_types et ON et.id = ce.event_type_id
+    LEFT JOIN stage_sends ss ON ss.id = ce.stage_send_id
+    WHERE ce.org_id = ${org}
+      AND ce.occurred_at >= ${windowStart} AND ce.occurred_at < ${windowEnd}
+  `)) as unknown as LifecycleOutsideBasis[];
+  return rows[0];
+}
+
 export function foldLifecycleRows(
   rows: LifecycleReportRow[],
   from: string,

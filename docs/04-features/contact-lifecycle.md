@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI, Drip row, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
+_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -555,7 +555,43 @@ purchases, CR, revenue, EPC, opt-outs, cost, CPC and ROI.
 those sends (pending + approved, same ledger-primary rule; a legacy
 `sale_status`-only sale counts 1), so a buyer who pays twice is 1 sale and 2
 purchases — measured 10-23: 847 buyers, 1,064 purchases in 09-23→10-22.
-**ROI = (revenue − cost) ÷ cost**, `null` when nothing was spent. The Opt-out column shows the count with
+**ROI = (revenue − cost) ÷ cost**, `null` when nothing was spent.
+**New clickers** = sends whose human click (on that send's own link) was the
+contact's first-ever human click — `min(clicked_at)` on the send's links
+`<= contact_engagement.first_click_at`, or `first_click_at IS NULL` (the job
+has not seen a click from them yet, so this one is the first). A contact is a
+new clicker at most once, so the column sums across days.
+**Cost / new clicker = (cost − revenue) ÷ new clickers**; blank with no new
+clickers, and *"pays for itself"* when revenue exceeds cost (never a negative
+cost). Fold arithmetic: `scripts/test-lifecycle-fold.ts` PART D; the SQL:
+`test-lifecycle-report.ts` A7–A9.
+
+⚠️ **The new-clicker work is a SECOND CTE over the clicked pairs, and
+`clicked` is `MATERIALIZED`.** Folding the first-click time into `clicked`
+(a `LATERAL min()` per link + `GROUP BY`) made the planner walk all 7.2M
+`links` rows via the `(stage, contact, send_token)` index: 65 s against
+17–23 s for 2026-10-22, past the route's 60 s — and today is always computed
+live. Fenced, the same day measured 6.6–15 s against 9.4–27.7 s for the
+previous statement. (Note: at current data the planner runs `clicked` as a
+parallel seq scan of `links` hash-joined to human clicks, not the per-stage
+probe described below; that was already true before this change.)
+
+**Warm is split** into `warm_31_60` / `warm_61_120` by days since the contact's
+last human click **at send time**: `reportCohortSql` reads the stamp's own
+`last_click_at` against the send's `sent_at`, with `WARM_SPLIT_DAYS = 60` in
+the evaluator's interval arithmetic — exactly 60×24 h is still 31–60, one
+second more is 61–120, the same convention that keeps exactly 30 days Hot.
+The cohort itself still comes from the stamp; the split only divides Warm. A
+warm stamp with no `last_click_at` (written before 0220 and not backfilled)
+shows as **"Warm (no click time)"**, hidden when empty, rather than being
+guessed into a bucket. Boundaries 30/31, 60/61, 120/121 (plus +1 s at each
+edge) run through the real evaluator then the split:
+`scripts/test-lifecycle-warm-split.ts`, red-proven (flipping `>=` to `>` turns
+B4 red). Historical warm stamps were filled by
+[scripts/backfill-lifecycle-last-click.ts](../../scripts/backfill-lifecycle-last-click.ts)
+(dry-run default; only `status = 'warm' AND last_click_at IS NULL`; value =
+latest human click at or before `sent_at`; tested by
+`scripts/test-lifecycle-last-click-backfill.ts`). The Opt-out column shows the count with
 the rate in parentheses — `1,234 (2.50%)`; with zero sends the rate is `null`
 and only the count is shown. **EPC = revenue / clickers** and **CPC = cost /
 clickers**, both over this tab's own Clickers (raw human clicks per send), so
@@ -574,7 +610,9 @@ every time you looked at it. Measured on stage 4791 nineteen hours after its
 send: stamped hot 1,306 / warm 1,526, live hot 1,315 / warm 1,517 — nine
 contacts had already moved.
 
-Rows, in order: the six statuses, then `Clickers` (hot + warm) and
+Rows, in order: New, Cold, Hot, Warm 31–60, Warm 61–120, (Warm — no click
+time, only when non-empty), Freeze, Suppressed, then `Clickers` (hot + every
+warm row) and
 `Non-clickers` (the rest), then `Total`, then `Unclassified`, then `Drip`,
 then `Grand total`.
 

@@ -1,6 +1,6 @@
 # Audience Stats Report
 
-_Last updated: 2026-09-28_
+_Last updated: 2026-10-23_
 
 A read-only report answering "for this contact group, which offers work?" —
 the inverse of the [Offer Group Performance Report](offer-group-report.md),
@@ -210,6 +210,6 @@ counting a registration as a sale, and nothing here is waiting for a backfill.
 - `app/api/reports/audience/route.ts` — API route; `lib/authz/route-map.ts` entry
 - `app/api/cron/refresh-offer-group-report/route.ts` — `audienceTotalsMs` in the log line
 - `app/(protected)/reports/audience/page.tsx`, `components/reports/audience-report.tsx` — page
-- `components/reports/report-metrics.tsx` — helpers shared with `app/(protected)/offers/[id]/report/page.tsx`
+- `components/reports/report-metrics.tsx` — helpers shared with `components/reports/offer-group-report.tsx`
 - `components/reports/reports-tabs.tsx`, `components/protected/nav-config.ts`, `app/(protected)/reports/layout.tsx` — tab, sidebar row, section blurb
 - `scripts/verify-audience-report.ts` — verification

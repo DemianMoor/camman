@@ -14,6 +14,7 @@ import {
   MousePointer,
   Network,
   PanelsTopLeft,
+  Grid2x2,
   Phone,
   Route,
   ScrollText,
@@ -137,6 +138,9 @@ export const navGroups: NavGroup[] = [
       // Results per landing page for one offer, send-date basis — see
       // docs/04-features/landing-page-report.md.
       { label: "Landing Pages", href: "/reports/landing-pages", icon: PanelsTopLeft, permission: "campaigns.view" },
+      // The offer screen's Group Report behind an offer picker — see
+      // docs/04-features/offer-group-report.md.
+      { label: "Offers x Group", href: "/reports/offer-groups", icon: Grid2x2, permission: "campaigns.view" },
       // Partner-facing lead performance (Drip P7). Same permission as every
       // other report; the page and its API re-check server-side.
       { label: "By Partner", href: "/reports/partners", icon: Handshake, permission: "campaigns.view" },

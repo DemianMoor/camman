@@ -19,6 +19,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # test-migration-numbering-guard compares this branch's journal with
+      # origin/main's; the default shallow checkout of the PR ref lacks it.
+      - run: git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
       - uses: actions/setup-node@v4
         with:
           node-version: 24

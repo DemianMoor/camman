@@ -1084,10 +1084,18 @@ export const contact_groups = pgTable(
     // audience and is never routed into a drip journey — in EVERY campaign, not
     // only ones that select this group (strictest group wins, like the lifecycle
     // overrides). Selection-time only: queued sends and frozen pools are not
-    // touched. Landlines are always blocked by messaging_status; toll_free is
-    // not gated. See lib/contact-groups/line-type-gate.ts.
-    allow_voip: boolean("allow_voip").notNull().default(true),
-    allow_unknown: boolean("allow_unknown").notNull().default(true),
+    // touched. Landlines are always blocked by messaging_status. See
+    // lib/contact-groups/line-type-gate.ts.
+    //
+    // Migration 0222: allow_toll_free joins the gate, and all three DEFAULT to
+    // false — a group created without explicit values is mobile-only. The app's
+    // create paths always pass explicit values (lib/drip/groups.ts: partner×tag
+    // false/false/false, system groups true/true/true; the UI POST requires all
+    // three, and the form starts VoIP/toll-free off, unknown on, owner ruling
+    // 2026-10-23, because a fresh CSV upload is 'unknown' until looked up).
+    allow_voip: boolean("allow_voip").notNull().default(false),
+    allow_unknown: boolean("allow_unknown").notNull().default(false),
+    allow_toll_free: boolean("allow_toll_free").notNull().default(false),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()

@@ -97,9 +97,9 @@ async function main() {
       INSERT INTO organizations (name) VALUES (${`${MARKER} ${tag}`}) RETURNING id`)).id;
     const group = async (key: string, status: "active" | "archived") =>
       (await one<{ id: number }>(sql`
-        INSERT INTO contact_groups (contact_group_id, org_id, name, status, archived_at)
+        INSERT INTO contact_groups (contact_group_id, org_id, name, status, archived_at, allow_voip, allow_unknown, allow_toll_free)
         VALUES (${`${tag}-${key}`}, ${orgId}::uuid, ${`${MARKER} ${key}`}, ${status},
-                ${status === "archived" ? sql`now()` : sql`NULL`})
+                ${status === "archived" ? sql`now()` : sql`NULL`}, true, true, true)
         RETURNING id`)).id;
     const gA = await group("A", "active");
     const gB = await group("B", "active");

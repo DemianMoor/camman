@@ -1534,6 +1534,13 @@
       "when": 1795521600000,
       "tag": "0219_contact_zip",
       "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1795737600000,
+      "tag": "0222_contact_group_mobile_only_default",
+      "breakpoints": true
     }
   ]
 }

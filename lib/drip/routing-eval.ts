@@ -363,7 +363,8 @@ export async function evaluateLeadRouting(
               WHERE lt_ccg.org_id = ${orgId}::uuid AND lt_ccg.contact_id = le.contact_id
                 AND lt_g.status = 'active'
                 AND ((lt_g.allow_voip = false AND le.line_type = 'voip')
-                  OR (lt_g.allow_unknown = false AND le.line_type = 'unknown'))) AS line_type_blocked,
+                  OR (lt_g.allow_unknown = false AND le.line_type = 'unknown')
+                  OR (lt_g.allow_toll_free = false AND le.line_type = 'toll_free'))) AS line_type_blocked,
       -- "In use" BOTH DIRECTIONS (G2): a regular campaign's frozen pool, or
       -- another live drip journey. Either blocks.
       EXISTS (SELECT 1 FROM campaign_audience_pool p

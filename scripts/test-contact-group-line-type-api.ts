@@ -5,7 +5,8 @@
 //   BASE_URL=https://camman-<hash>-demian-moors-projects.vercel.app \
 //     npx tsx --conditions=react-server --env-file=D:/AFF/camman/.env.demo scripts/test-contact-group-line-type-api.ts
 //
-//   A1 a new group defaults both boxes to true (POST without the fields)
+//   A0 (0222) a POST that omits any of the three flags is refused (400) — they are required
+//   A1 a POST with all three stores them as sent (incl. allow_toll_free)
 //   A2 PATCH allow_voip=false persists; GET [id] and the list both return it
 //   A3 a rename that omits the fields leaves them as stored
 //   A4 an operator (no contact_groups.update) gets 403 and changes nothing
@@ -64,8 +65,8 @@ async function main() {
       try { json = JSON.parse(text); } catch { /* non-JSON */ }
       return { status: res.status, json, text };
     };
-    const stored = async () => (await sql<{ allow_voip: boolean; allow_unknown: boolean }[]>`
-      SELECT allow_voip, allow_unknown FROM contact_groups WHERE id = ${groupId!}`)[0];
+    const stored = async () => (await sql<{ allow_voip: boolean; allow_unknown: boolean; allow_toll_free: boolean }[]>`
+      SELECT allow_voip, allow_unknown, allow_toll_free FROM contact_groups WHERE id = ${groupId!}`)[0];
     const listRow = async () => {
       const r = await call(`/api/contact-groups/list?page=0&pageSize=50&search=zz-lt`);
       const row = ((r.json.data as Record<string, unknown>[] | undefined) ?? []).find((g) => g.id === groupId);
@@ -73,22 +74,28 @@ async function main() {
       return row;
     };
 
-    const c = await call("/api/contact-groups", { method: "POST", body: JSON.stringify({ name: "zz-lt group", contact_group_id: `zz-lt-${Date.now()}` }) });
+    const bare = await call("/api/contact-groups", { method: "POST", body: JSON.stringify({ name: "zz-lt bare", contact_group_id: `zz-lt-bare-${Date.now()}`, allow_voip: true, allow_unknown: true }) });
+    if (bare.status === 201 && typeof bare.json.id === "number") await sql`DELETE FROM contact_groups WHERE id = ${bare.json.id as number}`;
+    check("A0 a POST without allow_toll_free is refused (all three flags are required)", bare.status === 400, `${bare.status} ${bare.text.slice(0, 120)}`);
+
+    const c = await call("/api/contact-groups", { method: "POST", body: JSON.stringify({
+      name: "zz-lt group", contact_group_id: `zz-lt-${Date.now()}`, allow_voip: true, allow_unknown: true, allow_toll_free: false }) });
     groupId = c.json.id as number | undefined;
-    check("A1 a new group defaults both boxes to true", c.status === 201 && c.json.allow_voip === true && c.json.allow_unknown === true,
-      `${c.status} voip=${c.json.allow_voip} unknown=${c.json.allow_unknown}`);
+    check("A1 a POST with all three stores them as sent", c.status === 201 && c.json.allow_voip === true && c.json.allow_unknown === true && c.json.allow_toll_free === false,
+      `${c.status} voip=${c.json.allow_voip} unknown=${c.json.allow_unknown} toll_free=${c.json.allow_toll_free}`);
 
     const p = await call(`/api/contact-groups/${groupId}`, { method: "PATCH", body: JSON.stringify({ allow_voip: false }) });
     const g = await call(`/api/contact-groups/${groupId}`);
     const l = await listRow();
     const s2 = await stored();
     check("A2 PATCH allow_voip=false persists and both reads return it",
-      p.status === 200 && s2.allow_voip === false && s2.allow_unknown === true && g.json.allow_voip === false && l?.allow_voip === false && l?.allow_unknown === true,
+      p.status === 200 && s2.allow_voip === false && s2.allow_unknown === true && s2.allow_toll_free === false
+        && g.json.allow_voip === false && l?.allow_voip === false && l?.allow_unknown === true && l?.allow_toll_free === false,
       `patch ${p.status}; db ${JSON.stringify(s2)}; get ${g.json.allow_voip}; list ${l?.allow_voip}/${l?.allow_unknown}`);
 
     const r = await call(`/api/contact-groups/${groupId}`, { method: "PATCH", body: JSON.stringify({ name: "zz-lt renamed" }) });
     const s3 = await stored();
-    check("A3 a rename leaves the boxes as stored", r.status === 200 && s3.allow_voip === false && s3.allow_unknown === true, `${r.status} ${JSON.stringify(s3)}`);
+    check("A3 a rename leaves the boxes as stored", r.status === 200 && s3.allow_voip === false && s3.allow_unknown === true && s3.allow_toll_free === false, `${r.status} ${JSON.stringify(s3)}`);
 
     await sql`UPDATE org_members SET role = 'operator' WHERE user_id = ${userId}::uuid AND org_id = ${orgId}::uuid`;
     const o = await call(`/api/contact-groups/${groupId}`, { method: "PATCH", body: JSON.stringify({ allow_voip: true }) });

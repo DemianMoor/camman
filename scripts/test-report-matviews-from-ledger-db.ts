@@ -267,8 +267,8 @@ async function seedFixture(tx: Tx): Promise<Fixture> {
   for (const key of [...CASES.map((c) => c.group), "all"]) {
     groups[key] = (
       await one<{ id: number }>(sql`
-        INSERT INTO contact_groups (org_id, contact_group_id, name)
-        VALUES (${orgId}::uuid, ${`t5-${key}-${tag}`}, ${`T5 ${key} ${tag}`})
+        INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free)
+        VALUES (${orgId}::uuid, ${`t5-${key}-${tag}`}, ${`T5 ${key} ${tag}`}, true, true, true)
         RETURNING id
       `)
     ).id;

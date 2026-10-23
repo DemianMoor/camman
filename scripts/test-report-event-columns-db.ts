@@ -152,8 +152,8 @@ async function main() {
     const group = async (name: string) =>
       (
         await one<{ id: number }>(sql`
-          INSERT INTO contact_groups (contact_group_id, org_id, name)
-          VALUES (${`${name}-${tag}`}, ${orgId}::uuid, ${name}) RETURNING id
+          INSERT INTO contact_groups (contact_group_id, org_id, name, allow_voip, allow_unknown, allow_toll_free)
+          VALUES (${`${name}-${tag}`}, ${orgId}::uuid, ${name}, true, true, true) RETURNING id
         `)
       ).id;
     const g1 = await group("G1");

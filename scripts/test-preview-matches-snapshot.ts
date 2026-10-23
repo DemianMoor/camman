@@ -72,8 +72,8 @@ async function main() {
       INSERT INTO offers (org_id, offer_id, network_id, name)
       VALUES (${org}, ${`o-${tag}`}, ${net.id}, ${`O ${tag}`}) RETURNING id`);
     const group = await one<{ id: number }>(sql`
-      INSERT INTO contact_groups (org_id, contact_group_id, name)
-      VALUES (${org}, ${`g-${tag}`}, ${`G ${tag}`}) RETURNING id`);
+      INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free)
+      VALUES (${org}, ${`g-${tag}`}, ${`G ${tag}`}, true, true, true) RETURNING id`);
     // The campaign under preview, plus an earlier one to carry the exposures.
     const mkCampaign = async (slug: string, status: string) =>
       (

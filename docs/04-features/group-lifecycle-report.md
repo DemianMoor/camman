@@ -1,6 +1,6 @@
 # Feature — Group × Lifecycle report
 
-_Last updated: 2026-09-28_
+_Last updated: 2026-10-23 (Hot and Warm separate columns; order New · Hot · Warm · Cold · Freeze · Suppressed · Total)_
 
 A read-only report for **sizing a daily campaign**: how many contacts each
 contact group can still be messaged today, split by lifecycle status. It is its own tab — **Reports → Group × Lifecycle**
@@ -9,16 +9,18 @@ contact group can still be messaged today, split by lifecycle status. It is its 
 [lib/reporting/group-lifecycle.ts](../../lib/reporting/group-lifecycle.ts),
 behind `GET /api/reports/group-lifecycle` (**`contacts.stats`**, not `contacts.view`: the report shows audience SIZE and never a contact row, and those are separate grants — gated on `contacts.view` it returned 403 to the OPERATOR role, which is the role that sizes the daily sends).
 
-**Columns, in order: Hot/Warm · Cold · Freeze · New · Suppressed · Total**
-(owner, 2026-09-28).
+**Columns, in order: New · Hot · Warm · Cold · Freeze · Suppressed · Total**
+(owner, 2026-10-23) — one column per status, in the table, the contact-group
+page and the CSV export alike.
 
-⚠️ **Hot and Warm share one column** because the operator treats them as one
-audience — people who have clicked — and sizes a send from the pair. The stored
-rows stay **per status**; this is presentation only, and no number changed.
+**Hot and Warm are separate columns** (2026-10-23). From 2026-09-28 they shared
+one "Hot/Warm" column; the stored rows were always **per status**, so the split
+is presentation only and no number changed. Bar L3 pins that no column holds
+both.
 
 ⚠️ **Summing statuses is safe because they are disjoint.** A contact has exactly
-one `lifecycle_status`, so Hot + Warm double-counts nobody — including on the
-cluster and distinct-total rows, which are themselves DISTINCT unions. That
+one `lifecycle_status`, so the Total column double-counts nobody — including on
+the cluster and distinct-total rows, which are themselves DISTINCT unions. That
 would not hold for any grouping whose members could overlap, which is why bar L4
 asserts the disjointness rather than assuming it.
 

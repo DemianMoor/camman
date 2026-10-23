@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
+_Last updated: 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -215,7 +215,14 @@ legacy **with** the engine-off note, never silently.
 A campaign with `lifecycle_rules = true` picks its audience with five status
 chips -- **New / Hot / Warm / Cold / Freeze** -- instead of the four legacy
 toggles (`include_no_status`, `include_clickers`, `exclude_clickers`,
-`include_opt_in`). The chips OR together and read the 3a projection, so the
+`include_opt_in`). **Hot and Warm are separate chips** (2026-10-23); until then
+they were one "Hot/Warm" chip that wrote both values. No migration: the chip
+always stored `'hot'` and `'warm'` as separate entries of
+`audience_filters.lifecycle_statuses`, so a campaign saved with the old chip
+shows both selected, and its frozen pool is untouched. A legacy campaign's
+`include_clickers` maps to both Hot and Warm in the read-only row. The audience
+preview shows a **By status** line — New · Hot · Warm · Cold · Freeze, each on
+its own, summing to Total matching (before any cap). The chips OR together and read the 3a projection, so the
 predicate is one indexed equality per chip rather than a join.
 
 Three contracts:

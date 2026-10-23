@@ -27,8 +27,12 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { ENGAGEMENT_STATUS_LABELS } from "@/lib/engagement/labels";
 import { formatPhoneInternational } from "@/lib/phone-validation";
-import { CAMPAIGN_CARRIER_FILTER_VALUES } from "@/lib/validators/campaigns";
+import {
+  CAMPAIGN_CARRIER_FILTER_VALUES,
+  LIFECYCLE_CHIP_STATUSES,
+} from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
 
 import { NONE, type CampaignFormState } from "./campaign-form-state";
@@ -776,6 +780,7 @@ export function AudiencePreviewCard({ state }: { state: CampaignFormState }) {
     retryPreview,
     watchedFilters,
     previewCarrierRemoved,
+    previewByStatus,
   } = state;
   return (
     <Card>
@@ -833,6 +838,9 @@ export function AudiencePreviewCard({ state }: { state: CampaignFormState }) {
               {previewCount.toLocaleString()} contacts
             </div>
           )}
+          {hasAudienceSource && !previewError && previewByStatus ? (
+            <StatusSplitLine byStatus={previewByStatus} />
+          ) : null}
           {hasAudienceSource && !previewError ? (
             <CarrierRemovedLines
               carrierFilter={watchedFilters.carrier_filter}
@@ -848,6 +856,27 @@ export function AudiencePreviewCard({ state }: { state: CampaignFormState }) {
         ) : null}
       </CardContent>
     </Card>
+  );
+}
+
+// The audience split by lifecycle status — one entry per chip status, in chip
+// order, each under its own name. Hot and Warm are ALWAYS separate entries
+// (owner, 2026-10-23): never a combined "Hot/Warm" line. The numbers sum to
+// Total matching, i.e. before any sample cap.
+function StatusSplitLine({ byStatus }: { byStatus: Record<string, number> }) {
+  return (
+    <div className="text-xs text-muted-foreground">
+      By status (of total matching):{" "}
+      {LIFECYCLE_CHIP_STATUSES.map((s, i) => (
+        <span key={s}>
+          {i > 0 ? " · " : null}
+          {ENGAGEMENT_STATUS_LABELS[s]}{" "}
+          <span className="font-mono tabular-nums text-foreground">
+            {(byStatus[s] ?? 0).toLocaleString()}
+          </span>
+        </span>
+      ))}
+    </div>
   );
 }
 

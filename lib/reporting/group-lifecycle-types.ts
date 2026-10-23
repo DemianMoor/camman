@@ -21,13 +21,16 @@ export const GROUP_LIFECYCLE_STATUSES = [
 export type GroupLifecycleStatus = (typeof GROUP_LIFECYCLE_STATUSES)[number];
 
 /**
- * The columns the REPORT shows, in the order it shows them (owner, 2026-09-28).
+ * The columns the REPORT shows, in the order it shows them: New · Hot · Warm ·
+ * Cold · Freeze · Suppressed, then the table's own Total (owner, 2026-10-23).
  *
- * ⚠️ DELIBERATELY NOT THE STORAGE ORDER, and deliberately not one column per
- * status. Hot and Warm are one column because the operator treats them as one
- * audience — people who have clicked — and sizes a send from the pair. The
- * stored rows stay per status (the DB check constraint pins that set), so this
- * is presentation only and nothing about the numbers changes.
+ * ⚠️ ONE COLUMN PER STATUS. Hot and Warm were a single "Hot/Warm" column from
+ * 2026-09-28 until the owner separated them everywhere on 2026-10-23. The
+ * stored rows were always per status (the DB check constraint pins that set),
+ * so the split is presentation only and no number changed.
+ *
+ * The `statuses` array (rather than one status per column) is kept so a column
+ * CAN still group statuses — the partition rule below is what keeps that safe.
  *
  * ⚠️ SUMMING ACROSS STATUSES IS SAFE HERE, including on the cluster and
  * distinct-total rows. A contact has exactly ONE `lifecycle_status`, so the
@@ -46,10 +49,11 @@ export interface GroupLifecycleColumn {
 }
 
 export const GROUP_LIFECYCLE_COLUMNS: readonly GroupLifecycleColumn[] = [
-  { key: "hot_warm", label: "Hot/Warm", statuses: ["hot", "warm"] },
+  { key: "new", label: "New", statuses: ["new"] },
+  { key: "hot", label: "Hot", statuses: ["hot"] },
+  { key: "warm", label: "Warm", statuses: ["warm"] },
   { key: "cold", label: "Cold", statuses: ["cold"] },
   { key: "freeze", label: "Freeze", statuses: ["freeze"] },
-  { key: "new", label: "New", statuses: ["new"] },
   { key: "suppressed", label: "Suppressed", statuses: ["suppressed"] },
 ] as const;
 

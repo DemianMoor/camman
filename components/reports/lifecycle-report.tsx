@@ -12,12 +12,14 @@ import {
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import type {
   LifecycleMetrics,
+  LifecycleOutsideBasis,
   LifecycleReport,
 } from "@/lib/reporting/lifecycle-report";
 
 type Report = LifecycleReport & {
   rollup_computed_at: string | null;
   live_days: number;
+  outside_basis: LifecycleOutsideBasis;
 };
 import { cn } from "@/lib/utils";
 
@@ -110,7 +112,7 @@ export function LifecycleReport() {
           />
         </div>
         <span className="pb-2 text-xs text-muted-foreground">
-          ET dates, max 92 days
+          ET dates, max 92 days · by send date
         </span>
       </div>
 
@@ -220,11 +222,31 @@ export function LifecycleReport() {
           above it is otherwise read as something it is not. */}
       <div className="grid gap-1 text-xs text-muted-foreground">
         <p>
-          <span className="font-medium">*Attributed only.</span> Sales, CR,
-          Revenue and EPC count conversions attributed to an individual send. Most
-          conversions are not, so these read far below the true totals — a low
-          CR here is an attribution gap, not performance.
+          <span className="font-medium">*By send date.</span> Sales, Purchases,
+          CR, Revenue and EPC count the conversions on the sends in this period —
+          each conversion is matched to the send whose link was clicked, whenever
+          it arrives. So a conversion that arrives later still counts on its
+          send&apos;s day, and one that arrives in this period on an earlier send
+          is not in the rows above.
         </p>
+        {data?.outside_basis ? (
+          <p>
+            <span className="font-medium">Not in the rows above:</span>{" "}
+            {money(data.outside_basis.earlier_sends_revenue)} revenue (
+            {num(data.outside_basis.earlier_sends_purchases)} purchases) earned in
+            this period on sends before it
+            {data.outside_basis.unattributed_conversions > 0 ? (
+              <>
+                , and {money(data.outside_basis.unattributed_revenue)} from{" "}
+                {num(data.outside_basis.unattributed_conversions)} conversions not
+                tied to any send
+              </>
+            ) : (
+              <>; every conversion in this period is tied to a send</>
+            )}
+            .
+          </p>
+        ) : null}
         <p>
           <span className="font-medium">One status per contact per day.</span>{" "}
           A contact&apos;s cohort is the status stamped when the message was
@@ -261,7 +283,8 @@ export function LifecycleReport() {
           rollup; today is counted live.</span>{" "}
           So today&apos;s row is current to the second, while a closed day
           reflects the last nightly recompute — which re-runs a 14-day trailing
-          window, so late clicks, conversions and opt-outs still land.
+          window, plus any older day that received a conversion or opt-out
+          since the previous run, so late money still lands.
         </p>
         {data?.rollup_computed_at ? (
           <p>

@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI; migration 0220)_
+_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI, 0220; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -600,7 +600,7 @@ otherwise be read as something else:
 
 | Footer line | Why it is there |
 | --- | --- |
-| Sales/CR/Revenue **attributed only** | ~1,038 attributed sales across 3.88M sends. Unlabelled, that reads as catastrophic performance rather than as an attribution gap. |
+| Sales/Purchases/CR/Revenue **by send date** | A conversion counts on the send whose link was clicked, whenever it arrives. So the rows include later conversions on this period's sends and EXCLUDE conversions arriving in the period on earlier sends. The next footer line prints that second amount (`earlier_sends_revenue`, plus any conversion tied to no send), read from `conversion_events` by `occurred_at` in `getLifecycleOutsideBasis`. Measured 09-23→10-22: $950 earned on earlier sends, $0 unattributed. (This line used to say "attributed only — most conversions are not", which the 10-23 audit disproved: 1,080 of Keitaro's 1,086 conversions in that period carry a `stage_send_id`; the 6 dropped at ingest are $3.33.) |
 | **CTR uses raw human clicks** | Overview uses `counted_clickers`, which lags the scoring cron. The same period gave 125 here and 112 there on stage 4791 at 19 h. An unexplained discrepancy between two tabs is worse than either number. |
 | **Cost includes opt-out cost** | An opt-out reply is billed like a send, so a cohort with more opt-outs costs more per send. That is the point of the column, but only if the reader knows it. |
 | **EPC and CPC divide by this tab's Clickers** | Overview's EPC divides by `counted_clickers` and uses all revenue; this one uses attributed revenue over raw human clickers. Unlabelled, the two EPCs would read as a contradiction. |
@@ -701,7 +701,16 @@ plus one day computed on the spot.
 
 **Written by the engagement job's nightly full run** (06:35 UTC / 02:35 ET),
 recomputing a **14-day trailing window** so late-scored clicks, conversions on
-the 15-minute poll and opt-outs that arrive days later still land. It runs
+the 15-minute poll and opt-outs that arrive days later still land — **plus any
+OLDER day that received a conversion (created or updated) or an opt-out
+attribution since the previous run** (`findDirtyDaysBefore`; "since" = the
+table's newest `computed_at`, read before the window is rewritten). The window
+alone was a cliff: the 10-23 audit found three conversions ($183) on
+09-29 / 10-02 / 10-03 sends that arrived after those days left it, stored
+nowhere the report reads. Late *clicks* on older days are not chased (rare,
+and scanning `clicks` nightly is the cost the rollup avoids). Only a run with
+no explicit range does this; `backfill-lifecycle-rollup.ts` recomputes exactly
+the range it is given. Bars T1–T5 in `scripts/test-lifecycle-rollup.ts`. It runs
 **outside** the refresh transaction: the rollup is a read-side convenience, and
 a reporting query must never be able to roll back `contact_engagement`, which
 the send path reads. A rollup failure is logged and withholds nothing.

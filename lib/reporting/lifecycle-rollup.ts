@@ -7,8 +7,10 @@ import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import { formatInTimeZone } from "date-fns-tz";
 import {
   foldLifecycleRows,
+  getLifecycleOutsideBasis,
   lifecycleDayRowsSql,
   lifecycleReportSql,
+  type LifecycleOutsideBasis,
   type LifecycleReport,
   type LifecycleReportRow,
 } from "@/lib/reporting/lifecycle-report";
@@ -40,6 +42,8 @@ export interface RollupRefreshResult {
   durationMs: number;
   from: string;
   to: string;
+  /** Days OLDER than the window recomputed because they changed (nightly only). */
+  dirtyDays: string[];
 }
 
 const etToday = () => formatInTimeZone(new Date(), CAMPAIGN_TIMEZONE, "yyyy-MM-dd");
@@ -71,8 +75,92 @@ export async function refreshLifecycleDayRollup(
   opts: { orgId: string; from?: string; to?: string },
 ): Promise<RollupRefreshResult> {
   const started = Date.now();
+  const nightly = opts.from === undefined && opts.to === undefined;
   const to = opts.to ?? etToday();
   const from = opts.from ?? addEtDays(to, -(ROLLUP_LOOKBACK_DAYS - 1));
+
+  // ⚠️ READ BEFORE THE WINDOW IS REWRITTEN: the last run's instant is what
+  // "changed since" means, and the window's own rows are about to be replaced.
+  const dirtyDays = nightly
+    ? await findDirtyDaysBefore(dbc, { orgId: opts.orgId, before: from })
+    : [];
+
+  let rows = await recomputeRange(dbc, { orgId: opts.orgId, from, to });
+  for (const day of dirtyDays) {
+    rows += await recomputeRange(dbc, { orgId: opts.orgId, from: day, to: day });
+  }
+
+  const days =
+    Math.round(
+      (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) /
+        86_400_000,
+    ) + 1;
+  return {
+    days,
+    rows,
+    durationMs: Date.now() - started,
+    from,
+    to,
+    dirtyDays,
+  };
+}
+
+/**
+ * ET days OLDER than `before` whose numbers moved since the rollup was last
+ * written: a conversion created or updated, or an opt-out attributed, on a send
+ * dated that day.
+ *
+ * ⚠️ WHY: the 14-day window is a bound on how late data may arrive, and data
+ * does not respect it. The 10-23 audit found three conversions ($183) that
+ * landed on 09-29 / 10-02 / 10-03 sends after those days had left the window —
+ * stored nowhere the report reads, permanently. A wider window would only move
+ * the cliff; this closes it for the two late signals that carry money.
+ *
+ * "Since" is the newest computed_at in the table — the previous run. Anything
+ * older was already caught by that run (or predates this check, and was
+ * covered by the one-off full recompute that shipped with it). Both inputs are
+ * small: conversion_events is a few thousand rows, and opt-out attributions
+ * since one night are hundreds, each joined to its send by primary key.
+ *
+ * Late CLICKS are not covered: a first click more than two weeks after the
+ * message is rare, and the clicks table is large enough that scanning it
+ * nightly is the cost this rollup exists to avoid.
+ */
+async function findDirtyDaysBefore(
+  dbc: DbOrTx,
+  opts: { orgId: string; before: string },
+): Promise<string[]> {
+  const org = sql`${opts.orgId}::uuid`;
+  const rows = (await dbc.execute(sql`
+    WITH since AS (
+      SELECT max(computed_at) AS at FROM lifecycle_day_rollup WHERE org_id = ${org}
+    ),
+    touched AS (
+      SELECT ce.stage_send_id AS id
+      FROM conversion_events ce, since
+      WHERE ce.org_id = ${org} AND ce.stage_send_id IS NOT NULL
+        AND ce.updated_at > since.at
+      UNION
+      SELECT oa.stage_send_id
+      FROM opt_out_attributions oa, since
+      WHERE oa.org_id = ${org} AND oa.stage_send_id IS NOT NULL
+        AND oa.created_at > since.at
+    )
+    SELECT DISTINCT (ss.sent_at AT TIME ZONE 'America/New_York')::date::text AS day
+    FROM touched t
+    JOIN stage_sends ss ON ss.id = t.id
+    WHERE ss.org_id = ${org} AND ss.status = 'sent'
+      AND (ss.sent_at AT TIME ZONE 'America/New_York')::date < ${opts.before}::date
+    ORDER BY 1`)) as unknown as { day: string }[];
+  return rows.map((r) => r.day);
+}
+
+/** DELETE-then-INSERT one ET day range; returns the rows written. */
+async function recomputeRange(
+  dbc: DbOrTx,
+  opts: { orgId: string; from: string; to: string },
+): Promise<number> {
+  const { from, to } = opts;
   const org = sql`${opts.orgId}::uuid`;
 
   await dbc.execute(sql`
@@ -87,19 +175,7 @@ export async function refreshLifecycleDayRollup(
            d.revenue::numeric, d.opt_outs, d.cost::numeric, d.reconstructed, now()
     FROM (${lifecycleDayRowsSql({ orgId: opts.orgId, from, to })}) d
     RETURNING et_day`)) as unknown as unknown[];
-
-  const days =
-    Math.round(
-      (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) /
-        86_400_000,
-    ) + 1;
-  return {
-    days,
-    rows: Array.isArray(inserted) ? inserted.length : 0,
-    durationMs: Date.now() - started,
-    from,
-    to,
-  };
+  return Array.isArray(inserted) ? inserted.length : 0;
 }
 
 /**
@@ -123,7 +199,11 @@ export async function getLifecycleReportHybrid(opts: {
   from: string;
   to: string;
 }): Promise<
-  LifecycleReport & { rollup_computed_at: string | null; live_days: number }
+  LifecycleReport & {
+    rollup_computed_at: string | null;
+    live_days: number;
+    outside_basis: LifecycleOutsideBasis;
+  }
 > {
   const org = sql`${opts.orgId}::uuid`;
   const today = etToday();
@@ -201,5 +281,6 @@ export async function getLifecycleReportHybrid(opts: {
     ...foldLifecycleRows(rows, opts.from, opts.to),
     rollup_computed_at: computed[0]?.at ?? null,
     live_days: hasLiveHalf ? 1 : 0,
+    outside_basis: await getLifecycleOutsideBasis(opts),
   };
 }

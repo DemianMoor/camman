@@ -124,8 +124,13 @@ export function ContactGroupForm({
       suppress_after_days: initialValues?.suppress_after_days ?? null,
       suppress_min_freeze_messages: initialValues?.suppress_min_freeze_messages ?? null,
       partner_id: initialValues?.partner_id ?? null,
-      allow_voip: initialValues?.allow_voip ?? true,
+      // New groups (0222): VoIP and toll-free off. Unknown starts ON for a group
+      // made here — a fresh CSV upload is 'unknown' until it is looked up, and a
+      // mobile-only group would block the whole list everywhere (owner ruling
+      // 2026-10-23). Drip's auto-created groups are fully mobile-only instead.
+      allow_voip: initialValues?.allow_voip ?? false,
       allow_unknown: initialValues?.allow_unknown ?? true,
+      allow_toll_free: initialValues?.allow_toll_free ?? false,
     },
   });
 
@@ -306,7 +311,8 @@ export function ContactGroupForm({
           {(
             [
               { name: "allow_voip", label: "Allow VoIP numbers" },
-              { name: "allow_unknown", label: "Allow unknown numbers (type not identified)" },
+              { name: "allow_unknown", label: "Allow unknown numbers (type not identified — includes numbers never looked up)" },
+              { name: "allow_toll_free", label: "Allow toll-free numbers" },
             ] as const
           ).map((f) => (
             <FormField
@@ -319,7 +325,7 @@ export function ContactGroupForm({
                     <input
                       type="checkbox"
                       className="size-4"
-                      checked={field.value ?? true}
+                      checked={field.value}
                       onChange={(e) => field.onChange(e.target.checked)}
                       disabled={isSubmitting}
                     />

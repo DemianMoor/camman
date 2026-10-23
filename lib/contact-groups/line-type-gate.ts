@@ -1,6 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
-// Line-type gate (migration 0218): contact_groups.allow_voip / allow_unknown.
+// Line-type gate (migrations 0218, 0222): contact_groups.allow_voip / allow_unknown /
+// allow_toll_free.
 //
 // ⭐ STRICTEST GROUP WINS, EVERYWHERE. A contact in ANY active group that
 // disallows its line type is blocked from every campaign — not only campaigns
@@ -41,11 +42,11 @@ export function lineTypeBlockedContactsSql(orgId: string): SQL {
     FROM contacts lt_c
     WHERE lt_c.org_id = ${orgId}::uuid
       AND lt_c.messaging_status = 'eligible'
-      AND lt_c.line_type IN ('voip', 'unknown')
+      AND lt_c.line_type IN ('voip', 'unknown', 'toll_free')
       AND EXISTS (
         SELECT 1 FROM contact_groups lt_any
         WHERE lt_any.org_id = ${orgId}::uuid AND lt_any.status = 'active'
-          AND (lt_any.allow_voip = false OR lt_any.allow_unknown = false))
+          AND (lt_any.allow_voip = false OR lt_any.allow_unknown = false OR lt_any.allow_toll_free = false))
       AND EXISTS (
         SELECT 1
         FROM contact_contact_groups lt_ccg
@@ -54,6 +55,7 @@ export function lineTypeBlockedContactsSql(orgId: string): SQL {
           AND lt_g.org_id = ${orgId}::uuid
           AND lt_g.status = 'active'
           AND ((lt_g.allow_voip = false AND lt_c.line_type = 'voip')
-            OR (lt_g.allow_unknown = false AND lt_c.line_type = 'unknown')))
+            OR (lt_g.allow_unknown = false AND lt_c.line_type = 'unknown')
+            OR (lt_g.allow_toll_free = false AND lt_c.line_type = 'toll_free')))
   `;
 }

@@ -45,11 +45,14 @@ export const contactGroupCreateSchema = z.object({
   // entry. Changing it needs partner_keys.manage (Q9); on a drip partner×tag
   // group and on a system group the route refuses it (F3 / C4).
   partner_id: z.number().int().positive().nullable().optional(),
-  // Line-type gate (migration 0218). false = this group's voip / unknown
-  // contacts are kept out of every campaign audience and drip routing. Omitted
-  // on create ⇒ the column default (true); the form always sends both.
-  allow_voip: z.boolean().optional(),
-  allow_unknown: z.boolean().optional(),
+  // Line-type gate (migrations 0218, 0222). false = this group's voip / unknown
+  // / toll_free contacts are kept out of every campaign audience and drip
+  // routing. REQUIRED on create (CLAUDE.md §11b — they decide who is selected;
+  // an omitted value must not silently take a column default). PATCH stays
+  // partial via contactGroupUpdateSchema.
+  allow_voip: z.boolean(),
+  allow_unknown: z.boolean(),
+  allow_toll_free: z.boolean(),
 });
 
 /** The four lifecycle override columns, shared by the form, the PATCH route and the preview. */

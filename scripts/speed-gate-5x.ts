@@ -76,7 +76,7 @@ async function main() {
     }
     const groups: number[] = [];
     for (let k = 0; k < GROUP_SHARES.length; k++) {
-      const [{ id }] = (await ex(sql`insert into contact_groups (org_id, contact_group_id, name) values (${org}::uuid, ${`SYN-G-${k + 1}`}, ${`Synthetic group ${k + 1}`}) returning id`)) as unknown as { id: number }[];
+      const [{ id }] = (await ex(sql`insert into contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free) values (${org}::uuid, ${`SYN-G-${k + 1}`}, ${`Synthetic group ${k + 1}`}, true, true, true) returning id`)) as unknown as { id: number }[];
       groups.push(id);
     }
     t("org, brand, network, 39 offers, 20 groups", t0);

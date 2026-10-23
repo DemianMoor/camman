@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-22 (zip attribute, 0219); 2026-10-21 (the contact gets its lookup line_type at creation; 0218 gate); 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
+_Last updated: 2026-10-23 (0222 toll-free gate link); 2026-10-22 (zip attribute, 0219); 2026-10-21 (the contact gets its lookup line_type at creation; 0218 gate); 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -43,7 +43,7 @@ counted in its own column, so Phase 4 can filter a population it can actually se
 
 Intake still keeps voip/unknown; **filtering them is a per-group choice** made at selection time —
 the contact group's **Allow VoIP / Allow unknown** boxes (migration 0218,
-[contacts-and-groups.md](contacts-and-groups.md#allowed-number-types-migration-0218)).
+[contacts-and-groups.md](contacts-and-groups.md#allowed-number-types-migrations-0218-0222)).
 
 **⚠️ The contact gets the lookup's `line_type` / `carrier_norm` when enrichment creates it**
 (2026-10-20). The worker's `syncContactsForPhones` copy runs when the lookup completes — before the

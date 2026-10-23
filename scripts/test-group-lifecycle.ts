@@ -59,8 +59,8 @@ async function main() {
     const mkGroup = async (code: string, name: string) =>
       (
         await one<{ id: number }>(sql`
-          INSERT INTO contact_groups (org_id, contact_group_id, name)
-          VALUES (${org}, ${code}, ${name}) RETURNING id`)
+          INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free)
+          VALUES (${org}, ${code}, ${name}, true, true, true) RETURNING id`)
       ).id;
     const gA = await mkGroup(wlCodes[0], `A ${tag}`);
     const gB = await mkGroup(wlCodes[1], `B ${tag}`);

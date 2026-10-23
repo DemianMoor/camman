@@ -77,6 +77,7 @@ type ContactGroup = {
   // Line-type gate (migration 0218).
   allow_voip: boolean;
   allow_unknown: boolean;
+  allow_toll_free: boolean;
   /** The org defaults, returned alongside the row for the "Effective: N" hints. */
   org_thresholds?: OrgThresholds;
 };
@@ -754,6 +755,7 @@ export default function ContactGroupDetailPage() {
             partner_id: group.partner_id,
             allow_voip: group.allow_voip,
             allow_unknown: group.allow_unknown,
+            allow_toll_free: group.allow_toll_free,
           }}
           onSubmit={handleEdit}
           onCancel={() => setEditOpen(false)}

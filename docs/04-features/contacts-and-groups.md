@@ -1,6 +1,6 @@
 # Feature — Contacts, Contact Groups, Opt-outs/ins & Clickers
 
-_Last updated: 2026-10-23 (contact_group_id not validated on edit; create limit 100)_
+_Last updated: 2026-10-23 (0222: mobile-only defaults + toll-free box; contact_group_id not validated on edit; create limit 100)_
 
 ## 1. Purpose
 The central phone registry and the suppression/engagement records attached to it. Contacts are the atomic audience unit (scaling to millions); contact groups are tags; opt-outs/ins and clickers are the status signals that audience filters and segment rules read.
@@ -64,12 +64,27 @@ value actually changed, so a plain rename never 403s or 409s. The list shows a *
 `Partner: <name>` badge. `GET /api/contact-groups/list` and `GET /api/contact-groups/[id]` carry
 `partner_id`, `partner_name`, `system_role`.
 
-### Allowed number types (migration 0218)
+### Allowed number types (migrations 0218, 0222)
 
-Two checkboxes on the group's Create/Edit dialog, both **checked by default**:
-**Allow VoIP numbers** (`contact_groups.allow_voip`) and **Allow unknown numbers (type not
-identified)** (`allow_unknown`). Landlines are never sent to regardless (`messaging_status`);
-toll-free is not gated.
+Three checkboxes on the group's Create/Edit dialog: **Allow VoIP numbers**
+(`contact_groups.allow_voip`), **Allow unknown numbers** (`allow_unknown`, includes numbers never
+looked up) and **Allow toll-free numbers** (`allow_toll_free`, 0222). Landlines are never sent to
+regardless (`messaging_status`).
+
+**New groups are mobile-only by default (0222, owner-approved 2026-10-23):**
+
+| Created by | VoIP | Unknown | Toll-free |
+|---|---|---|---|
+| Drip intake, partner×tag group (`ensurePartnerTagGroup`) | off | off | off |
+| The Create dialog (UI) | off | **on** | off |
+| Drip system groups `drip-intake` / `drip-sandbox` (`ensureDripGroup`) | on | on | on |
+| Anything that omits the values (column default) | off | off | off |
+
+Unknown starts **on** in the dialog because a fresh CSV upload is `unknown` until it is looked up
+(no lookup runs on upload): a fully mobile-only group would keep the whole list out of every
+campaign. The system groups stay open because they hold every drip lead and the strictest group
+wins. `POST /api/contact-groups` requires all three flags (400 without them); an existing group's
+values are never changed by intake (`ON CONFLICT` leaves them).
 
 Unchecking one blocks that group's contacts of that `contacts.line_type`:
 

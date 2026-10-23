@@ -443,8 +443,8 @@ async function main() {
           const gid = Number(
             (
               (await tx.execute(sql`
-                INSERT INTO contact_groups (org_id, contact_group_id, name, status)
-                VALUES (${orgId}::uuid, ${`${tag}-g-${role}`}, ${`${tag} g ${role}`}, 'active')
+                INSERT INTO contact_groups (org_id, contact_group_id, name, status, allow_voip, allow_unknown, allow_toll_free)
+                VALUES (${orgId}::uuid, ${`${tag}-g-${role}`}, ${`${tag} g ${role}`}, 'active', true, true, true)
                 RETURNING id
               `)) as unknown as { id: number }[]
             )[0].id,

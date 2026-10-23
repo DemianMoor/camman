@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -86,7 +86,7 @@ sequenceDiagram
   Kick->>Mint: per recipient → links + link_destinations
   Kick->>Kick: EXCEPT eligibility layers, in EXCLUSION_PRIORITY order<br/>(lifecycle campaign: suppressed, bought_offer, freeze_not_due; then creative, in_flight, offer;<br/>tagged stage: missing_tag_data, segment_limit)
   Kick->>Kick: tagged stage only: load contact_attributes, validate-all renders EVERY body first<br/>(missing tag / over segments ⇒ per_recipient_render_failed + Telegram, 0 rows; no STOP: txr refuses, dry-run = 1 alert)
-  Kick->>Kick: INSERT stage_sends + stage_send_lifecycle in ONE statement<br/>(rendered_text frozen, send_token=id; message_format_id / format_custom stamped; status-at-send stamped from contact_engagement)
+  Kick->>Kick: INSERT stage_sends + stage_send_lifecycle in ONE statement<br/>(rendered_text frozen, send_token=id; message_format_id / format_custom stamped; status-at-send + last_click_at stamped from contact_engagement via lifecycleStampInsertSql)
   Kick->>Kick: last window landed: stamp materialized_at + status draft→pending (skipped if status_set_manually)
   Op->>Drain: drain (SEND_ENABLED + approved + !paused + breakers)
   Drain->>Drain: resolve key: stage.provider_phone_id -> provider_phones.credential_id -> provider_credentials
@@ -615,7 +615,7 @@ sequenceDiagram
   R->>R: runDripRoutingBatch → drip_journeys (routed_at)<br/>global rules incl. line_type (0218 group gate) ⇒ unroutable
   R-)S: poke (routed > 0)
   S->>S: hourly-cap maintenance (0209): clear ineligible, then per capped campaign<br/>assign fresh → able to send? → close past hours (OFF) → release backlog → room
-  S->>S: runDripSchedulerBatch → due query (assigned journeys, ≤ room) → mint + gate + pending stage_sends<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)<br/>P5 tagged message: render per lead; missing data / over segments ⇒ rollback, then skipped_ineligible row + journey exited (follow-ups: row only)
+  S->>S: runDripSchedulerBatch → due query (assigned journeys, ≤ room) → mint + gate + pending stage_sends<br/>+ stage_send_lifecycle stamp in the SAME INSERT (status + last_click_at from contact_engagement; since 2026-10-23)<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)<br/>P5 tagged message: render per lead; missing data / over segments ⇒ rollback, then skipped_ineligible row + journey exited (follow-ups: row only)
   S-)D: poke (inserted > 0)
   D->>D: runScheduledSends dripOnly (no Phase A, drip stages only)<br/>per-phone lease, pending→sending claim, 1-h dedup
   D->>TX: send (sent_at)

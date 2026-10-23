@@ -161,17 +161,19 @@ async function main() {
       // asOf was 16:00 ET. Every day was then evaluated against truncated
       // message counts and clicks, and every send after 16:00 ET fell out of
       // the facts entirely and reconstructed to nothing.
-      const asOf = sql`${etDayBounds({
-        from: d.et_day,
-        to: d.et_day,
-      }).toExclusiveUtc.toISOString()}::timestamptz`;
+      const bounds = etDayBounds({ from: d.et_day, to: d.et_day });
+      const asOf = sql`${bounds.toExclusiveUtc.toISOString()}::timestamptz`;
+      const dayStart = sql`${bounds.fromUtc.toISOString()}::timestamptz`;
 
       await tx.execute(sql`
         CREATE TEMP TABLE rc_target ON COMMIT DROP AS
         SELECT ss.id AS stage_send_id, ss.contact_id
         FROM stage_sends ss
         WHERE ss.org_id = ${org} AND ss.status = 'sent'
-          AND (ss.sent_at AT TIME ZONE 'America/New_York')::date = ${d.et_day}::date
+          -- ⚠️ A HALF-OPEN RANGE ON RAW sent_at (2026-10-23). The expression
+          -- form (sent_at AT TIME ZONE …)::date = day wraps the indexed column
+          -- and seq-scans all of stage_sends once per day.
+          AND ss.sent_at >= ${dayStart} AND ss.sent_at < ${asOf}
           AND NOT EXISTS (
             SELECT 1 FROM stage_send_lifecycle l WHERE l.stage_send_id = ss.id
           )`);
@@ -259,10 +261,14 @@ async function main() {
 
       if (APPLY) {
         const ins = (await tx.execute(sql`
-          INSERT INTO stage_send_lifecycle (stage_send_id, org_id, status, reconstructed)
+          INSERT INTO stage_send_lifecycle
+            (stage_send_id, org_id, status, reconstructed, last_click_at)
           SELECT t.stage_send_id, ${org},
                  CASE WHEN f.status = 'suppressed' THEN 'freeze' ELSE f.status END,
-                 true
+                 true,
+                 -- The replayed last human click as of the day's end — the same
+                 -- instant the status was evaluated at (0220, the Warm split).
+                 f.last_click_at
           FROM rc_target t JOIN rc_final f ON f.contact_id = t.contact_id
           ON CONFLICT (stage_send_id) DO NOTHING
           RETURNING stage_send_id`)) as unknown as unknown[];

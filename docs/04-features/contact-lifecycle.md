@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI, 0220; send-date basis footer; nightly recompute of changed older days)_
+_Last updated: 2026-10-23 (cohort report: Grand total, Purchases, ROI, Drip row, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -575,8 +575,24 @@ send: stamped hot 1,306 / warm 1,526, live hot 1,315 / warm 1,517 — nine
 contacts had already moved.
 
 Rows, in order: the six statuses, then `Clickers` (hot + warm) and
-`Non-clickers` (the rest), then `Total`, then `Unclassified`, then
-`Grand total`.
+`Non-clickers` (the rest), then `Total`, then `Unclassified`, then `Drip`,
+then `Grand total`.
+
+- ⚠️ **Drip is a campaign KIND, not a cohort** (owner, 2026-10-23). Every row
+  above `Drip` reads **regular** campaigns only; `Drip` is every send of a
+  `campaigns.type = 'drip'` campaign whatever its stamp. Drip sends ARE stamped
+  (below), so the row can be split by cohort later without new history — but it
+  is shown as one row. Until 10-23 drip sends were not stamped at all, and the
+  whole drip programme sat in `Unclassified` (233,240 sends / 559 sales /
+  $4,650 in 09-23→10-22 — measured: drip sends = Unclassified on all 17 days
+  since drip launched). The rollup keys cells by `campaign_kind` for this.
+- **Every sendable producer stamps in the same statement.** One helper,
+  `lifecycleStampInsertSql` ([lib/engagement/lifecycle-stamp.ts](../../lib/engagement/lifecycle-stamp.ts)),
+  used by kickoff's bulk insert and both drip producers (`lib/drip/scheduler.ts`
+  first sends, `lib/drip/send-one.ts` follow-ups). `skipped_ineligible` rows
+  (`lib/drip/skip-send.ts`) are never sent and are not stamped. Source guard +
+  the helper's SQL: `scripts/test-lifecycle-stamp.ts`. Drip sends from
+  2026-10-06 until the deploy were stamped once by the reconstruction (§3k2).
 
 - ⚠️ **`Total` is the stamped cohorts only; `Grand total` is every send**
   (`Total` + `Unclassified`; owner, 2026-10-23). Before Grand total existed,
@@ -731,6 +747,14 @@ Days older than the nightly window are filled once by
 chunked so each statement stays short and the run is resumable.
 
 ### 3k2. The reconstruction, and what it cannot know
+
+> **Second use, 2026-10-24 quiet window:** drip sends from 2026-10-06 (drip
+> launch) until drip stamping deployed had no stamp at all; the same replay
+> filled them. Since 2026-10-23 the script also writes `last_click_at` (the
+> replayed last human click as of the day's end — the instant the status was
+> evaluated at), and selects each day's sends by a half-open `sent_at` range:
+> the earlier `(sent_at AT TIME ZONE …)::date = day` wrapped the indexed column
+> and seq-scanned all of `stage_sends` once per day.
 
 [scripts/backfill-lifecycle-reconstruction.ts](../../scripts/backfill-lifecycle-reconstruction.ts)
 fills `stage_send_lifecycle` for the sends that predate live stamping, marking

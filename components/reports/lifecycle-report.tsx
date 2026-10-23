@@ -37,11 +37,12 @@ const ROW_LABEL: Record<string, string> = {
   non_clickers: "Non-clickers",
   total: "Total",
   unclassified: "Unclassified",
+  drip: "Drip",
   grand_total: "Grand total",
 };
 const ROW_ORDER = [
   "new", "cold", "hot", "warm", "freeze", "suppressed",
-  "clickers", "non_clickers", "total", "unclassified", "grand_total",
+  "clickers", "non_clickers", "total", "unclassified", "drip", "grand_total",
 ];
 const RULE_BEFORE = new Set(["clickers", "total", "unclassified", "grand_total"]);
 const EMPHASIS = new Set(["total", "grand_total"]);
@@ -259,8 +260,10 @@ export function LifecycleReport() {
           different CTRs for the same period.
         </p>
         <p>
-          <span className="font-medium">Total is the stamped cohorts above it;
-          Grand total is every send in the period</span>, including Unclassified.
+          <span className="font-medium">Total is the regular-campaign cohorts
+          above it; Grand total is every send in the period</span> — Total plus
+          Unclassified plus Drip. Drip campaigns are one row of their own, not
+          split into cohorts.
           Sales counts buyers (sends with at least one purchase); Purchases counts
           every purchase event, so a buyer who pays twice is 1 sale and 2
           purchases. ROI is (revenue − cost) ÷ cost.

@@ -161,6 +161,30 @@ async function main() {
     await stamp(7, "freeze");
     // i = 8 deliberately unstamped.
 
+    // ⭐ ONE DRIP SEND, stamped HOT (drip is stamped since 2026-10-23). It must
+    // land in the Drip row only — never in Hot, Total or Unclassified.
+    const dripCamp = await one<{ id: number }>(sql`
+      INSERT INTO campaigns (org_id, slug, name, status, type, link_mode, brand_id, offer_id)
+      VALUES (${org}, ${`lrd-${tag}`}, ${`LRD ${tag}`}, 'active', 'drip', 'tracked',
+              ${brand.id}, ${offer.id}) RETURNING id`);
+    const dripStage = (
+      await one<{ id: number }>(sql`
+        INSERT INTO campaign_stages (org_id, campaign_id, stage_number, stop_text, total_cost, sms_count, opt_out_count)
+        VALUES (${org}, ${dripCamp.id}, 1, 'STOP', '0.0000', 0, 0) RETURNING id`)
+    ).id;
+    const dripSend = (
+      await one<{ id: string }>(sql`
+        INSERT INTO stage_sends
+          (org_id, campaign_id, stage_id, contact_id, phone, rendered_text,
+           status, sent_at, cost_per_sms)
+        VALUES (${org}, ${dripCamp.id}, ${dripStage}, ${contacts[0]}::uuid, ${phones[0]},
+                'hi', 'sent', ${sentAt}, '0.0300')
+        RETURNING id`)
+    ).id;
+    await db.execute(sql`
+      INSERT INTO stage_send_lifecycle (stage_send_id, org_id, status)
+      VALUES (${dripSend}::uuid, ${org}, 'hot')`);
+
     // ── links + clicks ──────────────────────────────────────────────────────
     const mkLink = async (i: number, stageId: number, suffix: string) =>
       (
@@ -257,17 +281,23 @@ async function main() {
       `total ${total.sends}, 9 sends exist`,
     );
     const grand = row("grand_total");
+    const drip = row("drip");
     bar(
-      "A5 ⭐ Grand total = Total + Unclassified = every send, on every column",
-      grand.sends === 9 &&
-        grand.sends === total.sends + unclass.sends &&
-        grand.clickers === total.clickers + unclass.clickers &&
-        grand.sales === total.sales + unclass.sales &&
-        grand.purchases === total.purchases + unclass.purchases &&
-        grand.opt_outs === total.opt_outs + unclass.opt_outs &&
-        near(Number(grand.revenue), Number(total.revenue) + Number(unclass.revenue)) &&
-        near(Number(grand.cost), 0.23),
-      `grand sends ${grand.sends}, cost ${grand.cost} (expect 9 / 0.21 + 0.02)`,
+      "A5 ⭐ Grand total = Total + Unclassified + Drip = every send, on every column",
+      grand.sends === 10 &&
+        grand.sends === total.sends + unclass.sends + drip.sends &&
+        grand.clickers === total.clickers + unclass.clickers + drip.clickers &&
+        grand.sales === total.sales + unclass.sales + drip.sales &&
+        grand.purchases === total.purchases + unclass.purchases + drip.purchases &&
+        grand.opt_outs === total.opt_outs + unclass.opt_outs + drip.opt_outs &&
+        near(Number(grand.revenue), Number(total.revenue) + Number(unclass.revenue) + Number(drip.revenue)) &&
+        near(Number(grand.cost), 0.26),
+      `grand sends ${grand.sends}, cost ${grand.cost} (expect 10 / 0.21 + 0.02 + 0.03)`,
+    );
+    bar(
+      "A6 ⭐ a drip send stamped hot is in Drip, NOT in Hot",
+      drip.sends === 1 && near(Number(drip.cost), 0.03) && hot.sends === 2,
+      `drip ${drip.sends} (cost ${drip.cost}), hot ${hot.sends}`,
     );
     bar(
       "A4 Clickers = hot + warm, Non-clickers = the other four",

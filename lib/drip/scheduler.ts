@@ -3,6 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { sql } from "drizzle-orm";
+import { lifecycleStampInsertSql } from "@/lib/engagement/lifecycle-stamp";
 
 import { db } from "@/db/client";
 import { campaignDayBoundsUtc } from "@/lib/campaign-timezone";
@@ -390,7 +391,10 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
             // id = sendToken so the row and its link share one identity, the
             // same pairing kickoff uses; link_id is what makes the /r/ click
             // resolvable back to this exact message.
+            // The status-at-send stamp rides in the same statement
+            // (lib/engagement/lifecycle-stamp.ts), as on kickoff's path.
             const ins = (await tx.execute(sql`
+              WITH ins AS (
               INSERT INTO stage_sends
                 (id, org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
                  link_id, rendered_text, status, created_at, cost_per_sms,
@@ -404,7 +408,9 @@ export async function runDripSchedulerBatch(now: Date = new Date()): Promise<Sch
                       (SELECT pp.cost_per_sms FROM provider_phones pp
                        WHERE pp.id = ${number.provider_phone_id}),
                       ${stamp.messageFormatId}, ${stamp.formatCustom})
-              RETURNING id
+              RETURNING id, org_id, contact_id
+              ), lc AS (${lifecycleStampInsertSql(sql`ins`)})
+              SELECT id FROM ins
             `)) as unknown as { id: string }[];
 
             await stampDripStageDrainable(tx, { stageId: stage.stage_id, orgId });

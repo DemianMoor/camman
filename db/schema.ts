@@ -3421,6 +3421,13 @@ export const stage_sends = pgTable(
     index("stage_sends_org_provider_phone_sent_idx")
       .on(table.org_id, table.provider_phone_id)
       .where(sql`status = 'sent'`),
+    // Migration 0220: one contact-id range of sent rows, for the batched nightly
+    // contact-engagement recount. The migration adds `INCLUDE (campaign_id)` so
+    // the facts and offers reads are index-only; drizzle-orm 0.45.2 cannot
+    // express INCLUDE (see stage_sends_org_provider_phone_sent_idx above).
+    index("stage_sends_org_contact_sent_idx")
+      .on(table.org_id, table.contact_id, table.sent_at)
+      .where(sql`status = 'sent'`),
   ],
 );
 

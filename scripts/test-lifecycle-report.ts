@@ -208,6 +208,23 @@ async function main() {
     await mkClick(await mkLink(1, stageB, "foreign"), "human", true);
     await mkClick(await mkLink(2, stageA, "bot"), "bot", true);
 
+    // ⭐ NEW CLICKERS. Contact 0 clicks twice: its stage-A (hot) link, then a
+    // minute later its drip link. Its engagement row records the FIRST of the
+    // two as first_click_at — so the hot send is a new clicker and the drip
+    // send is a clicker but not a new one.
+    const dripLink = await mkLink(0, dripStage, "drip");
+    await db.execute(sql`
+      INSERT INTO clicks (org_id, link_id, clicked_at, classification, scored_at)
+      VALUES (${org}, ${dripLink}, now() + interval '1 minute', 'human', now())`);
+    await db.execute(sql`
+      INSERT INTO contact_engagement
+        (contact_id, org_id, status, status_changed_at, freeze_cadence_days, thresholds,
+         first_click_at, last_click_at)
+      SELECT ${contacts[0]}::uuid, ${org}, 'hot', now(), 14, '{}'::jsonb,
+             min(ck.clicked_at), max(ck.clicked_at)
+      FROM clicks ck JOIN links lk ON lk.id = ck.link_id
+      WHERE lk.contact_id = ${contacts[0]}::uuid AND ck.classification = 'human'`);
+
     // ── sales ───────────────────────────────────────────────────────────────
     const mkConv = async (
       i: number,
@@ -298,6 +315,21 @@ async function main() {
       "A6 ⭐ a drip send stamped hot is in Drip, NOT in Hot",
       drip.sends === 1 && near(Number(drip.cost), 0.03) && hot.sends === 2,
       `drip ${drip.sends} (cost ${drip.cost}), hot ${hot.sends}`,
+    );
+    bar(
+      "A7 ⭐ New clickers: the send carrying the contact's FIRST-ever human click counts",
+      hot.clickers === 1 && hot.new_clickers === 1,
+      `hot clickers ${hot.clickers}, new ${hot.new_clickers}`,
+    );
+    bar(
+      "A8 ⭐ …and the same contact's LATER click is a clicker but not a new one",
+      drip.clickers === 1 && drip.new_clickers === 0,
+      `drip clickers ${drip.clickers}, new ${drip.new_clickers}`,
+    );
+    bar(
+      "A9 Total and Grand total sum New clickers like any count (1 each)",
+      total.new_clickers === 1 && grand.new_clickers === 1,
+      `total ${total.new_clickers}, grand ${grand.new_clickers}`,
     );
     bar(
       "A4 Clickers = hot + warm, Non-clickers = the other four",

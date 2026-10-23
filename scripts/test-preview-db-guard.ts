@@ -169,6 +169,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "fills lifecycle_day_rollup (migration 0192) for days the nightly 14-day window does not reach; writes through lib/reporting/lifecycle-rollup, so it carries no write token of its own",
   },
   {
+    file: "backfill-lifecycle-last-click.ts",
+    why: "one-shot production backfill of stage_send_lifecycle.last_click_at for WARM stamps (migration 0220, the Lifecycle report's Warm split); dry-run default, writes only behind --apply, batched, only where last_click_at IS NULL",
+  },
+  {
     file: "backfill-lifecycle-reconstruction.ts",
     why: "one-shot production backfill of stage_send_lifecycle for sends that predate live stamping (contact lifecycle PR 5); dry-run default, writes only behind --apply, one transaction per ET day",
   },

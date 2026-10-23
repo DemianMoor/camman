@@ -30,7 +30,9 @@ const ROW_LABEL: Record<string, string> = {
   new: "New",
   cold: "Cold",
   hot: "Hot",
-  warm: "Warm",
+  warm_31_60: "Warm 31–60",
+  warm_61_120: "Warm 61–120",
+  warm: "Warm (no click time)",
   freeze: "Freeze",
   suppressed: "Suppressed",
   clickers: "Clickers (hot + warm)",
@@ -41,13 +43,16 @@ const ROW_LABEL: Record<string, string> = {
   grand_total: "Grand total",
 };
 const ROW_ORDER = [
-  "new", "cold", "hot", "warm", "freeze", "suppressed",
+  "new", "cold", "hot", "warm_31_60", "warm_61_120", "warm", "freeze", "suppressed",
   "clickers", "non_clickers", "total", "unclassified", "drip", "grand_total",
 ];
 const RULE_BEFORE = new Set(["clickers", "total", "unclassified", "grand_total"]);
 const EMPHASIS = new Set(["total", "grand_total"]);
 // Metric cells per row — the suppressed row prints one dash per column.
-const METRIC_COLUMNS = 12;
+const METRIC_COLUMNS = 14;
+// Rows hidden when empty: a warm stamp with no click time exists only until the
+// last_click_at backfill reaches it, and a zero row there would read as data.
+const HIDE_WHEN_EMPTY = new Set(["warm"]);
 
 const pct = (v: number | null) => (v === null ? "—" : `${(v * 100).toFixed(2)}%`);
 const money = (v: string) =>
@@ -130,6 +135,7 @@ export function LifecycleReport() {
                 <th className="px-3 py-2 text-right font-medium">Sends</th>
                 <th className="px-3 py-2 text-right font-medium">Clickers</th>
                 <th className="px-3 py-2 text-right font-medium">CTR</th>
+                <th className="px-3 py-2 text-right font-medium">New clickers</th>
                 <th className="px-3 py-2 text-right font-medium">Sales*</th>
                 <th className="px-3 py-2 text-right font-medium">Purchases*</th>
                 <th className="px-3 py-2 text-right font-medium">CR*</th>
@@ -139,11 +145,13 @@ export function LifecycleReport() {
                 <th className="px-3 py-2 text-right font-medium">Cost</th>
                 <th className="px-3 py-2 text-right font-medium">CPC</th>
                 <th className="px-3 py-2 text-right font-medium">ROI</th>
+                <th className="px-3 py-2 text-right font-medium">Cost / new clicker</th>
               </tr>
             </thead>
             <tbody className="tabular-nums">
               {ROW_ORDER.map((key) => {
                 const r: LifecycleMetrics | undefined = byRow.get(key);
+                if (HIDE_WHEN_EMPTY.has(key) && !(r && r.sends > 0)) return null;
                 const suppressed = key === "suppressed";
                 const emphasis = EMPHASIS.has(key);
                 return (
@@ -182,6 +190,7 @@ export function LifecycleReport() {
                         <td className="px-3 py-2 text-right">{num(r?.sends ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{num(r?.clickers ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.ctr ?? null)}</td>
+                        <td className="px-3 py-2 text-right">{num(r?.new_clickers ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{num(r?.sales ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{num(r?.purchases ?? 0)}</td>
                         <td className="px-3 py-2 text-right">{pct(r?.cr ?? null)}</td>
@@ -204,6 +213,17 @@ export function LifecycleReport() {
                           )}
                         >
                           {roiPct(r?.roi ?? null)}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          {!r || r.new_clickers === 0 ? (
+                            "—"
+                          ) : r.pays_for_itself ? (
+                            <span className="text-emerald-700 dark:text-emerald-400">
+                              pays for itself
+                            </span>
+                          ) : (
+                            moneyOrDash(r.cost_per_new_clicker)
+                          )}
                         </td>
                       </>
                     )}
@@ -267,6 +287,15 @@ export function LifecycleReport() {
           Sales counts buyers (sends with at least one purchase); Purchases counts
           every purchase event, so a buyer who pays twice is 1 sale and 2
           purchases. ROI is (revenue − cost) ÷ cost.
+        </p>
+        <p>
+          <span className="font-medium">Warm is split by days since the
+          contact&apos;s last human click when the message was sent</span> — 31–60
+          and 61–120 (Hot is 30 days or less). <span className="font-medium">New
+          clickers</span> are sends whose click was the contact&apos;s first human
+          click ever. <span className="font-medium">Cost / new clicker</span> is
+          (cost − revenue) ÷ new clickers; it is blank with no new clickers and
+          reads &quot;pays for itself&quot; when revenue exceeds cost.
         </p>
         <p>
           <span className="font-medium">Cost includes opt-out cost</span> — a

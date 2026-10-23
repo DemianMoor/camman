@@ -169,9 +169,10 @@ async function recomputeRange(
 
   const inserted = (await dbc.execute(sql`
     INSERT INTO lifecycle_day_rollup
-      (org_id, et_day, campaign_kind, cohort, sends, clickers, sales, purchases,
-       revenue, opt_outs, cost, reconstructed, computed_at)
-    SELECT ${org}, d.et_day, d.kind, d.row, d.sends, d.clickers, d.sales, d.purchases,
+      (org_id, et_day, campaign_kind, cohort, sends, clickers, new_clickers,
+       sales, purchases, revenue, opt_outs, cost, reconstructed, computed_at)
+    SELECT ${org}, d.et_day, d.kind, d.row, d.sends, d.clickers, d.new_clickers,
+           d.sales, d.purchases,
            d.revenue::numeric, d.opt_outs, d.cost::numeric, d.reconstructed, now()
     FROM (${lifecycleDayRowsSql({ orgId: opts.orgId, from, to })}) d
     RETURNING et_day`)) as unknown as unknown[];
@@ -218,6 +219,7 @@ export async function getLifecycleReportHybrid(opts: {
         SELECT campaign_kind AS kind, cohort AS row,
                sum(sends)::int AS sends,
                sum(clickers)::int AS clickers,
+               sum(new_clickers)::int AS new_clickers,
                sum(sales)::int AS sales,
                sum(purchases)::int AS purchases,
                sum(revenue)::text AS revenue,
@@ -250,6 +252,7 @@ export async function getLifecycleReportHybrid(opts: {
             row: r.row,
             sends: Number(prev.sends) + Number(r.sends),
             clickers: Number(prev.clickers) + Number(r.clickers),
+            new_clickers: Number(prev.new_clickers) + Number(r.new_clickers),
             sales: Number(prev.sales) + Number(r.sales),
             purchases: Number(prev.purchases) + Number(r.purchases),
             revenue: String(Number(prev.revenue) + Number(r.revenue)),

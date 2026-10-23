@@ -26,12 +26,13 @@ async function main() {
   const cell = (
     row: string,
     k: number,
-    opts: { cost?: number; revenue?: number; kind?: "regular" | "drip" } = {},
+    opts: { cost?: number; revenue?: number; kind?: "regular" | "drip"; newClickers?: number } = {},
   ) => ({
     kind: opts.kind ?? ("regular" as const),
     row,
     sends: 1000 * k,
     clickers: 100 * k,
+    new_clickers: opts.newClickers ?? 3 * k,
     sales: 10 * k,
     purchases: 11 * k,
     revenue: String(opts.revenue ?? 5 * k),
@@ -112,6 +113,51 @@ async function main() {
   const tr = roiRows.find((x) => x.row === "total")!;
   bar("B6 Total ROI is from summed revenue and cost, not an average of ROIs",
     near(tr.roi ?? NaN, (40 - 30) / 30), `${tr.roi}`);
+
+  console.log("\nPART D — Warm split rows and Cost / new clicker");
+  const w = foldLifecycleRows(
+    [
+      cell("hot", 1),
+      cell("warm_31_60", 2),
+      cell("warm_61_120", 4),
+      cell("warm", 8), // stamp with no click time
+      cell("cold", 16),
+    ],
+    "2026-09-23",
+    "2026-10-22",
+  ).rows;
+  const wr = (k: string) => w.find((x) => x.row === k)!;
+  bar("D1 both Warm rows are rows of their own",
+    wr("warm_31_60").sends === 2000 && wr("warm_61_120").sends === 4000);
+  bar("D2 ⭐ Clickers = Hot + Warm 31–60 + Warm 61–120 + Warm (no click time)",
+    wr("clickers").sends === 15000, `${wr("clickers").sends}`);
+  bar("D3 Total includes every Warm row", wr("total").sends === 31000, `${wr("total").sends}`);
+  bar("D4 New clickers is summed like any count",
+    wr("total").new_clickers === 93 && wr("clickers").new_clickers === 45,
+    `total ${wr("total").new_clickers}, clickers ${wr("clickers").new_clickers}`);
+
+  const c = foldLifecycleRows(
+    [
+      cell("hot", 1, { cost: 10, revenue: 4, newClickers: 3 }),   // (10−4)/3 = 2
+      cell("cold", 1, { cost: 10, revenue: 25, newClickers: 5 }), // pays for itself
+      cell("warm_31_60", 1, { cost: 10, revenue: 0, newClickers: 0 }), // blank
+      cell("new", 1, { cost: 10, revenue: 10, newClickers: 4 }),  // break-even ⇒ 0
+    ],
+    "2026-09-23",
+    "2026-10-22",
+  ).rows;
+  const cr = (k: string) => c.find((x) => x.row === k)!;
+  bar("D5 Cost / new clicker = (cost − revenue) ÷ new clickers",
+    near(cr("hot").cost_per_new_clicker ?? NaN, 2) && !cr("hot").pays_for_itself,
+    `${cr("hot").cost_per_new_clicker}`);
+  bar("D6 ⭐ revenue > cost ⇒ null and pays_for_itself, never a negative cost",
+    cr("cold").cost_per_new_clicker === null && cr("cold").pays_for_itself,
+    `${cr("cold").cost_per_new_clicker} / ${cr("cold").pays_for_itself}`);
+  bar("D7 ⭐ zero new clickers ⇒ null (blank), not ∞",
+    cr("warm_31_60").cost_per_new_clicker === null, `${cr("warm_31_60").cost_per_new_clicker}`);
+  bar("D8 break-even ⇒ exactly 0, and does not 'pay for itself'",
+    cr("new").cost_per_new_clicker === 0 && !cr("new").pays_for_itself,
+    `${cr("new").cost_per_new_clicker}`);
 
   console.log(fail === 0 ? "\nAll checks passed." : `\n${fail} check(s) FAILED.`);
   process.exit(fail === 0 ? 0 : 1);

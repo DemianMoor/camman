@@ -42,14 +42,48 @@ import { purchasedClause } from "@/lib/sale-attribution";
 // contribute nothing here — which is one of the reasons this tab's totals do not
 // foot with Overview's, and the page says so.
 
+/**
+ * The report's cohort rows, in display order. Warm is SPLIT by days since the
+ * contact's last human click at send time (owner, 2026-10-23); plain `warm` is
+ * a warm stamp with no recorded click time (pre-0220 and not backfilled) — a
+ * real row so a gap in the backfill is visible instead of landing in a bucket.
+ */
 export const LIFECYCLE_COHORTS = [
   "new",
   "cold",
   "hot",
+  "warm_31_60",
+  "warm_61_120",
   "warm",
   "freeze",
   "suppressed",
 ] as const;
+
+/** Warm 31–60 vs 61–120: the boundary, in the evaluator's own day arithmetic. */
+export const WARM_SPLIT_DAYS = 60;
+
+/**
+ * The report cohort for one stamped send — THE one definition, used by the
+ * report query and by scripts/test-lifecycle-warm-split.ts.
+ *
+ * ⚠️ SAME ARITHMETIC AS THE EVALUATOR. Hot is `last_click_at >= asOf − 30 days`
+ * and Warm `>= asOf − 120 days` (lib/engagement/status-sql.ts), as INTERVALS
+ * from an instant, not calendar dates. So "31–60" is `last_click_at >= sent_at
+ * − 60 days`: exactly 60×24h is still 31–60, one second more is 61–120 — the
+ * same convention that makes exactly 30 days still Hot. The split reads the
+ * stamp's OWN last_click_at (taken from the same contact_engagement row as its
+ * status), measured to the send's sent_at.
+ */
+export function reportCohortSql(status: SQL, lastClickAt: SQL, sentAt: SQL): SQL {
+  return sql`(CASE
+    WHEN ${status} = 'warm' AND ${lastClickAt} IS NULL THEN 'warm'
+    WHEN ${status} = 'warm'
+     AND ${lastClickAt} >= ${sentAt} - make_interval(days => ${sql.raw(String(WARM_SPLIT_DAYS))})
+      THEN 'warm_31_60'
+    WHEN ${status} = 'warm' THEN 'warm_61_120'
+    ELSE ${status}
+  END)`;
+}
 
 export type LifecycleCohort = (typeof LIFECYCLE_COHORTS)[number];
 
@@ -67,6 +101,8 @@ export interface LifecycleMetrics {
   row: LifecycleRow;
   sends: number;
   clickers: number;
+  /** Sends whose human click was the contact's FIRST-ever human click. */
+  new_clickers: number;
   ctr: number | null;
   /** Sends with ≥1 purchase — buyers. */
   sales: number;
@@ -83,6 +119,13 @@ export interface LifecycleMetrics {
   cpc: number | null;
   /** (revenue − cost) / cost; null when nothing was spent. */
   roi: number | null;
+  /**
+   * (cost − revenue) / new clickers — what a new clicker cost after revenue.
+   * null when there are no new clickers, or when revenue exceeds cost
+   * (`pays_for_itself`), so the page never prints a negative cost.
+   */
+  cost_per_new_clicker: number | null;
+  pays_for_itself: boolean;
   /** true when ANY send in this row was reconstructed rather than stamped live. */
   reconstructed: boolean;
 }
@@ -119,6 +162,7 @@ export interface LifecycleReportRow {
   row: string;
   sends: number;
   clickers: number;
+  new_clickers: number;
   sales: number;
   purchases: number;
   revenue: string;
@@ -193,7 +237,9 @@ function lifecycleSql(
   return sql`
     WITH lc_sent AS (
       SELECT ss.id, ss.contact_id, ss.stage_id, ss.cost_per_sms, ss.sent_at,
-             ss.sale_status, l.status AS cohort, l.reconstructed,
+             ss.sale_status,
+             ${reportCohortSql(sql`l.status`, sql`l.last_click_at`, sql`ss.sent_at`)} AS cohort,
+             l.reconstructed,
              -- ⚠️ DRIP IS A KIND, NOT A COHORT (owner, 2026-10-23). Drip sends
              -- are stamped like any other so they CAN be split by cohort later,
              -- but they report as one "Drip" row. Before drip was stamped this
@@ -302,7 +348,14 @@ function lifecycleSql(
     -- stage's links were inserted together so their heap pages are adjacent,
     -- and the per-link probe into clicks_link_id_idx is index-only for the ~97%
     -- of links nobody clicked.
-    clicked AS (
+    --
+    -- ⚠️ MATERIALIZED, AND UNCHANGED. Folding the first-click time into this
+    -- CTE (a LATERAL min() per link + GROUP BY) made the planner walk ALL of
+    -- links (7.2M rows, via the (stage, contact, send_token) index) and merge
+    -- it against the window's stages: 65s against 17-23s on 2026-10-22, past
+    -- the route's 60s. So this stays the proven per-stage EXISTS, fenced, and
+    -- the first-click work happens below over the clicked pairs only.
+    clicked AS MATERIALIZED (
       SELECT DISTINCT lk.stage_id, lk.contact_id
       FROM links lk
       WHERE lk.org_id = ${org}
@@ -311,6 +364,26 @@ function lifecycleSql(
           SELECT 1 FROM clicks ck
           WHERE ck.link_id = lk.id AND ck.org_id = ${org} AND ${HUMAN_CLICK}
         )
+    ),
+    -- NEW CLICKER = this send's first human click IS the contact's first-ever
+    -- one. Over the clicked pairs only (a few thousand a day), each an index
+    -- probe on links (stage_id, contact_id) and contact_engagement's PK.
+    -- ⚠️ A NULL first_click_at means the engagement job has not yet seen ANY
+    -- click from the contact — so this one is the first.
+    clicked_new AS (
+      SELECT c.stage_id, c.contact_id,
+             (eng.first_click_at IS NULL OR fa.first_at <= eng.first_click_at) AS is_new
+      FROM clicked c
+      CROSS JOIN LATERAL (
+        SELECT min(ck.clicked_at) AS first_at
+        FROM links lk2
+        JOIN clicks ck ON ck.link_id = lk2.id
+        WHERE lk2.org_id = ${org} AND lk2.stage_id = c.stage_id
+          AND lk2.contact_id = c.contact_id
+          AND ck.org_id = ${org} AND ${HUMAN_CLICK}
+      ) fa
+      LEFT JOIN contact_engagement eng
+             ON eng.contact_id = c.contact_id AND eng.org_id = ${org}
     ),
     -- Ledger primary; the legacy column fills only where NO ledger row exists.
     --
@@ -342,6 +415,7 @@ function lifecycleSql(
     per_send AS (
       SELECT s.id, s.kind, s.cohort, s.reconstructed,
              (cl.stage_id IS NOT NULL) AS clicked,
+             coalesce(cl.is_new, false) AS new_clicker,
              -- A send with ledger rows but no purchase is NOT a sale: the
              -- ledger is primary, and it has answered. sale_status is consulted
              -- only where the ledger is silent (lg.id IS NULL).
@@ -364,7 +438,7 @@ function lifecycleSql(
              coalesce(s.cost_per_sms, r.rate, 0)
                * (1 + CASE WHEN op.id IS NOT NULL THEN 1 ELSE 0 END) AS cost
       FROM lc_sent s
-      LEFT JOIN clicked cl
+      LEFT JOIN clicked_new cl
              ON cl.stage_id = s.stage_id AND cl.contact_id = s.contact_id
       LEFT JOIN ledger lg ON lg.id = s.id
       LEFT JOIN opted op ON op.id = s.id
@@ -379,6 +453,7 @@ function lifecycleSql(
            coalesce(cohort, '__unclassified__') AS row,
            count(*)::int AS sends,
            count(*) FILTER (WHERE clicked)::int AS clickers,
+           count(*) FILTER (WHERE new_clicker)::int AS new_clickers,
            sum(is_sale)::int AS sales,
            sum(purchases)::int AS purchases,
            coalesce(sum(ledger_revenue), 0)::text AS revenue,
@@ -454,7 +529,7 @@ export function foldLifecycleRows(
   const by = new Map(rows.map((r) => [`${r.kind}:${r.row}`, r]));
   const dripKeys = rows.filter((r) => r.kind === "drip").map((r) => `drip:${r.row}`);
   const zero = {
-    sends: 0, clickers: 0, sales: 0, purchases: 0, revenue: "0",
+    sends: 0, clickers: 0, new_clickers: 0, sales: 0, purchases: 0, revenue: "0",
     opt_outs: 0, cost: "0", reconstructed: false,
   };
   const pick = (k: string) => by.get(k.includes(":") ? k : `regular:${k}`) ?? zero;
@@ -463,6 +538,7 @@ export function foldLifecycleRows(
     const parts = keys.map(pick);
     const sends = parts.reduce((a, p) => a + Number(p.sends), 0);
     const clickers = parts.reduce((a, p) => a + Number(p.clickers), 0);
+    const newClickers = parts.reduce((a, p) => a + Number(p.new_clickers ?? 0), 0);
     const sales = parts.reduce((a, p) => a + Number(p.sales), 0);
     const purchases = parts.reduce((a, p) => a + Number(p.purchases ?? 0), 0);
     const opt_outs = parts.reduce((a, p) => a + Number(p.opt_outs), 0);
@@ -472,6 +548,7 @@ export function foldLifecycleRows(
       row,
       sends,
       clickers,
+      new_clickers: newClickers,
       // ⚠️ null, not 0, when there is nothing to divide by — a 0% CTR on zero
       // sends is a statement nobody measured.
       ctr: sends > 0 ? clickers / sends : null,
@@ -485,12 +562,15 @@ export function foldLifecycleRows(
       cost: cost.toFixed(4),
       cpc: clickers > 0 ? cost / clickers : null,
       roi: cost > 0 ? (revenue - cost) / cost : null,
+      cost_per_new_clicker:
+        newClickers > 0 && revenue <= cost ? (cost - revenue) / newClickers : null,
+      pays_for_itself: revenue > cost,
       reconstructed: parts.some((p) => p.reconstructed),
     };
   };
 
   const cohortRows = LIFECYCLE_COHORTS.map((c) => build(c, [c]));
-  const clickers = build("clickers", ["hot", "warm"]);
+  const clickers = build("clickers", ["hot", "warm_31_60", "warm_61_120", "warm"]);
   const nonClickers = build("non_clickers", ["new", "cold", "freeze", "suppressed"]);
   const total = build("total", [...LIFECYCLE_COHORTS]);
   // ⚠️ A REAL ROW, not an omission. Sends with no stamp predate the backfill;

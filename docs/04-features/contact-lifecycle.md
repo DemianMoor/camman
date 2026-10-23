@@ -786,6 +786,27 @@ chunked so each statement stays short and the run is resumable.
 
 ### 3k2. The reconstruction, and what it cannot know
 
+> **The 2026-10-24 run is a one-shot Vercel cron**, not a session on a laptop:
+> `/api/cron/lifecycle-backfill` → [lib/engagement/lifecycle-backfill-oneshot.ts](../../lib/engagement/lifecycle-backfill-oneshot.ts),
+> every 5 min in 05–06 UTC on 10-24 only. Date-pinned window 05:00–06:20 UTC
+> (no unit starts after 06:15, ahead of the 06:35 nightly job), org pinned,
+> CRON_SECRET only, under a lease. Units — `recon:<day>` 10-06→10-23,
+> `lastclick`, `rollup:<from>` 06-29→10-23 in 3-day chunks — each write a
+> `cron_locks` marker `lifecycle-backfill-2026-10-24:<unit>` when done, so a
+> killed tick resumes. Telegram: a start line, then ONE before/after line at
+> completion (its own marker, written only when Telegram accepts it; retried
+> otherwise), or ⛔ ABORTED (a recon day with > 1% unevaluable sends) or ⚠️
+> INCOMPLETE (window closed with work left). After the run every tick is a
+> no-op; the cron entry can be removed in any later PR. Tested by
+> `scripts/test-lifecycle-backfill-oneshot.ts` (injected clock + notifier).
+> The day's SQL moved to [lib/engagement/lifecycle-reconstruct-day.ts](../../lib/engagement/lifecycle-reconstruct-day.ts)
+> (shared with the script) and now reads a contact's sends through
+> `contacts.phone_number` → `stage_sends_org_phone_sent_idx`, as the
+> engagement job does — `contact_id IN (…)` has no index and seq-scanned
+> `stage_sends` once per day. The warm last-click fill is
+> [lib/engagement/lifecycle-last-click.ts](../../lib/engagement/lifecycle-last-click.ts),
+> one transaction.
+>
 > **Second use, 2026-10-24 quiet window:** drip sends from 2026-10-06 (drip
 > launch) until drip stamping deployed had no stamp at all; the same replay
 > filled them. Since 2026-10-23 the script also writes `last_click_at` (the

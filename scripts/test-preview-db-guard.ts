@@ -170,11 +170,13 @@ const EXCLUSIONS: ReadonlyArray<{
   },
   {
     file: "backfill-lifecycle-last-click.ts",
-    why: "one-shot production backfill of stage_send_lifecycle.last_click_at for WARM stamps (migration 0220, the Lifecycle report's Warm split); dry-run default, writes only behind --apply, batched, only where last_click_at IS NULL",
+    viaLibrary: true,
+    why: "one-shot production backfill of stage_send_lifecycle.last_click_at for WARM stamps (migration 0220, the Lifecycle report's Warm split); writes through lib/engagement/lifecycle-last-click (shared with the one-shot cron); dry-run default (rolled back), commits only behind --apply, only where last_click_at IS NULL",
   },
   {
     file: "backfill-lifecycle-reconstruction.ts",
-    why: "one-shot production backfill of stage_send_lifecycle for sends that predate live stamping (contact lifecycle PR 5); dry-run default, writes only behind --apply, one transaction per ET day",
+    viaLibrary: true,
+    why: "one-shot production backfill of stage_send_lifecycle for sends that predate live stamping (contact lifecycle PR 5); writes through lib/engagement/lifecycle-reconstruct-day (shared with the one-shot cron); dry-run default, writes only behind --apply, one transaction per ET day",
   },
   {
     file: "backfill-optout-attributions.ts",

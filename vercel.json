@@ -139,6 +139,10 @@
     {
       "path": "/api/cron/texted-rule-trial",
       "schedule": "20 5 * * *"
+    },
+    {
+      "path": "/api/cron/lifecycle-backfill",
+      "schedule": "*/5 5,6 24 10 *"
     }
   ]
 }

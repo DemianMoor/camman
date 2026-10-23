@@ -103,9 +103,15 @@ async function main() {
 
     const c2 = await qualify({ lifecycle_statuses: ["hot", "warm"] }, true);
     bar(
-      "C2 the Hot/Warm chip selects both",
+      "C2 the Hot and Warm chips together select both (what a campaign saved with the old combined chip stores)",
       named(c2) === "hot,warm",
       named(c2),
+    );
+    const c2w = await qualify({ lifecycle_statuses: ["warm"] }, true);
+    bar(
+      "C2b ⭐ the Warm chip alone selects warm only — not hot (separate chips since 2026-10-23)",
+      named(c2w) === "warm",
+      named(c2w),
     );
 
     const c3 = await qualify(
@@ -259,9 +265,15 @@ async function main() {
     "app/api/campaigns/[campaignId]/route.ts",
     "utf8",
   );
+  // The select list moved out of the route into the shared
+  // CAMPAIGN_DETAIL_SELECT (lib/api/campaign-detail.ts, #362), so the bar reads
+  // both: the route must use the shared list, and the list must carry the
+  // column. Scanning the route alone went red while the screen was correct.
+  const detailSrc = readFileSync("lib/api/campaign-detail.ts", "utf8");
   bar(
     "R1 the campaign detail route SELECTS lifecycle_rules",
-    /lifecycle_rules:\s*campaigns\.lifecycle_rules/.test(routeSrc),
+    routeSrc.includes(".select(CAMPAIGN_DETAIL_SELECT)") &&
+      /lifecycle_rules:\s*campaigns\.lifecycle_rules/.test(detailSrc),
     "without it every saved campaign renders as legacy on the edit screen",
   );
   const editorSrc = readFileSync(

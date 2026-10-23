@@ -27,8 +27,10 @@ export const CAMPAIGN_CARRIER_FILTER_VALUES = [
   "Unknown",
 ] as const;
 
-// The lifecycle chips (PR 4b). The Hot/Warm chip writes BOTH 'hot' and 'warm',
-// so splitting it into two chips later needs no migration and no backfill.
+// The lifecycle chips (PR 4b): one chip per status — New / Hot / Warm / Cold /
+// Freeze. Hot and Warm were a single chip writing BOTH values until
+// 2026-10-23; the stored values were always separate, so the split needed no
+// migration and no backfill.
 // 'suppressed' is deliberately ABSENT: suppressed contacts are always excluded
 // and are never offered as a chip (spec §7.1) — that exclusion is an
 // eligibility layer, not an audience choice.

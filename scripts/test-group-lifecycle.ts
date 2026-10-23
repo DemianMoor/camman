@@ -129,9 +129,9 @@ async function main() {
     await join(c7, gA);
     const c8 = await mk(8, "cold");
     await join(c8, gOut);
-    // ⚠️ Group B ends up with one hot (c2) AND one warm (c9), so the Hot/Warm
-    // column's sum is exercised on real numbers. A bar that adds 0 + 0 proves
-    // only that the code did not crash.
+    // ⚠️ Group B ends up with one hot (c2) AND one warm (c9), so the separate
+    // Hot and Warm columns are each exercised on a real 1 — a bar over 0 and 0
+    // proves only that the code did not crash, and could not tell the two apart.
     const c9 = await mk(9, "warm");
     await join(c9, gB);
 
@@ -311,18 +311,26 @@ async function main() {
       ) === A.total.sendable,
       `${GROUP_LIFECYCLE_COLUMNS.reduce((a, c) => a + columnPair(A.by_status, c).sendable, 0)} vs total ${A.total.sendable}`,
     );
-    const hw = GROUP_LIFECYCLE_COLUMNS.find((c) => c.key === "hot_warm")!;
-    const hwB = columnPair(B.by_status, hw);
+    const hotCol = GROUP_LIFECYCLE_COLUMNS.find((c) => c.key === "hot")!;
+    const warmCol = GROUP_LIFECYCLE_COLUMNS.find((c) => c.key === "warm")!;
+    const hotB = columnPair(B.by_status, hotCol);
+    const warmB = columnPair(B.by_status, warmCol);
     bar(
-      "L3 Hot/Warm is hot + warm, on both halves of the cell",
-      hwB.sendable === 2 &&
-        hwB.sendable === B.by_status.hot.sendable + B.by_status.warm.sendable &&
-        hwB.available === B.by_status.hot.available + B.by_status.warm.available,
-      `group B: hot ${B.by_status.hot.sendable} + warm ${B.by_status.warm.sendable} = ${hwB.sendable} sendable (${hwB.available} available)`,
+      "L3 ⭐ Hot and Warm are SEPARATE columns, each its own status on both halves of the cell",
+      hotCol.statuses.join() === "hot" &&
+        warmCol.statuses.join() === "warm" &&
+        !GROUP_LIFECYCLE_COLUMNS.some((c) => c.statuses.includes("hot") && c.statuses.includes("warm")) &&
+        hotB.sendable === 1 && warmB.sendable === 1 &&
+        hotB.sendable === B.by_status.hot.sendable &&
+        warmB.sendable === B.by_status.warm.sendable &&
+        hotB.available === B.by_status.hot.available &&
+        warmB.available === B.by_status.warm.available,
+      `group B: Hot ${hotB.sendable} sendable (${hotB.available} available), Warm ${warmB.sendable} (${warmB.available})`,
     );
-    // Summing statuses is only safe because they are disjoint - a contact has
-    // exactly ONE lifecycle_status. If that ever stopped holding, Hot/Warm
-    // would double-count and this bar is where it would show.
+    // Summing statuses (the Total column, the cluster rows) is only safe
+    // because they are disjoint - a contact has exactly ONE lifecycle_status.
+    // If that ever stopped holding, Total would double-count and this bar is
+    // where it would show.
     bar(
       "L4 the status sets are DISJOINT, which is what makes summing safe",
       (
@@ -340,7 +348,7 @@ async function main() {
     bar(
       "L5 the order is the one the owner asked for",
       GROUP_LIFECYCLE_COLUMNS.map((c) => c.key).join(",") ===
-        "hot_warm,cold,freeze,new,suppressed",
+        "new,hot,warm,cold,freeze,suppressed",
       GROUP_LIFECYCLE_COLUMNS.map((c) => c.label).join(" | "),
     );
 

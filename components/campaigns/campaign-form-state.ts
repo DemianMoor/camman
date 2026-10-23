@@ -64,7 +64,9 @@ export interface AudienceFilters {
   include_not_clicked: boolean;
   // Lifecycle chips (PR 4b). Only read when the campaign has
   // lifecycle_rules = true; a legacy campaign's audience is still decided by
-  // the four booleans above. The Hot/Warm chip stores BOTH 'hot' and 'warm'.
+  // the four booleans above. One status per chip (Hot and Warm are separate
+  // chips since 2026-10-23; a campaign saved with the old combined chip stores
+  // both values and shows both chips selected).
   lifecycle_statuses: string[];
   // Optional carrier allow-list (migration 0098). Empty = no carrier filter.
   // When non-empty, only contacts whose carrier_norm is in the set qualify;
@@ -625,6 +627,9 @@ export function useCampaignFormState(props: CampaignFormProps) {
   const previewOfferExposed = shown?.got_offer_in_prior_campaign ?? null;
   const previewCarrierRemoved: Record<string, number> =
     shown?.carrier_removed ?? {};
+  // Lifecycle campaigns only: total_matching split by status (sums to it).
+  const previewByStatus: Record<string, number> | null =
+    shown?.lifecycle?.by_status ?? null;
   const previewLoading = basePart.loading || audiencePart.loading;
   // The audience part's error first: it is the one the operator's last edit
   // depends on. Either part failing is shown, with Retry re-running both.
@@ -800,9 +805,9 @@ export function useCampaignFormState(props: CampaignFormProps) {
   }
 
   // Lifecycle chips (PR 4b). Toggling a chip rewrites the whole
-  // lifecycle_statuses array, because the Hot/Warm chip owns TWO values —
-  // toggling one key at a time could leave 'hot' set and 'warm' clear, which no
-  // chip can represent.
+  // lifecycle_statuses array from the chip's `statuses`. Every chip owns one
+  // status today (Hot and Warm were split 2026-10-23); the array form stays so
+  // a future multi-status chip needs no change here.
   function toggleLifecycleChip(values: readonly string[], on: boolean) {
     const current = new Set(
       (form.getValues("audience_filters")?.lifecycle_statuses ??
@@ -880,6 +885,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
     previewInUseElsewhere,
     previewOfferExposed,
     previewCarrierRemoved,
+    previewByStatus,
     previewError,
     previewLoading,
     retryPreview,

@@ -42,9 +42,11 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
+import { ENGAGEMENT_STATUS_LABELS } from "@/lib/engagement/labels";
 import { formatPhoneInternational } from "@/lib/phone-validation";
 import {
   CAMPAIGN_CARRIER_FILTER_VALUES,
+  LIFECYCLE_CHIP_STATUSES,
   OFFER_COOLDOWN_DAYS_DEFAULT,
 } from "@/lib/validators/campaigns";
 import { cn } from "@/lib/utils";
@@ -153,8 +155,10 @@ const STATUS_COLOR: Record<Status, string> = {
 // The lifecycle chips (PR 4b, spec §7.1). Rendered INSTEAD of FILTER_DEFS for
 // a campaign with lifecycle_rules = true.
 //
-// Hot/Warm is ONE chip owning TWO statuses, so splitting it later needs no
-// migration. 'suppressed' is deliberately absent: suppressed contacts are
+// One chip per status (2026-10-23: Hot and Warm were one "Hot/Warm" chip
+// owning both values; split with no migration, because the chip always stored
+// the two statuses separately — a campaign saved with the old chip simply shows
+// both Hot and Warm selected). 'suppressed' is deliberately absent: suppressed contacts are
 // always excluded, which is an eligibility layer rather than an audience
 // choice, and offering it as a chip would imply it could be opted into.
 const LIFECYCLE_CHIP_DEFS: {
@@ -170,10 +174,16 @@ const LIFECYCLE_CHIP_DEFS: {
     tooltip: "Never messaged, or messaged only outside this system",
   },
   {
-    id: "hotwarm",
-    label: "Hot/Warm",
-    statuses: ["hot", "warm"],
-    tooltip: "Clicked recently — Hot within 30 days, Warm within 120",
+    id: "hot",
+    label: "Hot",
+    statuses: ["hot"],
+    tooltip: "Human click within the last 30 days",
+  },
+  {
+    id: "warm",
+    label: "Warm",
+    statuses: ["warm"],
+    tooltip: "Last human click 31–120 days ago",
   },
   {
     id: "cold",
@@ -211,7 +221,10 @@ function formatFreezeCadence(days: readonly number[] | undefined): string {
 
 function mapLegacyFiltersToChips(f: AudienceFilters): Set<string> {
   const out = new Set<string>();
-  if (f.include_clickers) out.add("hotwarm");
+  if (f.include_clickers) {
+    out.add("hot");
+    out.add("warm");
+  }
   if (f.include_not_clicked || f.include_no_status) {
     out.add("new");
     out.add("cold");
@@ -1797,6 +1810,7 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
     previewInUseElsewhere,
     previewOfferExposed,
     previewCarrierRemoved,
+    previewByStatus,
     previewError,
     previewLoading,
     retryPreview,
@@ -2036,6 +2050,26 @@ function AudienceCompositionPanel({ state }: { state: CampaignFormState }) {
                 />
               ) : null}
             </div>
+
+            {/* Lifecycle campaigns: Total matching split by status, one row
+                per chip status in chip order. Hot and Warm are ALWAYS separate
+                rows (owner, 2026-10-23) — never a combined Hot/Warm line. The
+                rows sum to Total matching, i.e. before the cap samples. */}
+            {previewByStatus ? (
+              <div className="grid gap-1.5 border-t pt-3 text-xs">
+                <div className="text-[11px] uppercase text-muted-foreground">
+                  By status (before cap)
+                </div>
+                {LIFECYCLE_CHIP_STATUSES.map((s) => (
+                  <BreakdownRow
+                    key={s}
+                    label={ENGAGEMENT_STATUS_LABELS[s]}
+                    value={previewByStatus[s] ?? 0}
+                    muted={(previewByStatus[s] ?? 0) === 0}
+                  />
+                ))}
+              </div>
+            ) : null}
 
             <CarrierRemovedLines
               carrierFilter={watchedFilters.carrier_filter}

@@ -151,7 +151,8 @@ export async function getStageMetricsInRange(
   const dripCost =
     sendDate || excludeDrip
       ? new Map<number, number>()
-      : await dripCostByStageInRange(orgId, fromUtc, toExclusiveUtc);
+      : // false: the Overview's drip cost has always excluded archived stages.
+        await dripCostByStageInRange(orgId, fromUtc, toExclusiveUtc, { includeArchived: false });
 
   // Stages SENT in range. Under conversion_date they seed stages Keitaro has no
   // results row for (zero-click or unpolled) so their send Cost + Total Sent
@@ -521,10 +522,16 @@ async function getClickerDenominators(
 //
 // Keyed by the drip stages with a send or an opt-out in the window; the caller
 // seeds those that have no Keitaro row and no in-range sent_at.
+//
+// `includeArchived` is REQUIRED (no default) so every caller states which stage
+// set it prices. The Overview and the Telegram spend keep archived stages out
+// (unchanged behaviour); /reports/landing-pages prices them, because it reports
+// every send that happened and an archived drip stage's sends were real.
 export async function dripCostByStageInRange(
   orgId: string | null,
   fromUtc: Date,
   toExclusiveUtc: Date,
+  opts: { includeArchived: boolean },
 ): Promise<Map<number, number>> {
   // null = every org (the Telegram report has no session; see report-snapshot.ts).
   const inOrg = (col: string) => (orgId ? sql`AND ${sql.raw(col)} = ${orgId}::uuid` : sql``);
@@ -533,7 +540,7 @@ export async function dripCostByStageInRange(
       SELECT cs.id
       FROM campaign_stages cs
       JOIN campaigns c ON c.id = cs.campaign_id AND c.type = 'drip'
-      WHERE cs.archived_at IS NULL ${inOrg("cs.org_id")}
+      WHERE ${opts.includeArchived ? sql`TRUE` : sql`cs.archived_at IS NULL`} ${inOrg("cs.org_id")}
     ),
     sends AS (
       SELECT ss.stage_id, sum(COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0)) AS cost

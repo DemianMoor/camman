@@ -16,7 +16,7 @@ export default function ReportsLayout({
         <p className="text-sm text-muted-foreground">
           Campaign performance — the Keitaro funnel overview, per-dimension
           breakdowns (by number, offer, message, hour, and group), delivery
-          receipts, offer results per contact group, performance by lifecycle
+          receipts, offer results per contact group and per landing page, performance by lifecycle
           cohort, and how many contacts each group can still be messaged today.
         </p>
       </div>

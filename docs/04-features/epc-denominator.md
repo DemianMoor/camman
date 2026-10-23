@@ -1,6 +1,6 @@
 # Feature — EPC denominator (counted clickers)
 
-_Last updated: 2026-09-23_
+_Last updated: 2026-10-23_
 
 ## 1. Purpose
 
@@ -87,6 +87,7 @@ That distinction was got wrong once and is worth stating plainly: the by-dimensi
 | `/offers/[id]/report` footer | offer | ✅ (0128) |
 | `/api/reports/performance` totals | report (campaign + contact) | ✅ (2026-09-14 — was a sum of per-stage counts) |
 | `/offers/[id]/report` benchmark | org | ✅ (0128) |
+| `/reports/landing-pages` rows / Total | (offer, slug) / offer | ✅ (2026-10-23) — Total does not foot, labelled; [landing-page-report.md](landing-page-report.md) |
 
 **By Group is exempt by construction.** Its metrics are fractionally split across each contact's groups — a contact in three of a campaign's used groups contributes ⅓ to each — and a fractional share has no set to take a `DISTINCT` over. Its click counts are split sums and are **not comparable** with the other tabs. The UI says so on the tab; this is a documented exemption, not a silent inconsistency.
 
@@ -184,6 +185,7 @@ The two are **not derivable from one another**. Counted clickers are deduplicate
 | `GET /api/keitaro/results` | lifetime (totals, stages) · per-day (rows) — see its `time_basis` field |
 | `/creatives` + stage picker | **30-day (sorted) + lifetime (shown)** |
 | `/offers/[id]/report` | **lifetime only**, explicitly labelled (the matview has no date dimension) |
+| `/reports/landing-pages` | **send-date cohort**: clicks on sends in range, clicked any time — named in the header (`Human clicks (on sends in range)`) |
 
 Campaign 404 reading `$1.4247` on both `/creatives` and `/reports` is true **because those windows happen to line up**, not because the screens are structurally consistent. The original defect — one campaign, several *denominators* — is fixed. What remains is one campaign, several *time bases*, and every surface now names its basis in the UI so the reader can tell which they are looking at.
 

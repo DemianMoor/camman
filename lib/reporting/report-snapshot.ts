@@ -102,7 +102,8 @@ export async function spendInRange(range: EtDayRange): Promise<number> {
       and cs.sent_at >= ${range.fromUtc.toISOString()}::timestamptz
       and cs.sent_at <  ${range.toExclusiveUtc.toISOString()}::timestamptz
     `)) as unknown as { spend: string }[];
-  const drip = await dripCostByStageInRange(null, range.fromUtc, range.toExclusiveUtc);
+  // false: matches the regular half above, which also skips archived stages.
+  const drip = await dripCostByStageInRange(null, range.fromUtc, range.toExclusiveUtc, { includeArchived: false });
   let dripSpend = 0;
   for (const v of drip.values()) dripSpend += v;
   return Number(rows[0]?.spend ?? 0) + dripSpend;

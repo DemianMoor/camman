@@ -11,6 +11,14 @@ _Last updated: 2026-10-23_
 - **Don't:** `SET default_transaction_read_only`, `SET SESSION …`, or `set_config(…, false)` on the pooled URL. Guarded by [scripts/test-session-set-guard.ts](../scripts/test-session-set-guard.ts) in `check:guards`; behaviour pinned by `scripts/test-readonly-db-helper.ts` (preview).
 - **If one leaks anyway:** open ~8 `max: 1` connections, loop `RESET <param>` ~40×, then sample `current_setting(...)` per `pg_backend_pid()` until every backend reads the default, and check Supabase `postgres_logs` for the error window.
 
+## A landing page is the slug AS MINTED, and drip is read per send (2026-10-23)
+
+`/reports/landing-pages` ([04-features/landing-page-report.md](04-features/landing-page-report.md)) keys a row on the slug parsed from a SENT row's minted link, falling back to the stage's configured page, then (manual) its `full_url`. **Do not key LP reporting on `campaign_stages.landing_page_id`:** a page's slug is editable (stage 5510 sent `bcf/sas`, its page now reads `sas2`) and a drip stage's page can switch mid-flight (stage 5064: 8,927 sends to `mdc`, then 22,492 to `mdc2`). Regular stages are read at stage grain (they send in minutes and minted one page — 0 disagreements); drip stages per send.
+
+- **Archived stages count.** Archiving does not unsend; the Overview already counts an archived stage's sends and revenue through its tracker rows. ⚠️ The Overview's cost for such a stage is its LIFETIME `total_cost` on its first-send day, because `dripCostByStageInRange` skipped archived stages for every caller. It now takes a **required** `{ includeArchived }` — the Overview and the Telegram spend pass `false` (unchanged), this report `true` — so a caller cannot price a different stage set by omission.
+- **Send-date basis is per SEND for drip.** `getStageMetricsInRange(…, "send_date")` dates a cohort by the stage's FIRST send (`campaign_stages.sent_at`), which is right for a regular stage and wrong for a drip stage that sends for weeks. Don't reuse it for a per-send window.
+- **`Sales % (of reached)` divides by `offer_reached_at` recipients**, not Keitaro redirects: per-send, so it splits a drip page switch. It reads Keitaro-covered stages only (`hasNoKeitaroVisits` + `stageIsMatureForGap`) and renders `—`, never 0%, when none are covered.
+
 ## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
 
 The drip poke chain ([04-features/drip-poke-chain.md](04-features/drip-poke-chain.md), migration

@@ -13,6 +13,7 @@ import {
   MessageSquare,
   MousePointer,
   Network,
+  PanelsTopLeft,
   Phone,
   Route,
   ScrollText,
@@ -133,6 +134,9 @@ export const navGroups: NavGroup[] = [
       { label: "By Group", href: "/reports/group", icon: FolderTree, permission: "campaigns.view" },
       { label: "Delivery", href: "/reports/delivery", icon: CheckCheck, permission: "campaigns.view" },
       { label: "Audience Stats", href: "/reports/audience", icon: Target, permission: "campaigns.view" },
+      // Results per landing page for one offer, send-date basis — see
+      // docs/04-features/landing-page-report.md.
+      { label: "Landing Pages", href: "/reports/landing-pages", icon: PanelsTopLeft, permission: "campaigns.view" },
       // Partner-facing lead performance (Drip P7). Same permission as every
       // other report; the page and its API re-check server-side.
       { label: "By Partner", href: "/reports/partners", icon: Handshake, permission: "campaigns.view" },

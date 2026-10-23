@@ -1,6 +1,15 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-23_
+
+## ⭐ Read-only checks are TRANSACTION-scoped on their own connection — never a session SET on DATABASE_URL (2026-10-23)
+
+`DATABASE_URL` is Supavisor's **transaction** pooler (:6543). A session-level `SET` sent through it sticks to the shared server backend, not to your script, and every later client of that backend — the live app included — inherits it.
+
+- **Incident (2026-10-22, 17:55–18:45 UTC):** three ad-hoc "read-only" check scripts ran `SET default_transaction_read_only = on`. The app then got `cannot execute INSERT/UPDATE in a read-only transaction` 340 times (303 INSERT, 37 UPDATE) until every pooled backend was `RESET`. Impact check found no lost lead, no double send and no missed opt-out (pml retried the 500'd intake posts), but that was luck, not design.
+- **Do:** `withReadOnlyDb(async (tx) => …)` from [scripts/_readonly-db.ts](../scripts/_readonly-db.ts) — a dedicated session-mode (:5432) connection, one `BEGIN READ ONLY` transaction, closed in `finally`. Or `SET LOCAL` inside a transaction (released at commit).
+- **Don't:** `SET default_transaction_read_only`, `SET SESSION …`, or `set_config(…, false)` on the pooled URL. Guarded by [scripts/test-session-set-guard.ts](../scripts/test-session-set-guard.ts) in `check:guards`; behaviour pinned by `scripts/test-readonly-db-helper.ts` (preview).
+- **If one leaks anyway:** open ~8 `max: 1` connections, loop `RESET <param>` ~40×, then sample `current_setting(...)` per `pg_backend_pid()` until every backend reads the default, and check Supabase `postgres_logs` for the error window.
 
 ## ⭐ A poke is another TRIGGER for the same leased function, never a second code path (2026-10-12)
 

@@ -339,6 +339,10 @@ const EXCLUSIONS: ReadonlyArray<{
 
   // ── read-only: matched the scan, issue no write ────────────────────────────
   {
+    file: "verify-carrier-rejections.ts",
+    why: "read-only: one SELECT inside withReadOnlyDb's BEGIN READ ONLY, compared against carrier_rejected_phones (the .unsafe( token is the match — the reference SQL is a string so its code lists stay independent of lib/carrier-rejection)",
+  },
+  {
     file: "perf-baseline.ts",
     why: "read-only: EXPLAIN ANALYZE over SELECTs (the .unsafe( token is the match)",
   },

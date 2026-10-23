@@ -63,6 +63,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // Text Request poll: catches the cron not firing at all (its own runs alert
     // on a dead previous run). Same hourly piggyback as the line above.
     HEARTBEAT_JOBS.textrequestPoll,
+    // Carrier-rejection ledger (0225): both passes. Its route alerts on its own
+    // failures; this catches it not running at all.
+    HEARTBEAT_JOBS.carrierRejectionIncremental,
+    HEARTBEAT_JOBS.carrierRejectionRebuild,
   ]);
   const allBreaches = [...report.breaches, ...heartbeatBreaches(heartbeats)];
 

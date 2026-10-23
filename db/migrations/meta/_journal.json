@@ -1541,6 +1541,13 @@
       "when": 1795737600000,
       "tag": "0220_lifecycle_report_fixes",
       "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1796083200000,
+      "tag": "0225_carrier_rejections",
+      "breakpoints": true
     }
   ]
 }

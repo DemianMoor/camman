@@ -60,6 +60,7 @@ export type LifecycleRow =
   | "non_clickers"
   | "total"
   | "unclassified"
+  | "drip"
   | "grand_total";
 
 export interface LifecycleMetrics {
@@ -110,7 +111,11 @@ export async function getLifecycleReport(opts: {
   return foldLifecycleRows(rows, opts.from, opts.to);
 }
 
+export type LifecycleCampaignKind = "regular" | "drip";
+
 export interface LifecycleReportRow {
+  /** campaigns.type folded to two values; drip cells feed only the Drip row. */
+  kind: LifecycleCampaignKind;
   row: string;
   sends: number;
   clickers: number;
@@ -188,8 +193,14 @@ function lifecycleSql(
   return sql`
     WITH lc_sent AS (
       SELECT ss.id, ss.contact_id, ss.stage_id, ss.cost_per_sms, ss.sent_at,
-             ss.sale_status, l.status AS cohort, l.reconstructed
+             ss.sale_status, l.status AS cohort, l.reconstructed,
+             -- ⚠️ DRIP IS A KIND, NOT A COHORT (owner, 2026-10-23). Drip sends
+             -- are stamped like any other so they CAN be split by cohort later,
+             -- but they report as one "Drip" row. Before drip was stamped this
+             -- is what Unclassified silently was.
+             CASE WHEN c.type = 'drip' THEN 'drip' ELSE 'regular' END AS kind
       FROM stage_sends ss
+      LEFT JOIN campaigns c ON c.id = ss.campaign_id AND c.org_id = ${org}
       LEFT JOIN stage_send_lifecycle l
              ON l.stage_send_id = ss.id AND l.org_id = ${org}
       WHERE ss.org_id = ${org} AND ss.status = 'sent'
@@ -329,7 +340,7 @@ function lifecycleSql(
       WHERE oa.org_id = ${org} AND oa.stage_send_id IN (SELECT id FROM lc_sent)
     ),
     per_send AS (
-      SELECT s.id, s.cohort, s.reconstructed,
+      SELECT s.id, s.kind, s.cohort, s.reconstructed,
              (cl.stage_id IS NOT NULL) AS clicked,
              -- A send with ledger rows but no purchase is NOT a sale: the
              -- ledger is primary, and it has answered. sale_status is consulted
@@ -364,6 +375,7 @@ function lifecycleSql(
         ? sql`(sent_at AT TIME ZONE 'America/New_York')::date AS et_day,`
         : sql``
     }
+           kind,
            coalesce(cohort, '__unclassified__') AS row,
            count(*)::int AS sends,
            count(*) FILTER (WHERE clicked)::int AS clickers,
@@ -374,7 +386,7 @@ function lifecycleSql(
            coalesce(sum(cost), 0)::text AS cost,
            bool_or(coalesce(reconstructed, false)) AS reconstructed
     FROM per_send
-    GROUP BY ${grain === "day" ? sql`1, 2` : sql`1`}
+    GROUP BY ${grain === "day" ? sql`1, 2, 3` : sql`1, 2`}
   `;
 }
 
@@ -437,12 +449,15 @@ export function foldLifecycleRows(
   from: string,
   to: string,
 ): LifecycleReport {
-  const by = new Map(rows.map((r) => [r.row, r]));
+  // Cells are keyed by (kind, cohort). Every cohort row reads REGULAR cells
+  // only; the Drip row is every drip cell whatever its cohort.
+  const by = new Map(rows.map((r) => [`${r.kind}:${r.row}`, r]));
+  const dripKeys = rows.filter((r) => r.kind === "drip").map((r) => `drip:${r.row}`);
   const zero = {
     sends: 0, clickers: 0, sales: 0, purchases: 0, revenue: "0",
     opt_outs: 0, cost: "0", reconstructed: false,
   };
-  const pick = (k: string) => by.get(k) ?? zero;
+  const pick = (k: string) => by.get(k.includes(":") ? k : `regular:${k}`) ?? zero;
 
   const build = (row: LifecycleRow, keys: string[]): LifecycleMetrics => {
     const parts = keys.map(pick);
@@ -483,17 +498,20 @@ export function foldLifecycleRows(
   // a reader would assume the tool was broken rather than that history is
   // missing.
   const unclassified = build("unclassified", ["__unclassified__"]);
-  // ⚠️ TOTAL IS THE STAMPED COHORTS ONLY; GRAND TOTAL IS EVERY SEND. Total
-  // stays the sum of the rows above it (owner, 2026-10-23), so it cannot be
-  // read as all sends — that is what Grand total is for. The 10-23 audit found
-  // Total alone reading $24,575 of a $29,226 period.
+  const drip = build("drip", dripKeys);
+  // ⚠️ TOTAL IS THE REGULAR STAMPED COHORTS ONLY; GRAND TOTAL IS EVERY SEND
+  // (regular stamped + regular Unclassified + Drip). Total stays the sum of the
+  // rows above it (owner, 2026-10-23), so it cannot be read as all sends — that
+  // is what Grand total is for. The 10-23 audit found Total alone reading
+  // $24,575 of a $29,226 period.
   const grandTotal = build("grand_total", [
     ...LIFECYCLE_COHORTS,
     "__unclassified__",
+    ...dripKeys,
   ]);
 
   const all = [
-    ...cohortRows, clickers, nonClickers, total, unclassified, grandTotal,
+    ...cohortRows, clickers, nonClickers, total, unclassified, drip, grandTotal,
   ];
   return {
     rows: all,

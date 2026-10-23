@@ -169,9 +169,9 @@ async function recomputeRange(
 
   const inserted = (await dbc.execute(sql`
     INSERT INTO lifecycle_day_rollup
-      (org_id, et_day, cohort, sends, clickers, sales, purchases, revenue,
-       opt_outs, cost, reconstructed, computed_at)
-    SELECT ${org}, d.et_day, d.row, d.sends, d.clickers, d.sales, d.purchases,
+      (org_id, et_day, campaign_kind, cohort, sends, clickers, sales, purchases,
+       revenue, opt_outs, cost, reconstructed, computed_at)
+    SELECT ${org}, d.et_day, d.kind, d.row, d.sends, d.clickers, d.sales, d.purchases,
            d.revenue::numeric, d.opt_outs, d.cost::numeric, d.reconstructed, now()
     FROM (${lifecycleDayRowsSql({ orgId: opts.orgId, from, to })}) d
     RETURNING et_day`)) as unknown as unknown[];
@@ -215,7 +215,7 @@ export async function getLifecycleReportHybrid(opts: {
 
   const rollupRows = hasRollupHalf
     ? ((await db.execute(sql`
-        SELECT cohort AS row,
+        SELECT campaign_kind AS kind, cohort AS row,
                sum(sends)::int AS sends,
                sum(clickers)::int AS clickers,
                sum(sales)::int AS sales,
@@ -227,7 +227,7 @@ export async function getLifecycleReportHybrid(opts: {
         FROM lifecycle_day_rollup
         WHERE org_id = ${org}
           AND et_day BETWEEN ${opts.from}::date AND ${rollupTo}::date
-        GROUP BY 1`)) as unknown as LifecycleReportRow[])
+        GROUP BY 1, 2`)) as unknown as LifecycleReportRow[])
     : [];
 
   const liveRows = hasLiveHalf
@@ -240,11 +240,13 @@ export async function getLifecycleReportHybrid(opts: {
   // derives are over the COMBINED numerators and denominators.
   const merged = new Map<string, LifecycleReportRow>();
   for (const r of [...rollupRows, ...liveRows]) {
-    const prev = merged.get(r.row);
+    const key = `${r.kind}:${r.row}`;
+    const prev = merged.get(key);
     merged.set(
-      r.row,
+      key,
       prev
         ? {
+            kind: r.kind,
             row: r.row,
             sends: Number(prev.sends) + Number(r.sends),
             clickers: Number(prev.clickers) + Number(r.clickers),

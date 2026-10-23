@@ -3,6 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { sql } from "drizzle-orm";
+import { lifecycleStampInsertSql } from "@/lib/engagement/lifecycle-stamp";
 
 import { db } from "@/db/client";
 import {
@@ -142,7 +143,10 @@ export async function dispatchDripSend(
     );
   }
 
+  // The status-at-send stamp rides in the same statement
+  // (lib/engagement/lifecycle-stamp.ts), as on kickoff's path.
   const ins = (await tx.execute(sql`
+    WITH ins AS (
     INSERT INTO stage_sends
       (id, org_id, campaign_id, stage_id, contact_id, phone, provider_phone_id,
        link_id, rendered_text, status, created_at, cost_per_sms, message_format_id, format_custom)
@@ -153,7 +157,9 @@ export async function dispatchDripSend(
             (SELECT pp.cost_per_sms FROM provider_phones pp
              WHERE pp.id = ${input.providerPhoneId}),
             ${stamp.messageFormatId}, ${stamp.formatCustom})
-    RETURNING id
+    RETURNING id, org_id, contact_id
+    ), lc AS (${lifecycleStampInsertSql(sql`ins`)})
+    SELECT id FROM ins
   `)) as unknown as { id: string }[];
 
   // The stage must be drainable or the row sits 'pending' for ever. Idempotent,

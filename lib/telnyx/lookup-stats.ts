@@ -86,7 +86,8 @@ export async function computeLookupGroupStats(
   orgId: string,
 ): Promise<LookupStatsBlob> {
   // Per-group rows. Opt-outs pre-hashed to a distinct set (matches the audience
-  // builder's oo_set) instead of a per-contact probe — ~1.2s vs ~13s at prod scale.
+  // builder's oo_set) instead of a per-contact probe (was ~1.2s vs ~13s). Measured on
+  // prod 2026-10-26 inside Postgres: this statement ~4–5s, the summary below ~3–6s.
   const groupRows = await db.execute<{
     group_id: number;
     name: string;

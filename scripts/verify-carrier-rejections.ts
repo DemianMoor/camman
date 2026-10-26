@@ -23,17 +23,17 @@ WITH ev AS (
   SELECT coalesce(matched_stage_send_id, stage_send_id) ss_id, lower(status) = 'delivered' d,
     CASE WHEN lower(status) = 'undelivered' AND ${TXR_CODE} IN ('30005','2001','30006','2003') THEN 'hard'
          WHEN lower(status) = 'undelivered' AND ${TXR_CODE} IN ('30003','1002') THEN 'soft' END cls, 'txr' src
-  FROM textrequest_dlr_events WHERE lower(status) IN ('delivered','undelivered')
+  FROM textrequest_dlr_events WHERE lower(status) IN ('delivered','undelivered') AND received_at < __CUTOFF__
   UNION ALL
   SELECT matched_stage_send_id, lower(status) = 'delivered',
     CASE WHEN lower(status) = 'error' AND lower(trim(error)) IN ('invalid destination address','teleservice not provisioned','mobile operator not found for the destination address') THEN 'hard'
          WHEN lower(status) = 'error' AND lower(trim(error)) IN ('absent subscriber','sm delivery failure') THEN 'soft' END, 'ahi'
-  FROM ahoi_dlr_events WHERE lower(status) IN ('delivered','error')
+  FROM ahoi_dlr_events WHERE lower(status) IN ('delivered','error') AND received_at < __CUTOFF__
   UNION ALL
   SELECT matched_stage_send_id, lower(status) = 'delivered',
     CASE WHEN lower(status) = 'undelivered' AND lower(trim(error_message)) IN ('unknown or invalid destination number.','landline or unreachable carrier detected.') THEN 'hard'
          WHEN lower(status) = 'undelivered' AND lower(trim(error_message)) = 'destination handset is unreachable.' THEN 'soft' END, 'tls'
-  FROM tells_webhook_events WHERE kind = 'dlr' AND lower(status) IN ('delivered','undelivered')
+  FROM tells_webhook_events WHERE kind = 'dlr' AND lower(status) IN ('delivered','undelivered') AND received_at < __CUTOFF__
 ),
 msg AS (
   SELECT ss_id, bool_or(d) d, bool_or(cls = 'hard') h, bool_or(cls = 'soft') s, string_agg(DISTINCT src, ',') src
@@ -60,23 +60,42 @@ FROM o JOIN cfg USING (org_id)
 WHERE o.outcome IN ('hard','soft') AND o.sent_at > coalesce(o.ld, '-infinity')
 GROUP BY o.org_id, o.phone, cfg.hard_thr, cfg.soft_thr, cfg.soft_days
 HAVING count(*) FILTER (WHERE o.outcome = 'hard') >= cfg.hard_thr
-    OR count(*) FILTER (WHERE o.outcome = 'soft' AND o.sent_at >= now() - make_interval(days => cfg.soft_days)) >= cfg.soft_thr`;
+    OR count(*) FILTER (WHERE o.outcome = 'soft' AND o.sent_at >= __NOW__ - make_interval(days => cfg.soft_days)) >= cfg.soft_thr`;
 
 async function main() {
   const t0 = Date.now();
   const out = await withReadOnlyDb(async (tx) => {
+    // ONE snapshot for every read below, so the ledger and the reference see
+    // the same rows even if a cron pass commits mid-run.
+    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
     await tx`SET LOCAL statement_timeout = '600s'`;
     const has = (await tx`SELECT to_regclass('public.carrier_rejected_phones') IS NOT NULL AS ok`)[0].ok as boolean;
+    // Compare like with like: the ledger holds receipts received before its
+    // watermark and evaluated its soft window at its last refresh. Bound the
+    // reference to the same cutoff and the same instant; before 0225, no bound.
+    let cutoff = "'infinity'::timestamptz";
+    let at = "now()";
+    let bound: { watermark: string | null; evaluated_at: string | null } = { watermark: null, evaluated_at: null };
+    if (has) {
+      const b = (await tx`
+        SELECT (SELECT watermark::text FROM cron_locks WHERE job_name = 'carrier-rejections:watermark') AS watermark,
+               (SELECT max(evaluated_at)::text FROM carrier_rejected_phones) AS evaluated_at`)[0];
+      bound = { watermark: b.watermark ?? null, evaluated_at: b.evaluated_at ?? null };
+      // Values are timestamptz text read back from the DB, quoted as literals.
+      if (bound.watermark) cutoff = `'${bound.watermark}'::timestamptz`;
+      if (bound.evaluated_at) at = `'${bound.evaluated_at}'::timestamptz`;
+    }
+    let ref = REFERENCE.replaceAll("__CUTOFF__", cutoff).replaceAll("__NOW__", at);
     // When 0225 is applied, read each org's thresholds; before it, the defaults.
-    const ref = has
-      ? await tx.unsafe(REFERENCE.replace(
-          "SELECT org_id, NULL::int hard, NULL::int soft, NULL::int days FROM org_settings WHERE false",
-          "SELECT org_id, carrier_rejection_hard_threshold::int hard, carrier_rejection_soft_threshold::int soft, carrier_rejection_soft_window_days::int days FROM org_settings",
-        ))
-      : await tx.unsafe(REFERENCE);
+    if (has) {
+      ref = ref.replace(
+        "SELECT org_id, NULL::int hard, NULL::int soft, NULL::int days FROM org_settings WHERE false",
+        "SELECT org_id, carrier_rejection_hard_threshold::int hard, carrier_rejection_soft_threshold::int soft, carrier_rejection_soft_window_days::int days FROM org_settings",
+      );
+    }
+    const refRows = await tx.unsafe(ref);
     const ledger = has ? await tx`SELECT org_id::text, phone FROM carrier_rejected_phones` : [];
-    const evaluated = has ? (await tx`SELECT max(evaluated_at)::text AS t FROM carrier_rejected_phones`)[0]?.t : null;
-    return { has, ref, ledger, evaluated };
+    return { has, ref: refRows, ledger, bound };
   });
 
   const key = (r: { org_id: string; phone: string }) => `${r.org_id}|${r.phone}`;
@@ -91,7 +110,8 @@ async function main() {
   const ledSet = new Set(out.ledger.map((r) => key(r as never)));
   const onlyRef = [...refSet].filter((k) => !ledSet.has(k));
   const onlyLed = [...ledSet].filter((k) => !refSet.has(k));
-  console.log(`Ledger (carrier_rejected_phones):      ${ledSet.size} numbers  (evaluated_at ${out.evaluated})`);
+  console.log(`Ledger (carrier_rejected_phones):      ${ledSet.size} numbers`);
+  console.log(`Bound: receipts before ${out.bound.watermark} · soft window at ${out.bound.evaluated_at} (one REPEATABLE READ snapshot)`);
   console.log(`Only in reference: ${onlyRef.length}  ${onlyRef.slice(0, 10).join(" ")}`);
   console.log(`Only in ledger:    ${onlyLed.length}  ${onlyLed.slice(0, 10).join(" ")}`);
   console.log(onlyRef.length === 0 && onlyLed.length === 0 ? "MATCH" : "DIFF — see above");

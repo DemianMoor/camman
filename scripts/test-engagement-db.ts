@@ -188,9 +188,9 @@ async function main() {
 
     const group = async (name: string, status: string, o: { fam?: number; fcd?: number; sad?: number; smm?: number }) =>
       (await one<{ id: number }>(sql`
-        INSERT INTO contact_groups (contact_group_id, org_id, name, status,
+        INSERT INTO contact_groups (contact_group_id, org_id, name, status, allow_voip, allow_unknown, allow_toll_free,
           freeze_after_messages, freeze_cadence_days, suppress_after_days, suppress_min_freeze_messages)
-        VALUES (${`${tag}-${name}`}, ${org}, ${name}, ${status},
+        VALUES (${`${tag}-${name}`}, ${org}, ${name}, ${status}, true, true, true,
           ${o.fam ?? null}::smallint, ${o.fcd ?? null}::smallint, ${o.sad ?? null}::smallint, ${o.smm ?? null}::smallint)
         RETURNING id`)).id;
     const GA = await group("A", "active", { fcd: 7 });

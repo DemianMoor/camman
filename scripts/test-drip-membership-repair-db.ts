@@ -34,7 +34,7 @@ async function main() {
       const [k] = (await tx.execute(sql`INSERT INTO partner_keys (org_id, partner_id, partner_slug, name, token, secret_hash, sandbox)
         VALUES (${orgId}::uuid, ${p.id}, 'zz-rep', 'zz-rep', 'tok-zz-rep', 'h', false) RETURNING id`)) as unknown as { id: number }[];
       const grp = async (key: string, name: string) =>
-        ((await tx.execute(sql`INSERT INTO contact_groups (contact_group_id, org_id, name, status) VALUES (${key}, ${orgId}::uuid, ${name}, 'active') RETURNING id`)) as unknown as { id: number }[])[0].id;
+        ((await tx.execute(sql`INSERT INTO contact_groups (contact_group_id, org_id, name, status, allow_voip, allow_unknown, allow_toll_free) VALUES (${key}, ${orgId}::uuid, ${name}, 'active', true, true, true) RETURNING id`)) as unknown as { id: number }[])[0].id;
       const gAca = await grp(`drip:${orgId}:zz-rep-aca`, "zz-rep-aca");
       const gPlain = await grp("zz-rep-plain", "zz-rep-plain"); // an ordinary group: the R3 counterpart
       // a system group with no 0201 marker dependency: identified by its key

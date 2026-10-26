@@ -57,7 +57,7 @@ async function main() {
       const mk = async (slug: string) => ((await tx.execute(sql`INSERT INTO partners (org_id, slug, name) VALUES (${orgId}::uuid, ${slug}, ${slug}) RETURNING id`)) as unknown as { id: number }[])[0].id;
       const pAb = await mk("zz-ab"); const pAbCd = await mk("zz-ab-cd"); const pOther = await mk("zz-other"); const pUnder = await mk("zz_u");
       const grp = async (key: string, name: string) =>
-        ((await tx.execute(sql`INSERT INTO contact_groups (contact_group_id, org_id, name, status) VALUES (${key}, ${orgId}::uuid, ${name}, 'active') RETURNING id`)) as unknown as { id: number }[])[0].id;
+        ((await tx.execute(sql`INSERT INTO contact_groups (contact_group_id, org_id, name, status, allow_voip, allow_unknown, allow_toll_free) VALUES (${key}, ${orgId}::uuid, ${name}, 'active', true, true, true) RETURNING id`)) as unknown as { id: number }[])[0].id;
       const g1 = await grp(`drip:${orgId}:zz-ab-cd-x`, "zz-ab-cd-x");
       const g2 = await grp(`drip:${orgId}:zz-ab-y`, "zz-ab-y");
       const g3 = await grp(`zz-manual-ab-z`, "zz-ab-z");           // not a drip key → never auto-linked

@@ -314,7 +314,7 @@ async function main() {
     // exactly the reference's numbers on THIS fixture — the only one with
     // contact_offer_campaigns rows — and the cases must not all be zero.
     const grp = await one<{ id: number }>(sql`
-      INSERT INTO contact_groups (org_id, contact_group_id, name) VALUES (${org}, ${`g-${tag}`}, ${`G ${tag}`}) RETURNING id`);
+      INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free) VALUES (${org}, ${`g-${tag}`}, ${`G ${tag}`}, true, true, true) RETURNING id`);
     await db.execute(sql`
       INSERT INTO contact_contact_groups (org_id, contact_id, contact_group_id)
       SELECT ${org}, id, ${grp.id} FROM contacts WHERE org_id = ${org}`);

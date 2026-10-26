@@ -10,6 +10,7 @@ import {
   normalizeAttributeValue,
   type AttributeField,
 } from "@/lib/contact-attributes";
+import { upsertContactAttributes } from "@/lib/contact-attributes-write";
 import { can } from "@/lib/permissions";
 import { validatePhone } from "@/lib/phone-validation";
 import { PHONE_TARGET } from "@/lib/validators/contact-attribute-mappings";
@@ -171,47 +172,12 @@ export async function POST(req: NextRequest) {
   // Only the MAPPED fields are written. An unmapped field keeps whatever it had
   // — a CSV that carries no `state` column must not blank the state we already
   // know, which a blanket overwrite would do.
-  let written = 0;
-  const CHUNK = 500;
-  for (let i = 0; i < found.length; i += CHUNK) {
-    const slice = found.slice(i, i + CHUNK);
-    const values = slice.map((c) => {
-      const v = byPhone.get(c.phone_number) ?? {};
-      const col = (f: string) => (v[f] === undefined ? sql`NULL` : sql`${v[f]}`);
-      return sql`(${c.id}::uuid, ${orgId}::uuid,
-        ${col("first_name")}::text, ${col("last_name")}::text, ${col("address")}::text,
-        ${col("state")}::text, ${col("zip")}::text, ${col("country")}::text, ${col("email")}::text,
-        ${col("gender")}::text, ${col("income_band")}::text,
-        ${col("kids")}::boolean, ${col("married")}::boolean, ${col("dob")}::date,
-        ${col("interest_tag")}::text, ${col("partner_slug")}::text, ${source}::text)`;
-    });
-    const res = (await db.execute(sql`
-      INSERT INTO contact_attributes AS ca (
-        contact_id, org_id, first_name, last_name, address, state, zip, country, email,
-        gender, income_band, kids, married, dob, interest_tag, partner_slug, source
-      )
-      VALUES ${sql.join(values, sql`, `)}
-      ON CONFLICT (contact_id) DO UPDATE SET
-        first_name   = COALESCE(EXCLUDED.first_name,   ca.first_name),
-        last_name    = COALESCE(EXCLUDED.last_name,    ca.last_name),
-        address      = COALESCE(EXCLUDED.address,      ca.address),
-        state        = COALESCE(EXCLUDED.state,        ca.state),
-        zip          = COALESCE(EXCLUDED.zip,          ca.zip),
-        country      = COALESCE(EXCLUDED.country,      ca.country),
-        email        = COALESCE(EXCLUDED.email,        ca.email),
-        gender       = COALESCE(EXCLUDED.gender,       ca.gender),
-        income_band  = COALESCE(EXCLUDED.income_band,  ca.income_band),
-        kids         = COALESCE(EXCLUDED.kids,         ca.kids),
-        married      = COALESCE(EXCLUDED.married,      ca.married),
-        dob          = COALESCE(EXCLUDED.dob,          ca.dob),
-        interest_tag = COALESCE(EXCLUDED.interest_tag, ca.interest_tag),
-        partner_slug = COALESCE(EXCLUDED.partner_slug, ca.partner_slug),
-        source       = EXCLUDED.source,
-        updated_at   = now()
-      RETURNING contact_id
-    `)) as unknown as { contact_id: string }[];
-    written += res.length;
-  }
+  const written = await upsertContactAttributes(
+    db,
+    orgId,
+    found.map((c) => ({ contactId: c.id, values: byPhone.get(c.phone_number) ?? {} })),
+    { mode: "overwrite", source },
+  );
 
   return NextResponse.json({
     dry_run: false,

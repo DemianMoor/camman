@@ -11,6 +11,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { writeUploadAttributes } from "@/lib/contact-attributes-write";
 import { bumpContactOrgStats } from "@/lib/contact-stats";
 import { can } from "@/lib/permissions";
 import { validatePhonesBatch } from "@/lib/phone-validation";
@@ -36,6 +37,11 @@ export type UploadResultSummary = {
   // for the first time are NOT counted (they're in `inserted`); existing
   // contacts uploaded with no new groups are NOT counted either.
   updated_contacts: number;
+  // Present only when the request carried `attributes` (a CSV with recognized
+  // attribute columns). Contacts whose contact_attributes gained ≥1 field, and
+  // non-empty cells that normalized to nothing (e.g. an unreadable DOB).
+  attributes_written?: number;
+  attribute_values_ignored?: number;
 };
 
 export async function POST(req: NextRequest) {
@@ -268,6 +274,14 @@ export async function POST(req: NextRequest) {
     groups_applied,
     updated_contacts: updatedContactIds.size,
   };
+
+  // Attribute columns, fill-empty only. After the contacts exist, so every
+  // valid phone resolves; a phone-only upload skips this entirely.
+  if (parsed.data.attributes) {
+    const a = await writeUploadAttributes(db, orgId, parsed.data.attributes);
+    summary.attributes_written = a.written;
+    summary.attribute_values_ignored = a.values_ignored;
+  }
 
   // W2 Task 1: real-time rollup increment for new contacts.
   if (inserted_count > 0) {

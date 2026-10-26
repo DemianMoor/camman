@@ -124,11 +124,13 @@ export async function bumpContactOrgStats(
       ${orgId}::uuid,
       ${d.total ?? 0}, ${d.archived ?? 0},
       ${d.opt_out ?? 0},
+      -- ::int is required: jsonb_build_object takes "any", so an untyped bound
+      -- parameter fails with 42P18 ("could not determine data type").
       jsonb_build_object(
-        'opt_out', ${rd.opt_out ?? 0},
-        'scrubbed', ${rd.scrubbed ?? 0},
-        'bounced', ${rd.bounced ?? 0},
-        'suppressed', ${rd.suppressed ?? 0}
+        'opt_out', ${rd.opt_out ?? 0}::int,
+        'scrubbed', ${rd.scrubbed ?? 0}::int,
+        'bounced', ${rd.bounced ?? 0}::int,
+        'suppressed', ${rd.suppressed ?? 0}::int
       ),
       ${d.opt_in ?? 0},
       ${d.clicker ?? 0},

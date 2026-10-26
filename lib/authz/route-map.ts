@@ -97,6 +97,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "campaigns/[campaignId]/behavioral-split": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/behavioral-split/preview": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"] },
   "campaigns/[campaignId]/click-report": { methods: ["GET", "POST", "PATCH", "PUT", "DELETE"], token: ["GET"] },
+  "campaigns/[campaignId]/daily-results": null, // drip / partner intake -- hidden from the operator (drip Daily results tab, #355)
   "campaigns/[campaignId]/drip-config": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-followups": null, // drip / partner intake -- hidden from the operator
   "campaigns/[campaignId]/drip-journeys": null, // drip / partner intake -- hidden from the operator
@@ -224,6 +225,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/carrier-triage": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/delivery-rollup": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/delivery-rollup-reconcile": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/drip-daily-rollup": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/drip-followups": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/drip-monitors": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/drip-routing": null, // cron / webhook / import machinery -- no operator session reaches these

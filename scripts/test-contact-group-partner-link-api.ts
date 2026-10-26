@@ -54,8 +54,8 @@ async function main() {
     const pA = await partner("zz-link"); const pB = await partner("zz-link-2"); const pArch = await partner("zz-link-archived", "archived");
     partnerIds.push(pA, pB, pArch);
     const group = async (key: string, name: string, extra: { partner_id?: number; system_role?: string } = {}) =>
-      (await sql<{ id: number }[]>`INSERT INTO contact_groups (contact_group_id, org_id, name, status, partner_id, system_role)
-         VALUES (${key}, ${orgId!}::uuid, ${name}, 'active', ${extra.partner_id ?? null}, ${extra.system_role ?? null}) RETURNING id`)[0].id;
+      (await sql<{ id: number }[]>`INSERT INTO contact_groups (contact_group_id, org_id, name, status, partner_id, system_role, allow_voip, allow_unknown, allow_toll_free)
+         VALUES (${key}, ${orgId!}::uuid, ${name}, 'active', ${extra.partner_id ?? null}, ${extra.system_role ?? null}, true, true, true) RETURNING id`)[0].id;
     const gPlain = await group(`zz-plain-${Date.now()}`, "Plain group");
     const gDrip = await group(`drip:${orgId}:zz-link-aca`, "zz-link-aca", { partner_id: pA });
     const gSys = await group(`zz-sys-${Date.now()}`, "Sys-like group", { system_role: "drip_sandbox" });

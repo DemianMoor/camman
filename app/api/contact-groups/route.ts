@@ -48,8 +48,11 @@ export async function POST(req: NextRequest) {
         contact_group_id: parsed.data.contact_group_id,
         description: nullIfEmpty(parsed.data.description),
         color: nullIfEmpty(parsed.data.color),
-        allow_voip: parsed.data.allow_voip ?? true,
-        allow_unknown: parsed.data.allow_unknown ?? true,
+        // Required by the schema (0222): never a fallback here — the column
+        // default is mobile-only and a fallback would hide a caller that omits them.
+        allow_voip: parsed.data.allow_voip,
+        allow_unknown: parsed.data.allow_unknown,
+        allow_toll_free: parsed.data.allow_toll_free,
         status: "active",
       })
       .returning();

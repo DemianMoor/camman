@@ -87,6 +87,7 @@ export async function GET(req: NextRequest) {
         // list would send the form default (true) and re-allow VoIP.
         allow_voip: contact_groups.allow_voip,
         allow_unknown: contact_groups.allow_unknown,
+        allow_toll_free: contact_groups.allow_toll_free,
         partner_name: drizzleSql<string | null>`(
           select p."name" from "partners" p where p."id" = "contact_groups"."partner_id"
         )`,

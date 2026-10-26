@@ -71,6 +71,7 @@ type ContactGroup = {
   // Line-type gate (migration 0218).
   allow_voip: boolean;
   allow_unknown: boolean;
+  allow_toll_free: boolean;
   // Lifecycle overrides (migration 0187); null = inherit the org value.
   freeze_after_messages: number | null;
   freeze_cadence_days: number | null;
@@ -627,6 +628,7 @@ export default function ContactGroupsPage() {
               partner_id: editing.partner_id,
               allow_voip: editing.allow_voip,
               allow_unknown: editing.allow_unknown,
+            allow_toll_free: editing.allow_toll_free,
             }}
             onSubmit={handleEdit}
             onCancel={() => setEditing(null)}

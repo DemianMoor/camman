@@ -2,11 +2,13 @@ import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — refuses any target but the preview DB
 import { createPartnerWithKey } from "./_partner-fixture";
 import { fictionalPhones, refuseIfPhonesInUse } from "./_fictional-phones";
+import { readFileSync } from "node:fs";
 import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { previewAudience } from "@/lib/audience-snapshot";
 import { runEnrichmentBatch } from "@/lib/drip/enrichment";
+import { ensurePartnerTagGroup } from "@/lib/drip/groups";
 import { classifyRoutingOutcome, evaluateLeadRouting } from "@/lib/drip/routing-eval";
 import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
 
@@ -24,6 +26,12 @@ import { buildSegmentAudienceClause } from "@/lib/segment-rules-eval";
 //   G5 both boxes checked ⇒ byte-for-byte today's audience
 //   D1 drip routing: a blocked lead fails global `line_type` and is PERMANENT
 //   D2 drip routing: mobile and an un-grouped voip lead pass `line_type`
+//   G6 allow_toll_free=false (0222): toll_free leaves too
+//   D3 drip routing: a blocked toll_free lead fails `line_type`, PERMANENT
+//   C1 a group inserted without flags is mobile-only (0222 column defaults)
+//   C2 drip intake's auto-created partner×tag group is mobile-only (explicit false×3)
+//   C3 re-resolving an existing partner×tag group never resets its flags
+//   M1 replaying the 0222 file (rolled back) backfills toll-free off only in mobile-only groups
 //
 // Own throwaway org; every row is torn down by id and the residue is counted.
 
@@ -55,7 +63,7 @@ async function main() {
   try {
     orgId = (await one<{ id: string }>(
       sql`INSERT INTO organizations (name) VALUES (${`${MARKER} ${sfx}`}) RETURNING id`)).id;
-    const keyId = (await createPartnerWithKey(db, { orgId, slug: "lt-" + sfx, name: "lt", token: "toklt" + sfx })).keyId;
+    const { keyId, partnerId } = await createPartnerWithKey(db, { orgId, slug: "lt-" + sfx, name: "lt", token: "toklt" + sfx });
 
     for (const p of phones) {
       await db.execute(sql`
@@ -74,10 +82,54 @@ async function main() {
     bar("I1 drip intake copies the lookup's line_type onto the contact", contacts.length === 5 && copied === 5,
       `processed ${enr.processed}, contacts ${contacts.length}, matching ${copied}/5`);
 
-    // Groups: STRICT holds mob/voip/unk/tf; OPEN holds all five. A campaign selects OPEN only.
-    const mkGroup = async (name: string) => (await one<{ id: number }>(sql`
+    // 0222: intake's auto-created partner×tag group ("lt-<sfx>-lt") is mobile-only.
+    type Flags = { allow_voip: boolean; allow_unknown: boolean; allow_toll_free: boolean };
+    const flagsOf = async (gid: number) => one<Flags>(sql`
+      SELECT allow_voip, allow_unknown, allow_toll_free FROM contact_groups WHERE id = ${gid}`);
+    const fmt = (f: Flags) => `${f.allow_voip}/${f.allow_unknown}/${f.allow_toll_free}`;
+    const auto = (await one<{ id: number }>(sql`
+      SELECT id FROM contact_groups WHERE contact_group_id = ${`drip:${orgId}:lt-${sfx}-lt`}`)).id;
+    const autoFlags = await flagsOf(auto);
+    bar("C2 drip intake's auto-created partner×tag group is mobile-only", fmt(autoFlags) === "false/false/false", fmt(autoFlags));
+    // Permissive from here on, so only the STRICT group below decides the gate.
+    await db.execute(sql`UPDATE contact_groups SET allow_voip = true, allow_unknown = true, allow_toll_free = true WHERE id = ${auto}`);
+    const again = await ensurePartnerTagGroup(db, { orgId, partnerSlug: "lt-" + sfx, interestTag: "lt", partnerId });
+    const againFlags = await flagsOf(again);
+    bar("C3 re-resolving an existing partner×tag group never resets its flags", again === auto && fmt(againFlags) === "true/true/true",
+      `id ${again}/${auto}, ${fmt(againFlags)}`);
+    const bare = (await one<{ id: number }>(sql`
       INSERT INTO contact_groups (org_id, contact_group_id, name)
-      VALUES (${orgId}::uuid, ${name + "-" + sfx}, ${name}) RETURNING id`)).id;
+      VALUES (${orgId}::uuid, ${"bare-" + sfx}, 'bare') RETURNING id`)).id;
+    const bareFlags = await flagsOf(bare);
+    bar("C1 a group inserted without flags is mobile-only (column defaults)", fmt(bareFlags) === "false/false/false", fmt(bareFlags));
+    await db.execute(sql`DELETE FROM contact_groups WHERE id = ${bare}`);
+
+    // M1: replay the 0222 file itself (it is re-runnable) in a ROLLED-BACK
+    // transaction over two fixture groups: a mobile-only one (allow_unknown =
+    // false) loses toll-free, an open one keeps it.
+    const mFile = readFileSync("db/migrations/0222_contact_group_mobile_only_default.sql", "utf8")
+      .split("--> statement-breakpoint").map((x) => x.trim()).filter(Boolean);
+    let m1 = "";
+    await db.transaction(async (tx) => {
+      const mk = async (key: string, unknown: boolean) => ((await tx.execute(sql`
+        INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free)
+        VALUES (${orgId}::uuid, ${key + "-" + sfx}, ${key}, true, ${unknown}, true) RETURNING id`)) as unknown as { id: number }[])[0].id;
+      const mOnly = await mk("m1-mobile-only", false);
+      const mOpen = await mk("m1-open", true);
+      for (const stmt of mFile) await tx.execute(sql.raw(stmt));
+      const r = (await tx.execute(sql`
+        SELECT (SELECT allow_toll_free FROM contact_groups WHERE id = ${mOnly}) AS only_tf,
+               (SELECT allow_toll_free FROM contact_groups WHERE id = ${mOpen}) AS open_tf`)) as unknown as { only_tf: boolean; open_tf: boolean }[];
+      m1 = `${r[0].only_tf}/${r[0].open_tf}`;
+      tx.rollback();
+    }).catch((e: unknown) => { if (!String(e).includes("Rollback")) throw e; });
+    bar("M1 0222's backfill blocks toll-free in mobile-only groups and leaves the rest", m1 === "false/true", `mobile-only/open toll_free = ${m1}`);
+
+    // Groups: STRICT holds mob/voip/unk/tf; OPEN holds all five. A campaign selects OPEN only.
+    // Explicit flags: since 0222 the column defaults are mobile-only.
+    const mkGroup = async (name: string) => (await one<{ id: number }>(sql`
+      INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free)
+      VALUES (${orgId}::uuid, ${name + "-" + sfx}, ${name}, true, true, true) RETURNING id`)).id;
     const strict = await mkGroup("strict");
     const open = await mkGroup("open");
     const member = async (g: number, ps: string[]) => {
@@ -95,8 +147,8 @@ async function main() {
         VALUES (${seg}, ${id[p]}::uuid, ${orgId}::uuid)`);
     }
 
-    const setStrict = (voip: boolean, unknown: boolean, status = "active") => db.execute(sql`
-      UPDATE contact_groups SET allow_voip = ${voip}, allow_unknown = ${unknown}, status = ${status}
+    const setStrict = (voip: boolean, unknown: boolean, tollFree = true, status = "active") => db.execute(sql`
+      UPDATE contact_groups SET allow_voip = ${voip}, allow_unknown = ${unknown}, allow_toll_free = ${tollFree}, status = ${status}
       WHERE id = ${strict}`);
     const filters = { include_no_status: true, include_opt_in: true, include_clickers: true, include_not_clicked: true };
     const groupCount = async () => (await previewAudience({
@@ -131,16 +183,26 @@ async function main() {
       `voip ${vVoip.global.line_type}/${classifyRoutingOutcome(vVoip)}, unknown ${vUnk.global.line_type}/${classifyRoutingOutcome(vUnk)}`);
     const vMob = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pMob), tagRules: "load" }))!;
     const vV2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip2), tagRules: "load" }))!;
-    bar("D2 mobile and the un-grouped voip pass line_type",
-      vMob.global.line_type === "pass" && vV2.global.line_type === "pass",
-      `mobile ${vMob.global.line_type}, voip2 ${vV2.global.line_type}`);
+    const vTf = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pTf), tagRules: "load" }))!;
+    bar("D2 mobile, the un-grouped voip, and toll_free (box still on) pass line_type",
+      vMob.global.line_type === "pass" && vV2.global.line_type === "pass" && vTf.global.line_type === "pass",
+      `mobile ${vMob.global.line_type}, voip2 ${vV2.global.line_type}, toll_free ${vTf.global.line_type}`);
+
+    await setStrict(false, false, false);
+    const g6 = await groupCount();
+    const s6 = await segSet();
+    bar("G6 toll-free disallowed too: only mobile and the un-grouped voip remain", g6 === 2 && s6 === "mobile,voip", `group ${g6}, segment ${s6}`);
+    const vTf2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pTf), tagRules: "load" }))!;
+    bar("D3 a blocked toll_free lead fails line_type and is PERMANENT",
+      vTf2.global.line_type === "blocked" && classifyRoutingOutcome(vTf2) === "permanent",
+      `${vTf2.global.line_type}/${classifyRoutingOutcome(vTf2)}`);
 
     await setStrict(false, true);
     const g3 = await groupCount();
     const s3 = await segSet();
     bar("G3 only VoIP disallowed: voip out, unknown back", g3 === 4 && s3 === "mobile,toll_free,unknown,voip", `group ${g3}, segment ${s3}`);
 
-    await setStrict(false, false, "archived");
+    await setStrict(false, false, false, "archived");
     const g4 = await groupCount();
     bar("G4 an archived strict group blocks nothing", g4 === 5, `got ${g4}`);
   } finally {

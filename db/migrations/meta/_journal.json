@@ -1545,6 +1545,13 @@
     {
       "idx": 220,
       "version": "7",
+      "when": 1795824000000,
+      "tag": "0222_contact_group_mobile_only_default",
+      "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
       "when": 1796083200000,
       "tag": "0225_carrier_rejections",
       "breakpoints": true

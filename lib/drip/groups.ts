@@ -35,12 +35,16 @@ export async function ensureDripGroup(
   const systemRole = sandbox ? "drip_sandbox" : "drip_intake";
 
   const rows = (await dbc.execute(sql`
-    INSERT INTO contact_groups (contact_group_id, org_id, name, description, status, system_role)
+    INSERT INTO contact_groups (contact_group_id, org_id, name, description, status, system_role,
+                                allow_voip, allow_unknown, allow_toll_free)
     VALUES (${externalId}, ${orgId}::uuid, ${name},
             ${sandbox
               ? "Sandbox partner leads. Stored and visible, never messaged."
               : "Contacts created from real-time partner lead intake."},
-            'active', ${systemRole})
+            'active', ${systemRole},
+            -- 0222, owner decision 2: system groups hold EVERY drip lead, and the
+            -- strictest group wins — mobile-only here would block VoIP org-wide.
+            true, true, true)
     ON CONFLICT (contact_group_id) DO UPDATE SET system_role = EXCLUDED.system_role
     RETURNING id
   `)) as unknown as { id: number }[];
@@ -90,10 +94,14 @@ export async function ensurePartnerTagGroup(
   const externalId = `drip:${orgId}:${name}`;
 
   const rows = (await dbc.execute(sql`
-    INSERT INTO contact_groups (contact_group_id, org_id, name, description, status, partner_id)
+    INSERT INTO contact_groups (contact_group_id, org_id, name, description, status, partner_id,
+                                allow_voip, allow_unknown, allow_toll_free)
     VALUES (${externalId}, ${orgId}::uuid, ${name},
             ${`Partner leads from "${partnerSlug}" tagged "${(interestTag ?? "").trim() || "(none)"}". Added automatically by drip intake.`},
-            'active', ${partnerId})
+            'active', ${partnerId},
+            -- 0222: a new partner×tag group is mobile-only. ON CONFLICT below never
+            -- touches the flags, so an owner's choice on an existing group stands.
+            false, false, false)
     ON CONFLICT (contact_group_id) DO UPDATE
       SET partner_id = COALESCE(contact_groups.partner_id, EXCLUDED.partner_id)
     RETURNING id

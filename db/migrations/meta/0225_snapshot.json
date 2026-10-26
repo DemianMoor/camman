@@ -1,6 +1,6 @@
 {
   "id": "0225a000-0225-4225-8225-000000000225",
-  "prevId": "0220a000-0220-4220-8220-000000000220",
+  "prevId": "0222a000-0222-4222-8222-000000000222",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -8459,14 +8459,21 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": false
         },
         "allow_unknown": {
           "name": "allow_unknown",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": false
+        },
+        "allow_toll_free": {
+          "name": "allow_toll_free",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {

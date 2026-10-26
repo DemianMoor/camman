@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useApiCall } from "@/lib/hooks/use-api-call";
-import { salesPctOfReached } from "@/lib/reporting/landing-page-metrics";
+import { ctrOfVisitors, salesPctOfReached } from "@/lib/reporting/landing-page-metrics";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
 import type { LandingPageReport as Report, LandingPageRow, LandingPageTotal } from "@/lib/reporting/landing-page-report";
@@ -30,6 +30,7 @@ function Dash() {
 function Cells({ m, bold }: { m: LandingPageTotal; bold?: boolean }) {
   const d = derive({ sends: m.sends, revenue: m.revenue, sales: m.sales, clicks: m.clicks, cost: m.cost, optouts: m.optouts });
   const sp = salesPctOfReached(m);
+  const ctr = ctrOfVisitors(m);
   const td = cn("px-3 py-2 text-right tabular-nums", bold && "font-medium");
   return (
     <>
@@ -44,6 +45,8 @@ function Cells({ m, bold }: { m: LandingPageTotal; bold?: boolean }) {
         {m.manual_visits > 0 ? <ManualMix /> : null}
       </td>
       <td className={td}>{d.ctr == null ? <Dash /> : fmtRate(d.ctr)}</td>
+      <td className={td}>{ctr == null ? <Dash /> : fmtPct(ctr)}</td>
+      <td className={td}>{m.reach_covered_stages === 0 ? <Dash /> : fmtInt(m.reached)}</td>
       <td className={td}>{fmtInt(m.sales)}</td>
       <td className={td} title={m.stages.gap > 0 ? `${m.stages.gap} stage(s) with no tracker data are left out of this ratio` : undefined}>
         {sp == null ? <Dash /> : fmtPct(sp)}
@@ -85,11 +88,13 @@ const HEADERS: { label: string; title?: string }[] = [
   { label: "Sends" },
   { label: "RPM", title: "Revenue per 1,000 sends" },
   { label: "Net RPM", title: "(Revenue − cost) per 1,000 sends" },
-  { label: "EPC", title: "Revenue ÷ human clicks" },
-  { label: "Human clicks (on sends in range)", title: "People with a human-scored click (or a purchase) on these sends, clicked at any time. Deduplicated per row." },
-  { label: "Click rate", title: "Human clicks ÷ sends" },
+  { label: "EPC", title: "Revenue ÷ visitors" },
+  { label: "Visitors", title: "People with a human-scored click (or a purchase) on these sends, clicked at any time. Deduplicated per row." },
+  { label: "SMS Clicked", title: "Visitors ÷ sends" },
+  { label: "CTR", title: "Share of visitors who clicked the CTA and reached the advertiser page (people, deduplicated)" },
+  { label: "Redirects", title: "Recipients who clicked through to the advertiser page" },
   { label: "Sales" },
-  { label: "Sales % (of reached)", title: "Sales ÷ recipients who reached the offer page — not ÷ clicks" },
+  { label: "CR, %", title: "Sales ÷ redirects (recipients who reached the advertiser page) — not ÷ visitors" },
   { label: "Opt-out %", title: "Opt-outs replying to these sends ÷ sends" },
   { label: "Net Profit", title: "Revenue − cost" },
 ];
@@ -295,7 +300,7 @@ export function LandingPageReport({ initialOfferId }: { initialOfferId: number |
             they happened.
           </p>
           <p>
-            <span className="font-medium">Total human clicks do not add up</span> to the rows: a person who clicked two
+            <span className="font-medium">Total visitors do not add up</span> to the rows: a person who clicked two
             pages is one clicker for the offer and one on each page. Every other column adds up.
             {report.total.manual_visits > 0 ? (
               <>
@@ -307,8 +312,10 @@ export function LandingPageReport({ initialOfferId }: { initialOfferId: number |
             ) : null}
           </p>
           <p>
-            <span className="font-medium">Sales % (of reached)</span> divides by recipients who reached the offer page,
-            not by clicks, and leaves out stages the tracker has no data for
+            <span className="font-medium">Redirects</span> are recipients who clicked through to the advertiser page;{" "}
+            <span className="font-medium">CTR</span> is the share of visitors who were redirected (people, so it never passes 100%) and{" "}
+            <span className="font-medium">CR, %</span> divides sales by them. All three leave out stages the tracker has
+            no data for
             {report.total.stages.gap > 0 ? ` (${report.total.stages.gap} here)` : ""}.
           </p>
           {zeroCost > 0 ? (

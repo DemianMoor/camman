@@ -1,6 +1,6 @@
 # Feature — Landing Page Results (`/reports/landing-pages`)
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-26_
 
 ## 1. Purpose
 
@@ -13,7 +13,7 @@ Compare an offer's landing pages: one row for each page that received sends for 
 | Access | `campaigns.view` (viewer and up) **and** the operator route map: `reports/landing-pages` is `{ methods: ["GET"] }` in [lib/authz/route-map.ts](../../lib/authz/route-map.ts). No `token` entry, so personal API tokens are denied. ⚠️ #390 shipped without the map line, which 403'd operators until the follow-up fix (2026-10-23). |
 | Data | [lib/reporting/landing-page-report.ts](../../lib/reporting/landing-page-report.ts) `getLandingPageReport` |
 | Table | [components/reports/landing-page-report.tsx](../../components/reports/landing-page-report.tsx) — hand-rolled like Delivery; ratios via `derive()` in [report-metrics.tsx](../../components/reports/report-metrics.tsx) |
-| Sales % rule | [lib/reporting/landing-page-metrics.ts](../../lib/reporting/landing-page-metrics.ts) `salesPctOfReached` |
+| CR, % and CTR rules | [lib/reporting/landing-page-metrics.ts](../../lib/reporting/landing-page-metrics.ts) `salesPctOfReached`, `ctrOfVisitors` |
 | Verify | [scripts/verify-lp-report-grains.ts](../../scripts/verify-lp-report-grains.ts) |
 
 ## 2. The landing-page key
@@ -45,7 +45,7 @@ Every figure belongs to the **sends made in the window**. A sale, click or opt-o
 | Cost | `campaign_stages.total_cost` | `dripCostByStageInRange(…, { includeArchived: true })`, apportioned across a stage's pages by its sends' own cost |
 | Sales / Revenue | ledger by `stage_id`: `purchasedClause` / `approvedRevenueClause`, + manual top-up `max(0, manual − ledger)` | ledger by `stage_send_id` |
 | Opt-outs | `opt_out_attributions` by stage | by `stage_send_id` (the PR #25 breaker join) |
-| Human clicks | `counted_clickers` of the stage | `counted_clickers` joined to the in-window send on (stage, contact) |
+| Visitors (human clicks) | `counted_clickers` of the stage | `counted_clickers` joined to the in-window send on (stage, contact) |
 | Reached | `stage_sends.offer_reached_at` per stage (bounded on the partial index) | per send |
 
 Why regular stages can be read whole:
@@ -63,15 +63,17 @@ Why regular stages can be read whole:
 |---|---|
 | Sends | as above |
 | RPM / Net RPM | revenue (− cost) ÷ sends × 1000 |
-| EPC | revenue ÷ human clicks |
-| **Human clicks (on sends in range)** | the standing denominator ([epc-denominator.md](epc-denominator.md)): `COUNT(DISTINCT contact_id)` at **(offer, slug)** for rows and at the **offer** for Total; clicked at any time. Manual stages add summed `visit_clicks_clean`, labelled `+manual` |
-| **Click rate** | human clicks ÷ sends. Named apart from the Overview's `CR %`, which is landing visits ÷ sent |
+| EPC | revenue ÷ visitors |
+| **Visitors** (was "Human clicks (on sends in range)") | the standing denominator ([epc-denominator.md](epc-denominator.md)): `COUNT(DISTINCT contact_id)` at **(offer, slug)** for rows and at the **offer** for Total; clicked at any time. Manual stages add summed `visit_clicks_clean`, labelled `+manual` |
+| **SMS Clicked** (was "Click rate") | visitors ÷ sends |
+| **CTR** | share of visitors who clicked the CTA and reached the advertiser page: visitors (on Keitaro-covered tracked stages) who ALSO have `offer_reached_at` on a send in the row ÷ those visitors. People ÷ people, both deduplicated per row (offer-distinct on Total), so it never passes 100% even when one person was sent the page several times. Fields `redirected_visitors` / `reach_clicks` |
+| **Redirects** | total sends whose recipient reached the advertiser page (`offer_reached_at`) — the `reached` field; **not** Keitaro's `redirect_clicks_clean`, which is stored per stage × click day and cannot be split per page or dated by send. Covered stages only; `—` when the row has none |
 | Sales | purchases only — **Upsell adds revenue, never a sale** |
-| **Sales % (of reached)** | sales ÷ recipients who reached the offer page (`offer_reached_at`), **not** ÷ Keitaro redirects; over Keitaro-covered tracked stages only |
+| **CR, %** (was "Sales % (of reached)") | sales ÷ Redirects; over Keitaro-covered tracked stages only. Not the Overview's `CR %`, which is landing visits ÷ sent |
 | Opt-out % | opt-outs replying to these sends ÷ sends |
 | Net Profit | revenue − cost |
 
-**Null, never 0.** A ratio with no denominator renders `—`. Sales % is `—` when a row has no Keitaro-covered stage: manual-only rows, and tracking-gap stages as defined by `hasNoKeitaroVisits` + `stageIsMatureForGap`, the same rule `shouldSubstituteClickers` uses. Clicks here are already `counted_clickers`, so there is no Keitaro visit count to substitute. The gap rule therefore only decides which stages Sales % may read.
+**Null, never 0.** A ratio with no denominator renders `—`. CR, %, CTR and Redirects are `—` when a row has no Keitaro-covered stage: manual-only rows, and tracking-gap stages as defined by `hasNoKeitaroVisits` + `stageIsMatureForGap`, the same rule `shouldSubstituteClickers` uses. Clicks here are already `counted_clickers`, so there is no Keitaro visit count to substitute. The gap rule therefore only decides which stages CR, %, CTR and Redirects may read.
 
 **Total clicks do not foot**, by design — the UI says so. Measured all time: offer 62 shows 35,717 against a column sum of 36,498, and offer 123 shows 26,369 against 27,145. Every other column foots.
 
@@ -103,7 +105,8 @@ It covers offers 62, 123 and 152, plus the offer with the most upsell rows and t
   - regular = `keitaro_stage_results` + manual top-up per cohort stage, which is what the Overview's send_date basis sums;
   - drip = a per-send ledger recount.
 - **(b)** Each row's clicks are recomputed with `COUNT(DISTINCT)` from `counted_clickers`. Total = offer-distinct, and Total ≤ column sum.
-- **(c)** Every no-denominator cell is null, and at least one row with sends must render Sales % `—` — an unexercised check fails.
+- **(c)** Every no-denominator cell is null, and at least one row with sends must render CR, % `—` — an unexercised check fails.
+- **(e)** CTR inputs nest on every row and Total: redirected visitors ≤ covered visitors ≤ visitors, and redirected visitors ≤ Redirects.
 - **(12)** `purchasedClause` matches 0 upsell rows. Report Sales = ledger purchases + manual top-up, and Revenue includes upsell.
 - **(d)** Scope is printed first; an empty scope fails.
 

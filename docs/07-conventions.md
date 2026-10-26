@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-26_
 
 ## ⭐ A migration number is reserved by rebasing on origin/main the moment the file is created (2026-10-23)
 
@@ -11,6 +11,10 @@ On 2026-10-23 three branches each minted `0220`, and one was applied to the shar
 - **If main moves first,** re-take the next free number and bump `when` again before merging.
 - **Guarded:** [scripts/test-migration-numbering-guard.ts](../scripts/test-migration-numbering-guard.ts) in `check:guards` (CI fetches `origin/main`). It fails a branch whose new migration (a) reuses a number that exists on `origin/main`, or (b) has a `when` not greater than main's latest. It cannot see another unmerged branch; the card is what covers that.
 - **Never renumber a migration that is already on main or applied to prod.** It is history: renumber the branch that has not landed.
+- ⭐ **Owner rule (2026-10-26): a branch whose migration `when` is not above the newest migration APPLIED IN PROD must re-timestamp / renumber before merge.** Prod — not main — is the reference, because migrations are applied in the morning window BEFORE their PR merges, so prod can be ahead of main. On 2026-10-26 0225 (#403) and 0226 (#404) were both valid against main, yet whichever reached prod second would have been skipped had the order flipped.
+- **Enforced at apply time:** `npm run db:migrate` now runs [scripts/check-migration-skip.ts](../scripts/check-migration-skip.ts) first. It reads the target DB's `drizzle.__drizzle_migrations` (read-only) and REFUSES when any journal entry is not applied (no `created_at` = its `when` and no hash match) yet has a `when` at or below the newest applied one — Drizzle would skip it silently. This covers prod AND the preview build (`vercel-build` calls `db:migrate`). The CI guard above stays: it catches the common case before review; the preflight is the backstop that sees what the database actually has. Pure scenarios: [scripts/test-migration-skip-preflight.ts](../scripts/test-migration-skip-preflight.ts) in `check:guards`.
+- **Accepted drift is per database and evidenced.** `ACCEPTED_DRIFT` in [scripts/_migration-skip.ts](../scripts/_migration-skip.ts) lists migrations whose objects were verified present but whose ledger row is an earlier draft (preview: 0182, 0219). Production has no entries and must never get one.
+- **Not covered:** applying SQL by hand, or calling Drizzle's `migrate()` from a one-off script (the Gate 3 recipe). Those bypass `db:migrate` — run `npx tsx scripts/check-migration-skip.ts` against the same `DATABASE_URL` first.
 
 ## ⭐ Read-only checks are TRANSACTION-scoped on their own connection — never a session SET on DATABASE_URL (2026-10-23)
 

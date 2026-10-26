@@ -6,7 +6,8 @@ import { can } from "@/lib/permissions";
 import { refreshLookupGroupStats } from "@/lib/telnyx/lookup-stats";
 
 export const dynamic = "force-dynamic";
-// Forces a recompute (~2.5s full-population scan).
+// Forces a recompute (full-population scan: ~9–10s inside Postgres, measured on prod
+// 2026-10-26; one run took ~19s under load — well inside maxDuration).
 export const maxDuration = 60;
 
 // Manual "Refresh now". Recomputes and atomically overwrites the cache. If the

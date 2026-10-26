@@ -6,7 +6,8 @@ import { can } from "@/lib/permissions";
 import { getLookupGroupStats } from "@/lib/telnyx/lookup-stats";
 
 export const dynamic = "force-dynamic";
-// Reads the cache (instant). Only the first-ever load computes (~2.5s full scan).
+// Reads the cache (instant). Only the first-ever load computes (~9–10s full scan,
+// measured on prod 2026-10-26). Refresh is manual-only; nothing schedules it.
 export const maxDuration = 60;
 
 // Lookup Stats Panel data: per-Contact-Group coverage + landline suppression, plus a

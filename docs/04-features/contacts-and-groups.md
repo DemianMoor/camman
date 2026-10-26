@@ -1,6 +1,6 @@
 # Feature — Contacts, Contact Groups, Opt-outs/ins & Clickers
 
-_Last updated: 2026-10-23 (0222: mobile-only defaults + toll-free box; contact_group_id not validated on edit; create limit 100)_
+_Last updated: 2026-10-26 (Upload contacts + group Add contacts import contact_attributes CSV columns, fill-empty only)_
 
 ## 1. Purpose
 The central phone registry and the suppression/engagement records attached to it. Contacts are the atomic audience unit (scaling to millions); contact groups are tags; opt-outs/ins and clickers are the status signals that audience filters and segment rules read.
@@ -15,6 +15,7 @@ The central phone registry and the suppression/engagement records attached to it
 ## 3. How it works
 - Standard CRUD + bulk phone-upload endpoints. Phone parsing/validation via libphonenumber-js ([`lib/phone-validation.ts`](../../lib/phone-validation.ts)).
 - **Phone upload (shared pipeline):** four entry points — contacts, opt-outs, opt-ins, clickers — all flow through [`lib/upload/audience-upload.ts`](../../lib/upload/audience-upload.ts) (`processAudienceUpload()`): split on `[\n,;]`, dedupe by E.164, validate, upsert `contacts` `ON CONFLICT DO UPDATE`, insert entity rows, then apply `assign_to_group_ids` (idempotent `ON CONFLICT DO NOTHING`). Returns a summary (submitted/valid/invalid/duplicates/inserted/groups_applied).
+- **Attribute CSV columns (2026-10-26):** Upload contacts and a group's Add contacts also import recognized `contact_attributes` columns (first/last name, email, address, state, ZIP, …) and list any column they ignore. Writes are fill-empty only. See [csv-imports.md](csv-imports.md) → *Attribute columns on a phone upload*.
 - **Bulk-apply groups:** `POST /api/contacts/bulk-apply-groups` `{ contact_ids[], group_ids[] }` → `{ applied }`, idempotent.
 - **Opt-out reasons** (`opt_outs.reason`, CHECK):
   | reason | scope | origin | snapshot effect |

@@ -1297,6 +1297,7 @@ export default function ContactsPage() {
               enableContactGroups
               requireContactGroups
               enableLookup
+              captureAttributes
             />
           )}
       </FormDialog>

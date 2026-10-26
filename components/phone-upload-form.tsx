@@ -18,6 +18,11 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  ATTRIBUTE_FIELDS,
+  scanCsvAttributes,
+  type CsvAttributeScan,
+} from "@/lib/contact-attributes";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { cn } from "@/lib/utils";
@@ -73,6 +78,11 @@ export type UploadResultSummary = {
   attributed?: number;
   unattributed?: number;
   skipped_already_opted_out?: number;
+  // Optional: present when the upload carried attribute columns
+  // (captureAttributes). Contacts that gained ≥1 attribute (fill-empty only),
+  // and non-empty cells that normalized to nothing.
+  attributes_written?: number;
+  attribute_values_ignored?: number;
 };
 
 type ContactGroupOption = {
@@ -112,6 +122,12 @@ export interface PhoneUploadFormProps {
   // time column, and the Paste tab, fall back to the plain phone-list upload.
   // Used by the opt-outs "Add Opt-Outs" dialog.
   captureReplyTime?: boolean;
+  // When true, CSV columns other than the phone are matched to contact
+  // attribute fields by header (first name, ZIP, state, …), listed as
+  // recognized / ignored, and uploaded as `attributes`. The endpoint writes
+  // them fill-empty-only. A phone-only CSV sends exactly the old payload.
+  // Used by Contacts → Upload contacts and Contact group → Add contacts.
+  captureAttributes?: boolean;
 }
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
@@ -160,6 +176,7 @@ export function PhoneUploadForm({
   requireContactGroups = false,
   enableLookup = false,
   captureReplyTime = false,
+  captureAttributes = false,
 }: PhoneUploadFormProps) {
   const uploadApi = useApiCall<UploadResultSummary>();
   const previewApi = useApiCall<LookupPreview>();
@@ -174,6 +191,10 @@ export function PhoneUploadForm({
     REPLY_TIME_ZONES[0].value,
   );
   const [csvSourceName, setCsvSourceName] = useState<string | null>(null);
+  // captureAttributes: what the CSV's non-phone columns map to. `csvNoHeader`
+  // marks a multi-column file without a phone header — only column 1 is read.
+  const [csvAttrScan, setCsvAttrScan] = useState<CsvAttributeScan | null>(null);
+  const [csvNoHeader, setCsvNoHeader] = useState(false);
   const [csvPreview, setCsvPreview] = useState<string[]>([]);
   const [csvError, setCsvError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"paste" | "csv">("paste");
@@ -210,6 +231,8 @@ export function PhoneUploadForm({
     setCsvLines([]);
     setCsvEntries([]);
     setCsvSourceName(null);
+    setCsvAttrScan(null);
+    setCsvNoHeader(false);
     setCsvPreview([]);
     setCsvError(null);
     setResult(null);
@@ -225,6 +248,8 @@ export function PhoneUploadForm({
     setCsvLines([]);
     setCsvEntries([]);
     setCsvPreview([]);
+    setCsvAttrScan(null);
+    setCsvNoHeader(false);
     setCsvSourceName(file.name);
 
     if (file.size > MAX_PAYLOAD_BYTES) {
@@ -255,6 +280,11 @@ export function PhoneUploadForm({
         }
         setCsvLines(values);
         setCsvPreview(values.slice(0, PREVIEW_COUNT));
+
+        if (captureAttributes) {
+          if (hasHeader) setCsvAttrScan(scanCsvAttributes(rows[0], dataRows, col));
+          else setCsvNoHeader(rows[0].length > 1);
+        }
 
         // Attribution mode: if a reply-time column is present, pair each phone
         // with its timestamp. A time column requires a header row to locate it.
@@ -312,6 +342,19 @@ export function PhoneUploadForm({
     // its no-group fast path.
     if (enableContactGroups && selectedGroupIds.length > 0) {
       body.assign_to_group_ids = selectedGroupIds;
+    }
+    // Attribute columns ride along only when the CSV had recognized ones with
+    // values; otherwise the body is the phone-only shape, unchanged.
+    const attributes = activeTab === "csv" ? csvAttrScan?.attributes : null;
+    if (captureAttributes && attributes) {
+      body.attributes = attributes;
+      const bytes = JSON.stringify(body).length;
+      if (bytes > MAX_PAYLOAD_BYTES) {
+        setCsvError(
+          `File too large with its attribute columns (${(bytes / 1024 / 1024).toFixed(1)}MB). Max 5MB — split the file.`,
+        );
+        return false;
+      }
     }
 
     const result = await uploadApi.execute(endpoint, {
@@ -436,6 +479,21 @@ export function PhoneUploadForm({
               label="New group tags"
               value={result.groups_applied}
               tone="success"
+            />
+          ) : null}
+          {typeof result.attributes_written === "number" ? (
+            <Stat
+              label="Attributes saved"
+              value={result.attributes_written}
+              tone="success"
+            />
+          ) : null}
+          {typeof result.attribute_values_ignored === "number" &&
+          result.attribute_values_ignored > 0 ? (
+            <Stat
+              label="Attribute values not recognized"
+              value={result.attribute_values_ignored}
+              tone="warn"
             />
           ) : null}
           {typeof result.attributed === "number" ? (
@@ -717,10 +775,23 @@ export function PhoneUploadForm({
                 </div>
               </div>
             ) : null}
+            {captureAttributes && csvLines.length > 0 && !csvError ? (
+              <CsvColumnsSummary scan={csvAttrScan} noHeader={csvNoHeader} />
+            ) : null}
             <p className="text-xs text-muted-foreground">
               First column or a column named <code>phone</code>,{" "}
               <code>phone_number</code>, or <code>number</code> is used. Header
               row is auto-detected.
+              {captureAttributes ? (
+                <>
+                  {" "}
+                  Other columns are matched to contact fields by header (e.g.{" "}
+                  <code>first_name</code>, <code>last_name</code>,{" "}
+                  <code>email</code>, <code>address</code>, <code>state</code>,{" "}
+                  <code>zip</code>) and only fill fields that are empty — stored
+                  values are never overwritten.
+                </>
+              ) : null}
               {captureReplyTime ? (
                 <>
                   {" "}
@@ -850,6 +921,63 @@ function Stat({
       >
         {value.toLocaleString()}
       </div>
+    </div>
+  );
+}
+
+// Which CSV columns the upload will use besides the phone, and which it will
+// ignore — so no column is dropped silently.
+function CsvColumnsSummary({
+  scan,
+  noHeader,
+}: {
+  scan: CsvAttributeScan | null;
+  noHeader: boolean;
+}) {
+  if (noHeader) {
+    return (
+      <p className="text-xs text-amber-700 dark:text-amber-400">
+        No header row with a phone column found — only the first column is
+        read, other columns are ignored. Add a header row (e.g.{" "}
+        <code>phone,first_name,zip</code>) to import contact fields.
+      </p>
+    );
+  }
+  if (!scan || (scan.recognized.length === 0 && scan.ignored.length === 0)) {
+    return null;
+  }
+  return (
+    <div className="grid gap-1.5 rounded-md border bg-muted/30 p-3 text-xs">
+      {scan.recognized.length > 0 ? (
+        <div>
+          <span className="font-medium text-emerald-700 dark:text-emerald-400">
+            Recognized:
+          </span>{" "}
+          {scan.recognized.map((r, i) => (
+            <span key={r.column}>
+              {i > 0 ? ", " : ""}
+              <code>{r.column}</code> →{" "}
+              {ATTRIBUTE_FIELDS.find((f) => f.field === r.field)?.label ?? r.field}
+            </span>
+          ))}
+          {scan.attributes === null ? (
+            <span className="text-muted-foreground"> (all empty — nothing to save)</span>
+          ) : null}
+        </div>
+      ) : null}
+      {scan.ignored.length > 0 ? (
+        <div>
+          <span className="font-medium text-amber-700 dark:text-amber-400">
+            Ignored:
+          </span>{" "}
+          {scan.ignored.map((c, i) => (
+            <span key={`${c}-${i}`}>
+              {i > 0 ? ", " : ""}
+              <code>{c}</code>
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

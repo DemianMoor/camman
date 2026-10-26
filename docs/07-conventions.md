@@ -2131,8 +2131,11 @@ Places 2, 3 and 4 all fall through to a `typeof value === "number"` test, so a *
 ## contact_attributes — age is DERIVED, and under-18 is scoped to the rule
 
 - **`contact_attributes` is 1:1 with `contacts`** (`contact_id` IS the PK, migration 0147). No
-  column was added to `contacts`. Populated only by drip intake and mapped CSV uploads; there is
-  **no backfill**.
+  column was added to `contacts`. Populated only by drip intake, mapped CSV uploads (Import
+  attributes, which overwrites) and phone uploads with attribute columns (Upload contacts / group Add
+  contacts, **fill-empty only**). All CSV writes go through ONE upsert,
+  `upsertContactAttributes` in `lib/contact-attributes-write.ts`. Its `mode` is required: it decides
+  whose value survives, so never give it a default. There is **no backfill**.
 - **Phone is the identity; everything there is an attribute.** `email` has **no unique constraint** —
   partners legitimately submit shared addresses, and a unique index would make an import FAIL on a
   duplicate rather than update it.

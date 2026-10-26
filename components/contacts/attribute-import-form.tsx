@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ATTRIBUTE_FIELDS } from "@/lib/contact-attributes";
+import { ATTRIBUTE_FIELDS, guessAttributeField } from "@/lib/contact-attributes";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 
 // Column → field mapping step for attribute CSV imports (Drip P1 1c).
@@ -109,10 +109,8 @@ export function AttributeImportForm({ onDone }: { onDone?: () => void }) {
             const k = h.trim().toLowerCase().replace(/[^a-z]/g, "");
             if (["phone", "phonenumber", "mobile", "mobilenumber", "cell"].includes(k)) guess[h] = PHONE;
             else {
-              const f = ATTRIBUTE_FIELDS.find(
-                (a) => a.field.replace(/_/g, "") === k || a.label.toLowerCase().replace(/[^a-z]/g, "") === k,
-              );
-              if (f) guess[h] = f.field;
+              const f = guessAttributeField(h);
+              if (f) guess[h] = f;
             }
           }
           setMap(guess);

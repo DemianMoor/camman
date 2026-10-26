@@ -343,6 +343,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "read-only: one SELECT inside withReadOnlyDb's BEGIN READ ONLY, compared against carrier_rejected_phones (the .unsafe( token is the match — the reference SQL is a string so its code lists stay independent of lib/carrier-rejection)",
   },
   {
+    file: "check-migration-skip.ts",
+    why: "read-only apply-time preflight run by `npm run db:migrate` against prod and preview alike, so it cannot import _require-preview-db; one SELECT inside withReadOnlyDb's BEGIN READ ONLY (the createHash(...).update( token is the match)",
+  },
+  {
     file: "perf-baseline.ts",
     why: "read-only: EXPLAIN ANALYZE over SELECTs (the .unsafe( token is the match)",
   },

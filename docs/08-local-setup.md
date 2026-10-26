@@ -1,6 +1,6 @@
 # 08 — Local Setup
 
-_Last updated: 2026-07-16_
+_Last updated: 2026-10-26_
 
 Clone-to-running on Windows (PowerShell). Adapt paths/shell as needed; the repo lives at `c:\AFF\camman`.
 
@@ -36,7 +36,7 @@ Fill at minimum (see [06-integrations.md](06-integrations.md) for every variable
 ## 3. Database migrations
 Migrations are **hand-authored** and **not** auto-applied. Apply them against the `DATABASE_URL` in `.env.local`:
 ```powershell
-npm run db:migrate                                    # drizzle-kit migrate
+npm run db:migrate                                    # skip preflight (scripts/check-migration-skip.ts), then drizzle-kit migrate
 npx tsx scripts/verify-migration-integrity.ts         # confirm the chain is clean
 ```
 - `npm run db:generate` is intentionally avoided (it blocks on a TTY rename prompt — see project memory). New migrations are hand-written: author the SQL in `db/migrations/`, clone the snapshot forward, add the journal entry, then `db:migrate` + verify.

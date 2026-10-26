@@ -77,15 +77,19 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "fresh_pool", label: "Fresh pool", numeric: true },
 ];
 
-// Behind the "Show lifecycle detailed report" checkbox (migrations 0214/0215,
-// offer_group_lifecycle_mv). Cohort = the contact's CURRENT lifecycle status;
+// Behind the "Show lifecycle detailed report" checkbox (migration 0226,
+// offer_group_lifecycle_v2_mv). Cohort = the contact's CURRENT lifecycle status,
+// with Hot and Warm SEPARATE (owner, 2026-10-23 — they were one "Hot/Warm" cohort);
 // Sent = messages in the same scope as "Sent 30d (this offer)", Fresh = contacts
 // on the same definition as "Fresh pool". New contacts are in no cohort — they
 // stay in the overall Fresh pool column.
 const LIFECYCLE_COLUMNS: { key: LifecycleKey; label: string; numeric: true }[] = [
-  { key: "hw_sent_14d", label: "Hot/Warm sent 14d", numeric: true },
-  { key: "hw_sent_30d", label: "Hot/Warm sent 30d", numeric: true },
-  { key: "hw_fresh_pool", label: "Hot/Warm fresh pool", numeric: true },
+  { key: "hot_sent_14d", label: "Hot sent 14d", numeric: true },
+  { key: "hot_sent_30d", label: "Hot sent 30d", numeric: true },
+  { key: "hot_fresh_pool", label: "Hot fresh pool", numeric: true },
+  { key: "warm_sent_14d", label: "Warm sent 14d", numeric: true },
+  { key: "warm_sent_30d", label: "Warm sent 30d", numeric: true },
+  { key: "warm_fresh_pool", label: "Warm fresh pool", numeric: true },
   { key: "cold_sent_14d", label: "Cold sent 14d", numeric: true },
   { key: "cold_sent_30d", label: "Cold sent 30d", numeric: true },
   { key: "cold_fresh_pool", label: "Cold fresh pool", numeric: true },
@@ -409,10 +413,10 @@ export function OfferGroupReport({
         <p className="text-xs text-muted-foreground">
           <strong>Lifecycle columns</strong> split “Sent 30d (this offer)” and
           “Fresh pool” by each contact’s <em>current</em> lifecycle status
-          (Hot/Warm, Cold, Freeze), and add a 14-day window. Sent columns count
+          (Hot, Warm, Cold, Freeze), and add a 14-day window. Sent columns count
           messages; fresh pool columns count contacts. New and Suppressed
           contacts are in no cohort column. Sent 30d cohorts add up to “Sent 30d”
-          (a texted contact is never New); the three fresh pools add up to
+          (a texted contact is never New); the four fresh pools add up to
           less than “Fresh pool”, which also counts New contacts.
         </p>
       ) : null}

@@ -2220,3 +2220,5 @@ still computes and reports, it just never refuses. **No migration.**
 
 2026-10-23 — test-migration-numbering-guard in check:guards (a branch's new migration must not reuse an origin/main number and must have a journal `when` above main's latest; CI fetches origin/main); convention: reserve the number by rebasing on origin/main when the file is created, number on the ClickUp card — 07-conventions
 2026-10-23 — Migration 0222: contact_groups.allow_toll_free (gate + drip routing), all three line-type flags default false (new groups mobile-only); drip partner×tag groups false×3, system groups true×3, UI create requires the flags (form: unknown on); toll-free backfilled off where allow_unknown = false — 03-data-model, 04-features/contacts-and-groups, 07-conventions
+
+2026-10-26 — check:authz green again: route map classifies campaigns/[campaignId]/daily-results and cron/drip-daily-rollup (both from #355) as operator-denied; no behaviour change (both already structurally deny the operator) — none (route map only)

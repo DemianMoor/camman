@@ -13,7 +13,10 @@ import {
 import type { AudiencePreviewResult } from "@/lib/audience-snapshot";
 
 import { usePreviewPart } from "./use-preview-part";
-import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
+import {
+  OFFER_COOLDOWN_DAYS_DEFAULT,
+  OFFER_LIMIT_TIMES_DEFAULT,
+} from "@/lib/validators/campaigns";
 
 // =============== Types ===============
 
@@ -264,7 +267,7 @@ export function useCampaignFormState(props: CampaignFormProps) {
       // OFFER_COOLDOWN_DAYS_DEFAULT; limit: 0191), so the form and the row the
       // create route writes start from the same numbers.
       offer_cooldown_days: initialValues?.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
-      offer_limit_times: initialValues?.offer_limit_times ?? 5,
+      offer_limit_times: initialValues?.offer_limit_times ?? OFFER_LIMIT_TIMES_DEFAULT,
       link_mode: initialValues?.link_mode ?? "manual",
       start_date: initialValues?.start_date ?? "",
       end_date: initialValues?.end_date ?? "",

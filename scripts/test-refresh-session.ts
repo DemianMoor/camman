@@ -51,7 +51,8 @@ const VIEWS = [
   "offer_group_report_mv",
   "offer_report_offer_totals_mv",
   "audience_report_group_totals_mv",
-  "offer_group_lifecycle_mv",
+  // 0226 replaced offer_group_lifecycle_mv (Hot/Warm merged) in the refresh.
+  "offer_group_lifecycle_v2_mv",
 ];
 
 // ── source-scan bar ──────────────────────────────────────────────────────────

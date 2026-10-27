@@ -164,6 +164,11 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production repair; writes only behind --apply",
   },
   {
+    file: "fill-offer-group-lifecycle-v2.ts",
+    viaLibrary: true,
+    why: "one-off production first fill of offer_group_lifecycle_v2_mv (migration 0226, created WITH NO DATA); writes only through lib/reporting/offer-group-report's fillOfferGroupLifecycleV2 (the report's own refresh session); dry-run default, --apply to fill; attended, quiet window",
+  },
+  {
     file: "backfill-lifecycle-rollup.ts",
     viaLibrary: true,
     why: "fills lifecycle_day_rollup (migration 0192) for days the nightly 14-day window does not reach; writes through lib/reporting/lifecycle-rollup, so it carries no write token of its own",

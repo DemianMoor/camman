@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-10-23_
+_Last updated: 2026-10-26 (lifecycle columns: Hot and Warm separate — migration 0226, offer_group_lifecycle_v2_mv)_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -79,11 +79,14 @@ an average of per-group ratios.
 | **Sent last 7 / 30 / 90 days** | `COUNT(*)` of attributed `stage_sends` rows within the window — send rows, **not** distinct contacts, scoped to **this offer**, and (since migration 0132) tracked campaigns only. |
 | **Fresh pool** | Contacts in the group that are sendable (`contacts.messaging_status = 'eligible'` AND no `opt_outs` row) AND have never been sent a campaign of **this offer** — anti-joined against `offer_exposures` per offer (migration 0133). All-time, not a window; offer-scoped, not shared across offers. |
 
-## Lifecycle detailed report (migrations 0214, 0215)
+## Lifecycle detailed report (migrations 0214, 0215, 0226)
 
-A **"Show lifecycle detailed report"** checkbox above the table adds nine
-columns — Sent 14d, Sent 30d and Fresh pool for each of three lifecycle
-cohorts: **Hot/Warm** (hot + warm), **Cold**, **Freeze**. Owner rulings,
+A **"Show lifecycle detailed report"** checkbox above the table adds twelve
+columns — Sent 14d, Sent 30d and Fresh pool for each of four lifecycle
+cohorts: **Hot**, **Warm**, **Cold**, **Freeze**, in that order. Hot and Warm
+are **separate** since migration 0226 (owner, 2026-10-23; ClickUp 1amdve284ue):
+0214/0215 merged them into one "Hot/Warm" cohort, and no Hot+Warm subtotal is
+kept because the screen never had one alongside separate columns. Owner rulings,
 2026-10-19:
 
 | Decision | Ruling |
@@ -95,14 +98,15 @@ cohorts: **Hot/Warm** (hot + warm), **Cold**, **Freeze**. Owner rulings,
 
 Fresh pool per cohort uses the 0133 definition above (eligible, not opted out,
 never exposed to this offer), split by status. New and Suppressed are in no
-cohort, so the three fresh pools sum to **less** than the overall Fresh pool.
+cohort, so the four fresh pools sum to **less** than the overall Fresh pool.
 The Sent 30d cohorts sum to the overall "Sent 30d (this offer)" in practice — a
 texted contact is never `new`, and on 2026-10-19 Suppressed was 0 (measured on
 production at the 0214 apply, then for 90d: 5,927,289 = 5,927,289 across all
 237 rows).
 
-Source: `offer_group_lifecycle_mv` (one row per org × offer × group, nine
-columns `hw_*` / `cold_*` / `freeze_*`), refreshed **last** by the same
+Source: `offer_group_lifecycle_v2_mv` (migration 0226; one row per org × offer
+× group, twelve columns `hot_*` / `warm_*` / `cold_*` / `freeze_*`), refreshed
+**last** by the same
 twice-daily cron and stamped separately in `report_refresh_log`; the page shows
 its own "Lifecycle columns as of" line. A separate matview, not new columns on
 `offer_group_report_mv`, so that view and `audience_report_group_totals_mv`
@@ -284,8 +288,41 @@ total against the 300s ceiling. This is a background job with no user waiting
 on it, so the larger budget costs nothing. The same cron also refreshes the
 Audience Stats group totals (`audience_report_group_totals_mv`, migration 0180)
 after the group view; its defining SELECT measured 5.3s on 2026-09-14, logged
-per run as `audienceTotalsMs`. `offer_group_lifecycle_mv` (migration 0214)
-refreshes last, logged as `lifecycleMs`; its first build is timed at apply.
+per run as `audienceTotalsMs`. The lifecycle view refreshes last, logged as
+`lifecycleMs` — since 0226 that is `offer_group_lifecycle_v2_mv`.
+
+### 0226: a new view alongside, filled after the migration
+
+0226 does **not** rebuild `offer_group_lifecycle_mv` in place (0215's DROP +
+CREATE). The deployed code selects its `hw_*` columns, so dropping it would break
+the live report between the apply and the code deploy. Instead:
+
+1. **0226 creates `offer_group_lifecycle_v2_mv` `WITH NO DATA`** (plus the
+   unique index `CONCURRENTLY` needs, the same `REVOKE`, and a NULL
+   `report_refresh_log` row), so it applies in seconds through `db:migrate` —
+   the build itself (~150 s at 0215) does not fit prod's 120 s server-wide
+   `statement_timeout` inside a migration.
+2. **First fill, attended, quiet window:**
+   [scripts/fill-offer-group-lifecycle-v2.ts](../../scripts/fill-offer-group-lifecycle-v2.ts)
+   (dry-run default, `--apply`) calls `fillOfferGroupLifecycleV2()`: a plain
+   `REFRESH` of v2 (`CONCURRENTLY` refuses an unpopulated view) on the report's
+   own session (180 s / 384 MB), then the OLD view's normal `CONCURRENTLY`
+   refresh straight after, stamping both log rows.
+3. **Verify:** [scripts/verify-offer-group-lifecycle-v2.ts](../../scripts/verify-offer-group-lifecycle-v2.ts)
+   (read-only) — same rows (0 lost / 0 added), zero NULLs, Cold and Freeze
+   identical per cell, Hot + Warm = old Hot/Warm per cell; any difference is
+   reported as drift (sends between the two refreshes), never absorbed. The
+   arithmetic is the pure `compareLifecycleViews`
+   (`lib/reporting/offer-group-lifecycle-compare.ts`), pinned by
+   `scripts/test-offer-group-lifecycle-compare.ts`; the defining SELECT is
+   pinned by `scripts/test-offer-group-lifecycle.ts` (every cell vs an
+   independent computation, plus PART O: the new SELECT vs 0215's over one
+   fixture snapshot).
+4. **Only then** the code that reads v2 merges and deploys (reading an
+   unpopulated matview errors).
+5. The old view is no longer read or refreshed after that deploy and is dropped
+   by its own later migration, once v2 has refreshed cleanly in production —
+   ClickUp 1amdve28dvj (destructive steps follow the code).
 
 ### ⛔ `maxDuration` is not the binding limit — `statement_timeout` is
 
@@ -588,6 +625,10 @@ registration as a sale, and nothing here is waiting for a backfill.
   group-row attribution; adds `offer_report_tracked_campaigns` and
   `offer_report_offer_totals_mv`; extends the dedup-at-grain rule to every
   group-row column.
+- `db/migrations/0226_offer_group_lifecycle_v2.sql` — `offer_group_lifecycle_v2_mv`
+  (Hot and Warm separate), created `WITH NO DATA`; filled by
+  `scripts/fill-offer-group-lifecycle-v2.ts`, verified by
+  `scripts/verify-offer-group-lifecycle-v2.ts`.
 - `db/migrations/0215_lifecycle_cohort_sent_30d.sql` — rebuilds
   `offer_group_lifecycle_mv` with `*_sent_30d` in place of `*_sent_90d`.
 - `db/migrations/0214_offer_group_lifecycle_report.sql` —

@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
+_Last updated: 2026-10-27 (offer limit default 5 → 2 for new campaigns); 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -369,7 +369,7 @@ offer" toggle is on AND that was created with `offer_rules_enabled`:
 
 | layer            | excludes                                                    |
 | ---------------- | ----------------------------------------------------------- |
-| `offer_limit`    | got this offer in **N or more other CAMPAIGNS** (default 5) |
+| `offer_limit`    | got this offer in **N or more other CAMPAIGNS** (default **2** for new campaigns since 2026-10-27, `OFFER_LIMIT_TIMES_DEFAULT`; was 5 — stored campaigns and duplicates keep their own value) |
 | `offer_cooldown` | last got it **within Y days** (default 14 for new campaigns since 2026-10-02, `OFFER_COOLDOWN_DAYS_DEFAULT`; was 7) |
 
 Both read `contact_offer_campaigns`, the per-(contact, offer, campaign) rollup

@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-26_
+_Last updated: 2026-10-27_
 
 ## ⭐ A migration number is reserved by rebasing on origin/main the moment the file is created (2026-10-23)
 
@@ -15,6 +15,7 @@ On 2026-10-23 three branches each minted `0220`, and one was applied to the shar
 - **Enforced at apply time:** `npm run db:migrate` now runs [scripts/check-migration-skip.ts](../scripts/check-migration-skip.ts) first. It reads the target DB's `drizzle.__drizzle_migrations` (read-only) and REFUSES when any journal entry is not applied (no `created_at` = its `when` and no hash match) yet has a `when` at or below the newest applied one — Drizzle would skip it silently. This covers prod AND the preview build (`vercel-build` calls `db:migrate`). The CI guard above stays: it catches the common case before review; the preflight is the backstop that sees what the database actually has. Pure scenarios: [scripts/test-migration-skip-preflight.ts](../scripts/test-migration-skip-preflight.ts) in `check:guards`.
 - **Accepted drift is per database and evidenced.** `ACCEPTED_DRIFT` in [scripts/_migration-skip.ts](../scripts/_migration-skip.ts) lists migrations whose objects were verified present but whose ledger row is an earlier draft (preview: 0182, 0219). Production has no entries and must never get one.
 - **Not covered:** applying SQL by hand, or calling Drizzle's `migrate()` from a one-off script (the Gate 3 recipe). Those bypass `db:migrate` — run `npx tsx scripts/check-migration-skip.ts` against the same `DATABASE_URL` first.
+- ⭐ **Migration line endings (2026-10-27).** Drizzle hashes the migration file exactly as read from disk, CR bytes included. `.gitattributes` (`db/migrations/** text eol=lf`, since 2026-06-05) only acts on commit and checkout — but a migration is applied from the working file BEFORE it is committed, so a file a Windows tool wrote with CRLF gets its CRLF hash recorded while git holds LF. That is how prod recorded `0204` and `0208` (2026-10-12): same SQL, `hash ✗` on every integrity run since. Two fixes: `verify-migration-integrity` accepts a recorded hash that matches EITHER line-ending form of the file and prints `(recorded from a CRLF copy …)` (a real content difference still fails), and the apply-time preflight `check-migration-skip` REFUSES a pending migration file containing a carriage return — convert it to LF and re-run. Shared rule: [scripts/_migration-hash.ts](../scripts/_migration-hash.ts); bars L1–L7 (incl. the two real prod prefixes) in [scripts/test-migration-skip-preflight.ts](../scripts/test-migration-skip-preflight.ts).
 
 ## ⭐ Read-only checks are TRANSACTION-scoped on their own connection — never a session SET on DATABASE_URL (2026-10-23)
 

@@ -1,8 +1,13 @@
-// Pure test of the apply-time skip preflight (scripts/_migration-skip.ts) —
+// Pure test of the apply-time skip preflight (scripts/_migration-skip.ts) and the
+// line-ending hash rule (scripts/_migration-hash.ts) —
 // part of check:guards, no DB. The scenarios are the real 2026-10-26 ones.
 //
 // Run: npx tsx scripts/test-migration-skip-preflight.ts
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+import { hasCarriageReturn, recordedHashForm } from "./_migration-hash";
 import { ACCEPTED_DRIFT, projectRefOf, skipReport } from "./_migration-skip";
 
 let fail = 0;
@@ -75,6 +80,26 @@ console.log("Migration skip preflight");
   bar("C10 ACCEPTED_DRIFT covers exactly one database (the preview)", dbs.length === 1, dbs.join(","));
   bar("C11 ref parsed from a pooler URL", projectRefOf(`postgresql://postgres.${preview}:pw@aws-0-eu.pooler.supabase.com:6543/postgres`) === preview);
   bar("C12 ref parsed from a direct URL", projectRefOf(`postgresql://postgres:pw@db.${other}.supabase.co:5432/postgres`) === other);
+}
+
+console.log("\nLine endings vs recorded hash");
+{
+  const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+  const lf = "create table t (\n  id int\n);\n";
+  const crlf = lf.replace(/\n/g, "\r\n");
+  bar("L1 LF file, LF hash recorded ⇒ lf", recordedHashForm(sha(lf), lf) === "lf");
+  bar("L2 LF file, CRLF hash recorded ⇒ crlf (not drift)", recordedHashForm(sha(crlf), lf) === "crlf");
+  bar("L3 CRLF file, LF hash recorded ⇒ lf", recordedHashForm(sha(lf), crlf) === "lf");
+  bar("L4 different SQL ⇒ null (real drift still fails)", recordedHashForm(sha(lf), lf.replace("int", "bigint")) === null);
+  bar("L5 no recorded row ⇒ null", recordedHashForm(undefined, lf) === null);
+  bar("L6 CR detected in a pending file", hasCarriageReturn(crlf) && !hasCarriageReturn(lf));
+  // The real 2026-10-12 cases: prod recorded these prefixes for files git holds as LF.
+  for (const [tag, prodPrefix] of [["0204_drip_carry_over", "de5ee55b17"], ["0208_drip_daily_rollup", "11826a196a"]] as const) {
+    const disk = readFileSync(`db/migrations/${tag}.sql`, "utf8");
+    const asCrlf = sha(disk.replace(/\r\n/g, "\n").replace(/\n/g, "\r\n"));
+    bar(`L7 ${tag}: prod hash is the CRLF form and is accepted`,
+      asCrlf.startsWith(prodPrefix) && recordedHashForm(asCrlf, disk) === "crlf");
+  }
 }
 
 console.log(fail === 0 ? "\nAll checks passed." : `\n${fail} FAILED`);

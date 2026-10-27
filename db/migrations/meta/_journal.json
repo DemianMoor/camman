@@ -1555,6 +1555,13 @@
       "when": 1796083200000,
       "tag": "0225_carrier_rejections",
       "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1796169600000,
+      "tag": "0226_offer_group_lifecycle_v2",
+      "breakpoints": true
     }
   ]
 }

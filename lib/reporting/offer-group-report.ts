@@ -92,6 +92,42 @@ export const LIFECYCLE_COLUMNS = [
   "freeze_sent_14d", "freeze_sent_30d", "freeze_fresh_pool",
 ] as const satisfies ReadonlyArray<keyof GroupLifecycleRow>;
 
+// Offer-exposure columns per lifecycle cohort for one group row (migration
+// 0227, offer_group_exposure_mv; owner 2026-10-27, ClickUp 1amdve28n15).
+// Contacts, not messages: the cohort's SENDABLE contacts in the group split by
+// how many campaigns of THIS offer reached them (contact_offer_campaigns), and
+// how many of them a new campaign of the offer could message today at the
+// defaults (limit 2, cooldown 14 days, not a buyer, Freeze not resting).
+// x0 + x1 + x2plus = the cohort's sendable contacts in the group.
+export type GroupExposureRow = {
+  hot_x0: number;
+  hot_x1: number;
+  hot_x2plus: number;
+  hot_eligible: number;
+  warm_x0: number;
+  warm_x1: number;
+  warm_x2plus: number;
+  warm_eligible: number;
+  cold_x0: number;
+  cold_x1: number;
+  cold_x2plus: number;
+  cold_eligible: number;
+  freeze_x0: number;
+  freeze_x1: number;
+  freeze_x2plus: number;
+  freeze_eligible: number;
+};
+
+export const EXPOSURE_COLUMNS = [
+  "hot_x0", "hot_x1", "hot_x2plus", "hot_eligible",
+  "warm_x0", "warm_x1", "warm_x2plus", "warm_eligible",
+  "cold_x0", "cold_x1", "cold_x2plus", "cold_eligible",
+  "freeze_x0", "freeze_x1", "freeze_x2plus", "freeze_eligible",
+] as const satisfies ReadonlyArray<keyof GroupExposureRow>;
+
+/** One group's lifecycle detail. Either view may lack the group (not yet refreshed); absent cells render "—". */
+export type GroupLifecycleDetail = Partial<GroupLifecycleRow & GroupExposureRow>;
+
 export type OfferGroupReport = {
   rows: GroupRawRow[];
   offerTotals: OfferTotals;
@@ -177,34 +213,45 @@ export async function getOfferGroupReport(
 }
 
 // The lifecycle columns per group_id, read only when the page asks for them
-// (the "Show lifecycle detailed report" checkbox). A group with no row here
-// (lifecycle view not yet refreshed) is simply absent and renders "—".
+// (the "Show lifecycle detailed report" checkbox): the cohort sends from
+// offer_group_lifecycle_v2_mv (0226) merged with the cohort exposure from
+// offer_group_exposure_mv (0227). A group absent from a view (not yet
+// refreshed) simply lacks those cells and renders "—". Both views refresh in
+// the same cron run; `refreshedAt` is the OLDER of the two stamps (null until
+// both have refreshed), so "as of" never overstates the staler one.
 export async function getOfferGroupLifecycle(
   orgId: string,
   offerId: number,
-): Promise<{ rows: Record<number, GroupLifecycleRow>; refreshedAt: string | null }> {
-  const rows = (await db.execute(sql`
+): Promise<{ rows: Record<number, GroupLifecycleDetail>; refreshedAt: string | null }> {
+  const lifecycleRows = (await db.execute(sql`
     select group_id, ${sql.raw(LIFECYCLE_COLUMNS.join(", "))}
     from offer_group_lifecycle_v2_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
+  const exposureRows = (await db.execute(sql`
+    select group_id, ${sql.raw(EXPOSURE_COLUMNS.join(", "))}
+    from offer_group_exposure_mv
+    where org_id = ${orgId}::uuid and offer_id = ${offerId}
+  `)) as unknown as Record<string, unknown>[];
   const logRows = (await db.execute(sql`
     select refreshed_at from report_refresh_log
-    where view_name = 'offer_group_lifecycle_v2_mv'
+    where view_name in ('offer_group_lifecycle_v2_mv', 'offer_group_exposure_mv')
   `)) as unknown as { refreshed_at: string | null }[];
 
-  const out: Record<number, GroupLifecycleRow> = {};
-  for (const r of rows) {
-    const row = {} as GroupLifecycleRow;
-    for (const c of LIFECYCLE_COLUMNS) row[c] = Number(r[c] ?? 0);
-    out[Number(r.group_id)] = row;
-  }
-  return {
-    rows: out,
-    refreshedAt: logRows[0]?.refreshed_at
-      ? new Date(logRows[0].refreshed_at).toISOString()
-      : null,
+  const out: Record<number, GroupLifecycleDetail> = {};
+  const merge = (r: Record<string, unknown>, cols: readonly (keyof GroupLifecycleDetail)[]) => {
+    const row = (out[Number(r.group_id)] ??= {});
+    for (const c of cols) row[c] = Number(r[c] ?? 0);
   };
+  for (const r of lifecycleRows) merge(r, LIFECYCLE_COLUMNS);
+  for (const r of exposureRows) merge(r, EXPOSURE_COLUMNS);
+
+  const stamps = logRows.map((l) => (l.refreshed_at ? new Date(l.refreshed_at).getTime() : null));
+  const refreshedAt =
+    stamps.length === 2 && stamps.every((t) => t != null)
+      ? new Date(Math.min(...(stamps as number[]))).toISOString()
+      : null;
+  return { rows: out, refreshedAt };
 }
 
 // The de-duplicated org-wide benchmark row. Shared with the Audience Stats
@@ -248,7 +295,7 @@ export async function readGroupReportRefreshedAt(): Promise<string | null> {
     : null;
 }
 
-/** Per-view result. One entry per matview, in refresh order, always all five. */
+/** Per-view result. One entry per matview of the run, in refresh order. */
 export type RefreshOutcome = {
   view: string;
   ok: boolean;
@@ -262,9 +309,8 @@ export type RefreshDurations = {
   summaryMs: number;
   groupMs: number;
   audienceTotalsMs: number;
-  lifecycleMs: number;
   totalMs: number;
-  /** All five views, in order, with per-view success and duration. */
+  /** All four views, in order, with per-view success and duration. */
   outcomes: RefreshOutcome[];
   /** Names of the views that failed this run. Empty on a clean run. */
   failed: string[];
@@ -276,32 +322,85 @@ export type RefreshDurations = {
   connection: RefreshConnection;
 };
 
-// The five matviews, in refresh order. Ordering still matters even though a
-// failure no longer stops the run:
+// The four matviews of the main run, in refresh order. Ordering still matters
+// even though a failure no longer stops the run:
 //
 //   * audience_report_group_totals_mv SUMS offer_group_report_mv, so it must
 //     refresh after it to pick up the same snapshot. If the group refresh
 //     FAILS, this one still runs and sums the previous group snapshot — stale,
 //     but internally consistent and visibly stale via its own log stamp, which
 //     beats freezing it too.
-//   * offer_group_lifecycle_v2_mv (0226; replaced 0214/0215's
-//     offer_group_lifecycle_mv, which is no longer refreshed or read and is
-//     dropped by its own later migration) depends on no other matview; it
-//     goes LAST so the four older reports are never queued behind it.
 //   * The two 0093 matviews lead, so a code-before-migration deploy (CLAUDE.md
 //     §14) breaks on the newer views rather than the older ones.
+//
+// The LIFECYCLE views are not here. Since 0227 they are
+// LIFECYCLE_REFRESH_SEQUENCE, refreshed by their own cron run 30 minutes later
+// (owner, 2026-10-27): with the exposure view added, one run of all six would
+// sit at or past the 300 s route limit — the group view alone peaked at 175.9 s.
 const REFRESH_SEQUENCE = [
   { view: "offer_report_org_summary_mv", durationKey: "summaryMs" },
   { view: "offer_group_report_mv", durationKey: "groupMs" },
   { view: "offer_report_offer_totals_mv", durationKey: "totalsMs" },
   { view: "audience_report_group_totals_mv", durationKey: "audienceTotalsMs" },
-  { view: "offer_group_lifecycle_v2_mv", durationKey: "lifecycleMs" },
 ] as const satisfies ReadonlyArray<{
   view: string;
-  durationKey: "summaryMs" | "groupMs" | "totalsMs" | "audienceTotalsMs" | "lifecycleMs";
+  durationKey: "summaryMs" | "groupMs" | "totalsMs" | "audienceTotalsMs";
 }>;
 
-// Rebuild all five matviews (CONCURRENTLY -- non-blocking) and stamp the
+// The lifecycle run (/api/cron/refresh-offer-group-lifecycle, 05:30 / 20:30 UTC).
+// Neither view reads another matview, so the order only puts the view the
+// screen has read longest first.
+const LIFECYCLE_REFRESH_SEQUENCE = [
+  { view: "offer_group_lifecycle_v2_mv", durationKey: "lifecycleMs" },
+  { view: "offer_group_exposure_mv", durationKey: "exposureMs" },
+] as const satisfies ReadonlyArray<{ view: string; durationKey: "lifecycleMs" | "exposureMs" }>;
+
+type SessionDb = Parameters<Parameters<typeof withRefreshSession>[0]>[0];
+
+// One sequence on one session connection: each view refreshed CONCURRENTLY,
+// caught on its own, and stamped in report_refresh_log only on its own
+// success. Shared by both cron runs so they cannot disagree about isolation.
+async function refreshSequence<K extends string>(
+  sessionDb: SessionDb,
+  sequence: ReadonlyArray<{ view: string; durationKey: K }>,
+  logTag: string,
+): Promise<{ outcomes: RefreshOutcome[]; durations: Record<K, number> }> {
+  const outcomes: RefreshOutcome[] = [];
+  const durations = Object.fromEntries(sequence.map((t) => [t.durationKey, 0])) as Record<K, number>;
+  for (const target of sequence) {
+    const startedAt = Date.now();
+    try {
+      // View names come from the frozen sequences above, never from input;
+      // REFRESH does not accept a bind parameter for its target.
+      await sessionDb.execute(
+        sql.raw(`refresh materialized view concurrently ${target.view}`),
+      );
+      durations[target.durationKey] = Date.now() - startedAt;
+      await sessionDb.execute(sql`
+        update report_refresh_log set refreshed_at = now() where view_name = ${target.view}
+      `);
+      outcomes.push({ view: target.view, ok: true, durationMs: durations[target.durationKey] });
+    } catch (err) {
+      // Reported, not swallowed: recorded below, logged here, alerted by the
+      // route. The loop continues so the remaining views still refresh.
+      durations[target.durationKey] = Date.now() - startedAt;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[${logTag}] ${target.view} FAILED after ${durations[target.durationKey]}ms:`,
+        err,
+      );
+      outcomes.push({
+        view: target.view,
+        ok: false,
+        durationMs: durations[target.durationKey],
+        error: message,
+      });
+    }
+  }
+  return { outcomes, durations };
+}
+
+// Rebuild the four main matviews (CONCURRENTLY -- non-blocking) and stamp the
 // refresh log. Called by the twice-daily cron. CONCURRENTLY must run outside a
 // transaction, so each statement is its own execute() call.
 //
@@ -320,10 +419,10 @@ const REFRESH_SEQUENCE = [
 //
 // ── EACH VIEW STAMPS ITS OWN SUCCESS ─────────────────────────────────────────
 // report_refresh_log is updated immediately after that view's OWN refresh
-// succeeds, and NOT at all when it fails. That is what makes the five
-// refreshed_at values independently meaningful: a view whose stamp is current
+// succeeds, and NOT at all when it fails. That is what makes every
+// refreshed_at value independently meaningful: a view whose stamp is current
 // really was rebuilt on the last run, and a view whose stamp is stale really
-// was not, regardless of what its neighbours did. Reading all five back is the
+// was not, regardless of what its neighbours did. Reading them all back is the
 // supported way to check a run.
 //
 // Runs on a dedicated session-mode connection (see ./refresh-session) so the
@@ -337,44 +436,43 @@ const REFRESH_SEQUENCE = [
 export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
   return withRefreshSession(async (sessionDb, connection) => {
     const t0 = Date.now();
-    const outcomes: RefreshOutcome[] = [];
-    const durations = { summaryMs: 0, groupMs: 0, totalsMs: 0, audienceTotalsMs: 0, lifecycleMs: 0 };
+    const { outcomes, durations } = await refreshSequence(
+      sessionDb,
+      REFRESH_SEQUENCE,
+      "refresh-offer-group-report",
+    );
+    return {
+      ...durations,
+      totalMs: Date.now() - t0,
+      outcomes,
+      failed: outcomes.filter((o) => !o.ok).map((o) => o.view),
+      connection,
+    };
+  });
+}
 
-    for (const target of REFRESH_SEQUENCE) {
-      const startedAt = Date.now();
-      try {
-        // View names come from the frozen REFRESH_SEQUENCE above, never from
-        // input; REFRESH does not accept a bind parameter for its target.
-        await sessionDb.execute(
-          sql.raw(`refresh materialized view concurrently ${target.view}`),
-        );
-        durations[target.durationKey] = Date.now() - startedAt;
-        await sessionDb.execute(sql`
-          update report_refresh_log set refreshed_at = now() where view_name = ${target.view}
-        `);
-        outcomes.push({
-          view: target.view,
-          ok: true,
-          durationMs: durations[target.durationKey],
-        });
-      } catch (err) {
-        // Reported, not swallowed: recorded below, logged here, alerted by the
-        // route. The loop continues so the remaining views still refresh.
-        durations[target.durationKey] = Date.now() - startedAt;
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[refresh-offer-group-report] ${target.view} FAILED after ${durations[target.durationKey]}ms:`,
-          err,
-        );
-        outcomes.push({
-          view: target.view,
-          ok: false,
-          durationMs: durations[target.durationKey],
-          error: message,
-        });
-      }
-    }
+export type LifecycleRefreshDurations = {
+  lifecycleMs: number;
+  exposureMs: number;
+  totalMs: number;
+  /** Both lifecycle views, in order, with per-view success and duration. */
+  outcomes: RefreshOutcome[];
+  failed: string[];
+  connection: RefreshConnection;
+};
 
+// The lifecycle run: offer_group_lifecycle_v2_mv (0226) and
+// offer_group_exposure_mv (0227), with the same session connection, per-view
+// isolation and stamping as the main run. Called by
+// /api/cron/refresh-offer-group-lifecycle.
+export async function refreshOfferGroupLifecycle(): Promise<LifecycleRefreshDurations> {
+  return withRefreshSession(async (sessionDb, connection) => {
+    const t0 = Date.now();
+    const { outcomes, durations } = await refreshSequence(
+      sessionDb,
+      LIFECYCLE_REFRESH_SEQUENCE,
+      "refresh-offer-group-lifecycle",
+    );
     return {
       ...durations,
       totalMs: Date.now() - t0,
@@ -428,5 +526,26 @@ export async function fillOfferGroupLifecycleV2(): Promise<LifecycleV2FillResult
       where view_name = 'offer_group_lifecycle_mv'
     `);
     return { v2Ms, oldMs, connection };
+  });
+}
+
+// ── ONE-OFF: the first fill of offer_group_exposure_mv (migration 0227) ──────
+//
+// Same reason and shape as fillOfferGroupLifecycleV2 above: 0227 creates the
+// view WITH NO DATA (its build reads contact_offer_campaigns, ~1 GB), so it is
+// filled once, attended, by scripts/fill-offer-group-exposure.ts — a PLAIN
+// REFRESH (CONCURRENTLY refuses an unpopulated view) on the report's session.
+// Nothing reads the view until the code that reads it deploys after the fill
+// verifies.
+export async function fillOfferGroupExposure(): Promise<{ ms: number; connection: RefreshConnection }> {
+  return withRefreshSession(async (sessionDb, connection) => {
+    const t0 = Date.now();
+    await sessionDb.execute(sql`refresh materialized view offer_group_exposure_mv`);
+    const ms = Date.now() - t0;
+    await sessionDb.execute(sql`
+      update report_refresh_log set refreshed_at = now()
+      where view_name = 'offer_group_exposure_mv'
+    `);
+    return { ms, connection };
   });
 }

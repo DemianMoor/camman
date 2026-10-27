@@ -49,10 +49,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // It also watches the twice-daily offer-report refresh. That job's own
     // failure path is sound, so the only thing left to catch is it not running
     // at all — and a watcher on a daily cadence notices a 26h breach promptly,
-    // where the weekly monitors would take up to a week.
+    // where the weekly monitors would take up to a week. Since 0227 the
+    // lifecycle matviews have their own run and heartbeat; it is watched here
+    // too, for the same reason.
     const heartbeats = await checkHeartbeats(db, [
       HEARTBEAT_JOBS.epcMonitors,
       HEARTBEAT_JOBS.offerReportRefresh,
+      HEARTBEAT_JOBS.offerLifecycleRefresh,
     ]);
     const stale = heartbeatBreaches(heartbeats);
     if (stale.length > 0) {

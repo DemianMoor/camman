@@ -143,6 +143,16 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     max_age_hours: 26, // twice-daily (05:00/20:00 UTC); worst normal age is 15h
     label: "offer-report matview refresh (twice daily)",
   },
+  // The Offer Group report's lifecycle matviews (0226 + 0227), in their own
+  // run 30 min after the one above since 0227. Same cadence, same watcher (the
+  // daily counted-clickers rebuild). The grace covers the deploy that adds it:
+  // the watcher may look before the first 05:30 / 20:30 run.
+  offerLifecycleRefresh: {
+    job_name: "offer-group-lifecycle-refresh",
+    max_age_hours: 26, // twice-daily (05:30/20:30 UTC); worst normal age is 15h
+    first_run_grace_hours: 30, // 2x the longest interval
+    label: "offer-report lifecycle matview refresh (twice daily)",
+  },
   countedClickersFull: {
     job_name: "counted-clickers-rebuild",
     max_age_hours: 52, // daily cadence, ~2 missed runs

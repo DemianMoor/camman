@@ -6,7 +6,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { derive } from "@/components/reports/report-metrics";
 import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { addEtDays, etDayBounds } from "@/lib/reporting/delivery-rollup";
-import { salesPctOfReached } from "@/lib/reporting/landing-page-metrics";
+import { ctrOfVisitors, salesPctOfReached } from "@/lib/reporting/landing-page-metrics";
 import { getLandingPageReport, type LandingPageReport } from "@/lib/reporting/landing-page-report";
 import { dripCostByStageInRange, getStageMetricsInRange } from "@/lib/reporting/stage-funnel";
 import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
@@ -32,6 +32,7 @@ import { withReadOnlyDb } from "./_readonly-db";
 //       offer is picked so this is exercised, and an unexercised check fails.
 //   (12) Upsell adds revenue, never a sale (purchasedClause).
 //   (d) Scope is printed first; an empty scope fails.
+//   (e) CTR is people ÷ people: redirected visitors ⊆ covered visitors ⊆ visitors.
 //
 //   npx tsx --conditions=react-server scripts/verify-lp-report-grains.ts
 // =============================================================================
@@ -207,17 +208,25 @@ async function main() {
       for (const m of [...r.rows, r.total]) {
         const d = derive({ sends: m.sends, revenue: m.revenue, sales: m.sales, clicks: m.clicks, cost: m.cost, optouts: m.optouts });
         const sp = salesPctOfReached(m);
+        const vctr = ctrOfVisitors(m);
         const expectNull = {
           rpm: m.sends === 0, net_rpm: m.sends === 0, ctr: m.sends === 0, oo_pct: m.sends === 0,
           epc: m.clicks === 0, sp: m.reach_covered_stages === 0 || m.reached === 0,
+          vctr: m.reach_covered_stages === 0 || m.reach_clicks === 0,
         };
-        const got = { rpm: d.rpm, net_rpm: d.net_rpm, ctr: d.ctr, oo_pct: d.oo_pct, epc: d.epc, sp };
+        const got = { rpm: d.rpm, net_rpm: d.net_rpm, ctr: d.ctr, oo_pct: d.oo_pct, epc: d.epc, sp, vctr };
         for (const k of Object.keys(expectNull) as (keyof typeof expectNull)[]) {
           if (expectNull[k]) { nullCells++; if (got[k] !== null) bad++; }
           else if (got[k] === null) bad++;
         }
       }
       assert(bad === 0, `(c) ${nullCells} no-denominator cell(s) are null (render —), and no computable cell is null`);
+
+      // ---- (e) CTR is people ÷ people: redirected visitors ⊆ covered visitors ⊆ visitors
+      const ctrBad = [...r.rows, r.total].filter(
+        (m) => !(m.redirected_visitors <= m.reach_clicks && m.reach_clicks <= m.clicks && m.redirected_visitors <= m.reached),
+      );
+      assert(ctrBad.length === 0, `(e) CTR inputs nest (redirected ≤ covered visitors ≤ visitors, redirected ≤ redirects) on all ${r.rows.length + 1} rows`);
     }
 
     // ---- (c) the fallback must actually be exercised somewhere

@@ -10,8 +10,10 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { writeUploadAttributes } from "@/lib/contact-attributes-write";
 import { can } from "@/lib/permissions";
 import { validatePhonesBatch } from "@/lib/phone-validation";
+import { uploadAttributesSchema } from "@/lib/validators/contacts";
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
 const INVALID_SAMPLE_LIMIT = 20;
@@ -22,6 +24,7 @@ const bodySchema = z.object({
     .string()
     .min(1, "Phones field is required")
     .max(MAX_PAYLOAD_BYTES, "Payload too large (max ~5MB)"),
+  attributes: uploadAttributesSchema.optional(),
 });
 
 function parseId(idParam: string) {
@@ -150,6 +153,11 @@ export async function POST(
     }
   }
 
+  // Attribute columns, fill-empty only — same write as the contacts upload.
+  const attrs = parsed.data.attributes
+    ? await writeUploadAttributes(db, orgId, parsed.data.attributes)
+    : null;
+
   return NextResponse.json(
     {
       submitted: rawLines.length,
@@ -162,7 +170,14 @@ export async function POST(
       // mirror the field so the shared form keeps working without bespoke
       // result-mapping per endpoint.
       inserted: contactsCreated,
+      // The shared result screen renders these two unconditionally; without
+      // them it crashed (undefined.toLocaleString) after every successful add.
+      duplicates_in_db: contactsAlreadyExisted,
+      duplicates_in_input: valid.length - dedupedValid.length,
       invalid_samples: invalid.slice(0, INVALID_SAMPLE_LIMIT),
+      ...(attrs
+        ? { attributes_written: attrs.written, attribute_values_ignored: attrs.values_ignored }
+        : {}),
     },
     { status: 201 },
   );

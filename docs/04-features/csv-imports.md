@@ -1,6 +1,6 @@
 # Feature — CSV Result Imports & Phone Uploads
 
-_Last updated: 2026-07-21_
+_Last updated: 2026-10-26 (phone uploads import contact_attributes columns, fill-empty only)_
 
 ## 1. Purpose
 After a manual send, the provider exports a results CSV. This module imports it, derives a per-row **outcome**, propagates opt-outs and clickers into the suppression/engagement tables, and updates the stage's result counters — all transactionally and **revertibly**. A separate, simpler path handles bulk phone uploads.
@@ -66,6 +66,30 @@ Within one CSV, per-phone duplicates collapse to the highest-priority outcome. P
 ### Phone uploads (separate path)
 Four entry points — contacts / opt-outs / opt-ins / clickers — share `processAudienceUpload()`: dedupe by E.164, upsert `contacts`, insert entity rows, apply `assign_to_group_ids` (idempotent). See [contacts-and-groups.md](contacts-and-groups.md).
 
+#### Attribute columns on a phone upload (2026-10-26)
+**Contacts → Upload contacts** (`/api/contacts/upload`) and **Contact group → Add contacts**
+(`/api/contact-groups/[id]/contacts/add`) read CSV columns besides the phone. `PhoneUploadForm`
+with `captureAttributes` matches each header to a `contact_attributes` field with
+`guessAttributeField` (the same guess the Import attributes dialog uses) and lists the columns it
+**recognized** and the ones it **ignored**, so no column is dropped without the popup saying so.
+`city` and other unknown headers are ignored, because there is no column for them. A file whose header row
+has no phone column is read as column 1 only, and the popup says so.
+
+- **Wire shape:** `attributes: { fields: AttributeField[], rows: [phone, ...values][] }` alongside
+  `phones` (`uploadAttributesSchema`, [lib/validators/contacts.ts](../../lib/validators/contacts.ts)).
+  Absent ⇒ the request is byte-identical to a phone-only upload and the route skips the write.
+- **Write:** `writeUploadAttributes` ([lib/contact-attributes-write.ts](../../lib/contact-attributes-write.ts)),
+  called after the contacts are upserted. Same normalization as the import (`normalizeAttributeValue`,
+  incl. the ZIP leading-zero restore). **Fill-empty only:** a stored non-empty value is never
+  overwritten, and an empty cell never blanks one. A contact with nothing left to fill is not touched. `source` = `contact_upload`
+  on new rows; an existing row keeps its source.
+- **Result:** `attributes_written` (contacts that gained ≥1 field) and `attribute_values_ignored`
+  (non-empty cells that normalized to nothing, e.g. an unreadable DOB).
+- The Import attributes dialog shares the same upsert (`upsertContactAttributes`, `mode: "overwrite"`)
+  and keeps its semantics: a non-empty CSV value replaces the stored value, and it never creates contacts.
+- Uploaded first name / ZIP / state feed the personalization tags at materialization
+  (`loadRecipientAttributes` reads `contact_attributes`). Test: `scripts/test-upload-attributes.ts`.
+
 #### Opt-out import with campaign/stage attribution (timestamped)
 The **Add Opt-Outs** dialog accepts a CSV that pairs each number with the time it
 replied STOP (a `received` / `received_at` / `time` column auto-detected next to
@@ -96,7 +120,7 @@ the opt-out is created for suppression only (`unattributed`).
   append-only suppression with no attribution.
 
 ## 4. Data it reads/writes
-- Writes `stage_results_imports`, `stage_result_rows`, `opt_outs`(+`opt_out_brands`), `clickers`, `contacts`, `campaign_stages` counters.
+- Writes `stage_results_imports`, `stage_result_rows`, `opt_outs`(+`opt_out_brands`), `clickers`, `contacts`, `campaign_stages` counters; phone uploads with attribute columns also write `contact_attributes` (fill-empty).
 - Reads `result_import_mappings`, the stage/campaign, existing opt-outs/clickers (for dedup).
 
 ## 5. UI surface

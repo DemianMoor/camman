@@ -30,6 +30,7 @@ import { can } from "@/lib/permissions";
 import { generateCampaignTrackingId } from "@/lib/tracking-id";
 import {
   OFFER_COOLDOWN_DAYS_DEFAULT,
+  OFFER_LIMIT_TIMES_DEFAULT,
   campaignCreateSchema,
   nullIfEmpty,
 } from "@/lib/validators/campaigns";
@@ -348,7 +349,7 @@ export async function POST(req: NextRequest) {
             // here opts a new one into the new semantics.
             offer_rules_enabled: true,
             offer_cooldown_days: input.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
-            offer_limit_times: input.offer_limit_times ?? 5,
+            offer_limit_times: input.offer_limit_times ?? OFFER_LIMIT_TIMES_DEFAULT,
           })
           .returning();
 
@@ -446,7 +447,7 @@ export async function POST(req: NextRequest) {
               lifecycleRules,
               offerRulesEnabled: true,
               offerCooldownDays: input.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
-              offerLimitTimes: input.offer_limit_times ?? 5,
+              offerLimitTimes: input.offer_limit_times ?? OFFER_LIMIT_TIMES_DEFAULT,
               segmentIds,
               excludeSegmentIds,
               contactGroupIds,

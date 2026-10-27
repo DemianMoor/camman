@@ -18,11 +18,17 @@ import "./_env-preload";
 // Fix when it fires: give the skipped migration the next free number and a
 // `when` above the newest applied (owner rule 2026-10-26, docs/07-conventions.md).
 //
+// Also refuses when a PENDING migration file contains a carriage return:
+// Drizzle would record the CRLF hash, which no git checkout (LF, .gitattributes)
+// can reproduce — how 0204/0208 drifted on prod (scripts/_migration-hash.ts).
+// Fix: convert the file to LF and re-run.
+//
 // Run: npx tsx scripts/check-migration-skip.ts
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+import { hasCarriageReturn } from "./_migration-hash";
 import { ACCEPTED_DRIFT, projectRefOf, skipReport, type AppliedRow, type JournalEntry } from "./_migration-skip";
 import { withReadOnlyDb } from "./_readonly-db";
 
@@ -34,7 +40,8 @@ async function main() {
     async (tx) =>
       (await tx`SELECT created_at::bigint AS created_at, hash FROM drizzle.__drizzle_migrations`) as unknown as AppliedRow[],
   );
-  const hashOf = (tag: string) => createHash("sha256").update(readFileSync(`${DIR}/${tag}.sql`).toString()).digest("hex");
+  const sqlOf = (tag: string) => readFileSync(`${DIR}/${tag}.sql`).toString();
+  const hashOf = (tag: string) => createHash("sha256").update(sqlOf(tag)).digest("hex");
   const ref = projectRefOf(process.env.DATABASE_URL ?? "");
   const accepted = ACCEPTED_DRIFT[ref ?? ""] ?? {};
   const r = skipReport(journal, applied, hashOf, new Set(Object.keys(accepted)));
@@ -48,6 +55,14 @@ async function main() {
       `[migration-skip] REFUSING: ${r.skipped.map((e) => `${e.tag} (when ${e.when})`).join(", ")} ` +
         `is not applied and is not newer than the newest applied migration (${r.newestApplied}). ` +
         `Drizzle would skip it silently. Renumber it and set its journal \`when\` above ${r.newestApplied}.`,
+    );
+    process.exit(1);
+  }
+  const crlf = r.pending.filter((e) => hasCarriageReturn(sqlOf(e.tag)));
+  if (crlf.length > 0) {
+    console.error(
+      `[migration-skip] REFUSING: ${crlf.map((e) => e.tag).join(", ")} has CRLF line endings. ` +
+        `Drizzle would record a hash no LF checkout reproduces. Convert the file to LF and re-run.`,
     );
     process.exit(1);
   }

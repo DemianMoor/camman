@@ -1548,6 +1548,13 @@
       "when": 1795824000000,
       "tag": "0222_contact_group_mobile_only_default",
       "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
+      "when": 1796169600000,
+      "tag": "0226_offer_group_lifecycle_v2",
+      "breakpoints": true
     }
   ]
 }

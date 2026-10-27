@@ -64,14 +64,19 @@ export type OfferTotals = RawMetrics & {
   attributable_pending_revenue: number;
 };
 
-// Lifecycle-cohort columns for one group row (migrations 0214/0215,
-// offer_group_lifecycle_mv). Cohort = the contact's CURRENT lifecycle status:
-// hw = hot + warm. Sent = messages (same scope as sent_7d/30d/90d); fresh = contacts
-// (0133 definition). new/suppressed are in no cohort.
+// Lifecycle-cohort columns for one group row (migration 0226,
+// offer_group_lifecycle_v2_mv; 0214/0215's offer_group_lifecycle_mv merged hot +
+// warm into one "hw" cohort and is no longer read). Cohort = the contact's
+// CURRENT lifecycle status; Hot and Warm are SEPARATE cohorts (owner,
+// 2026-10-23). Sent = messages (same scope as sent_7d/30d/90d); fresh =
+// contacts (0133 definition). new/suppressed are in no cohort.
 export type GroupLifecycleRow = {
-  hw_sent_14d: number;
-  hw_sent_30d: number;
-  hw_fresh_pool: number;
+  hot_sent_14d: number;
+  hot_sent_30d: number;
+  hot_fresh_pool: number;
+  warm_sent_14d: number;
+  warm_sent_30d: number;
+  warm_fresh_pool: number;
   cold_sent_14d: number;
   cold_sent_30d: number;
   cold_fresh_pool: number;
@@ -81,7 +86,8 @@ export type GroupLifecycleRow = {
 };
 
 export const LIFECYCLE_COLUMNS = [
-  "hw_sent_14d", "hw_sent_30d", "hw_fresh_pool",
+  "hot_sent_14d", "hot_sent_30d", "hot_fresh_pool",
+  "warm_sent_14d", "warm_sent_30d", "warm_fresh_pool",
   "cold_sent_14d", "cold_sent_30d", "cold_fresh_pool",
   "freeze_sent_14d", "freeze_sent_30d", "freeze_fresh_pool",
 ] as const satisfies ReadonlyArray<keyof GroupLifecycleRow>;
@@ -179,12 +185,12 @@ export async function getOfferGroupLifecycle(
 ): Promise<{ rows: Record<number, GroupLifecycleRow>; refreshedAt: string | null }> {
   const rows = (await db.execute(sql`
     select group_id, ${sql.raw(LIFECYCLE_COLUMNS.join(", "))}
-    from offer_group_lifecycle_mv
+    from offer_group_lifecycle_v2_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
   const logRows = (await db.execute(sql`
     select refreshed_at from report_refresh_log
-    where view_name = 'offer_group_lifecycle_mv'
+    where view_name = 'offer_group_lifecycle_v2_mv'
   `)) as unknown as { refreshed_at: string | null }[];
 
   const out: Record<number, GroupLifecycleRow> = {};
@@ -278,8 +284,10 @@ export type RefreshDurations = {
 //     FAILS, this one still runs and sums the previous group snapshot — stale,
 //     but internally consistent and visibly stale via its own log stamp, which
 //     beats freezing it too.
-//   * offer_group_lifecycle_mv (0214) depends on no other matview; it goes
-//     LAST so the four older reports are never queued behind it.
+//   * offer_group_lifecycle_v2_mv (0226; replaced 0214/0215's
+//     offer_group_lifecycle_mv, which is no longer refreshed or read and is
+//     dropped by its own later migration) depends on no other matview; it
+//     goes LAST so the four older reports are never queued behind it.
 //   * The two 0093 matviews lead, so a code-before-migration deploy (CLAUDE.md
 //     §14) breaks on the newer views rather than the older ones.
 const REFRESH_SEQUENCE = [
@@ -287,7 +295,7 @@ const REFRESH_SEQUENCE = [
   { view: "offer_group_report_mv", durationKey: "groupMs" },
   { view: "offer_report_offer_totals_mv", durationKey: "totalsMs" },
   { view: "audience_report_group_totals_mv", durationKey: "audienceTotalsMs" },
-  { view: "offer_group_lifecycle_mv", durationKey: "lifecycleMs" },
+  { view: "offer_group_lifecycle_v2_mv", durationKey: "lifecycleMs" },
 ] as const satisfies ReadonlyArray<{
   view: string;
   durationKey: "summaryMs" | "groupMs" | "totalsMs" | "audienceTotalsMs" | "lifecycleMs";
@@ -374,5 +382,51 @@ export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
       failed: outcomes.filter((o) => !o.ok).map((o) => o.view),
       connection,
     };
+  });
+}
+
+// ── ONE-OFF: the first fill of offer_group_lifecycle_v2_mv (migration 0226) ──
+//
+// 0226 creates the view WITH NO DATA, because building it (~150 s) does not fit
+// prod's 120 s server-wide statement_timeout inside db:migrate. This fills it on
+// the same session-mode connection the twice-daily refresh uses (180 s
+// statement_timeout, raised work_mem), so it lives in this module — the one
+// caller refresh-session.ts allows. Called only by
+// scripts/fill-offer-group-lifecycle-v2.ts, attended, in the quiet window.
+//
+// ⚠️ A PLAIN REFRESH, NOT CONCURRENTLY: CONCURRENTLY refuses a matview that has
+// never been populated. The plain form takes an ACCESS EXCLUSIVE lock on v2
+// only — nothing reads v2 until the code that reads it is deployed, which
+// happens after this fill verifies.
+//
+// ⚠️ THE OLD VIEW IS REFRESHED STRAIGHT AFTER (CONCURRENTLY, non-blocking — its
+// normal refresh), so the verification compares two snapshots minutes apart,
+// not hours. Any drift between them is sends that landed in between, and the
+// verify script reports it rather than hiding it.
+export type LifecycleV2FillResult = {
+  v2Ms: number;
+  oldMs: number;
+  connection: RefreshConnection;
+};
+
+export async function fillOfferGroupLifecycleV2(): Promise<LifecycleV2FillResult> {
+  return withRefreshSession(async (sessionDb, connection) => {
+    const t0 = Date.now();
+    await sessionDb.execute(sql`refresh materialized view offer_group_lifecycle_v2_mv`);
+    const v2Ms = Date.now() - t0;
+    await sessionDb.execute(sql`
+      update report_refresh_log set refreshed_at = now()
+      where view_name = 'offer_group_lifecycle_v2_mv'
+    `);
+    const t1 = Date.now();
+    await sessionDb.execute(
+      sql`refresh materialized view concurrently offer_group_lifecycle_mv`,
+    );
+    const oldMs = Date.now() - t1;
+    await sessionDb.execute(sql`
+      update report_refresh_log set refreshed_at = now()
+      where view_name = 'offer_group_lifecycle_mv'
+    `);
+    return { v2Ms, oldMs, connection };
   });
 }

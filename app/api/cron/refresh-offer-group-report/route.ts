@@ -67,7 +67,8 @@ export const dynamic = "force-dynamic";
 // per-statement timeout, not the 300s ceiling.
 //
 // 300s remains the right Vercel budget: it is ~2x the ~145s the four views
-// cost today (0214 adds a fifth, offer_group_lifecycle_mv, refreshed last; its
+// cost today (0214 added a fifth lifecycle view, refreshed last — since 0226
+// offer_group_lifecycle_v2_mv, Hot and Warm separate; its
 // measured cost is in docs/04-features/offer-group-report.md), and it is ABOVE the 180s per-statement timeout so the database
 // cancels a runaway refresh first. That ordering is deliberate — a 57014
 // throws and this route alerts on it, whereas a Vercel timeout kills the

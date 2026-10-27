@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-10-27 — Migration numbering guard: APPLIED_BEFORE_MERGE lets 0225 (applied to prod before #403 merged, after which 0226 merged) pass rule (b) on its exact `when`; 0226 snapshot re-chained after 0225 — docs/07-conventions.md
 2026-10-27 — Migration hashes vs line endings: verify-migration-integrity accepts a recorded hash matching either the LF or CRLF form of the file (prod 0204/0208 were applied from CRLF working copies on 10-12 and failed every run since); check-migration-skip refuses a pending migration file containing CR; .gitattributes comment corrected — docs/07-conventions.md
 2026-10-27 — **Rule: no prod migration or backfill from a scheduled/automated run** (owner). Attended = the owner typed "go now" in the session within 30 minutes; a timed trigger is not attendance; a scheduled run that reaches a prod migration/backfill step stops and reports. Prompted by 0225 being applied by a session cron at 09:32 UTC — CLAUDE.md §14
 

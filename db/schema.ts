@@ -4007,8 +4007,10 @@ export type LookupSettings = typeof lookup_settings.$inferSelect;
 export type NewLookupSettings = typeof lookup_settings.$inferInsert;
 
 // Migration 0106: per-org cache for the Lookup Stats Panel. One row per org; `data`
-// holds the whole { summary, groups[] } blob written atomically. Refreshed on a
-// TTL / manual "Refresh now"; a failed recompute leaves the prior row intact.
+// holds the whole { summary, groups[] } blob written atomically. Refreshed ONLY by
+// the manager's "Refresh now" (or the first-ever load with no row) — there is no
+// scheduled refresh; the 15-min TTL only flags the row "may be stale" in the UI.
+// A failed recompute leaves the prior row intact.
 export const lookup_group_stats_cache = pgTable("lookup_group_stats_cache", {
   org_id: uuid("org_id")
     .primaryKey()

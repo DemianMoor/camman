@@ -228,3 +228,79 @@ export function normalizeAttributeValue(
     }
   }
 }
+
+/**
+ * Best-effort header → attribute field guess. ONE copy, shared by the Import
+ * attributes mapping picker and the phone-upload CSV path, so a column the
+ * mapping dialog recognizes is recognized on upload too. Phone headers are NOT
+ * guessed here — each caller keeps its own phone detection.
+ */
+export function guessAttributeField(header: string): AttributeField | null {
+  const k = header.trim().toLowerCase().replace(/[^a-z]/g, "");
+  if (!k) return null;
+  const f = ATTRIBUTE_FIELDS.find(
+    (a) => a.field.replace(/_/g, "") === k || a.label.toLowerCase().replace(/[^a-z]/g, "") === k,
+  );
+  return f ? f.field : null;
+}
+
+/**
+ * Attribute columns carried by a phone-upload CSV, in the compact shape the
+ * upload routes accept: `fields` names the columns, each row is
+ * `[phone, ...values in fields order]`. Compact on purpose — the request body
+ * shares the phone list's size ceiling.
+ */
+export interface UploadAttributes {
+  fields: AttributeField[];
+  rows: (string | null)[][];
+}
+
+export interface CsvAttributeScan {
+  /** null ⇒ nothing to write; the upload body stays the phone-only shape. */
+  attributes: UploadAttributes | null;
+  recognized: { column: string; field: AttributeField }[];
+  /** Header columns that are neither the phone nor a known attribute. */
+  ignored: string[];
+}
+
+/**
+ * Split a parsed CSV (header row + data rows) into recognized attribute
+ * columns and ignored ones. `phoneIdx` is the column the uploader already
+ * chose for the phone. The first column wins when two headers guess the same
+ * field, and the later one is reported as ignored, never silently merged.
+ */
+export function scanCsvAttributes(
+  header: string[],
+  dataRows: string[][],
+  phoneIdx: number,
+): CsvAttributeScan {
+  const recognized: { column: string; field: AttributeField; idx: number }[] = [];
+  const ignored: string[] = [];
+  header.forEach((raw, idx) => {
+    const column = String(raw ?? "").trim();
+    if (idx === phoneIdx || column === "") return;
+    const field = guessAttributeField(column);
+    if (field && !recognized.some((r) => r.field === field)) recognized.push({ column, field, idx });
+    else ignored.push(column);
+  });
+
+  const rows: (string | null)[][] = [];
+  for (const r of dataRows) {
+    const phone = (r[phoneIdx] ?? "").trim();
+    if (!phone) continue;
+    const values = recognized.map(({ idx }) => {
+      const v = (r[idx] ?? "").trim();
+      return v.length > 0 ? v : null;
+    });
+    if (values.some((v) => v !== null)) rows.push([phone, ...values]);
+  }
+
+  return {
+    attributes:
+      recognized.length > 0 && rows.length > 0
+        ? { fields: recognized.map((r) => r.field), rows }
+        : null,
+    recognized: recognized.map(({ column, field }) => ({ column, field })),
+    ignored,
+  };
+}

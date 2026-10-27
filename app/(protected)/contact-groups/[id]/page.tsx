@@ -698,6 +698,7 @@ export default function ContactGroupDetailPage() {
               submitLabel="Add to group"
               successLabel="Contacts added to group"
               enableLookup
+              captureAttributes
             />
           </TabsContent>
         ) : null}

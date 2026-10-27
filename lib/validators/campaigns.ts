@@ -6,6 +6,15 @@ import { z } from "zod";
 // is NOT NULL, so no fallback ever applies to a stored row).
 export const OFFER_COOLDOWN_DAYS_DEFAULT = 14;
 
+// "Not more than [N] times" (offer limit: N or more OTHER campaigns of this
+// offer blocks the contact) for a NEW campaign — 2 since 2026-10-27 (owner;
+// was 5, ClickUp 1amdve28n15). Every fallback for offer_limit_times in the
+// create API and the form reads this. Stored campaigns keep their own value
+// (NOT NULL, so no fallback applies to a stored row), and a duplicate copies
+// its source's value. The column's DB default (5, migration 0191) is never
+// reached: both insert paths set the value explicitly.
+export const OFFER_LIMIT_TIMES_DEFAULT = 2;
+
 export { nullIfEmpty } from "./_helpers";
 
 export const CAMPAIGN_STATUSES = [

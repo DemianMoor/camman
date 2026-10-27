@@ -61,6 +61,10 @@ export interface LandingPageRow {
   reached: number;
   reach_sales: number;
   reach_covered_stages: number;
+  /** CTR denominator: counted clickers (deduplicated like `clicks`) on the Keitaro-covered tracked stages only. */
+  reach_clicks: number;
+  /** CTR numerator: of `reach_clicks`, those who also reached the offer page on a send in this row. */
+  redirected_visitors: number;
   stages: { regular: number; drip: number; manual: number; gap: number };
   /** Stages in this row with total_cost = 0 and at least one send in range. */
   zero_cost_stages_with_sends: number;
@@ -122,7 +126,7 @@ type StageRow = {
 function emptyRow(): Omit<LandingPageRow, "key" | "kind" | "value" | "title" | "in_registry" | "brand_id" | "brand_name"> {
   return {
     sends: 0, cost: 0, revenue: 0, sales: 0, clicks: 0, manual_visits: 0, optouts: 0,
-    reached: 0, reach_sales: 0, reach_covered_stages: 0,
+    reached: 0, reach_sales: 0, reach_covered_stages: 0, reach_clicks: 0, redirected_visitors: 0,
     stages: { regular: 0, drip: 0, manual: 0, gap: 0 },
     zero_cost_stages_with_sends: 0,
     sources: { stage_ids: [], drip: [] },
@@ -223,7 +227,7 @@ export async function getLandingPageReport(args: {
     s.link_mode === "tracked" && stageIsMatureForGap(s.sent_at, now) && hasNoKeitaroVisits(s.visits_raw, s.visits_clean);
 
   const none = Promise.resolve([] as never[]);
-  const [regularSent, manualSales, regOptOuts, regLedger, regReached, regClickers, dripSends, dripClickers, dripCost, unattributed] =
+  const [regularSent, manualSales, regOptOuts, regLedger, regReached, regClickers, dripSends, dripClickers, dripReached, dripCost, unattributed] =
     await Promise.all([
       sentCountsByStage(db, { orgId, stageIds: trackedRegularIds, fromEtDay: from, toEtDay: to, toExclusiveUtc }, now),
       lifetimeManualSalesByStage({ orgId, stageIds: cohortIds }),
@@ -247,11 +251,10 @@ export async function getLandingPageReport(args: {
       // instead of walking every send of the offer.
       cohortIds.length
         ? (db.execute(sql`
-            SELECT stage_id, count(*)::int AS n FROM stage_sends
+            SELECT stage_id, contact_id FROM stage_sends
             WHERE offer_reached_at IS NOT NULL AND offer_reached_at >= ${fromUtc.toISOString()}::timestamptz
               AND org_id = ${orgId}::uuid AND status = 'sent' AND stage_id = ANY(${idArray(cohortIds)})
-            GROUP BY 1
-          `) as unknown as Promise<{ stage_id: number; n: number }[]>)
+          `) as unknown as Promise<{ stage_id: number; contact_id: string }[]>)
         : none,
       cohortIds.length
         ? (db.execute(sql`
@@ -271,6 +274,17 @@ export async function getLandingPageReport(args: {
               AND ss.sent_at >= ${fromUtc.toISOString()}::timestamptz AND ss.sent_at < ${toExclusiveUtc.toISOString()}::timestamptz
           `) as unknown as Promise<{ stage_id: number; url: string | null; contact_id: string }[]>)
         : none,
+      dripIds.length
+        ? (db.execute(sql`
+            SELECT DISTINCT ss.stage_id, d.url, ss.contact_id
+            FROM stage_sends ss
+            LEFT JOIN links l ON l.id = ss.link_id
+            LEFT JOIN link_destinations d ON d.id = l.destination_id
+            WHERE ss.org_id = ${orgId}::uuid AND ss.stage_id = ANY(${idArray(dripIds)}) AND ss.status = 'sent'
+              AND ss.offer_reached_at IS NOT NULL
+              AND ss.sent_at >= ${fromUtc.toISOString()}::timestamptz AND ss.sent_at < ${toExclusiveUtc.toISOString()}::timestamptz
+          `) as unknown as Promise<{ stage_id: number; url: string | null; contact_id: string }[]>)
+        : none,
       dripIds.length ? dripCostByStageInRange(orgId, fromUtc, toExclusiveUtc, { includeArchived: true }) : Promise.resolve(new Map<number, number>()),
       dripIds.length
         ? (db.execute(sql`
@@ -284,6 +298,9 @@ export async function getLandingPageReport(args: {
   const rowsByKey = new Map<string, LandingPageRow>();
   const clickSets = new Map<string, Set<string>>();
   const allClickers = new Set<string>();
+  // The same clickers, restricted to reach-covered stages — CTR's denominator.
+  const reachClickSets = new Map<string, Set<string>>();
+  const allReachClickers = new Set<string>();
 
   function rowFor(key: LpKey | null, brandId: number | null, brandName: string | null): LandingPageRow {
     const k: LpKey = key ?? { kind: "host", value: "(no destination)" };
@@ -300,6 +317,7 @@ export async function getLandingPageReport(args: {
       };
       rowsByKey.set(id, r);
       clickSets.set(id, new Set());
+      reachClickSets.set(id, new Set());
     }
     return r;
   }
@@ -307,8 +325,20 @@ export async function getLandingPageReport(args: {
   // ---- regular pass (stage grain) ----
   const optOutBy = new Map(regOptOuts.map((r) => [Number(r.stage_id), Number(r.n)]));
   const ledgerBy = new Map(regLedger.map((r) => [Number(r.stage_id), r]));
-  const reachedBy = new Map(regReached.map((r) => [Number(r.stage_id), Number(r.n)]));
+  const reachedBy = new Map<number, number>();
+  for (const r of regReached) reachedBy.set(Number(r.stage_id), (reachedBy.get(Number(r.stage_id)) ?? 0) + 1);
+  // Contacts who reached the offer page, per row — intersected with the row's
+  // visitors for CTR's numerator, so CTR is people ÷ people and never > 100%.
+  const reachedSets = new Map<string, Set<string>>();
+  const allReached = new Set<string>();
+  const markReached = (key: string, contactId: string) => {
+    const set = reachedSets.get(key) ?? new Set<string>();
+    set.add(contactId);
+    reachedSets.set(key, set);
+    allReached.add(contactId);
+  };
   const stageKey = new Map<number, string>();
+  const reachCovered = new Set<number>();
   const subtotals = {
     regular: { sends: 0, cost: 0, sales: 0, revenue: 0 },
     drip: { sends: 0, cost: 0, sales: 0, revenue: 0 },
@@ -342,6 +372,7 @@ export async function getLandingPageReport(args: {
       r.manual_visits += s.visits_clean;
     } else if (!gap) {
       r.reach_covered_stages += 1;
+      reachCovered.add(s.stage_id);
       r.reached += reachedBy.get(s.stage_id) ?? 0;
       r.reach_sales += sales;
     }
@@ -354,6 +385,14 @@ export async function getLandingPageReport(args: {
     if (!k) continue;
     clickSets.get(k)!.add(c.contact_id);
     allClickers.add(c.contact_id);
+    if (reachCovered.has(Number(c.stage_id))) {
+      reachClickSets.get(k)!.add(c.contact_id);
+      allReachClickers.add(c.contact_id);
+    }
+  }
+  for (const c of regReached) {
+    const k = stageKey.get(Number(c.stage_id));
+    if (k && reachCovered.has(Number(c.stage_id))) markReached(k, c.contact_id);
   }
 
   // ---- drip pass (per send) ----
@@ -411,10 +450,28 @@ export async function getLandingPageReport(args: {
     const r = rowFor(lpKeyFromUrl(c.url, paths) ?? cfgKey(s), s.brand_id, s.brand_name);
     clickSets.get(r.key)!.add(c.contact_id);
     allClickers.add(c.contact_id);
+    if (!isGap(s)) {
+      reachClickSets.get(r.key)!.add(c.contact_id);
+      allReachClickers.add(c.contact_id);
+    }
   }
+  for (const c of dripReached) {
+    const s = dripById.get(Number(c.stage_id))!;
+    if (isGap(s)) continue;
+    markReached(rowFor(lpKeyFromUrl(c.url, paths) ?? cfgKey(s), s.brand_id, s.brand_name).key, c.contact_id);
+  }
+  const countIn = (a: Set<string>, b: Set<string> | undefined) => {
+    let n = 0;
+    if (b) for (const x of a) if (b.has(x)) n++;
+    return n;
+  };
 
   const rows = [...rowsByKey.values()];
-  for (const r of rows) r.clicks = clickSets.get(r.key)!.size + r.manual_visits;
+  for (const r of rows) {
+    r.clicks = clickSets.get(r.key)!.size + r.manual_visits;
+    r.reach_clicks = reachClickSets.get(r.key)!.size;
+    r.redirected_visitors = countIn(reachClickSets.get(r.key)!, reachedSets.get(r.key));
+  }
   rows.sort((a, b) => b.sends - a.sends || a.key.localeCompare(b.key));
 
   const sum = (f: (r: LandingPageRow) => number) => rows.reduce((n, r) => n + f(r), 0);
@@ -431,6 +488,9 @@ export async function getLandingPageReport(args: {
     reached: sum((r) => r.reached),
     reach_sales: sum((r) => r.reach_sales),
     reach_covered_stages: sum((r) => r.reach_covered_stages),
+    // Offer-distinct, like clicks.
+    reach_clicks: allReachClickers.size,
+    redirected_visitors: countIn(allReachClickers, allReached),
     stages: {
       regular: sum((r) => r.stages.regular),
       drip: dripRowsTouched.size,

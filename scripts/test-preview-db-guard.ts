@@ -344,6 +344,10 @@ const EXCLUSIONS: ReadonlyArray<{
 
   // ── read-only: matched the scan, issue no write ────────────────────────────
   {
+    file: "check-migration-skip.ts",
+    why: "read-only apply-time preflight run by `npm run db:migrate` against prod and preview alike, so it cannot import _require-preview-db; one SELECT inside withReadOnlyDb's BEGIN READ ONLY (the createHash(...).update( token is the match)",
+  },
+  {
     file: "perf-baseline.ts",
     why: "read-only: EXPLAIN ANALYZE over SELECTs (the .unsafe( token is the match)",
   },

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { ATTRIBUTE_FIELD_KEYS, type UploadAttributes } from "@/lib/contact-attributes";
+
 export { nullIfEmpty } from "./_helpers";
 
 // Contacts: phone-only entity in 6.1. Single-record creation is not supported;
@@ -20,6 +22,24 @@ export const contactUpdateSchema = z
 // Server-side defense; client-side enforces the same limit.
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
 
+// Optional attribute columns on a phone upload (contacts upload + contact group
+// "Add contacts"). Compact shape: `fields` names the columns, each row is
+// `[phone, ...values in fields order]` (see scanCsvAttributes). Absent ⇒ the
+// upload is phone-only, exactly as before. Written fill-empty-only.
+const MAX_ATTRIBUTE_ROWS = 200_000;
+
+export const uploadAttributesSchema = z
+  .object({
+    fields: z
+      .array(z.string().refine((f) => (ATTRIBUTE_FIELD_KEYS as readonly string[]).includes(f), "Unknown attribute field"))
+      .min(1)
+      .max(ATTRIBUTE_FIELD_KEYS.length)
+      .refine((fs) => new Set(fs).size === fs.length, "Duplicate attribute field"),
+    rows: z.array(z.array(z.string().max(500).nullable())).max(MAX_ATTRIBUTE_ROWS),
+  })
+  .refine((a) => a.rows.every((r) => r.length === a.fields.length + 1), "Each attribute row must be [phone, ...fields]")
+  .transform((a) => a as UploadAttributes);
+
 export const contactBulkUploadSchema = z.object({
   phones: z
     .string()
@@ -36,6 +56,7 @@ export const contactBulkUploadSchema = z.object({
     .array(z.number().int().positive())
     .min(1, "Select at least one contact group")
     .max(50, "At most 50 groups per upload"),
+  attributes: uploadAttributesSchema.optional(),
 });
 
 // List-query schema is just a shape marker for the parseListParams output plus

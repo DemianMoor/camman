@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-10-26 (lifecycle columns: Hot and Warm separate — migration 0226, offer_group_lifecycle_v2_mv)_
+_Last updated: 2026-10-27 (offer exposure per cohort — 0x / 1x / 2x+ / Eligible now, migration 0227, offer_group_exposure_mv; lifecycle views in their own 05:30 / 20:30 UTC cron run); 2026-10-26 (lifecycle columns: Hot and Warm separate — migration 0226, offer_group_lifecycle_v2_mv)_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -79,11 +79,13 @@ an average of per-group ratios.
 | **Sent last 7 / 30 / 90 days** | `COUNT(*)` of attributed `stage_sends` rows within the window — send rows, **not** distinct contacts, scoped to **this offer**, and (since migration 0132) tracked campaigns only. |
 | **Fresh pool** | Contacts in the group that are sendable (`contacts.messaging_status = 'eligible'` AND no `opt_outs` row) AND have never been sent a campaign of **this offer** — anti-joined against `offer_exposures` per offer (migration 0133). All-time, not a window; offer-scoped, not shared across offers. |
 
-## Lifecycle detailed report (migrations 0214, 0215, 0226)
+## Lifecycle detailed report (migrations 0214, 0215, 0226, 0227)
 
-A **"Show lifecycle detailed report"** checkbox above the table adds twelve
-columns — Sent 14d, Sent 30d and Fresh pool for each of four lifecycle
-cohorts: **Hot**, **Warm**, **Cold**, **Freeze**, in that order. Hot and Warm
+A **"Show lifecycle detailed report"** checkbox above the table adds
+twenty-four columns — six for each of four lifecycle cohorts, **Hot**,
+**Warm**, **Cold**, **Freeze**, in that order: **Sent 14d · Sent 30d · 0x ·
+1x · 2x+ · Eligible now** (0227; until then the four after Sent 30d were one
+"fresh pool" column — see "Offer exposure per cohort" below). Hot and Warm
 are **separate** since migration 0226 (owner, 2026-10-23; ClickUp 1amdve284ue):
 0214/0215 merged them into one "Hot/Warm" cohort, and no Hot+Warm subtotal is
 kept because the screen never had one alongside separate columns. Owner rulings,
@@ -105,14 +107,63 @@ production at the 0214 apply, then for 90d: 5,927,289 = 5,927,289 across all
 237 rows).
 
 Source: `offer_group_lifecycle_v2_mv` (migration 0226; one row per org × offer
-× group, twelve columns `hot_*` / `warm_*` / `cold_*` / `freeze_*`), refreshed
-**last** by the same
-twice-daily cron and stamped separately in `report_refresh_log`; the page shows
-its own "Lifecycle columns as of" line. A separate matview, not new columns on
+× group, twelve columns `hot_*` / `warm_*` / `cold_*` / `freeze_*` — the screen
+reads its `*_sent_14d` / `*_sent_30d`) and `offer_group_exposure_mv` (0227,
+below), refreshed by **their own cron run** (since 0227, see Refresh) and
+stamped separately in `report_refresh_log`; the page shows its own "Lifecycle
+columns as of" line — the OLDER of the two views' stamps. A separate matview, not new columns on
 `offer_group_report_mv`, so that view and `audience_report_group_totals_mv`
 (which sums it) are not dropped and recreated. Read only when the checkbox is
 on (`GET /api/offers/[id]/report?lifecycle=1`); benchmark and footer rows show
 "—". The checkbox is not persisted — it resets on reload.
+
+### Offer exposure per cohort (migration 0227)
+
+Owner, 2026-10-27 (ClickUp 1amdve28n15). Per cohort, the cohort's **sendable**
+contacts in the group (0133 definition: eligible, not opted out), counted as
+contacts, split by how many campaigns of **this offer** have reached them:
+
+| Column | Definition |
+|---|---|
+| **0x** | no `contact_offer_campaigns` row for (contact, offer). Replaced the cohort's "fresh pool" on screen |
+| **1x** | exactly 1 campaign of the offer |
+| **2x+** | 2 or more campaigns |
+| **Eligible now** | of the sendable contacts, how many a **new** campaign of this offer could message today at the defaults: 0x or 1x (offer limit **2** — `OFFER_LIMIT_TIMES_DEFAULT`, so 2x+ is never eligible), last send of this offer at least **14 days** ago (cooldown 14 — the exact complement of the send path's blocking `last_sent_at > now() - 14 days`), **not a buyer** of the offer (`purchasedOfferContacts`), and for **Freeze** not inside the contact's rest period (`freeze_not_due`: `last_sent_at > now() - freeze_cadence_days`) |
+
+0x + 1x + 2x+ = the cohort's sendable contacts in the group, which is the same
+for every offer of that group. Exposure counts **campaigns**, not messages (one
+`contact_offer_campaigns` row per contact × offer × campaign) — the unit the
+offer limit counts.
+
+⚠️ **0x reads `contact_offer_campaigns`, the old fresh pool read
+`offer_exposures`** (owner decision 1, 2026-10-27: all four buckets from one
+source). The two are written by different paths — `offer_exposures` by a
+trigger at send time, `contact_offer_campaigns` by the engagement job (15-min
+incremental, nightly full) — so 0x can differ slightly from the old figure. The
+gap was measured on production in the quiet window and recorded on the card;
+`scripts/verify-offer-group-exposure.ts` reports it again (per cohort, and the
+largest cell difference as % of its cell) after every fill. The overall
+**Fresh pool** column is unchanged (0133, `offer_exposures`, all statuses).
+
+**Not the campaign's own audience.** Eligible now applies only the offer rules,
+the buyer rule and the Freeze rest at their **defaults**. A real campaign also
+excludes contacts in other active campaigns, applies its own limit/cooldown
+values, segments, caps and send-time checks — so its audience is usually
+smaller. This is a per-group capacity figure, not a preview.
+
+Source: `offer_group_exposure_mv` (one row per org × offer × group — the same
+universe as `offer_group_lifecycle_v2_mv` — sixteen columns `<cohort>_x0`,
+`_x1`, `_x2plus`, `_eligible`). Created `WITH NO DATA` by 0227 and filled once,
+attended, by [scripts/fill-offer-group-exposure.ts](../../scripts/fill-offer-group-exposure.ts);
+verified by [scripts/verify-offer-group-exposure.ts](../../scripts/verify-offer-group-exposure.ts)
+(read-only): E1 same keys as v2, E2 no NULL / negative cell, E3 Eligible ≤ 0x +
+1x, E4 0x + 1x + 2x+ identical across the offers of a group, plus the 0x gap
+(reported, not a bar). The bar logic is the pure
+`lib/reporting/offer-group-exposure-checks.ts` (pinned by
+`scripts/test-offer-group-exposure-checks.ts`); the defining SELECT is pinned by
+`scripts/test-offer-group-exposure.ts` — every cell against an independent
+per-contact computation, with the cooldown anchored to the send path's own
+predicate, and red-proven against a `<` boundary and a dropped buyer rule.
 
 ## Tracked-only attribution and the per-contact-column limitation
 
@@ -288,8 +339,30 @@ total against the 300s ceiling. This is a background job with no user waiting
 on it, so the larger budget costs nothing. The same cron also refreshes the
 Audience Stats group totals (`audience_report_group_totals_mv`, migration 0180)
 after the group view; its defining SELECT measured 5.3s on 2026-09-14, logged
-per run as `audienceTotalsMs`. The lifecycle view refreshes last, logged as
-`lifecycleMs` — since 0226 that is `offer_group_lifecycle_v2_mv`.
+per run as `audienceTotalsMs`.
+
+### The lifecycle views: their own run (0227)
+
+Since 0227 the two lifecycle views — `offer_group_lifecycle_v2_mv` and
+`offer_group_exposure_mv` — are **not** refreshed by this run. They have their
+own: `GET/POST /api/cron/refresh-offer-group-lifecycle`
+([route](../../app/api/cron/refresh-offer-group-lifecycle/route.ts)), schedule
+**`30 5,20 * * *`**, `refreshOfferGroupLifecycle()` in
+`lib/reporting/offer-group-report.ts`. Owner, 2026-10-27: the whole six-view run
+would sit at or past the 300 s route limit (the group view alone peaked at
+175.9 s). Same machinery as this run — the shared `refreshSequence` helper on
+the report's session connection (180 s / 384 MB), each view `CONCURRENTLY`,
+caught on its own and stamped on its own success; a failure is a Tier-1
+Telegram alert and a 500 naming the view. Its log line reports `lifecycleMs`
+(v2) and `exposureMs`. It stamps its **own heartbeat**,
+`offer-group-lifecycle-refresh` in `cron_locks` (`HEARTBEAT_JOBS.offerLifecycleRefresh`,
+26 h, 30 h first-run grace), watched by the daily counted-clickers rebuild
+alongside `offer-group-report-refresh`. The 30 minutes between the runs are
+only spacing: neither lifecycle view reads another matview.
+
+Cost on production: v2 refreshed in **30.6 s** at its first fill (2026-10-27);
+the exposure view's cost is measured at its first fill and recorded on ClickUp
+1amdve28n15.
 
 ### 0226: a new view alongside, filled after the migration
 
@@ -544,7 +617,9 @@ pin rows or foot a table; justified by the small per-offer row count).
 - **Columns:** Group · Sends · RPM · Net RPM · EPC · CTR % · Sales · Opt-out % · Net
   profit · Sent 7d · Sent 30d · Sent 90d · Fresh pool. Default sort: Net RPM
   descending. All columns sortable client-side (the full row set is already
-  loaded).
+  loaded). With "Show lifecycle detailed report" on, 24 more: per cohort (Hot,
+  Warm, Cold, Freeze) Sent 14d · Sent 30d · 0x · 1x · 2x+ · Eligible now — also
+  sortable, and all in the CSV export.
 - **Frozen Group column** — the first column is `sticky left-0`, so group
   names stay visible while the table scrolls sideways (the lifecycle columns
   push it past the viewport). Sticky cells use solid `bg-muted`/`bg-background`
@@ -625,6 +700,12 @@ registration as a sale, and nothing here is waiting for a backfill.
   group-row attribution; adds `offer_report_tracked_campaigns` and
   `offer_report_offer_totals_mv`; extends the dedup-at-grain rule to every
   group-row column.
+- `db/migrations/0227_offer_group_exposure.sql` — `offer_group_exposure_mv`
+  (0x / 1x / 2x+ / Eligible now per cohort), created `WITH NO DATA`; filled by
+  `scripts/fill-offer-group-exposure.ts`, verified by
+  `scripts/verify-offer-group-exposure.ts`.
+- `app/api/cron/refresh-offer-group-lifecycle/route.ts` — the lifecycle views'
+  own twice-daily run (05:30 / 20:30 UTC).
 - `db/migrations/0226_offer_group_lifecycle_v2.sql` — `offer_group_lifecycle_v2_mv`
   (Hot and Warm separate), created `WITH NO DATA`; filled by
   `scripts/fill-offer-group-lifecycle-v2.ts`, verified by

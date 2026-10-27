@@ -238,6 +238,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/refresh-creative-lifetime": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-fresh-counts": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-offer-group-report": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/refresh-offer-group-lifecycle": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/report-rollup": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/send-preflight": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/send-scheduled": null, // cron / webhook / import machinery -- no operator session reaches these

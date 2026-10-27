@@ -8,6 +8,8 @@ import { sql as drizzleSql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
+import { recordedHashForm } from "./_migration-hash";
+
 interface JournalEntry {
   idx: number;
   version: string;
@@ -118,11 +120,13 @@ async function main() {
       }
 
       const sqlContent = readFileSync(sqlPath, "utf8");
-      // Drizzle hashes the migration SQL content. We compute SHA-256 here as a
-      // sanity check against the recorded hash.
+      // Drizzle hashes the migration file as read from disk. Line endings don't
+      // count as drift: a file applied from a CRLF working copy has a CRLF hash
+      // recorded while git holds the same SQL as LF (scripts/_migration-hash.ts).
       const computedHash = createHash("sha256").update(sqlContent).digest("hex");
       const recordHash = rows[entry.idx]?.hash;
-      const hashMatches = recordHash === computedHash;
+      const hashForm = recordedHashForm(recordHash, sqlContent);
+      const hashMatches = hashForm !== null;
 
       const snapshot = JSON.parse(
         readFileSync(snapshotPath, "utf8"),
@@ -153,6 +157,9 @@ async function main() {
           `prevId-chain ${prevIdMatches ? "✓" : "✗"}`,
       );
 
+      if (hashForm === "crlf") {
+        console.log(`      (recorded from a CRLF copy of the same SQL — line endings only, not drift)`);
+      }
       if (!hashMatches) {
         console.log(
           `      recorded: ${recordHash?.slice(0, 16)}…  computed: ${computedHash.slice(0, 16)}…`,

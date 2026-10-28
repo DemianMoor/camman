@@ -32,5 +32,7 @@ export async function GET(req: NextRequest) {
     return apiError(400, "from must not be after to", API_ERROR_CODES.VALIDATION, { field: "from" });
   }
 
-  return NextResponse.json(await getPartnerReport(orgId, from, to));
+  return NextResponse.json(
+    await getPartnerReport(orgId, from, to, undefined, { includeCarrierRejected: true }),
+  );
 }

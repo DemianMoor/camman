@@ -100,6 +100,15 @@ export interface PartnerReportRow {
   /** NULL when nothing was sent — a CTR over zero sends is not 0%, it is unknown. */
   ctr: number | null;
   opt_outs: number;
+  /**
+   * Of the leads RECEIVED in the range (lead_events.received_at), the distinct
+   * numbers that meet the carrier-rejection rule NOW (carrier_rejected_phones,
+   * owner 2026-10-28). A lead-quality figure: unlike every other column it is
+   * evaluated at read time, so a past range moves as numbers are flagged or
+   * cleared. INTERNAL ONLY — null unless the caller asks for it, so the signed
+   * partner view never receives it.
+   */
+  carrier_rejected: number | null;
   /** Counted purchases DETECTED in the range, on this partner x tag's leads. */
   sales: number;
   /** Approved revenue of conversions DETECTED in the range. */
@@ -162,7 +171,10 @@ export async function getPartnerReport(
   from: string,
   to: string,
   partnerId?: number,
+  // Internal page only (owner 2026-10-28: not shown to partners).
+  opts: { includeCarrierRejected?: boolean } = {},
 ): Promise<PartnerReportResult> {
+  const withCarrier = opts.includeCarrierRejected === true;
   const rate = await getCalibratedLookupRate();
   const onlyPartner = partnerId != null ? sql`AND p.id = ${partnerId}` : sql``;
 
@@ -277,6 +289,21 @@ export async function getPartnerReport(
       -- A rejected or unmapped conversion is in the ledger but is not activity.
       HAVING sum(p.purchases) > 0 OR sum(p.revenue) > 0
     ),
+    ${withCarrier
+      ? sql`-- ── carrier-rejected: leads received in the range whose number meets the
+    -- rule NOW (see PartnerReportRow.carrier_rejected). Dated by arrival. ──────
+    carrier AS (
+      SELECT e.partner_key_id, COALESCE(e.interest_tag, '') AS interest_tag,
+             count(DISTINCT c.phone_number)::int AS carrier_rejected
+      FROM lead_events e
+      JOIN contacts c ON c.id = e.contact_id
+      JOIN carrier_rejected_phones crp ON crp.org_id = e.org_id AND crp.phone = c.phone_number
+      WHERE e.org_id = ${orgId}::uuid
+        AND e.sandbox = false
+        AND ${within(sql`e.received_at`)}
+      GROUP BY 1, 2
+    ),`
+      : sql``}
     -- ⚠️ THE KEY SET IS A UNION OF EVERY SOURCE, not one source with the others
     -- coalesced onto it. Joining metrics on a COALESCE'd tag silently drops a
     -- (partner, tag) that exists in one source but not another -- which is
@@ -288,7 +315,10 @@ export async function getPartnerReport(
       UNION SELECT partner_key_id, interest_tag FROM sends
       UNION SELECT partner_key_id, interest_tag FROM clicks
       UNION SELECT partner_key_id, interest_tag FROM optouts
-      UNION SELECT partner_key_id, interest_tag FROM sales
+      UNION SELECT partner_key_id, interest_tag FROM sales${withCarrier
+        ? sql`
+      UNION SELECT partner_key_id, interest_tag FROM carrier`
+        : sql``}
     )
     SELECT k.id AS partner_key_id,
            p.id AS partner_id,
@@ -308,7 +338,10 @@ export async function getPartnerReport(
            COALESCE(oo.opt_outs, 0)      AS opt_outs,
            COALESCE(sa.sales, 0)         AS sales,
            COALESCE(sa.revenue_usd, 0)   AS revenue_usd,
-           COALESCE(s.sent_cost, 0) + COALESCE(oo.optout_cost, 0) AS send_cost_usd
+           COALESCE(s.sent_cost, 0) + COALESCE(oo.optout_cost, 0) AS send_cost_usd${withCarrier
+             ? sql`,
+           COALESCE(cr.carrier_rejected, 0) AS carrier_rejected`
+             : sql``}
     FROM keys ky
     JOIN partner_keys k
       ON k.id = ky.partner_key_id
@@ -323,7 +356,10 @@ export async function getPartnerReport(
     LEFT JOIN sends   s  ON s.partner_key_id  = ky.partner_key_id AND s.interest_tag  = ky.interest_tag
     LEFT JOIN clicks  cl ON cl.partner_key_id = ky.partner_key_id AND cl.interest_tag = ky.interest_tag
     LEFT JOIN optouts oo ON oo.partner_key_id = ky.partner_key_id AND oo.interest_tag = ky.interest_tag
-    LEFT JOIN sales   sa ON sa.partner_key_id = ky.partner_key_id AND sa.interest_tag = ky.interest_tag
+    LEFT JOIN sales   sa ON sa.partner_key_id = ky.partner_key_id AND sa.interest_tag = ky.interest_tag${withCarrier
+      ? sql`
+    LEFT JOIN carrier cr ON cr.partner_key_id = ky.partner_key_id AND cr.interest_tag = ky.interest_tag`
+      : sql``}
     WHERE TRUE ${onlyPartner}
     -- k.id last: a partner with two keys on one tag shows one row per key until
     -- Phase 5 moves the grain to (partner, contact group); keep that order stable.
@@ -363,6 +399,7 @@ export async function getPartnerReport(
         // ⚠️ Likewise: a CTR over zero sends is unknown, not 0%.
         ctr: sent > 0 ? clicks / sent : null,
         opt_outs: Number(r.opt_outs),
+        carrier_rejected: withCarrier ? Number(r.carrier_rejected) : null,
         sales: Number(r.sales),
         revenue_usd: revenue,
         net_profit_usd,

@@ -33,12 +33,19 @@ function tagLabel(t: string): string {
   return t === "" ? "(untagged)" : t;
 }
 
-function toCsv(rows: PartnerReportRow[], showRevenue: boolean, showPartnerColumn: boolean): string {
+function toCsv(
+  rows: PartnerReportRow[],
+  showRevenue: boolean,
+  showPartnerColumn: boolean,
+  showCarrierRejected: boolean,
+): string {
   const head = [
     ...(showPartnerColumn ? ["partner"] : []),
     "interest_tag", "leads_received", "mobile", "voip", "unknown", "landline",
     "sent", ...(showRevenue ? ["send_cost_usd"] : []),
-    "delivered_pct", "clicks", "ctr", "opt_outs", "sales", "lookup_cost_usd",
+    "delivered_pct", "clicks", "ctr", "opt_outs",
+    ...(showCarrierRejected ? ["carrier_rejected"] : []),
+    "sales", "lookup_cost_usd",
     ...(showRevenue ? ["revenue_usd", "net_profit_usd", "roi"] : []),
   ];
   // ⚠️ An empty cell for a null, never "0" — the CSV carries the same
@@ -56,7 +63,9 @@ function toCsv(rows: PartnerReportRow[], showRevenue: boolean, showPartnerColumn
         ...(showPartnerColumn ? [r.partner_name] : []),
         tagLabel(r.interest_tag), r.leads_received, r.mobile, r.voip, r.unknown, r.landline,
         r.sent, ...(showRevenue ? [r.send_cost_usd.toFixed(4)] : []),
-        r.delivered_pct, r.clicks, r.ctr, r.opt_outs, r.sales,
+        r.delivered_pct, r.clicks, r.ctr, r.opt_outs,
+        ...(showCarrierRejected ? [r.carrier_rejected] : []),
+        r.sales,
         r.lookup_cost_usd.toFixed(4),
         ...(showRevenue
           ? [r.revenue_usd.toFixed(2), r.net_profit_usd.toFixed(4), r.roi]
@@ -74,6 +83,7 @@ export function PartnerReportView({
   report,
   showDateControls = true,
   showPartnerColumn = false,
+  showCarrierRejected = false,
 }: {
   token: string;
   partnerName: string;
@@ -85,6 +95,12 @@ export function PartnerReportView({
    * signed link is one partner by construction and leaves it off.
    */
   showPartnerColumn?: boolean;
+  /**
+   * INTERNAL page only (owner 2026-10-28). The signed link never sets it, and
+   * getPartnerReport does not compute the value for it either (null), so it is
+   * absent from that payload rather than merely hidden.
+   */
+  showCarrierRejected?: boolean;
   /**
    * The public signed-link page owns its range through a plain GET form, so it
    * leaves this on. The INTERNAL page owns the range in React state and refetches
@@ -105,13 +121,14 @@ export function PartnerReportView({
         sent: a.sent + r.sent,
         clicks: a.clicks + r.clicks,
         optOuts: a.optOuts + r.opt_outs,
+        carrierRejected: a.carrierRejected + (r.carrier_rejected ?? 0),
         sales: a.sales + r.sales,
         cost: a.cost + r.lookup_cost_usd,
         sendCost: a.sendCost + r.send_cost_usd,
         revenue: a.revenue + r.revenue_usd,
       }),
       {
-        leads: 0, landline: 0, sent: 0, clicks: 0, optOuts: 0, sales: 0,
+        leads: 0, landline: 0, sent: 0, clicks: 0, optOuts: 0, carrierRejected: 0, sales: 0,
         cost: 0, sendCost: 0, revenue: 0,
       },
     );
@@ -121,7 +138,7 @@ export function PartnerReportView({
   }, [report.rows]);
 
   function downloadCsv() {
-    const blob = new Blob([toCsv(report.rows, showRevenue, showPartnerColumn)], { type: "text/csv" });
+    const blob = new Blob([toCsv(report.rows, showRevenue, showPartnerColumn, showCarrierRejected)], { type: "text/csv" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `report-${report.from}-to-${report.to}.csv`;
@@ -192,6 +209,14 @@ export function PartnerReportView({
               <th className="p-2 text-right">Clicks</th>
               <th className="p-2 text-right">CTR</th>
               <th className="p-2 text-right">Opt-outs</th>
+              {showCarrierRejected && (
+                <th
+                  className="p-2 text-right"
+                  title="Of the leads received in this period, the numbers that meet the carrier-rejection rule now"
+                >
+                  Carrier-rejected
+                </th>
+              )}
               <th className="p-2 text-right">Sales</th>
               <th className="p-2 text-right">Lookup cost</th>
               {showRevenue && (
@@ -206,7 +231,7 @@ export function PartnerReportView({
           <tbody>
             {report.rows.length === 0 && (
               <tr>
-                <td colSpan={(showRevenue ? 17 : 13) + (showPartnerColumn ? 1 : 0)} className="p-4 text-center text-muted-foreground">
+                <td colSpan={(showRevenue ? 17 : 13) + (showPartnerColumn ? 1 : 0) + (showCarrierRejected ? 1 : 0)} className="p-4 text-center text-muted-foreground">
                   No activity in this period.
                 </td>
               </tr>
@@ -226,6 +251,9 @@ export function PartnerReportView({
                 <td className="p-2 text-right">{r.clicks.toLocaleString()}</td>
                 <td className="p-2 text-right">{pct(r.ctr)}</td>
                 <td className="p-2 text-right">{r.opt_outs.toLocaleString()}</td>
+                {showCarrierRejected && (
+                  <td className="p-2 text-right">{(r.carrier_rejected ?? 0).toLocaleString()}</td>
+                )}
                 <td className="p-2 text-right">{r.sales.toLocaleString()}</td>
                 <td className="p-2 text-right">{usd(r.lookup_cost_usd)}</td>
                 {showRevenue && (
@@ -251,6 +279,9 @@ export function PartnerReportView({
                 <td className="p-2 text-right">{totals.clicks.toLocaleString()}</td>
                 <td className="p-2 text-right">{pct(totals.ctr)}</td>
                 <td className="p-2 text-right">{totals.optOuts.toLocaleString()}</td>
+                {showCarrierRejected && (
+                  <td className="p-2 text-right">{totals.carrierRejected.toLocaleString()}</td>
+                )}
                 <td className="p-2 text-right">{totals.sales.toLocaleString()}</td>
                 <td className="p-2 text-right">{usd(totals.cost)}</td>
                 {showRevenue && (

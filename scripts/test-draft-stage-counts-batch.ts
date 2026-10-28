@@ -34,6 +34,7 @@ async function main() {
       VALUES (${orgId}, ${"dsc-" + sfx}, 'dsc', 'draft', 'manual', ARRAY[${seg.id}]::int[], ${JSON.stringify({ include_no_status: true })}::jsonb, false) RETURNING id`);
     made.campaign = camp.id;
     const campaign = {
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       id: camp.id, orgId, segmentIds: [seg.id], excludeSegmentIds: [], contactGroupIds: [],
       filters: { include_no_status: true }, cap: null, excludeInUse: false, lifecycleRules: false,
     };

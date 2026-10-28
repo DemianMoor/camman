@@ -267,6 +267,7 @@ async function loadRecipes(): Promise<Recipe[]> {
   const toInput = (r: CampaignRow): AudiencePreviewInput => ({
     orgId: r.org_id,
     lifecycleRules: r.lifecycle_rules === true,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     segmentIds: r.audience_segment_ids ?? [],
     excludeSegmentIds: r.audience_exclude_segment_ids ?? [],
     contactGroupIds: r.audience_contact_group_ids ?? [],

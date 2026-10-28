@@ -153,6 +153,7 @@ async function main() {
     // Legacy behaviour is what this bar asserts; the lifecycle predicate
     // has its own suites. Explicit, because the field is required now.
     lifecycleRules: false,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     orgId,
     segmentIds: [segNarrow.id],
     contactGroupIds: groupIds,
@@ -162,6 +163,7 @@ async function main() {
     // Legacy behaviour is what this bar asserts; the lifecycle predicate
     // has its own suites. Explicit, because the field is required now.
     lifecycleRules: false,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     orgId,
     segmentIds: [segNarrow.id, segFilter.id],
     contactGroupIds: groupIds,
@@ -172,6 +174,7 @@ async function main() {
     // Legacy behaviour is what this bar asserts; the lifecycle predicate
     // has its own suites. Explicit, because the field is required now.
     lifecycleRules: false,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     orgId,
     segmentIds: [segFilter.id, segNarrow.id],
     contactGroupIds: groupIds,
@@ -278,6 +281,7 @@ async function main() {
       filters: allFilters,
       cap: null,
       offerId: null,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     },
     draftFilters,
   );
@@ -290,6 +294,7 @@ async function main() {
       filters: allFilters,
       cap: null,
       offerId: null,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     },
     draftFilters,
   );

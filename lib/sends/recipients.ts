@@ -31,6 +31,9 @@ export interface StageEligibilityOverlay {
   // P4: the stage's personalization rules (loadStageTagRules /
   // countingTagRules). NO_TAG_RULES for a tag-less stage. Required (§11b).
   tagRules: TagRules;
+  // org_settings.carrier_rejection_suppression_enabled
+  // (isCarrierRejectionSuppressionOn). Required (§11b) — see StageEligibilityParams.
+  carrierRejectedSuppression: boolean;
 }
 
 import {
@@ -247,6 +250,7 @@ export function stageRecipientsSql(opts: {
         offerCooldownDays: opts.eligibility.offerCooldownDays,
         offerLimitTimes: opts.eligibility.offerLimitTimes,
         lifecycleRules: opts.eligibility.lifecycleRules,
+        carrierRejectedSuppression: opts.eligibility.carrierRejectedSuppression,
         tagRules: opts.eligibility.tagRules,
       })
     : [];

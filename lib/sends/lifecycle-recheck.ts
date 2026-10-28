@@ -145,12 +145,17 @@ export async function recheckLifecycleEligibility(
     // First hit in priority order wins — iterate the canonical key list rather
     // than writing the order out again here.
     for (const key of LIFECYCLE_EXCLUSION_KEYS) {
+      // Explicit per key: a fall-through default would attribute any key added
+      // to the list to the freeze check. carrier_rejected is NOT re-checked at
+      // send time — rows already pending are left alone (1amdve2850v spec).
       const hit =
         key === "suppressed"
           ? r.hit_suppressed
           : key === "bought_offer"
             ? r.hit_bought_offer
-            : r.hit_freeze_not_due;
+            : key === "freeze_not_due"
+              ? r.hit_freeze_not_due
+              : false;
       if (hit) {
         out.set(r.send_id, key);
         break;

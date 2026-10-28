@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -84,7 +84,7 @@ sequenceDiagram
   Op->>Kick: kickoff stage (tracked, send_approved)
   Kick->>Kick: render with the stage's message shape (0216: format template or custom text, lib/messages/render.ts)<br/>P4: loadStageTagRules (NO_TAG_RULES for a tag-less stage ⇒ one body, unchanged)
   Kick->>Mint: per recipient → links + link_destinations
-  Kick->>Kick: EXCEPT eligibility layers, in EXCLUSION_PRIORITY order<br/>(lifecycle campaign: suppressed, bought_offer, freeze_not_due; then creative, in_flight, offer;<br/>tagged stage: missing_tag_data, segment_limit)
+  Kick->>Kick: EXCEPT eligibility layers, in EXCLUSION_PRIORITY order<br/>(org toggle on: carrier_rejected; lifecycle campaign: suppressed, bought_offer, freeze_not_due; then creative, in_flight, offer;<br/>tagged stage: missing_tag_data, segment_limit)
   Kick->>Kick: tagged stage only: load contact_attributes, validate-all renders EVERY body first<br/>(missing tag / over segments ⇒ per_recipient_render_failed + Telegram, 0 rows; no STOP: txr refuses, dry-run = 1 alert)
   Kick->>Kick: INSERT stage_sends + stage_send_lifecycle in ONE statement<br/>(rendered_text frozen, send_token=id; message_format_id / format_custom stamped; status-at-send + last_click_at stamped from contact_engagement via lifecycleStampInsertSql)
   Kick->>Kick: last window landed: stamp materialized_at + status draft→pending (skipped if status_set_manually)
@@ -614,7 +614,7 @@ sequenceDiagram
   L-)E: poke (processed > 0)
   E->>E: pass 2 — contact (+ lookup line_type / carrier_norm) + lead_events (processed_at)
   E-)R: poke (processed > 0)
-  R->>R: runDripRoutingBatch → drip_journeys (routed_at)<br/>global rules incl. line_type (0218 group gate) ⇒ unroutable
+  R->>R: runDripRoutingBatch → drip_journeys (routed_at)<br/>global rules incl. line_type (0218 group gate),<br/>rejected_by_carriers (toggle on) ⇒ unroutable
   R-)S: poke (routed > 0)
   S->>S: hourly-cap maintenance (0209): clear ineligible, then per capped campaign<br/>assign fresh → able to send? → close past hours (OFF) → release backlog → room
   S->>S: runDripSchedulerBatch → due query (assigned journeys, ≤ room) → mint + gate + pending stage_sends<br/>+ stage_send_lifecycle stamp in the SAME INSERT (status + last_click_at from contact_engagement; since 2026-10-23)<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)<br/>P5 tagged message: render per lead; missing data / over segments ⇒ rollback, then skipped_ineligible row + journey exited (follow-ups: row only)
@@ -628,7 +628,8 @@ sequenceDiagram
 ## L4. Carrier-rejection ledger (0225, `5,20,35,50 * * * *` + daily `15 4 * * *`)
 
 Derived from delivery receipts; nothing on the receipt intake paths changes. Read by
-nothing until PR 2 (eligibility). See [04-features/carrier-rejected-numbers.md](04-features/carrier-rejected-numbers.md).
+the eligibility paths (audience source, materialization, drip routing) only while the
+org's toggle is on. See [04-features/carrier-rejected-numbers.md](04-features/carrier-rejected-numbers.md).
 
 ```mermaid
 sequenceDiagram

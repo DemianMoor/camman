@@ -29,6 +29,7 @@ import {
   computeStageAudienceCountsBatchForDraft,
 } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { can } from "@/lib/permissions";
 import {
   denominatorFor,
@@ -305,7 +306,10 @@ export async function GET(
 
   const plainCounts = isDraft
     ? await computeStageAudienceCountsBatchForDraft(
-        draftAudienceInput,
+        {
+          ...draftAudienceInput,
+          carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
+        },
         plainBatchItems,
       )
     : await computeStageAudienceCountsBatch(cid, orgId, plainBatchItems);

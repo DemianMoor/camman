@@ -6,6 +6,7 @@ import { db } from "@/db/client";
 import { campaign_stages, campaigns } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { chunkedQuery, streamCsvResponse } from "@/lib/csv/stream-export";
 import { can } from "@/lib/permissions";
 import { formatPhoneForExport } from "@/lib/phone-validation";
@@ -115,6 +116,8 @@ export async function GET(
   // per-recipient rendered `message` column (follow-up card). Tag-less stages
   // (NO_TAG_RULES) export exactly as before.
   const tagRules = await loadStageTagRules(db, { orgId, stageId: sid });
+  // An export is a manual send: carrier-rejected numbers stay out of it too.
+  const carrierRejectedSuppression = await isCarrierRejectionSuppressionOn(orgId);
   if (isTagRulesRefusal(tagRules) || tagRules.required.length > 0) {
     return apiError(
       409,
@@ -195,6 +198,7 @@ export async function GET(
             offerCooldownDays: Number(stage.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
             offerLimitTimes: Number(stage.offer_limit_times ?? 5),
             tagRules,
+            carrierRejectedSuppression,
           },
           limit: effectiveLimit,
           offset,

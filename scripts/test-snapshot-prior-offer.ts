@@ -104,6 +104,7 @@ async function main() {
     // Legacy behaviour is what this bar asserts; the lifecycle predicate
     // has its own suites. Explicit, because the field is required now.
     lifecycleRules: false,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     campaignId,
     orgId: f.org_id,
     segmentIds: [],

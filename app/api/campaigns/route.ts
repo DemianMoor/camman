@@ -19,6 +19,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { loadLifecycleSettings } from "@/lib/engagement/settings-io";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { isOfferAssignedToBrand } from "@/lib/api/offer-brands";
@@ -445,6 +446,8 @@ export async function POST(req: NextRequest) {
               // about which predicate chose it, permanently, because a pool is
               // never recomputed.
               lifecycleRules,
+              // The ORG's toggle at activation — the same read the preview made.
+              carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
               offerRulesEnabled: true,
               offerCooldownDays: input.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT,
               offerLimitTimes: input.offer_limit_times ?? OFFER_LIMIT_TIMES_DEFAULT,

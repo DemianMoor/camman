@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import {
   ZERO_LIFECYCLE_EXCLUSIONS,
@@ -181,6 +182,7 @@ export async function computePreflightBreakdown(
     offerLimitTimes: Number(cfg.offer_limit_times ?? 5),
     // P4: same rules as preflight/kickoff (NO_TAG_RULES ⇒ no layer).
     tagRules: await loadStageCountingTagRules(dbc, { orgId, stageId }),
+    carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
   };
 
   // 3. Per-cause exclusion buckets off the frozen pool (opt-out/filter/split/dedup).

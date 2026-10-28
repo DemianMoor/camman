@@ -224,6 +224,7 @@ async function main() {
         currentOfferId: p.offerId,
         excludePriorOffer: false,
         lifecycleRules: p.lifecycleRules,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         offerRulesEnabled: false,
         offerCooldownDays: 7,
         offerLimitTimes: 5,
@@ -246,6 +247,7 @@ async function main() {
         currentOfferId: offerId,
         excludePriorOffer: false,
         lifecycleRules: true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         offerRulesEnabled: false,
         offerCooldownDays: 7,
         offerLimitTimes: 5,
@@ -323,6 +325,7 @@ async function main() {
       currentOfferId: null,
       excludePriorOffer: false,
       lifecycleRules: true,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
@@ -355,6 +358,7 @@ async function main() {
       currentOfferId: offerA.id,
       excludePriorOffer: false,
       lifecycleRules: true,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,

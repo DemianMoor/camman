@@ -82,7 +82,7 @@ async function main() {
       const noName = await mkLead(1, undefined);
       const longName = await mkLead(2, "Abcdefghijklmno");
 
-      let v = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: "load" }))!;
+      let v = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
       const c1 = v.candidates.find((c) => c.campaign_id === p1.id)!;
       const c2 = v.candidates.find((c) => c.campaign_id === p2.id)!;
       bar("R1 lead without first_name ⇒ routed to P2", v.winner?.campaign_id === p2.id, `winner ${v.winner?.campaign_id}`);
@@ -91,13 +91,13 @@ async function main() {
       bar("R3 tag-less P2 has NO creative_tags key", !("creative_tags" in c2.rules) && !("creative_tags" in c2.detail), JSON.stringify(c2.rules));
       bar("R5 P2's tagged follow-up child does not add the rule", !("creative_tags" in c2.rules));
 
-      const v4 = (await evaluateLeadRouting(T, { orgId, leadEventId: longName, tagRules: "load" }))!;
+      const v4 = (await evaluateLeadRouting(T, { orgId, leadEventId: longName, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
       const c14 = v4.candidates.find((c) => c.campaign_id === p1.id)!;
       bar("R4 15-character name, L = 12 ⇒ blocked, 'segment limit (first_name 15 > 12)'",
         c14.rules.creative_tags === "blocked" && c14.detail.creative_tags === "segment limit (first_name 15 > 12)", JSON.stringify(c14.detail));
 
       const cache = await loadCampaignTagRules(T, orgId, [p1.id, p2.id]);
-      const vc = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: cache }))!;
+      const vc = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: cache, carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
       bar("R6 per-tick cache == load mode", JSON.stringify(vc.candidates.map((c) => [c.campaign_id, c.rules, c.detail])) ===
         JSON.stringify(v.candidates.map((c) => [c.campaign_id, c.rules, c.detail])));
 
@@ -116,11 +116,11 @@ async function main() {
         expectL !== null && expectL < 12 && pooled.firstNameMaxLength === expectL, JSON.stringify({ pooled, expectL }));
 
       // Review M1: a campaign missing from the per-tick cache is loaded, never skipped.
-      const vMiss = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: new Map() }))!;
+      const vMiss = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: new Map(), carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
       bar("R8 cache miss ⇒ rule still evaluated (fail-closed)", vMiss.candidates.find((c) => c.campaign_id === p1.id)?.rules.creative_tags === "missing");
 
       await tx.execute(sql`UPDATE campaigns SET status = 'archived' WHERE id = ${p2.id}`);
-      v = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: "load" }))!;
+      v = (await evaluateLeadRouting(T, { orgId, leadEventId: noName, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
       const own = v.candidates.filter((c) => c.campaign_id === p1.id);
       bar("R2 only P1 left ⇒ no winner, outcome permanent", v.winner === null && own.length === 1 && classifyRoutingOutcome({
         ...v, candidates: own,

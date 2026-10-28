@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { contact_groups, segments } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { newCampaignUsesLifecycleRules } from "@/lib/engagement/lifecycle-gate";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { previewTimeoutResponse } from "@/lib/api/preview-timeout";
@@ -148,6 +149,9 @@ export async function POST(req: NextRequest) {
   const input: Parameters<typeof previewAudience>[0] = {
     orgId,
     lifecycleRules,
+    // The org's toggle as it stands now — the same read activation makes, so
+    // the previewed audience is the one the snapshot will freeze.
+    carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
     segmentIds,
     excludeSegmentIds,
     contactGroupIds: groupIds,

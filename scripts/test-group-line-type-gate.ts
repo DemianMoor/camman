@@ -152,6 +152,7 @@ async function main() {
       WHERE id = ${strict}`);
     const filters = { include_no_status: true, include_opt_in: true, include_clickers: true, include_not_clicked: true };
     const groupCount = async () => (await previewAudience({
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       orgId, lifecycleRules: false, segmentIds: [], contactGroupIds: [open], filters,
     })).total_matching;
     const segSet = async () => {
@@ -175,15 +176,15 @@ async function main() {
     const events = await all<{ id: string; contact_id: string }>(sql`
       SELECT id, contact_id FROM lead_events WHERE org_id = ${orgId}::uuid`);
     const ev = (p: string) => events.find((e) => e.contact_id === id[p])!.id;
-    const vVoip = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip), tagRules: "load" }))!;
-    const vUnk = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pUnk), tagRules: "load" }))!;
+    const vVoip = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip), tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
+    const vUnk = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pUnk), tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     bar("D1 blocked voip / unknown leads fail global line_type and are PERMANENT",
       vVoip.global.line_type === "blocked" && vUnk.global.line_type === "blocked"
         && classifyRoutingOutcome(vVoip) === "permanent" && classifyRoutingOutcome(vUnk) === "permanent",
       `voip ${vVoip.global.line_type}/${classifyRoutingOutcome(vVoip)}, unknown ${vUnk.global.line_type}/${classifyRoutingOutcome(vUnk)}`);
-    const vMob = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pMob), tagRules: "load" }))!;
-    const vV2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip2), tagRules: "load" }))!;
-    const vTf = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pTf), tagRules: "load" }))!;
+    const vMob = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pMob), tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
+    const vV2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pVoip2), tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
+    const vTf = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pTf), tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     bar("D2 mobile, the un-grouped voip, and toll_free (box still on) pass line_type",
       vMob.global.line_type === "pass" && vV2.global.line_type === "pass" && vTf.global.line_type === "pass",
       `mobile ${vMob.global.line_type}, voip2 ${vV2.global.line_type}, toll_free ${vTf.global.line_type}`);
@@ -192,7 +193,7 @@ async function main() {
     const g6 = await groupCount();
     const s6 = await segSet();
     bar("G6 toll-free disallowed too: only mobile and the un-grouped voip remain", g6 === 2 && s6 === "mobile,voip", `group ${g6}, segment ${s6}`);
-    const vTf2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pTf), tagRules: "load" }))!;
+    const vTf2 = (await evaluateLeadRouting(db, { orgId, leadEventId: ev(pTf), tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     bar("D3 a blocked toll_free lead fails line_type and is PERMANENT",
       vTf2.global.line_type === "blocked" && classifyRoutingOutcome(vTf2) === "permanent",
       `${vTf2.global.line_type}/${classifyRoutingOutcome(vTf2)}`);

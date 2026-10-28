@@ -80,6 +80,7 @@ async function main() {
       currentOfferId: null,
       excludePriorOffer: false,
       lifecycleRules: false,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
@@ -127,6 +128,7 @@ async function main() {
       currentOfferId: null,
       excludePriorOffer: false,
       lifecycleRules: false,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
@@ -159,6 +161,7 @@ async function main() {
       currentOfferId: 999999,
       excludePriorOffer: false,
       lifecycleRules: false,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
@@ -171,6 +174,7 @@ async function main() {
       currentOfferId: 999999,
       excludePriorOffer: true,
       lifecycleRules: false,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       offerRulesEnabled: false,
       offerCooldownDays: 7,
       offerLimitTimes: 5,
@@ -231,6 +235,7 @@ async function main() {
         offerCooldownDays: 7,
         offerLimitTimes: 5,
         lifecycleRules: false,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         tagRules: NO_TAG_RULES, // legacy test: its creatives carry no contact tag (P4)
       };
 
@@ -267,6 +272,7 @@ async function main() {
         currentOfferId: offerId,
         excludePriorOffer: xp,
         lifecycleRules: false,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         offerRulesEnabled: false,
         offerCooldownDays: 7,
         offerLimitTimes: 5,

@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { evaluateLeadRouting } from "@/lib/drip/routing-eval";
 import { can } from "@/lib/permissions";
 import { validatePhone } from "@/lib/phone-validation";
@@ -85,7 +86,10 @@ export async function GET(req: NextRequest) {
 
   // Explain the most recent arrival — live, against today's campaigns.
   const latest = events[0] as { id: string };
-  const verdict = await evaluateLeadRouting(db, { orgId, leadEventId: latest.id, tagRules: "load" });
+  const verdict = await evaluateLeadRouting(db, {
+    orgId, leadEventId: latest.id, tagRules: "load",
+    carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
+  });
 
   return NextResponse.json({
     phone,

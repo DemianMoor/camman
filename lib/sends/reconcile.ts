@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import {
   buildStageEligibilityExclusions,
   eligibilityUnion,
@@ -89,6 +90,10 @@ export async function computeStageReconciliation(
   // P4: the same personalization rules kickoff materialized with, so the
   // missing_tag_data / segment_limit buckets reconcile (NO_TAG_RULES ⇒ no layer).
   const tagRules = e ? await loadStageCountingTagRules(dbc, { orgId, stageId }) : null;
+  // The current toggle, as the kickoff reads it. A stage materialized before a
+  // flip reconciles against today's value — the same caveat as every other
+  // live layer here (a creative seen since, an offer bought since).
+  const carrierRejectedSuppression = e ? await isCarrierRejectionSuppressionOn(orgId) : false;
   const exclusions = e && tagRules
     ? buildStageEligibilityExclusions({
         orgId,
@@ -101,6 +106,7 @@ export async function computeStageReconciliation(
         offerCooldownDays: Number(e.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
         offerLimitTimes: Number(e.offer_limit_times ?? 5),
         tagRules,
+        carrierRejectedSuppression,
       })
     : [];
   const exclUnion = eligibilityUnion(exclusions);

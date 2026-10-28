@@ -171,6 +171,7 @@ async function main() {
         currentOfferId: offer.id,
         excludePriorOffer: true,
         lifecycleRules: opts.lifecycleRules ?? true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         offerRulesEnabled: opts.offerRulesEnabled ?? true,
         offerCooldownDays: opts.cooldown ?? 7,
         offerLimitTimes: opts.limit ?? 5,
@@ -344,6 +345,7 @@ async function main() {
       const input = {
         orgId,
         lifecycleRules: true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         segmentIds: [],
         contactGroupIds: [grp.id],
         filters: { lifecycle_statuses: ["cold"] },
@@ -380,6 +382,7 @@ async function main() {
       {
         orgId,
         lifecycleRules: true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         segmentIds: [],
         contactGroupIds: [grp.id],
         filters: { lifecycle_statuses: ["cold"] },

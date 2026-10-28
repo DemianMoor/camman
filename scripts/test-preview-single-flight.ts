@@ -50,6 +50,7 @@ async function main() {
   `)) as unknown as { org_id: string; id: number }[];
   bar("a contact group exists to preview", !!g);
   const input = {
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     orgId: g.org_id,
     lifecycleRules: true,
     segmentIds: [],

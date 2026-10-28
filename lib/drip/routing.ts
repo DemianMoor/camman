@@ -12,6 +12,7 @@ import {
   loadCampaignJourneyCounts,
   ZERO_COUNTS,
 } from "./routing-eval";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { loadCampaignTagRules } from "@/lib/sends/tag-rules";
 
 // The drip routing worker (Drip Phase 4). ZERO SENDS.
@@ -152,6 +153,7 @@ export async function runDripRoutingBatch(
       WHERE org_id = ${orgId}::uuid AND type = 'drip' AND status IN ('active', 'paused')
     `)) as unknown as { id: number }[];
     const tagRules = await loadCampaignTagRules(db, orgId, liveDrip.map((c) => Number(c.id)));
+    const carrierRejectedSuppression = await isCarrierRejectionSuppressionOn(orgId);
     const recheckAt = new Date(now.getTime() + DRIP_RECHECK_MINUTES * 60_000).toISOString();
 
     for (const lead of leads) {
@@ -161,7 +163,9 @@ export async function runDripRoutingBatch(
         break;
       }
       res.considered++;
-      const verdict = await evaluateLeadRouting(db, { orgId, leadEventId: lead.id, now, counts, tagRules });
+      const verdict = await evaluateLeadRouting(db, {
+        orgId, leadEventId: lead.id, now, counts, tagRules, carrierRejectedSuppression,
+      });
       if (!verdict) continue;
       const outcome = classifyRoutingOutcome(verdict);
 

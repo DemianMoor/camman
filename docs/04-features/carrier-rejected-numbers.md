@@ -1,6 +1,6 @@
 # Carrier-Rejected Numbers
 
-_Last updated: 2026-10-24 (PR 1: ledger, crons, backfill; ships dark)_
+_Last updated: 2026-10-28 (PR 2: eligibility filters, toggle still off); 2026-10-24 (PR 1: ledger, crons, backfill)_
 
 ClickUp [1amdve2850v](https://app.clickup.com/t/1amdve2850v). Numbers that carriers
 repeatedly reject as dead or landline are marked **"Rejected by carriers"** and, while
@@ -15,12 +15,12 @@ is on. Turning it off makes the numbers eligible again, with no data lost.
 
 | PR | Scope | State |
 |---|---|---|
-| 1 | Migration 0225, code map, ledger, 15-min + daily crons, backfill, verification | this PR |
-| 2 | Eligibility filters: audience (preview/snapshot/draft counts), drip routing (`rejected_by_carriers`), stage materialization | planned |
+| 1 | Migration 0225, code map, ledger, 15-min + daily crons, backfill, verification | LIVE 2026-10-28 (#403); backfill `MATCH` 24,955 |
+| 2 | Eligibility filters: audience (preview/snapshot/draft counts), drip routing (`rejected_by_carriers`), stage materialization | this PR |
 | 3 | Settings > Sending UI (toggle, thresholds, code table, live count, CSV), contact detail status | planned |
 | 4 | Partner report column | planned |
 
-Until PR 2 ships, the ledger is computed but **nothing reads it** — the toggle has no effect.
+From PR 2 the toggle is live in every eligibility path (§6). It still ships OFF; the owner turns it on.
 
 ## 2. The rule
 
@@ -88,16 +88,57 @@ refuses does not stamp its heartbeat.
 the cron secret, repeated until the response says `complete: true`; then
 `npx tsx scripts/verify-carrier-rejections.ts` must print `MATCH`.
 
-## 6. Verification
+## 6. Where the toggle applies (PR 2)
+
+ONE definition — [lib/carrier-rejection/eligibility.ts](../../lib/carrier-rejection/eligibility.ts):
+a contact is carrier-rejected when its `phone_number` is in `carrier_rejected_phones`
+for its org. The toggle is read per call by `isCarrierRejectionSuppressionOn(orgId)`
+and passed down as `carrierRejectedSuppression`, a **required** field on
+`AudiencePreviewInput`, the draft-count inputs, `StageEligibilityParams`,
+`StageEligibilityOverlay` and `evaluateLeadRouting` (read once per routing batch) — CLAUDE.md §11b.
+
+| Path | How | Where |
+|---|---|---|
+| Campaign audience: preview (whole, base + narrowed parts), activation snapshot, draft stage counts | removed from the audience **source** by `excludeCarrierRejected` — before any count, cap or sample | `buildPreviewMembership` and `buildAudienceSourceSql` / `computeStageAudienceCountForDraft` in [lib/audience-snapshot.ts](../../lib/audience-snapshot.ts) |
+| Stage materialization (kickoff), Prepare / preflight, reconcile, CSV export, stage eligibility preview | the `carrier_rejected` layer, **first** in `EXCLUSION_PRIORITY`, outside the `lifecycleRules` gate — every campaign | `buildStageEligibilityExclusions` in [lib/sends/eligibility.ts](../../lib/sends/eligibility.ts); reported as "rejected by carriers" |
+| Drip routing | global rule `rejected_by_carriers` = `blocked` ⇒ **permanent** ⇒ the lead is written `unroutable` with that reason | `evaluateLeadRouting` in [lib/drip/routing-eval.ts](../../lib/drip/routing-eval.ts) |
+
+- **Flag off = byte-identical.** `excludeCarrierRejected(rel, org, false)` returns the same
+  SQL object; the layer is absent; the drip statement emits no lookup and the verdict has
+  no `rejected_by_carriers` key, so stored `unroutable` reasons are unchanged.
+- **Source, not a layer, for the audience.** Both audience implementations (the preview
+  and the snapshot/draft source) read the source, so they exclude the same people and the
+  cap samples only sendable contacts. The source is materialized into the snapshot's
+  ANALYZEd temp table, so the extra anti-join never reaches the estimate cascade §10b warns
+  about.
+- **Not re-checked at send time.** Rows already materialized as pending are left alone
+  (owner spec); the drain's lifecycle re-check maps every key explicitly and never reports
+  `carrier_rejected`.
+- **Stage counts on ACTIVE campaigns** (`computeStageAudienceCount*`, frozen pool) do not
+  subtract the layer, the same as the lifecycle layers; materialization does.
+- The kill-switch preview (`AUDIENCE_PREVIEW_IMPL=reference`) is frozen and ignores the
+  toggle.
+
+## 7. Verification
 
 - [scripts/test-carrier-rejection-codes.ts](../../scripts/test-carrier-rejection-codes.ts)
   — pure; every code seen on prod, with its class.
 - [scripts/test-carrier-rejection-ledger-db.ts](../../scripts/test-carrier-rejection-ledger-db.ts)
   — preview DB; hand-derived scenarios (per-message folding, raw_body codes, window,
   reset, Ahoi `error`, thresholds, idempotency, rebuild stale-row removal).
+- [scripts/test-carrier-rejection-eligibility.ts](../../scripts/test-carrier-rejection-eligibility.ts)
+  — preview DB (PR 2); flag off is the same SQL object; preview == snapshot with the flag
+  off (4) and on (2), with a cap, for a lifecycle campaign, and for the two-part preview;
+  draft counts; materialization off a pre-toggle pool; the `carrier_rejected` bucket; drip
+  `rejected_by_carriers` permanent, absent while off.
+- `scripts/test-eligibility-layers-identical.ts` — flag-off byte identity of every
+  stage's send SQL and the snapshot qualifier against an origin/main capture (PR 2: 7,469
+  shapes, 0 differences, prod 2026-10-28).
 - [scripts/verify-carrier-rejections.ts](../../scripts/verify-carrier-rejections.ts) —
   read-only; recomputes the rule from the raw receipts with independent SQL (no import
   of the ledger code) and diffs it against `carrier_rejected_phones`.
 
 Reference point (prod, 2026-10-24, default rule): **24,496** numbers — txr only 23,375 ·
-Ahoi + txr 992 · Ahoi only 111 · other combinations 18.
+Ahoi + txr 992 · Ahoi only 111 · other combinations 18. Backfill 2026-10-28: `MATCH`
+**24,955** — txr 23,870 · Ahoi + txr 957 · Ahoi 110 · other 18; every flagged phone maps
+to exactly one contact.

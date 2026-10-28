@@ -58,6 +58,7 @@ async function main() {
   );
 
   const base = {
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     // ⚠️ A DIFFERENT campaign id than the recipe's owner, so the current-campaign
     // carve-out behaves as it would for a NEW campaign rather than excusing the
     // recipe's own history.

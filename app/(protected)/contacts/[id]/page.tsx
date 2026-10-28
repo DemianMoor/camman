@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { format } from "date-fns";
-import { ArrowLeft, ShieldAlert } from "lucide-react";
+import { ArrowLeft, PhoneOff, ShieldAlert } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
@@ -69,7 +69,20 @@ interface ContactDetail {
     reason: string;
     created_at: string;
   }[];
+  // Carrier-rejected numbers (0225). null unless the number currently meets the
+  // rule. Not an opt-out: it only keeps the number out of new sends while the
+  // org's suppression is on.
+  carrier_rejection: {
+    hard_count: number;
+    soft_count: number;
+    last_code: string;
+    last_provider: string;
+    last_rejected_at: string;
+    suppression_on: boolean;
+  } | null;
 }
+
+const PROVIDER_LABELS: Record<string, string> = { txr: "Text Request", ahi: "Ahoi", tls: "Tells" };
 
 function Field({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -170,6 +183,11 @@ export default function ContactDetailPage() {
         {optedOut && (
           <Badge variant="destructive" className="gap-1">
             <ShieldAlert className="size-3" /> Opted out
+          </Badge>
+        )}
+        {contact.carrier_rejection && (
+          <Badge variant="outline" className="gap-1">
+            <PhoneOff className="size-3" /> Rejected by carriers
           </Badge>
         )}
       </div>
@@ -346,6 +364,34 @@ export default function ContactDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      {contact.carrier_rejection && (
+        <Card>
+          <CardContent className="pt-6">
+            <h2 className="mb-1 text-sm font-medium">Rejected by carriers</h2>
+            <p className="text-muted-foreground mb-3 text-xs">
+              {contact.carrier_rejection.suppression_on
+                ? "Kept out of new audiences, stage sends and drip routing."
+                : "Suppression is off in Settings > Sending, so this number is still used."}
+            </p>
+            <dl className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <Field label="Hard rejections" value={contact.carrier_rejection.hard_count} />
+              <Field label="Soft rejections (window)" value={contact.carrier_rejection.soft_count} />
+              <Field
+                label="Last code"
+                value={`${contact.carrier_rejection.last_code} · ${
+                  PROVIDER_LABELS[contact.carrier_rejection.last_provider] ??
+                  contact.carrier_rejection.last_provider
+                }`}
+              />
+              <Field
+                label="Last rejection"
+                value={format(new Date(contact.carrier_rejection.last_rejected_at), "d MMM yyyy HH:mm")}
+              />
+            </dl>
+          </CardContent>
+        </Card>
+      )}
 
       {optedOut && (
         <Card>

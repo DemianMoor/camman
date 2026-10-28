@@ -54,7 +54,7 @@ export async function GET(
   // page. Separate small queries rather than one wide LEFT JOIN: groups are
   // 1:N, so joining would fan the contact row out and every scalar would need
   // de-duplicating. Each of these is an indexed single-key lookup.
-  const [attrRows, groupRows, optOutRows, engagementRows, transitionRows] =
+  const [attrRows, groupRows, optOutRows, engagementRows, transitionRows, carrierRows] =
     await Promise.all([
     db
       .select()
@@ -115,6 +115,24 @@ export async function GET(
       // order is not a history list.
       .orderBy(desc(contact_engagement_transitions.created_at))
       .limit(20),
+    // Carrier-rejected numbers (0225): the primary key of
+    // carrier_rejected_phones, plus whether the org's suppression is on.
+    db.execute(drizzleSql`
+      SELECT p.hard_count, p.soft_count, p.last_code, p.last_provider, p.last_rejected_at,
+             coalesce(s.carrier_rejection_suppression_enabled, false) AS suppression_on
+      FROM carrier_rejected_phones p
+      LEFT JOIN org_settings s ON s.org_id = p.org_id
+      WHERE p.org_id = ${orgId}::uuid AND p.phone = ${rows[0].phone_number}
+    `) as unknown as Promise<
+      {
+        hard_count: number;
+        soft_count: number;
+        last_code: string;
+        last_provider: string;
+        last_rejected_at: string;
+        suppression_on: boolean;
+      }[]
+    >,
   ]);
 
   const attrs = attrRows[0] ?? null;
@@ -135,6 +153,8 @@ export async function GET(
     // missing row IS 'new', but it is not the same as a row that says 'new'.
     lifecycle: engagementRows[0] ?? null,
     lifecycle_transitions: transitionRows,
+    // null unless the number currently meets the carrier-rejection rule.
+    carrier_rejection: carrierRows[0] ?? null,
   });
 }
 

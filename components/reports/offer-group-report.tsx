@@ -23,6 +23,8 @@ import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import type {
   RawMetrics,
   GroupRawRow,
+  GroupExposureRow,
+  GroupLifecycleDetail,
   GroupLifecycleRow,
   OfferTotals,
 } from "@/lib/reporting/offer-group-report";
@@ -37,10 +39,10 @@ type ReportResponse = {
   unattributedSends: number;
   refreshedAt: string | null;
   // Present only when requested with ?lifecycle=1; rows keyed by group_id.
-  lifecycle: { rows: Record<number, GroupLifecycleRow>; refreshedAt: string | null } | null;
+  lifecycle: { rows: Record<number, GroupLifecycleDetail>; refreshedAt: string | null } | null;
 };
 
-type LifecycleKey = keyof GroupLifecycleRow;
+type LifecycleKey = keyof GroupLifecycleRow | keyof GroupExposureRow;
 
 type SortKey =
   | "group_name" | "sends" | "rpm" | "net_rpm" | "epc" | "ctr" | "sales" | "pending_revenue"
@@ -77,28 +79,36 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "fresh_pool", label: "Fresh pool", numeric: true },
 ];
 
-// Behind the "Show lifecycle detailed report" checkbox (migration 0226,
-// offer_group_lifecycle_v2_mv). Cohort = the contact's CURRENT lifecycle status,
-// with Hot and Warm SEPARATE (owner, 2026-10-23 — they were one "Hot/Warm" cohort);
-// Sent = messages in the same scope as "Sent 30d (this offer)", Fresh = contacts
-// on the same definition as "Fresh pool". New contacts are in no cohort — they
-// stay in the overall Fresh pool column.
-const LIFECYCLE_COLUMNS: { key: LifecycleKey; label: string; numeric: true }[] = [
-  { key: "hot_sent_14d", label: "Hot sent 14d", numeric: true },
-  { key: "hot_sent_30d", label: "Hot sent 30d", numeric: true },
-  { key: "hot_fresh_pool", label: "Hot fresh pool", numeric: true },
-  { key: "warm_sent_14d", label: "Warm sent 14d", numeric: true },
-  { key: "warm_sent_30d", label: "Warm sent 30d", numeric: true },
-  { key: "warm_fresh_pool", label: "Warm fresh pool", numeric: true },
-  { key: "cold_sent_14d", label: "Cold sent 14d", numeric: true },
-  { key: "cold_sent_30d", label: "Cold sent 30d", numeric: true },
-  { key: "cold_fresh_pool", label: "Cold fresh pool", numeric: true },
-  { key: "freeze_sent_14d", label: "Freeze sent 14d", numeric: true },
-  { key: "freeze_sent_30d", label: "Freeze sent 30d", numeric: true },
-  { key: "freeze_fresh_pool", label: "Freeze fresh pool", numeric: true },
-];
+// Behind the "Show lifecycle detailed report" checkbox. Cohort = the contact's
+// CURRENT lifecycle status, Hot and Warm SEPARATE (owner, 2026-10-23). Per
+// cohort, in this order (owner, 2026-10-27; ClickUp 1amdve28n15):
+//   Sent 14d / Sent 30d  messages, same scope as "Sent 30d (this offer)" (0226)
+//   0x / 1x / 2x+        sendable contacts by how many campaigns of THIS offer
+//                        reached them (contact_offer_campaigns, 0227). 0x took
+//                        the place of the cohort's "fresh pool" (which read
+//                        offer_exposures); 0x + 1x + 2x+ = the cohort's
+//                        sendable contacts in the group.
+//   Eligible now         of those, how many a new campaign of this offer could
+//                        message today at the defaults (0227).
+// New contacts are in no cohort — they stay in the overall Fresh pool column.
+const COHORTS = [
+  ["hot", "Hot"],
+  ["warm", "Warm"],
+  ["cold", "Cold"],
+  ["freeze", "Freeze"],
+] as const;
+const LIFECYCLE_COLUMNS: { key: LifecycleKey; label: string; numeric: true }[] = COHORTS.flatMap(
+  ([c, label]) => [
+    { key: `${c}_sent_14d`, label: `${label} sent 14d`, numeric: true },
+    { key: `${c}_sent_30d`, label: `${label} sent 30d`, numeric: true },
+    { key: `${c}_x0`, label: `${label} 0x`, numeric: true },
+    { key: `${c}_x1`, label: `${label} 1x`, numeric: true },
+    { key: `${c}_x2plus`, label: `${label} 2x+`, numeric: true },
+    { key: `${c}_eligible`, label: `${label} eligible now`, numeric: true },
+  ] as const,
+);
 
-type ViewRow = GroupRawRow & Derived & Partial<GroupLifecycleRow>;
+type ViewRow = GroupRawRow & Derived & GroupLifecycleDetail;
 
 // The Group column stays frozen while the table scrolls sideways. Sticky cells
 // need an OPAQUE background or the scrolled cells show through, so the tinted
@@ -411,13 +421,18 @@ export function OfferGroupReport({
 
       {showLifecycle ? (
         <p className="text-xs text-muted-foreground">
-          <strong>Lifecycle columns</strong> split “Sent 30d (this offer)” and
-          “Fresh pool” by each contact’s <em>current</em> lifecycle status
-          (Hot, Warm, Cold, Freeze), and add a 14-day window. Sent columns count
-          messages; fresh pool columns count contacts. New and Suppressed
-          contacts are in no cohort column. Sent 30d cohorts add up to “Sent 30d”
-          (a texted contact is never New); the four fresh pools add up to
-          less than “Fresh pool”, which also counts New contacts.
+          <strong>Lifecycle columns</strong> split the group by each contact’s{" "}
+          <em>current</em> lifecycle status (Hot, Warm, Cold, Freeze). Sent
+          14d/30d count messages and add up to “Sent 30d (this offer)” (a texted
+          contact is never New). The other columns count sendable contacts:{" "}
+          <strong>0x / 1x / 2x+</strong> is how many campaigns of this offer have
+          reached them, and <strong>Eligible now</strong> is how many a new
+          campaign of this offer could message today at the defaults — 0x or 1x,
+          last sent this offer at least 14 days ago, not a buyer of it, and for
+          Freeze not inside their rest period. New and Suppressed contacts are in
+          no cohort column, so the four 0x columns add up to less than “Fresh
+          pool”, which also counts New contacts and reads a different exposure
+          source.
         </p>
       ) : null}
     </div>

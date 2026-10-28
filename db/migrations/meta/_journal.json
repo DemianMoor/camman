@@ -1562,6 +1562,13 @@
       "when": 1796169600000,
       "tag": "0226_offer_group_lifecycle_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 223,
+      "version": "7",
+      "when": 1796256000000,
+      "tag": "0227_offer_group_exposure",
+      "breakpoints": true
     }
   ]
 }

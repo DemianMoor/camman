@@ -22,7 +22,10 @@ import {
   withRefreshSession,
   type RefreshConnection,
 } from "../lib/reporting/refresh-session";
-import { refreshOfferGroupReport } from "../lib/reporting/offer-group-report";
+import {
+  refreshOfferGroupLifecycle,
+  refreshOfferGroupReport,
+} from "../lib/reporting/offer-group-report";
 
 // ⛔ NEVER LET A TEST REACH THE REAL TELEGRAM CHAT. `_env-preload` loads
 // `.env.local`, which carries a live TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID,
@@ -51,9 +54,10 @@ const VIEWS = [
   "offer_group_report_mv",
   "offer_report_offer_totals_mv",
   "audience_report_group_totals_mv",
-  // 0226 replaced offer_group_lifecycle_mv (Hot/Warm merged) in the refresh.
-  "offer_group_lifecycle_v2_mv",
 ];
+// Since 0227 the lifecycle views are their OWN run (refreshOfferGroupLifecycle,
+// /api/cron/refresh-offer-group-lifecycle) — never part of the main one.
+const LIFECYCLE_VIEWS = ["offer_group_lifecycle_v2_mv", "offer_group_exposure_mv"];
 
 // ── source-scan bar ──────────────────────────────────────────────────────────
 // Line endings are normalized before matching so the bar behaves identically on
@@ -258,7 +262,7 @@ async function main() {
     sent[0],
   );
 
-  // ── 8. A clean run refreshes all five and stamps all five ──────────────────
+  // ── 8. A clean run refreshes all four and stamps all four ──────────────────
   const probe = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
   const stampsBefore = await readStamps(probe);
 
@@ -272,9 +276,64 @@ async function main() {
   );
   const stampsAfter = await readStamps(probe);
   check(
-    "clean run advances all five report_refresh_log stamps",
+    "clean run advances all four report_refresh_log stamps",
     VIEWS.every((v) => stampsAfter[v] > stampsBefore[v]),
     VIEWS.map((v) => `${v}:${stampsAfter[v] > stampsBefore[v]}`).join(" "),
+  );
+  check(
+    "⭐ the main run does NOT refresh the lifecycle views (they have their own run)",
+    clean.outcomes.every((o) => !LIFECYCLE_VIEWS.includes(o.view)) &&
+      LIFECYCLE_VIEWS.every((v) => stampsAfter[v] === stampsBefore[v]),
+    LIFECYCLE_VIEWS.map((v) => `${v}:${stampsAfter[v] === stampsBefore[v] ? "untouched" : "STAMPED"}`).join(" "),
+  );
+
+  // ── 8b. The lifecycle run refreshes both lifecycle views, and only them ───
+  const lcBefore = await readStamps(probe);
+  const lc = await refreshOfferGroupLifecycle();
+  const lcAfter = await readStamps(probe);
+  check("lifecycle run: no failures", lc.failed.length === 0, lc.failed.join(", "));
+  check(
+    "lifecycle run: exactly the two lifecycle views, in order",
+    lc.outcomes.map((o) => o.view).join(",") === LIFECYCLE_VIEWS.join(","),
+    lc.outcomes.map((o) => o.view).join(","),
+  );
+  check(
+    "lifecycle run: both views stamp their own success",
+    LIFECYCLE_VIEWS.every((v) => lcAfter[v] > lcBefore[v]),
+    LIFECYCLE_VIEWS.map((v) => `${v}:${lcAfter[v] > lcBefore[v]}`).join(" "),
+  );
+  check(
+    "lifecycle run: the four main views are untouched",
+    VIEWS.every((v) => lcAfter[v] === lcBefore[v]),
+  );
+  check(
+    "lifecycle run: on the session connection with the raised settings",
+    lc.connection.mode === "session" && lc.connection.statementTimeoutMs === 180000,
+    JSON.stringify(lc.connection),
+  );
+
+  // ── 8c. Isolation in the lifecycle run: v2 failing does not stop exposure ──
+  const isoBefore = await readStamps(probe);
+  let lcPartial: Awaited<ReturnType<typeof refreshOfferGroupLifecycle>> | null = null;
+  try {
+    await probe`alter materialized view offer_group_lifecycle_v2_mv rename to offer_group_lifecycle_v2_mv_rt`;
+    try {
+      lcPartial = await refreshOfferGroupLifecycle();
+    } catch {
+      lcPartial = null;
+    }
+  } finally {
+    await probe`alter materialized view offer_group_lifecycle_v2_mv_rt rename to offer_group_lifecycle_v2_mv`;
+  }
+  const isoAfter = await readStamps(probe);
+  check(
+    "lifecycle run: a failing v2 is reported and the exposure view still refreshes and stamps",
+    lcPartial !== null &&
+      lcPartial.failed.join(",") === "offer_group_lifecycle_v2_mv" &&
+      lcPartial.outcomes.find((o) => o.view === "offer_group_exposure_mv")?.ok === true &&
+      isoAfter["offer_group_exposure_mv"] > isoBefore["offer_group_exposure_mv"] &&
+      isoAfter["offer_group_lifecycle_v2_mv"] === isoBefore["offer_group_lifecycle_v2_mv"],
+    lcPartial ? `failed=[${lcPartial.failed.join(", ")}]` : "threw",
   );
 
   // ── 9. THE POINT OF THE CHANGE: one view's failure freezes ONE view ────────
@@ -311,8 +370,8 @@ async function main() {
     for (const name of [
       "the failing view is reported in `failed`",
       "the failure carries an error message (reported, not swallowed)",
-      "the OTHER FOUR views still refreshed — including the three queued behind it",
-      "the other four stamped their own success in report_refresh_log",
+      "the OTHER THREE views still refreshed — including the two queued behind it",
+      "the other three stamped their own success in report_refresh_log",
       "the failed view did NOT stamp a success (its staleness stays visible)",
     ]) {
       check(name, false, "refreshOfferGroupReport threw — the run aborted");
@@ -329,12 +388,12 @@ async function main() {
   );
   const others = VIEWS.filter((v) => v !== "offer_group_report_mv");
   check(
-    "the OTHER FOUR views still refreshed — including the three queued behind it",
+    "the OTHER THREE views still refreshed — including the two queued behind it",
     others.every((v) => partial!.outcomes.find((o) => o.view === v)?.ok === true),
     others.map((v) => `${v}=${partial!.outcomes.find((o) => o.view === v)?.ok}`).join(" "),
   );
   check(
-    "the other four stamped their own success in report_refresh_log",
+    "the other three stamped their own success in report_refresh_log",
     others.every((v) => after[v] > before[v]),
     others.map((v) => `${v}:${after[v] > before[v]}`).join(" "),
   );
@@ -353,6 +412,17 @@ async function main() {
       "ok: false,",
       "outcomes.filter((o) => !o.ok)",
     ]),
+  );
+  check(
+    "the lifecycle route surfaces partial failures and stamps its OWN heartbeat",
+    scanSource("app/api/cron/refresh-offer-group-lifecycle/route.ts", [
+      "HEARTBEAT_JOBS.offerLifecycleRefresh.job_name",
+    ]) &&
+      scanSource("app/api/cron/refresh-offer-group-lifecycle/route.ts", ['"refresh_partial"']),
+  );
+  check(
+    "the lifecycle cron is scheduled at 05:30 / 20:30 UTC",
+    scanSource("vercel.json", ['"path": "/api/cron/refresh-offer-group-lifecycle",\n      "schedule": "30 5,20 * * *"']),
   );
   check(
     "the route surfaces which views succeeded and which did not",

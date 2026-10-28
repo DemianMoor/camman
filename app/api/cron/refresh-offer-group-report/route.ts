@@ -67,12 +67,14 @@ export const dynamic = "force-dynamic";
 // per-statement timeout, not the 300s ceiling.
 //
 // 300s remains the right Vercel budget: it is ~2x the ~145s the four views
-// cost today (0214 added a fifth lifecycle view, refreshed last — since 0226
-// offer_group_lifecycle_v2_mv, Hot and Warm separate; its
-// measured cost is in docs/04-features/offer-group-report.md), and it is ABOVE the 180s per-statement timeout so the database
+// cost today, and it is ABOVE the 180s per-statement timeout so the database
 // cancels a runaway refresh first. That ordering is deliberate — a 57014
 // throws and this route alerts on it, whereas a Vercel timeout kills the
 // invocation with no catch and no alert. See docs/04-features/offer-group-report.md.
+//
+// The lifecycle matviews (offer_group_lifecycle_v2_mv, offer_group_exposure_mv)
+// are NOT refreshed here since 0227: they have their own run,
+// /api/cron/refresh-offer-group-lifecycle, 30 minutes later.
 export const maxDuration = 300;
 
 async function handle(req: NextRequest): Promise<NextResponse> {
@@ -101,7 +103,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         `effectiveStatementTimeoutMs=${connection.statementTimeoutMs}` +
         (connection.fallbackReason ? ` fallbackReason=${connection.fallbackReason}` : "") +
         ` totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} ` +
-        `audienceTotalsMs=${durations.audienceTotalsMs} lifecycleMs=${durations.lifecycleMs} totalMs=${durations.totalMs} ` +
+        `audienceTotalsMs=${durations.audienceTotalsMs} totalMs=${durations.totalMs} ` +
         `refreshed=${refreshed.length}/${durations.outcomes.length}`,
     );
 
@@ -135,7 +137,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Stamped only when ALL FIVE refreshes succeeded — the heartbeat must mean
+    // Stamped only when ALL FOUR refreshes succeeded — the heartbeat must mean
     // "every report is fresh", not "the route was reached" and not "some of it
     // worked". Per-view freshness lives in report_refresh_log, which each view
     // stamps for itself.

@@ -41,6 +41,10 @@
       "schedule": "0 5,20 * * *"
     },
     {
+      "path": "/api/cron/refresh-offer-group-lifecycle",
+      "schedule": "30 5,20 * * *"
+    },
+    {
       "path": "/api/cron/lookup-worker",
       "schedule": "*/2 * * * *"
     },

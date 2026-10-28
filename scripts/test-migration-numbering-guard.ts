@@ -32,15 +32,12 @@ const num = (tag: string) => tag.slice(0, 4);
 // so a re-timestamped or different migration under the same tag still fails.
 // The apply-time preflight (check-migration-skip) reads prod and is the backstop.
 // Evidence required; remove an entry once its PR has merged.
-export const APPLIED_BEFORE_MERGE: Readonly<Record<string, { when: number; evidence: string }>> = {
-  "0225_carrier_rejections": {
-    when: 1796083200000,
-    evidence: "applied to prod 2026-10-27 09:32 UTC (#403); 0226 (#404) merged + applied after it",
-  },
-};
+// History: 0225_carrier_rejections (2026-10-27, #403) — removed 2026-10-28 after #403 merged.
+type AppliedBeforeMerge = Readonly<Record<string, { when: number; evidence: string }>>;
+export const APPLIED_BEFORE_MERGE: AppliedBeforeMerge = {};
 
 /** Problems with the branch's new migrations against main's journal. Pure. */
-export function numberingProblems(main: Entry[], branch: Entry[]): string[] {
+export function numberingProblems(main: Entry[], branch: Entry[], allow: AppliedBeforeMerge = APPLIED_BEFORE_MERGE): string[] {
   const mainTags = new Set(main.map((e) => e.tag));
   const mainNums = new Set(main.map((e) => num(e.tag)));
   const latest = Math.max(...main.map((e) => e.when));
@@ -51,7 +48,7 @@ export function numberingProblems(main: Entry[], branch: Entry[]): string[] {
     if (mainNums.has(num(e.tag))) out.push(`(a) ${e.tag}: number ${num(e.tag)} already exists on origin/main`);
     if (seen.has(num(e.tag))) out.push(`(a) ${e.tag}: number ${num(e.tag)} used twice on this branch`);
     seen.add(num(e.tag));
-    if (!(e.when > latest) && APPLIED_BEFORE_MERGE[e.tag]?.when !== e.when) out.push(`(b) ${e.tag}: when ${e.when} is not greater than origin/main's latest ${latest}`);
+    if (!(e.when > latest) && allow[e.tag]?.when !== e.when) out.push(`(b) ${e.tag}: when ${e.when} is not greater than origin/main's latest ${latest}`);
   }
   return out;
 }
@@ -66,12 +63,13 @@ bar("C4 (b) a lower `when` fails", numberingProblems(MAIN, [...MAIN, { idx: 2, t
 bar("C5 main's own entries are never judged (a branch with no new migration passes)", numberingProblems(MAIN, MAIN).length === 0);
 {
   const big: Entry[] = [{ idx: 0, tag: "0226_x", when: 1796169600000 }];
+  const allow: AppliedBeforeMerge = { "0225_listed": { when: 1796083200000, evidence: "control" } };
   bar("C6 listed tag + exact when ⇒ allowed past a newer main",
-    numberingProblems(big, [...big, { idx: 1, tag: "0225_carrier_rejections", when: 1796083200000 }]).length === 0);
+    numberingProblems(big, [...big, { idx: 1, tag: "0225_listed", when: 1796083200000 }], allow).length === 0);
   bar("C7 listed tag with a DIFFERENT when ⇒ still fails (b)",
-    numberingProblems(big, [...big, { idx: 1, tag: "0225_carrier_rejections", when: 1796083200001 }]).some((p) => p.startsWith("(b)")));
+    numberingProblems(big, [...big, { idx: 1, tag: "0225_listed", when: 1796083200001 }], allow).some((p) => p.startsWith("(b)")));
   bar("C8 an unlisted tag behind main ⇒ still fails (b)",
-    numberingProblems(big, [...big, { idx: 1, tag: "0227_other", when: 1796083200000 }]).some((p) => p.startsWith("(b)")));
+    numberingProblems(big, [...big, { idx: 1, tag: "0227_other", when: 1796083200000 }], allow).some((p) => p.startsWith("(b)")));
 }
 
 // The real check.

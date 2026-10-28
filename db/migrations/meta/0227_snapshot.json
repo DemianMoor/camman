@@ -484,6 +484,153 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.campaign_stage_split_groups": {
+      "name": "campaign_stage_split_groups",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "campaign_id": {
+          "name": "campaign_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "anchor_stage_id": {
+          "name": "anchor_stage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_stage_ids": {
+          "name": "source_stage_ids",
+          "type": "integer[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "recomputed_at": {
+          "name": "recomputed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "campaign_stage_split_groups_campaign_idx": {
+          "name": "campaign_stage_split_groups_campaign_idx",
+          "columns": [
+            {
+              "expression": "campaign_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "campaign_stage_split_groups_org_idx": {
+          "name": "campaign_stage_split_groups_org_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "campaign_stage_split_groups_org_id_organizations_id_fk": {
+          "name": "campaign_stage_split_groups_org_id_organizations_id_fk",
+          "tableFrom": "campaign_stage_split_groups",
+          "tableTo": "organizations",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "campaign_stage_split_groups_campaign_id_campaigns_id_fk": {
+          "name": "campaign_stage_split_groups_campaign_id_campaigns_id_fk",
+          "tableFrom": "campaign_stage_split_groups",
+          "tableTo": "campaigns",
+          "columnsFrom": [
+            "campaign_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "campaign_stage_split_groups_anchor_stage_id_campaign_stages_id_fk": {
+          "name": "campaign_stage_split_groups_anchor_stage_id_campaign_stages_id_fk",
+          "tableFrom": "campaign_stage_split_groups",
+          "tableTo": "campaign_stages",
+          "columnsFrom": [
+            "anchor_stage_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "campaign_stage_split_groups_state_check": {
+          "name": "campaign_stage_split_groups_state_check",
+          "value": "state IN ('pending', 'materializing', 'materialized', 'failed')"
+        }
+      },
+      "isRLSEnabled": true
+    },
     "public.campaign_stages": {
       "name": "campaign_stages",
       "schema": "",
@@ -1750,6 +1897,290 @@
         }
       },
       "isRLSEnabled": false
+    },
+    "public.carrier_phone_delivery": {
+      "name": "carrier_phone_delivery",
+      "schema": "",
+      "columns": {
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_delivered_sent_at": {
+          "name": "last_delivered_sent_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "refreshed_at": {
+          "name": "refreshed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "carrier_phone_delivery_org_id_organizations_id_fk": {
+          "name": "carrier_phone_delivery_org_id_organizations_id_fk",
+          "tableFrom": "carrier_phone_delivery",
+          "tableTo": "organizations",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "carrier_phone_delivery_pkey": {
+          "name": "carrier_phone_delivery_pkey",
+          "columns": [
+            "org_id",
+            "phone"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": true
+    },
+    "public.carrier_rejected_phones": {
+      "name": "carrier_rejected_phones",
+      "schema": "",
+      "columns": {
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "hard_count": {
+          "name": "hard_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "soft_count": {
+          "name": "soft_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_rejected_at": {
+          "name": "last_rejected_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_code": {
+          "name": "last_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "last_provider": {
+          "name": "last_provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "flagged_at": {
+          "name": "flagged_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "evaluated_at": {
+          "name": "evaluated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "carrier_rejected_phones_org_id_organizations_id_fk": {
+          "name": "carrier_rejected_phones_org_id_organizations_id_fk",
+          "tableFrom": "carrier_rejected_phones",
+          "tableTo": "organizations",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "carrier_rejected_phones_pkey": {
+          "name": "carrier_rejected_phones_pkey",
+          "columns": [
+            "org_id",
+            "phone"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": true
+    },
+    "public.carrier_rejections": {
+      "name": "carrier_rejections",
+      "schema": "",
+      "columns": {
+        "stage_send_id": {
+          "name": "stage_send_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "severity": {
+          "name": "severity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sent_at": {
+          "name": "sent_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "refreshed_at": {
+          "name": "refreshed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "carrier_rejections_org_phone_sent_idx": {
+          "name": "carrier_rejections_org_phone_sent_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "phone",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sent_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "carrier_rejections_stage_send_id_stage_sends_id_fk": {
+          "name": "carrier_rejections_stage_send_id_stage_sends_id_fk",
+          "tableFrom": "carrier_rejections",
+          "tableTo": "stage_sends",
+          "columnsFrom": [
+            "stage_send_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "carrier_rejections_org_id_organizations_id_fk": {
+          "name": "carrier_rejections_org_id_organizations_id_fk",
+          "tableFrom": "carrier_rejections",
+          "tableTo": "organizations",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "carrier_rejections_provider_check": {
+          "name": "carrier_rejections_provider_check",
+          "value": "provider IN (txr, ahi, tls)"
+        },
+        "carrier_rejections_severity_check": {
+          "name": "carrier_rejections_severity_check",
+          "value": "severity IN (hard, soft)"
+        }
+      },
+      "isRLSEnabled": true
     },
     "public.clickers": {
       "name": "clickers",
@@ -3842,6 +4273,107 @@
       },
       "isRLSEnabled": true
     },
+    "public.group_lifecycle_rollup": {
+      "name": "group_lifecycle_rollup",
+      "schema": "",
+      "columns": {
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "row_kind": {
+          "name": "row_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "row_key": {
+          "name": "row_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sendable": {
+          "name": "sendable",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "available": {
+          "name": "available",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "recent_days": {
+          "name": "recent_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "group_lifecycle_rollup_org_id_organizations_id_fk": {
+          "name": "group_lifecycle_rollup_org_id_organizations_id_fk",
+          "tableFrom": "group_lifecycle_rollup",
+          "tableTo": "organizations",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "group_lifecycle_rollup_pkey": {
+          "name": "group_lifecycle_rollup_pkey",
+          "columns": [
+            "org_id",
+            "row_kind",
+            "row_key",
+            "status"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "group_lifecycle_rollup_kind_check": {
+          "name": "group_lifecycle_rollup_kind_check",
+          "value": "row_kind IN ('group', 'cluster', 'all')"
+        },
+        "group_lifecycle_rollup_status_check": {
+          "name": "group_lifecycle_rollup_status_check",
+          "value": "status IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')"
+        },
+        "group_lifecycle_rollup_recent_days_check": {
+          "name": "group_lifecycle_rollup_recent_days_check",
+          "value": "recent_days >= 1 AND recent_days <= 90"
+        }
+      },
+      "isRLSEnabled": true
+    },
     "public.invites": {
       "name": "invites",
       "schema": "",
@@ -4824,6 +5356,311 @@
       },
       "isRLSEnabled": true
     },
+    "public.lifecycle_day_rollup": {
+      "name": "lifecycle_day_rollup",
+      "schema": "",
+      "columns": {
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "et_day": {
+          "name": "et_day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "campaign_kind": {
+          "name": "campaign_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'regular'"
+        },
+        "cohort": {
+          "name": "cohort",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sends": {
+          "name": "sends",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "clickers": {
+          "name": "clickers",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "new_clickers": {
+          "name": "new_clickers",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "sales": {
+          "name": "sales",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "purchases": {
+          "name": "purchases",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "revenue": {
+          "name": "revenue",
+          "type": "numeric(14, 4)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "opt_outs": {
+          "name": "opt_outs",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "cost": {
+          "name": "cost",
+          "type": "numeric(14, 4)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "reconstructed": {
+          "name": "reconstructed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "lifecycle_day_rollup_computed_at_idx": {
+          "name": "lifecycle_day_rollup_computed_at_idx",
+          "columns": [
+            {
+              "expression": "computed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "lifecycle_day_rollup_org_id_organizations_id_fk": {
+          "name": "lifecycle_day_rollup_org_id_organizations_id_fk",
+          "tableFrom": "lifecycle_day_rollup",
+          "tableTo": "organizations",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "lifecycle_day_rollup_pkey": {
+          "name": "lifecycle_day_rollup_pkey",
+          "columns": [
+            "org_id",
+            "et_day",
+            "campaign_kind",
+            "cohort"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "lifecycle_day_rollup_cohort_check": {
+          "name": "lifecycle_day_rollup_cohort_check",
+          "value": "cohort IN ('new', 'cold', 'hot', 'warm', 'warm_31_60', 'warm_61_120', 'freeze', 'suppressed', '__unclassified__')"
+        },
+        "lifecycle_day_rollup_campaign_kind_check": {
+          "name": "lifecycle_day_rollup_campaign_kind_check",
+          "value": "campaign_kind IN ('regular', 'drip')"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.message_formats": {
+      "name": "message_formats",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "template": {
+          "name": "template",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_enabled": {
+          "name": "is_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "is_default": {
+          "name": "is_default",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "message_formats_org_default_uniq": {
+          "name": "message_formats_org_default_uniq",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"message_formats\".\"is_default\"",
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "message_formats_org_status_idx": {
+          "name": "message_formats_org_status_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "message_formats_org_id_organizations_id_fk": {
+          "name": "message_formats_org_id_organizations_id_fk",
+          "tableFrom": "message_formats",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "tableTo": "organizations",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {
+        "message_formats_select_own_org": {
+          "name": "message_formats_select_own_org",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ]
+        }
+      },
+      "checkConstraints": {
+        "message_formats_status_check": {
+          "name": "message_formats_status_check",
+          "value": "\"message_formats\".\"status\" IN ('active', 'archived')"
+        },
+        "message_formats_default_usable_check": {
+          "name": "message_formats_default_usable_check",
+          "value": "NOT \"message_formats\".\"is_default\" OR (\"message_formats\".\"is_enabled\" AND \"message_formats\".\"status\" = 'active')"
+        }
+      },
+      "isRLSEnabled": true
+    },
     "public.notification_settings": {
       "name": "notification_settings",
       "schema": "",
@@ -4963,6 +5800,117 @@
         }
       },
       "isRLSEnabled": true
+    },
+    "public.offer_brands": {
+      "name": "offer_brands",
+      "schema": "",
+      "columns": {
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "offer_id": {
+          "name": "offer_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brand_id": {
+          "name": "brand_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "offer_brands_org_brand_idx": {
+          "name": "offer_brands_org_brand_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "brand_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "offer_brands_org_id_organizations_id_fk": {
+          "name": "offer_brands_org_id_organizations_id_fk",
+          "tableFrom": "offer_brands",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "offer_brands_offer_id_offers_id_fk": {
+          "name": "offer_brands_offer_id_offers_id_fk",
+          "tableFrom": "offer_brands",
+          "columnsFrom": [
+            "offer_id"
+          ],
+          "tableTo": "offers",
+          "schemaTo": "public",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "offer_brands_brand_id_brands_id_fk": {
+          "name": "offer_brands_brand_id_brands_id_fk",
+          "tableFrom": "offer_brands",
+          "columnsFrom": [
+            "brand_id"
+          ],
+          "tableTo": "brands",
+          "schemaTo": "public",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "offer_brands_offer_id_brand_id_pk": {
+          "name": "offer_brands_offer_id_brand_id_pk",
+          "columns": [
+            "offer_id",
+            "brand_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
     },
     "public.offer_landing_pages": {
       "name": "offer_landing_pages",
@@ -5999,6 +6947,182 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.partner_attribution_recalcs": {
+      "name": "partner_attribution_recalcs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigserial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "contact_group_id": {
+          "name": "contact_group_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_at": {
+          "name": "requested_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "requested_by": {
+          "name": "requested_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "campaigns_total": {
+          "name": "campaigns_total",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "campaigns_done": {
+          "name": "campaigns_done",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "partner_attribution_recalcs_org_status_idx": {
+          "name": "partner_attribution_recalcs_org_status_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "requested_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "partner_attribution_recalcs_group_idx": {
+          "name": "partner_attribution_recalcs_group_idx",
+          "columns": [
+            {
+              "expression": "contact_group_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "partner_attribution_recalcs_org_id_organizations_id_fk": {
+          "name": "partner_attribution_recalcs_org_id_organizations_id_fk",
+          "tableFrom": "partner_attribution_recalcs",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "tableTo": "organizations",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "partner_attribution_recalcs_contact_group_id_contact_groups_id_fk": {
+          "name": "partner_attribution_recalcs_contact_group_id_contact_groups_id_fk",
+          "tableFrom": "partner_attribution_recalcs",
+          "columnsFrom": [
+            "contact_group_id"
+          ],
+          "tableTo": "contact_groups",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {
+        "partner_attribution_recalcs_select_own_org": {
+          "name": "partner_attribution_recalcs_select_own_org",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ]
+        }
+      },
+      "checkConstraints": {
+        "partner_attribution_recalcs_reason_check": {
+          "name": "partner_attribution_recalcs_reason_check",
+          "value": "\"partner_attribution_recalcs\".\"reason\" IN ('link', 'unlink', 'relink', 'manual')"
+        },
+        "partner_attribution_recalcs_status_check": {
+          "name": "partner_attribution_recalcs_status_check",
+          "value": "\"partner_attribution_recalcs\".\"status\" IN ('queued', 'running', 'done', 'failed')"
+        }
+      },
+      "isRLSEnabled": true
+    },
     "public.partner_key_usage": {
       "name": "partner_key_usage",
       "schema": "",
@@ -6437,6 +7561,185 @@
         "partner_keys_max_payload_bytes_check": {
           "name": "partner_keys_max_payload_bytes_check",
           "value": "max_payload_bytes BETWEEN 1024 AND 4194304"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.partners": {
+      "name": "partners",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "report_token_hash": {
+          "name": "report_token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "report_token_issued_at": {
+          "name": "report_token_issued_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "report_token_expires_at": {
+          "name": "report_token_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "report_show_revenue": {
+          "name": "report_show_revenue",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        }
+      },
+      "indexes": {
+        "partners_org_slug_uniq": {
+          "name": "partners_org_slug_uniq",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "slug",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "partners_report_token_hash_uniq": {
+          "name": "partners_report_token_hash_uniq",
+          "columns": [
+            {
+              "expression": "report_token_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"partners\".\"report_token_hash\" IS NOT NULL",
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "partners_org_status_idx": {
+          "name": "partners_org_status_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "partners_org_id_organizations_id_fk": {
+          "name": "partners_org_id_organizations_id_fk",
+          "tableFrom": "partners",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "tableTo": "organizations",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {
+        "partners_select_own_org": {
+          "name": "partners_select_own_org",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ]
+        }
+      },
+      "checkConstraints": {
+        "partners_status_check": {
+          "name": "partners_status_check",
+          "value": "\"partners\".\"status\" IN ('active', 'archived')"
+        },
+        "partners_slug_check": {
+          "name": "partners_slug_check",
+          "value": "\"partners\".\"slug\" ~ '^[a-z0-9][a-z0-9_-]*$'"
         }
       },
       "isRLSEnabled": true
@@ -8115,6 +9418,131 @@
       },
       "isRLSEnabled": true
     },
+    "public.stage_manual_recipients": {
+      "name": "stage_manual_recipients",
+      "schema": "",
+      "columns": {
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stage_id": {
+          "name": "stage_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "contact_id": {
+          "name": "contact_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "exported_at": {
+          "name": "exported_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "sent_at": {
+          "name": "sent_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "stage_manual_recipients_org_sent_idx": {
+          "name": "stage_manual_recipients_org_sent_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sent_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "sent_at IS NOT NULL",
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "stage_manual_recipients_org_id_organizations_id_fk": {
+          "name": "stage_manual_recipients_org_id_organizations_id_fk",
+          "tableFrom": "stage_manual_recipients",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "stage_manual_recipients_stage_id_campaign_stages_id_fk": {
+          "name": "stage_manual_recipients_stage_id_campaign_stages_id_fk",
+          "tableFrom": "stage_manual_recipients",
+          "columnsFrom": [
+            "stage_id"
+          ],
+          "tableTo": "campaign_stages",
+          "schemaTo": "public",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        },
+        "stage_manual_recipients_contact_id_contacts_id_fk": {
+          "name": "stage_manual_recipients_contact_id_contacts_id_fk",
+          "tableFrom": "stage_manual_recipients",
+          "columnsFrom": [
+            "contact_id"
+          ],
+          "tableTo": "contacts",
+          "schemaTo": "public",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "stage_manual_recipients_stage_id_contact_id_pk": {
+          "name": "stage_manual_recipients_stage_id_contact_id_pk",
+          "columns": [
+            "stage_id",
+            "contact_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.stage_result_rows": {
       "name": "stage_result_rows",
       "schema": "",
@@ -8853,1150 +10281,6 @@
         }
       },
       "isRLSEnabled": false
-    },
-    "public.campaign_stage_split_groups": {
-      "name": "campaign_stage_split_groups",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "campaign_id": {
-          "name": "campaign_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "anchor_stage_id": {
-          "name": "anchor_stage_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "source_stage_ids": {
-          "name": "source_stage_ids",
-          "type": "integer[]",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'"
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "recomputed_at": {
-          "name": "recomputed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_error": {
-          "name": "last_error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "campaign_stage_split_groups_campaign_idx": {
-          "name": "campaign_stage_split_groups_campaign_idx",
-          "columns": [
-            {
-              "expression": "campaign_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "campaign_stage_split_groups_org_idx": {
-          "name": "campaign_stage_split_groups_org_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "campaign_stage_split_groups_org_id_organizations_id_fk": {
-          "name": "campaign_stage_split_groups_org_id_organizations_id_fk",
-          "tableFrom": "campaign_stage_split_groups",
-          "tableTo": "organizations",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "campaign_stage_split_groups_campaign_id_campaigns_id_fk": {
-          "name": "campaign_stage_split_groups_campaign_id_campaigns_id_fk",
-          "tableFrom": "campaign_stage_split_groups",
-          "tableTo": "campaigns",
-          "columnsFrom": [
-            "campaign_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "campaign_stage_split_groups_anchor_stage_id_campaign_stages_id_fk": {
-          "name": "campaign_stage_split_groups_anchor_stage_id_campaign_stages_id_fk",
-          "tableFrom": "campaign_stage_split_groups",
-          "tableTo": "campaign_stages",
-          "columnsFrom": [
-            "anchor_stage_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "campaign_stage_split_groups_state_check": {
-          "name": "campaign_stage_split_groups_state_check",
-          "value": "state IN ('pending', 'materializing', 'materialized', 'failed')"
-        }
-      },
-      "isRLSEnabled": true
-    },
-    "public.lifecycle_day_rollup": {
-      "name": "lifecycle_day_rollup",
-      "schema": "",
-      "columns": {
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "et_day": {
-          "name": "et_day",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "campaign_kind": {
-          "name": "campaign_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'regular'"
-        },
-        "cohort": {
-          "name": "cohort",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "sends": {
-          "name": "sends",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "clickers": {
-          "name": "clickers",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "new_clickers": {
-          "name": "new_clickers",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "sales": {
-          "name": "sales",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "purchases": {
-          "name": "purchases",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "revenue": {
-          "name": "revenue",
-          "type": "numeric(14, 4)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "opt_outs": {
-          "name": "opt_outs",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "cost": {
-          "name": "cost",
-          "type": "numeric(14, 4)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'0'"
-        },
-        "reconstructed": {
-          "name": "reconstructed",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "computed_at": {
-          "name": "computed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "lifecycle_day_rollup_computed_at_idx": {
-          "name": "lifecycle_day_rollup_computed_at_idx",
-          "columns": [
-            {
-              "expression": "computed_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "lifecycle_day_rollup_org_id_organizations_id_fk": {
-          "name": "lifecycle_day_rollup_org_id_organizations_id_fk",
-          "tableFrom": "lifecycle_day_rollup",
-          "tableTo": "organizations",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "lifecycle_day_rollup_pkey": {
-          "name": "lifecycle_day_rollup_pkey",
-          "columns": [
-            "org_id",
-            "et_day",
-            "campaign_kind",
-            "cohort"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "lifecycle_day_rollup_cohort_check": {
-          "name": "lifecycle_day_rollup_cohort_check",
-          "value": "cohort IN ('new', 'cold', 'hot', 'warm', 'warm_31_60', 'warm_61_120', 'freeze', 'suppressed', '__unclassified__')"
-        },
-        "lifecycle_day_rollup_campaign_kind_check": {
-          "name": "lifecycle_day_rollup_campaign_kind_check",
-          "value": "campaign_kind IN ('regular', 'drip')"
-        }
-      },
-      "isRLSEnabled": true
-    },
-    "public.group_lifecycle_rollup": {
-      "name": "group_lifecycle_rollup",
-      "schema": "",
-      "columns": {
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "row_kind": {
-          "name": "row_kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "row_key": {
-          "name": "row_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "sendable": {
-          "name": "sendable",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "available": {
-          "name": "available",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "recent_days": {
-          "name": "recent_days",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "computed_at": {
-          "name": "computed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "group_lifecycle_rollup_org_id_organizations_id_fk": {
-          "name": "group_lifecycle_rollup_org_id_organizations_id_fk",
-          "tableFrom": "group_lifecycle_rollup",
-          "tableTo": "organizations",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "group_lifecycle_rollup_pkey": {
-          "name": "group_lifecycle_rollup_pkey",
-          "columns": [
-            "org_id",
-            "row_kind",
-            "row_key",
-            "status"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "group_lifecycle_rollup_kind_check": {
-          "name": "group_lifecycle_rollup_kind_check",
-          "value": "row_kind IN ('group', 'cluster', 'all')"
-        },
-        "group_lifecycle_rollup_status_check": {
-          "name": "group_lifecycle_rollup_status_check",
-          "value": "status IN ('new', 'cold', 'hot', 'warm', 'freeze', 'suppressed')"
-        },
-        "group_lifecycle_rollup_recent_days_check": {
-          "name": "group_lifecycle_rollup_recent_days_check",
-          "value": "recent_days >= 1 AND recent_days <= 90"
-        }
-      },
-      "isRLSEnabled": true
-    },
-    "public.offer_brands": {
-      "name": "offer_brands",
-      "schema": "",
-      "columns": {
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "offer_id": {
-          "name": "offer_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "brand_id": {
-          "name": "brand_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "offer_brands_org_brand_idx": {
-          "name": "offer_brands_org_brand_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "brand_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        }
-      },
-      "foreignKeys": {
-        "offer_brands_org_id_organizations_id_fk": {
-          "name": "offer_brands_org_id_organizations_id_fk",
-          "tableFrom": "offer_brands",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "tableTo": "organizations",
-          "schemaTo": "public",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        },
-        "offer_brands_offer_id_offers_id_fk": {
-          "name": "offer_brands_offer_id_offers_id_fk",
-          "tableFrom": "offer_brands",
-          "columnsFrom": [
-            "offer_id"
-          ],
-          "tableTo": "offers",
-          "schemaTo": "public",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        },
-        "offer_brands_brand_id_brands_id_fk": {
-          "name": "offer_brands_brand_id_brands_id_fk",
-          "tableFrom": "offer_brands",
-          "columnsFrom": [
-            "brand_id"
-          ],
-          "tableTo": "brands",
-          "schemaTo": "public",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        }
-      },
-      "compositePrimaryKeys": {
-        "offer_brands_offer_id_brand_id_pk": {
-          "name": "offer_brands_offer_id_brand_id_pk",
-          "columns": [
-            "offer_id",
-            "brand_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.stage_manual_recipients": {
-      "name": "stage_manual_recipients",
-      "schema": "",
-      "columns": {
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "stage_id": {
-          "name": "stage_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "contact_id": {
-          "name": "contact_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "exported_at": {
-          "name": "exported_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "sent_at": {
-          "name": "sent_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "stage_manual_recipients_org_sent_idx": {
-          "name": "stage_manual_recipients_org_sent_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "sent_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "where": "sent_at IS NOT NULL",
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        }
-      },
-      "foreignKeys": {
-        "stage_manual_recipients_org_id_organizations_id_fk": {
-          "name": "stage_manual_recipients_org_id_organizations_id_fk",
-          "tableFrom": "stage_manual_recipients",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "tableTo": "organizations",
-          "schemaTo": "public",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        },
-        "stage_manual_recipients_stage_id_campaign_stages_id_fk": {
-          "name": "stage_manual_recipients_stage_id_campaign_stages_id_fk",
-          "tableFrom": "stage_manual_recipients",
-          "columnsFrom": [
-            "stage_id"
-          ],
-          "tableTo": "campaign_stages",
-          "schemaTo": "public",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
-        },
-        "stage_manual_recipients_contact_id_contacts_id_fk": {
-          "name": "stage_manual_recipients_contact_id_contacts_id_fk",
-          "tableFrom": "stage_manual_recipients",
-          "columnsFrom": [
-            "contact_id"
-          ],
-          "tableTo": "contacts",
-          "schemaTo": "public",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        }
-      },
-      "compositePrimaryKeys": {
-        "stage_manual_recipients_stage_id_contact_id_pk": {
-          "name": "stage_manual_recipients_stage_id_contact_id_pk",
-          "columns": [
-            "stage_id",
-            "contact_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.partners": {
-      "name": "partners",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "serial",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "slug": {
-          "name": "slug",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'active'"
-        },
-        "archived_at": {
-          "name": "archived_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "created_by": {
-          "name": "created_by",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "report_token_hash": {
-          "name": "report_token_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "report_token_issued_at": {
-          "name": "report_token_issued_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "report_token_expires_at": {
-          "name": "report_token_expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "report_show_revenue": {
-          "name": "report_show_revenue",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        }
-      },
-      "indexes": {
-        "partners_org_slug_uniq": {
-          "name": "partners_org_slug_uniq",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "slug",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        },
-        "partners_report_token_hash_uniq": {
-          "name": "partners_report_token_hash_uniq",
-          "columns": [
-            {
-              "expression": "report_token_hash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"partners\".\"report_token_hash\" IS NOT NULL",
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        },
-        "partners_org_status_idx": {
-          "name": "partners_org_status_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        }
-      },
-      "foreignKeys": {
-        "partners_org_id_organizations_id_fk": {
-          "name": "partners_org_id_organizations_id_fk",
-          "tableFrom": "partners",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "tableTo": "organizations",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {
-        "partners_select_own_org": {
-          "name": "partners_select_own_org",
-          "as": "PERMISSIVE",
-          "for": "SELECT",
-          "to": [
-            "public"
-          ]
-        }
-      },
-      "checkConstraints": {
-        "partners_status_check": {
-          "name": "partners_status_check",
-          "value": "\"partners\".\"status\" IN ('active', 'archived')"
-        },
-        "partners_slug_check": {
-          "name": "partners_slug_check",
-          "value": "\"partners\".\"slug\" ~ '^[a-z0-9][a-z0-9_-]*$'"
-        }
-      },
-      "isRLSEnabled": true
-    },
-    "public.partner_attribution_recalcs": {
-      "name": "partner_attribution_recalcs",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "bigserial",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "contact_group_id": {
-          "name": "contact_group_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "requested_at": {
-          "name": "requested_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "requested_by": {
-          "name": "requested_by",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reason": {
-          "name": "reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'queued'"
-        },
-        "campaigns_total": {
-          "name": "campaigns_total",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "campaigns_done": {
-          "name": "campaigns_done",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "finished_at": {
-          "name": "finished_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "partner_attribution_recalcs_org_status_idx": {
-          "name": "partner_attribution_recalcs_org_status_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "requested_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        },
-        "partner_attribution_recalcs_group_idx": {
-          "name": "partner_attribution_recalcs_group_idx",
-          "columns": [
-            {
-              "expression": "contact_group_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        }
-      },
-      "foreignKeys": {
-        "partner_attribution_recalcs_org_id_organizations_id_fk": {
-          "name": "partner_attribution_recalcs_org_id_organizations_id_fk",
-          "tableFrom": "partner_attribution_recalcs",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "tableTo": "organizations",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        },
-        "partner_attribution_recalcs_contact_group_id_contact_groups_id_fk": {
-          "name": "partner_attribution_recalcs_contact_group_id_contact_groups_id_fk",
-          "tableFrom": "partner_attribution_recalcs",
-          "columnsFrom": [
-            "contact_group_id"
-          ],
-          "tableTo": "contact_groups",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {
-        "partner_attribution_recalcs_select_own_org": {
-          "name": "partner_attribution_recalcs_select_own_org",
-          "as": "PERMISSIVE",
-          "for": "SELECT",
-          "to": [
-            "public"
-          ]
-        }
-      },
-      "checkConstraints": {
-        "partner_attribution_recalcs_reason_check": {
-          "name": "partner_attribution_recalcs_reason_check",
-          "value": "\"partner_attribution_recalcs\".\"reason\" IN ('link', 'unlink', 'relink', 'manual')"
-        },
-        "partner_attribution_recalcs_status_check": {
-          "name": "partner_attribution_recalcs_status_check",
-          "value": "\"partner_attribution_recalcs\".\"status\" IN ('queued', 'running', 'done', 'failed')"
-        }
-      },
-      "isRLSEnabled": true
-    },
-    "public.message_formats": {
-      "name": "message_formats",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "serial",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "template": {
-          "name": "template",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "is_enabled": {
-          "name": "is_enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "is_default": {
-          "name": "is_default",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'active'"
-        },
-        "archived_at": {
-          "name": "archived_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "message_formats_org_default_uniq": {
-          "name": "message_formats_org_default_uniq",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"message_formats\".\"is_default\"",
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        },
-        "message_formats_org_status_idx": {
-          "name": "message_formats_org_status_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        }
-      },
-      "foreignKeys": {
-        "message_formats_org_id_organizations_id_fk": {
-          "name": "message_formats_org_id_organizations_id_fk",
-          "tableFrom": "message_formats",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "tableTo": "organizations",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {
-        "message_formats_select_own_org": {
-          "name": "message_formats_select_own_org",
-          "as": "PERMISSIVE",
-          "for": "SELECT",
-          "to": [
-            "public"
-          ]
-        }
-      },
-      "checkConstraints": {
-        "message_formats_status_check": {
-          "name": "message_formats_status_check",
-          "value": "\"message_formats\".\"status\" IN ('active', 'archived')"
-        },
-        "message_formats_default_usable_check": {
-          "name": "message_formats_default_usable_check",
-          "value": "NOT \"message_formats\".\"is_default\" OR (\"message_formats\".\"is_enabled\" AND \"message_formats\".\"status\" = 'active')"
-        }
-      },
-      "isRLSEnabled": true
     }
   },
   "enums": {},

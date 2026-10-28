@@ -121,6 +121,14 @@
       "schedule": "14 * * * *"
     },
     {
+      "path": "/api/cron/carrier-rejections",
+      "schedule": "5,20,35,50 * * * *"
+    },
+    {
+      "path": "/api/cron/carrier-rejections?mode=rebuild",
+      "schedule": "15 4 * * *"
+    },
+    {
       "path": "/api/cron/delivery-rollup",
       "schedule": "3,13,23,33,43,53 * * * *"
     },

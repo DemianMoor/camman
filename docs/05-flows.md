@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -661,6 +661,12 @@ sequenceDiagram
   R->>DB: recordHeartbeat (incremental / rebuild)
   R-->>Cron: 200 · on throw: Tier-1 Telegram + 500
 ```
+
+Settings > Sending (PR 3) writes the same table outside the cron: `PUT
+/api/settings/carrier-rejection` with a changed threshold runs `refreshFlaggedPhones(tx,
+org)` in the save transaction, after the `org_settings` UPDATE and its
+`org_setting_events` row. It does not take the cron lease; both are full recomputes from
+the ledger, so whichever commits last is correct.
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)
 

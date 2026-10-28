@@ -168,7 +168,7 @@ export function CarrierRejectionSettings() {
         <div className="flex flex-wrap items-center gap-3 rounded-md border p-3">
           <p className="text-sm">
             <span className="text-lg font-semibold">{saved.flagged_count.toLocaleString()}</span>{" "}
-            numbers currently meet the rule
+            {saved.flagged_count === 1 ? "number currently meets" : "numbers currently meet"} the rule
             {saved.evaluated_at ? (
               <span className="text-muted-foreground">
                 {" "}

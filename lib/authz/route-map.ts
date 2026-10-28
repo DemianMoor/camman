@@ -451,6 +451,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "sends/today": { methods: ["GET"], token: ["GET"] },
 
   // ── settings ─────────────────────────────────────────────────────────────
+  "settings/carrier-rejection": null, // settings -- toggle/thresholds are manager+ (campaigns.drain); no operator path
+  "settings/carrier-rejection/export": null, // contact rows / CSV of contacts
   "settings/lifecycle": null, // settings -- lifecycle.configure (manager+); no operator path
   // ⚠️ The OPERATOR path to the one fact the campaign form needs from the line
   // above: which editor to draw. settings/lifecycle stays denied (thresholds

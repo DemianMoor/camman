@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { CarrierRejectionSettings } from "@/components/settings/carrier-rejection-settings";
 import { SendToggle } from "@/components/settings/send-toggle";
 
 export const metadata: Metadata = { title: "Sending Settings" };
@@ -15,6 +16,8 @@ export default function SendingSettingsPage() {
       </header>
 
       <SendToggle />
+
+      <CarrierRejectionSettings />
     </div>
   );
 }

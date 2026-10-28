@@ -1,6 +1,6 @@
 # Carrier-Rejected Numbers
 
-_Last updated: 2026-10-28 (PR 2: eligibility filters, toggle still off); 2026-10-24 (PR 1: ledger, crons, backfill)_
+_Last updated: 2026-10-28 (PR 3: Settings > Sending card + contact detail); 2026-10-28 (PR 2: eligibility filters, toggle still off); 2026-10-24 (PR 1: ledger, crons, backfill)_
 
 ClickUp [1amdve2850v](https://app.clickup.com/t/1amdve2850v). Numbers that carriers
 repeatedly reject as dead or landline are marked **"Rejected by carriers"** and, while
@@ -16,8 +16,8 @@ is on. Turning it off makes the numbers eligible again, with no data lost.
 | PR | Scope | State |
 |---|---|---|
 | 1 | Migration 0225, code map, ledger, 15-min + daily crons, backfill, verification | LIVE 2026-10-28 (#403); backfill `MATCH` 24,955 |
-| 2 | Eligibility filters: audience (preview/snapshot/draft counts), drip routing (`rejected_by_carriers`), stage materialization | this PR |
-| 3 | Settings > Sending UI (toggle, thresholds, code table, live count, CSV), contact detail status | planned |
+| 2 | Eligibility filters: audience (preview/snapshot/draft counts), drip routing (`rejected_by_carriers`), stage materialization | LIVE 2026-10-28 (#415) |
+| 3 | Settings > Sending UI (toggle, thresholds, code table, live count, CSV), contact detail status | this PR |
 | 4 | Partner report column | planned |
 
 From PR 2 the toggle is live in every eligibility path (§6). It still ships OFF; the owner turns it on.
@@ -119,7 +119,36 @@ and passed down as `carrierRejectedSuppression`, a **required** field on
 - The kill-switch preview (`AUDIENCE_PREVIEW_IMPL=reference`) is frozen and ignores the
   toggle.
 
-## 7. Verification
+## 7. Settings and contact detail (PR 3)
+
+**Settings > Sending** — [components/settings/carrier-rejection-settings.tsx](../../components/settings/carrier-rejection-settings.tsx),
+API [app/api/settings/carrier-rejection](../../app/api/settings/carrier-rejection/route.ts):
+
+- **Toggle** "Suppress carrier-rejected numbers". Turning it ON asks for confirmation and
+  names the number of numbers affected; OFF applies at once.
+- **Live count** — rows in `carrier_rejected_phones` for the org, with the time they were
+  last evaluated. Shown whether or not the toggle is on, so the effect can be checked first.
+- **Thresholds** (hard, soft, soft window days; bounds = the 0225 CHECK). **Saving a
+  changed threshold recomputes the flagged set in the same transaction**
+  (`refreshFlaggedPhones(tx, org)`, owner 2026-10-23), so the count is current when the
+  save returns. A toggle-only change does not recompute.
+- **Code map** — read-only, from `CARRIER_REJECTION_CODES`, txr webhook aliases shown beside
+  their poll codes; TextHub listed as not counted.
+- **Export CSV** — [export route](../../app/api/settings/carrier-rejection/export/route.ts):
+  phone, partner (via the contact's lead events), contact groups, hard / soft counts, last
+  rejection (UTC), last code, last provider. ~15 s for 24,955 rows on prod.
+
+Permissions: read = `campaigns.view`; change = `campaigns.drain` (manager+, the live-send
+switch's bar); export = `contacts.export` (manager+). Every changed value writes an
+`org_setting_events` row (`setting_key` = the column name). Both routes are denied to
+operators and tokens in [lib/authz/route-map.ts](../../lib/authz/route-map.ts).
+
+**Contact detail** — `GET /api/contacts/[id]` returns `carrier_rejection` (null unless the
+number currently meets the rule): counts, last code and provider, last rejection, and
+`suppression_on`. The page shows a "Rejected by carriers" badge and a card saying whether
+the number is currently being kept out of sends.
+
+## 8. Verification
 
 - [scripts/test-carrier-rejection-codes.ts](../../scripts/test-carrier-rejection-codes.ts)
   — pure; every code seen on prod, with its class.

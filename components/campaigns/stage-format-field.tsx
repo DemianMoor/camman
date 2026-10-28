@@ -50,7 +50,7 @@ export function formatWarnings(shape: MessageShape | null, creativeText: string 
 
 /**
  * Message format picker (0216). Operators pick from ENABLED formats; "Custom"
- * (free-form message with {creative_text} {url} {stop_text}) is owner-only.
+ * (free-form message with {creative_text} {url} {stop_text}) needs stages.custom_message (operator+).
  * Both lock once the stage has sent.
  */
 export function StageFormatField({
@@ -79,7 +79,7 @@ export function StageFormatField({
   const options = formats.filter((f) => f.is_enabled || f.id === selectedId);
   const value = isCustom ? CUSTOM : selectedId != null ? String(selectedId) : "";
   const customError = isCustom ? validateCustomText(customText) : null;
-  // Custom text is owner territory: a non-owner can neither pick it nor leave it.
+  // Without stages.custom_message a user can neither pick custom text nor leave it.
   const pickerDisabled = disabled || locked || (isCustom && !canCustom);
 
   const insert = (token: string) => {

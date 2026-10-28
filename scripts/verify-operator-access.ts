@@ -414,6 +414,7 @@ async function main() {
     "/offers",
     "/affiliate-networks",
     "/utm-tags",
+    "/message-formats",
     "/routing-types",
     "/traffic-types",
     "/reports",

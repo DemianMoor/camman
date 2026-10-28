@@ -58,7 +58,7 @@ export type Permission =
   | "traffic_types.restore"
   | "utm_tags.view"
   // 0216 message formats: view = pick a format on a stage (every role);
-  // manage = create / edit / enable / make default (manager, admin, owner).
+  // manage = create / edit / enable / make default (operator and above).
   | "message_formats.view"
   | "message_formats.manage"
   | "utm_tags.create"
@@ -120,6 +120,9 @@ export type Permission =
   | "stages.archive"
   | "stages.restore"
   | "stages.delete"
+  // 0216: write a free-form custom message on a stage (operator+). It must
+  // still contain {stop_text}; the footer TEXT stays compliance.manage.
+  | "stages.custom_message"
   | "registry.view"
   | "registry.create"
   | "registry.update"
@@ -249,6 +252,7 @@ const staffBaselinePerms: ReadonlySet<Permission> = new Set([
   "stages.update",
   "stages.send",
   "stages.archive",
+  "stages.custom_message",
   "result_imports.create",
   "import_mappings.create",
   "import_mappings.update",
@@ -288,10 +292,14 @@ const operatorPerms: ReadonlySet<Permission> = new Set([
   "offers.view",
   "networks.view",
   "utm_tags.view",
-  "message_formats.view",
   "routing_types.view",
   "traffic_types.view",
   "registry.view",
+  // Message formats — pick, write a custom message on a stage, and manage the
+  // org templates (owner ruling 2026-10-28).
+  "message_formats.view",
+  "message_formats.manage",
+  "stages.custom_message",
   // Sending numbers: needed to choose a route on a stage. The response is
   // redacted to a route alias, so this grants "pick Route B", never "learn
   // which SSP Route B is".

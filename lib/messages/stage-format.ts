@@ -43,7 +43,7 @@ export type StageFormatDecision =
       ok: false;
       status: 400 | 403 | 409;
       message: string;
-      reason: "compliance_field_locked" | "custom_text_missing_required_block" | "format_locked_after_send" | "format_unavailable";
+      reason: "custom_message_locked" | "custom_text_missing_required_block" | "format_locked_after_send" | "format_unavailable";
       field: "custom_text" | "message_format_id";
     };
 
@@ -51,8 +51,8 @@ export type StageFormatDecision =
  * Decide a stage create/edit of its message shape (spec B3/B4, R4/R5). PURE.
  * The stage form ECHOES every field, so only a value that differs from the
  * stored one is a change — an echo is never refused.
- *   • custom text is owner territory (compliance.manage): setting it, editing it
- *     and leaving it for a format all require it;
+ *   • custom text needs stages.custom_message (operator+): setting it, editing
+ *     it and leaving it for a format all require it;
  *   • custom text must contain {creative_text}, {url} and {stop_text};
  *   • a format must be enabled, active and the org's own (`formatUsable`);
  *   • once the stage is locked (stageFormatLocked) the shape cannot change
@@ -64,7 +64,7 @@ export { stageFormatLocked } from "@/lib/stages/format-lock";
 export function decideStageFormatChange(i: {
   current: StageFormatColumns | null;
   input: { message_format_id?: number | null; custom_text?: string | null };
-  canCompliance: boolean;
+  canCustomMessage: boolean;
   /** stageFormatLocked(...) for an existing stage; false on create. */
   locked: boolean;
   /** Is input.message_format_id enabled + active in this org? Ignored when not sent. */
@@ -77,10 +77,10 @@ export function decideStageFormatChange(i: {
   if (wantsCustom ? i.input.custom_text === cur.custom_text : i.input.message_format_id === cur.message_format_id) {
     return { ok: true, set: {} };
   }
-  if ((wantsCustom || cur.custom_text != null) && !i.canCompliance) {
+  if ((wantsCustom || cur.custom_text != null) && !i.canCustomMessage) {
     return {
-      ok: false, status: 403, reason: "compliance_field_locked", field: "custom_text",
-      message: "Custom message text is an owner-only compliance setting.",
+      ok: false, status: 403, reason: "custom_message_locked", field: "custom_text",
+      message: "You don't have permission to write a custom message.",
     };
   }
   if (wantsCustom) {

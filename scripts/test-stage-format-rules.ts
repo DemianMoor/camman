@@ -11,12 +11,12 @@ const eq = (n: string, got: unknown, want: unknown) =>
 
 const T1 = { message_format_id: 1, custom_text: null };
 const CUSTOM = "Hi<new_row>{creative_text}<new_row>{url}<new_row>{stop_text}";
-const base = { current: T1, canCompliance: true, locked: false, formatUsable: true };
+const base = { current: T1, canCustomMessage: true, locked: false, formatUsable: true };
 
 console.log("M3 — stage format rules");
-const op = decideStageFormatChange({ ...base, canCompliance: false, input: { custom_text: CUSTOM } });
-bar("M3.1 operator setting custom_text ⇒ 403 compliance_field_locked (field custom_text)",
-  !op.ok && op.status === 403 && op.reason === "compliance_field_locked" && op.field === "custom_text");
+const op = decideStageFormatChange({ ...base, canCustomMessage: false, input: { custom_text: CUSTOM } });
+bar("M3.1 role without stages.custom_message setting custom_text ⇒ 403 custom_message_locked (field custom_text)",
+  !op.ok && op.status === 403 && op.reason === "custom_message_locked" && op.field === "custom_text");
 const noStop = decideStageFormatChange({ ...base, input: { custom_text: "{creative_text} {url}" } });
 bar("M3.2 owner custom text without {stop_text} ⇒ 400 custom_text_missing_required_block",
   !noStop.ok && noStop.status === 400 && noStop.reason === "custom_text_missing_required_block");
@@ -29,14 +29,14 @@ const sent = decideStageFormatChange({ ...base, locked: true, input: { message_f
 bar("M3.5 switching format on a locked stage ⇒ 409 format_locked_after_send", !sent.ok && sent.status === 409 && sent.reason === "format_locked_after_send");
 eq("M3.6 echoing the same format on a locked stage ⇒ no change, ok", decideStageFormatChange({ ...base, locked: true, input: { message_format_id: 1 } }), { ok: true, set: {} });
 eq("M3.7 echoing the same custom text (operator, locked stage) ⇒ no change, ok",
-  decideStageFormatChange({ ...base, current: { message_format_id: null, custom_text: CUSTOM }, canCompliance: false, locked: true, input: { custom_text: CUSTOM, message_format_id: null } }),
+  decideStageFormatChange({ ...base, current: { message_format_id: null, custom_text: CUSTOM }, canCustomMessage: false, locked: true, input: { custom_text: CUSTOM, message_format_id: null } }),
   { ok: true, set: {} });
-const opLeave = decideStageFormatChange({ ...base, current: { message_format_id: null, custom_text: CUSTOM }, canCompliance: false, input: { message_format_id: 1 } });
-bar("M3.8 operator switching a custom stage back to a format ⇒ 403 (custom text is owner territory)",
-  !opLeave.ok && opLeave.status === 403 && opLeave.reason === "compliance_field_locked");
+const opLeave = decideStageFormatChange({ ...base, current: { message_format_id: null, custom_text: CUSTOM }, canCustomMessage: false, input: { message_format_id: 1 } });
+bar("M3.8 role without stages.custom_message switching a custom stage back to a format ⇒ 403",
+  !opLeave.ok && opLeave.status === 403 && opLeave.reason === "custom_message_locked");
 const disabled = decideStageFormatChange({ ...base, formatUsable: false, input: { message_format_id: 2 } });
 bar("M3.9 picking a disabled / foreign format ⇒ 400 format_unavailable", !disabled.ok && disabled.status === 400 && disabled.reason === "format_unavailable");
-eq("M3.10 operator picking another enabled format ⇒ ok", decideStageFormatChange({ ...base, canCompliance: false, input: { message_format_id: 2 } }), { ok: true, set: { message_format_id: 2, custom_text: null } });
+eq("M3.10 operator picking another enabled format ⇒ ok", decideStageFormatChange({ ...base, canCustomMessage: false, input: { message_format_id: 2 } }), { ok: true, set: { message_format_id: 2, custom_text: null } });
 eq("M3.11 create with nothing ⇒ ok, nothing set (trigger fills the default)", decideStageFormatChange({ ...base, current: null, input: {} }), { ok: true, set: {} });
 
 console.log("\nM3 — when the format locks (spec R4, P4: regular = materialized_at, drip = sent ≥ 1)");

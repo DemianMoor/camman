@@ -2,7 +2,7 @@
 // Flag OFF (default) ⇒ every screen looks and behaves exactly as before P2; the
 // backend keeps stamping T1. Pure + source guards.
 //   npx tsx scripts/test-message-formats-ui-flag.ts
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { MESSAGE_FORMATS_UI_ENV, messageFormatsUiEnabled, stageFormatPayload } from "@/lib/messages/ui-flag";
 import { decideCreativeChange } from "@/lib/stages/send-locks";
 
@@ -39,7 +39,7 @@ bar("G3 stage form fetches formats only when the flag is on", /if\s*\(!formatsUi
 bar("G4 picker ALWAYS previews with the resolved footer (correctness fix, not gated)", /stopText=\{resolvedFooter\.text\}/.test(form) && !/stopText=\{formatsUi/.test(form));
 const route = strip(readFileSync("app/api/campaigns/[campaignId]/stages/[stageId]/route.ts", "utf8"));
 bar("G5 PATCH applies the drip creative lock regardless of the flag", /decideCreativeChange\(\{/.test(route) && !/lockEnabled/.test(route));
-const settings = strip(readFileSync("app/(protected)/settings/message-formats/page.tsx", "utf8"));
+const settings = strip(readFileSync("app/(protected)/message-formats/page.tsx", "utf8"));
 bar("G6 Settings page shows the UI-off note", settings.includes("messageFormatsUiEnabled()") && settings.includes("switched off"));
 
 console.log("\nSource guards — P4 creative editor (behind the flag)");
@@ -84,9 +84,12 @@ console.log("\nSource guards — sidebar (flag walk 10-22)");
 const nav = strip(readFileSync("components/protected/nav-config.ts", "utf8"));
 bar("G19 sidebar Reports lists By Format only when the flag is on",
   /\.\.\.\(messageFormatsUiEnabled\(\)\s*\?\s*\[\s*\{\s*label:\s*"By Format",\s*href:\s*"\/reports\/format"/.test(nav));
-bar("G20 sidebar Message Formats link uses the Settings layout's gate (providers.view), so an operator never gets a link to a 404",
-  /label:\s*"Message Formats",\s*href:\s*"\/settings\/message-formats",\s*permission:\s*"providers\.view"/.test(nav)
-  && /requirePagePermission\("providers\.view"\)/.test(strip(readFileSync("app/(protected)/settings/layout.tsx", "utf8"))));
+// Operators manage formats (2026-10-28), so the page lives OUTSIDE the Settings
+// layout (which 404s them) and the link uses the page's own gate.
+bar("G20 sidebar Message Formats link → /message-formats on message_formats.view, the page's own gate, outside the Settings layout",
+  /label:\s*"Message Formats",\s*href:\s*"\/message-formats",\s*permission:\s*"message_formats\.view"/.test(nav)
+  && /requirePagePermission\("message_formats\.view"\)/.test(settings)
+  && !existsSync("app/(protected)/settings/message-formats"));
 
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

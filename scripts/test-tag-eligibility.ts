@@ -101,14 +101,14 @@ async function main() {
 
     const recips = await enumerateStageRecipients(db, {
       campaignId: tagged.campaignId, orgId, filters,
-      eligibility: { creativeId: null, offerId: null, excludePriorOffer: false, lifecycleRules: false, offerRulesEnabled: false, offerCooldownDays: 7, offerLimitTimes: 5, tagRules: rules as typeof NO_TAG_RULES },
+      eligibility: { creativeId: null, offerId: null, excludePriorOffer: false, lifecycleRules: false, carrierRejectedSuppression: false, offerRulesEnabled: false, offerCooldownDays: 7, offerLimitTimes: 5, tagRules: rules as typeof NO_TAG_RULES },
     });
     bar("T3.6 recipients are exactly Jose and Mary", JSON.stringify(recips.map((r) => r.phone_number).sort()) === JSON.stringify([phones[2], phones[4]].sort()), JSON.stringify(recips.map((r) => r.phone_number)));
 
     const prev = await computeStageEligibilityPreview({
       orgId, campaignId: tagged.campaignId, mode: "active",
       stageFilters: { include_no_status: true, include_clickers: false, exclude_clickers: false },
-      eligibility: { currentCreativeId: null, currentOfferId: null, excludePriorOffer: false, offerRulesEnabled: false, offerCooldownDays: 7, offerLimitTimes: 5, lifecycleRules: false, tagRules: rules as typeof NO_TAG_RULES },
+      eligibility: { currentCreativeId: null, currentOfferId: null, excludePriorOffer: false, offerRulesEnabled: false, offerCooldownDays: 7, offerLimitTimes: 5, lifecycleRules: false, carrierRejectedSuppression: false, tagRules: rules as typeof NO_TAG_RULES },
     });
     bar("T3.7 stage audience preview: missing_tag_data = 2, segment_limit = 1, will_send = 2",
       prev.excluded_lifecycle.missing_tag_data === 2 && prev.excluded_lifecycle.segment_limit === 1 && prev.will_send === 2, JSON.stringify(prev));
@@ -134,6 +134,7 @@ async function main() {
     const layers = buildStageEligibilityExclusions({
       orgId, currentCampaignId: plain.campaignId, currentCreativeId: 1, currentOfferId: 1, excludePriorOffer: true,
       lifecycleRules: true, offerRulesEnabled: true, offerCooldownDays: 7, offerLimitTimes: 5, tagRules: plainRules as typeof NO_TAG_RULES,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     });
     bar("T3.10 …so no personalization layer is built (SQL unchanged)", !layers.some((l) => l.key === "missing_tag_data" || l.key === "segment_limit"), layers.map((l) => l.key).join(","));
     const pf2 = await preflightStageSend(db, { orgId, campaignId: plain.campaignId, stageId: plain.stageId });

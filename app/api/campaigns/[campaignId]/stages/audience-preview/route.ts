@@ -11,6 +11,7 @@ import {
   computeStageAudienceCountForDraft,
   computeStageEligibilityPreview,
 } from "@/lib/audience-snapshot";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { can } from "@/lib/permissions";
 import { countingTagRules, loadTagRules } from "@/lib/sends/tag-rules";
 
@@ -134,6 +135,8 @@ export async function POST(
   // split stages before activation. After activation we always go
   // through the pool query (faster + reflects the random sample).
   const isDraft = campaignRow[0].status === "draft";
+  // Read once, so the count and the eligibility breakdown below agree.
+  const carrierRejectedSuppression = await isCarrierRejectionSuppressionOn(orgId);
   const result = isDraft
     ? await computeStageAudienceCountForDraft(
         {
@@ -146,6 +149,7 @@ export async function POST(
           cap: campaignRow[0].audience_cap ?? null,
           excludeInUse: campaignRow[0].exclude_in_use_contacts,
           lifecycleRules: campaignRow[0].lifecycle_rules === true,
+          carrierRejectedSuppression,
           // Required: it builds the bought_offer exclusion (CLAUDE.md §11b).
           offerId: campaignRow[0].offer_id ?? null,
         },
@@ -190,6 +194,7 @@ export async function POST(
       offerCooldownDays: campaignRow[0].offer_cooldown_days,
       offerLimitTimes: campaignRow[0].offer_limit_times,
       tagRules,
+      carrierRejectedSuppression,
     },
     draft: isDraft
       ? {

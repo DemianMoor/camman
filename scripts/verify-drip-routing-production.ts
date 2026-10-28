@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 
 import { db, sql as pgConn } from "@/db/client";
 import { createPartnerWithKey } from "./_partner-fixture";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { evaluateLeadRouting } from "@/lib/drip/routing-eval";
 import { runDripRoutingBatch } from "@/lib/drip/routing";
 
@@ -151,7 +152,10 @@ async function main() {
     };
 
     const verdictFor = async (evId: string) =>
-      evaluateLeadRouting(db, { orgId, leadEventId: evId, tagRules: "load" });
+      evaluateLeadRouting(db, {
+        orgId, leadEventId: evId, tagRules: "load",
+        carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
+      });
 
     // ── posture ON (restored in finally) ─────────────────────────────────
     await db.execute(sql`

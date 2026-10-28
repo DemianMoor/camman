@@ -124,6 +124,7 @@ interface RawRow {
   carrier_norm: string | null;
   line_type: string;
   line_type_blocked: boolean;
+  carrier_rejected?: boolean;
   in_use_regular: boolean;
   in_use_drip: boolean;
   prior_event_count: number;
@@ -332,11 +333,15 @@ export function creativeTagsVerdict(
 
 export async function evaluateLeadRouting(
   dbc: DbOrTx,
-  { orgId, leadEventId, now = new Date(), counts, tagRules }:
+  { orgId, leadEventId, now = new Date(), counts, tagRules, carrierRejectedSuppression }:
     {
       orgId: string; leadEventId: string; now?: Date; counts?: CampaignJourneyCounts;
       // P5: REQUIRED (CLAUDE.md §11b) — it decides who is routed where.
       tagRules: CampaignTagRulesSource;
+      // org_settings.carrier_rejection_suppression_enabled
+      // (isCarrierRejectionSuppressionOn), read once per batch by the caller.
+      // REQUIRED (§11b). Off ⇒ the statement and the verdict are unchanged.
+      carrierRejectedSuppression: boolean;
     },
 ): Promise<LeadRoutingEvaluation | null> {
   const { start: dayStart, end: dayEnd } = campaignDayBoundsUtc(now);
@@ -364,7 +369,15 @@ export async function evaluateLeadRouting(
                 AND lt_g.status = 'active'
                 AND ((lt_g.allow_voip = false AND le.line_type = 'voip')
                   OR (lt_g.allow_unknown = false AND le.line_type = 'unknown')
-                  OR (lt_g.allow_toll_free = false AND le.line_type = 'toll_free'))) AS line_type_blocked,
+                  OR (lt_g.allow_toll_free = false AND le.line_type = 'toll_free'))) AS line_type_blocked,${
+        carrierRejectedSuppression
+          ? sql`
+      -- Carrier-rejected numbers (1amdve2850v): a primary-key lookup, the
+      -- same definition as lib/carrier-rejection/eligibility.ts for one contact.
+      EXISTS (SELECT 1 FROM carrier_rejected_phones crp
+              WHERE crp.org_id = ${orgId}::uuid AND crp.phone = le.phone_number) AS carrier_rejected,`
+          : sql``
+      }
       -- "In use" BOTH DIRECTIONS (G2): a regular campaign's frozen pool, or
       -- another live drip journey. Either blocks.
       EXISTS (SELECT 1 FROM campaign_audience_pool p
@@ -482,6 +495,17 @@ export async function evaluateLeadRouting(
   if (head.line_type_blocked) {
     globalDetail.line_type =
       `contact line type is ${head.line_type} and one of its groups disallows ${head.line_type} numbers`;
+  }
+
+  // Carrier-rejected numbers (1amdve2850v). PERMANENT, like line_type: the lead
+  // is marked unroutable with reason `rejected_by_carriers`. The key is only
+  // present while the org's toggle is on, so a toggle-off verdict (and the
+  // reason JSON written from it) is unchanged.
+  if (carrierRejectedSuppression) {
+    global.rejected_by_carriers = head.carrier_rejected ? "blocked" : "pass";
+    if (head.carrier_rejected) {
+      globalDetail.rejected_by_carriers = "contact's number is rejected by carriers";
+    }
   }
 
   const inUse = head.in_use_regular || head.in_use_drip;

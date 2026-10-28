@@ -22,6 +22,7 @@ import {
   type StageEligibilityParams,
 } from "./sends/eligibility";
 import { stageRecipientsSql } from "./sends/recipients";
+import { excludeCarrierRejected } from "./carrier-rejection/eligibility";
 import { splitBucketMatch } from "./sends/split-bucket";
 import { buildSegmentAudienceClause } from "./segment-rules-eval";
 import { LIFECYCLE_CHIP_STATUSES, OFFER_COOLDOWN_DAYS_DEFAULT } from "./validators/campaigns";
@@ -426,6 +427,13 @@ export interface AudiencePreviewInput {
   // Required makes the compiler name them, which is how the same field on
   // StageEligibilityParams found its missing callers in 4b.
   lifecycleRules: boolean;
+  // org_settings.carrier_rejection_suppression_enabled, resolved by the caller
+  // (isCarrierRejectionSuppressionOn). On ⇒ carrier-rejected contacts are
+  // removed from the audience SOURCE — the one place the preview
+  // (buildPreviewMembership) and the snapshot/draft counts
+  // (buildAudienceSourceSql) both read, so they exclude the same people.
+  // REQUIRED per CLAUDE.md §11b: it decides who is selected.
+  carrierRejectedSuppression: boolean;
   // The INCLUDE segment set (intersected with groups when both present).
   segmentIds: number[];
   // The EXCLUDE segment set (migration 0114). Members are subtracted from the
@@ -618,7 +626,11 @@ async function buildAudienceSourceSql(
     hasGroup ? groupClause! : undefined,
   );
 
-  return buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion);
+  return excludeCarrierRejected(
+    buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
+    orgId,
+    input.carrierRejectedSuppression,
+  );
 }
 
 // Build the SQL that yields one row per qualifying contact_id, with the
@@ -933,6 +945,8 @@ export async function computeStageAudienceCountForDraft(
     excludeInUse?: boolean;
     // campaigns.lifecycle_rules — see AudiencePreviewInput.
     lifecycleRules?: boolean;
+    // See AudiencePreviewInput. Required (§11b).
+    carrierRejectedSuppression: boolean;
     // ⚠️ REQUIRED, per CLAUDE.md §11b: it changes WHO is counted (the
     // bought_offer layer is built from it), so it must not be optional with a
     // default. Optional, a call site that forgot it would quietly count buyers
@@ -1003,7 +1017,11 @@ export async function computeStageAudienceCountForDraft(
     contactGroupIds.length > 0 ? groupClause! : undefined,
   );
   const source = applyCarrierFilter(
-    buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
+    excludeCarrierRejected(
+      buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
+      orgId,
+      campaign.carrierRejectedSuppression,
+    ),
     orgId,
     filters.carrier_filter,
   );
@@ -1208,6 +1226,8 @@ export async function computeStageAudienceCountsBatchForDraft(
     excludeInUse?: boolean;
     // campaigns.lifecycle_rules — see AudiencePreviewInput.
     lifecycleRules?: boolean;
+    // See AudiencePreviewInput. Required (§11b).
+    carrierRejectedSuppression: boolean;
   },
   stages: StageCountBatchItem[],
 ): Promise<Map<number, number>> {
@@ -1236,6 +1256,7 @@ export async function computeStageAudienceCountsBatchForDraft(
     contactGroupIds,
     filters,
     excludeInUse,
+    carrierRejectedSuppression: campaign.carrierRejectedSuppression,
   });
   // Drip posture (G2/R14). Read once per call; false means the emitted
   // in-use CTE is byte-identical to pre-Phase-4.
@@ -1501,7 +1522,11 @@ export async function computeLaneAudienceCountsBatch(
 // sources relation) and positiveExpr reads `q.` (the flagged relation).
 export type PreviewMembershipInput = Pick<
   AudiencePreviewInput,
-  "orgId" | "segmentIds" | "excludeSegmentIds" | "contactGroupIds"
+  | "orgId"
+  | "segmentIds"
+  | "excludeSegmentIds"
+  | "contactGroupIds"
+  | "carrierRejectedSuppression"
 >;
 
 async function buildPreviewMembership(
@@ -1600,8 +1625,14 @@ async function buildPreviewMembership(
     ...groupBranches,
     ...excludeBranches,
   ];
-  const unionedWithSources = allBranches.reduce((acc, branch, i) =>
-    i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
+  // Carrier-rejected contacts leave every branch here, before any count — the
+  // same removal buildAudienceSourceSql makes for the snapshot.
+  const unionedWithSources = excludeCarrierRejected(
+    allBranches.reduce((acc, branch, i) =>
+      i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
+    ),
+    orgId,
+    input.carrierRejectedSuppression,
   );
 
   // Positive-base membership expression, resolved from which dimensions are
@@ -1969,6 +2000,7 @@ export async function previewAudience(
       segmentIds,
       excludeSegmentIds,
       contactGroupIds,
+      carrierRejectedSuppression: input.carrierRejectedSuppression,
     });
 
   // Drip posture (G2/R14). Read once per call; false means the emitted
@@ -2739,6 +2771,8 @@ export interface StageEligibilityPreviewInput {
     // P4: the previewed stage's personalization rules (loadTagRules from the
     // form's values). NO_TAG_RULES ⇒ unchanged.
     | "tagRules"
+    // The org's carrier-rejection toggle. Required, like lifecycleRules.
+    | "carrierRejectedSuppression"
   >;
   // Draft mode needs the campaign's planned audience recipe (no frozen pool yet).
   draft?: {
@@ -2807,6 +2841,7 @@ export async function computeStageEligibilityPreview(
       contactGroupIds: draft.contactGroupIds,
       filters: draft.filters,
       excludeInUse: draft.excludeInUse,
+      carrierRejectedSuppression: input.eligibility.carrierRejectedSuppression,
     });
     const dripPostureOn = await isDripPostureOn(orgId);
     const excludeInUse = draft.excludeInUse === true;
@@ -2857,6 +2892,7 @@ export async function computeStageEligibilityPreview(
     currentOfferId: input.eligibility.currentOfferId,
     excludePriorOffer: input.eligibility.excludePriorOffer,
     lifecycleRules: input.eligibility.lifecycleRules === true,
+    carrierRejectedSuppression: input.eligibility.carrierRejectedSuppression,
     offerRulesEnabled: input.eligibility.offerRulesEnabled === true,
     offerCooldownDays: input.eligibility.offerCooldownDays,
     offerLimitTimes: input.eligibility.offerLimitTimes,

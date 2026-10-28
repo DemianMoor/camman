@@ -115,6 +115,7 @@ async function main() {
     // Legacy behaviour is what this bar asserts; the lifecycle predicate
     // has its own suites. Explicit, because the field is required now.
     lifecycleRules: false,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     ...baseInput,
     filters: (c.audience_filters ?? {}) as never,
   });
@@ -136,6 +137,7 @@ async function main() {
     const r = await previewAudience({
       ...baseInput,
       lifecycleRules: true,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       filters: { lifecycle_statuses: [chip] } as never,
     });
     perChip[chip] = r.total_matching;
@@ -150,6 +152,7 @@ async function main() {
   const all = await previewAudience({
     ...baseInput,
     lifecycleRules: true,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     filters: { lifecycle_statuses: [...LIFECYCLE_CHIP_STATUSES] } as never,
   });
   console.log(
@@ -192,6 +195,7 @@ async function main() {
     excludePriorOffer: c.exclude_prior_offer_contacts,
     // ⭐ The hypothetical, as an argument. The campaign row is untouched.
     lifecycleRules: true,
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     offerRulesEnabled: false,
     offerCooldownDays: 7,
     offerLimitTimes: 5,

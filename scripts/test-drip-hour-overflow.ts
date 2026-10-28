@@ -129,7 +129,7 @@ async function main() {
       await sentThisHour(fx, a, 3);                                // hour-full — must be ignored
       await fx.campaign("b", 3, true, true, { interestTag: tag, priority: 100 });
       const l = await fx.lead(tag, Z("2026-10-13T18:09:00Z"));
-      const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load" }))!;
+      const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
       qlog = [];
       await route(fx, NOW);
       const log = qlog; qlog = null;
@@ -166,7 +166,7 @@ async function main() {
     await sentThisHour(fx, a, 3);
     await fx.campaign("b", 3, true, true, { interestTag: "t", priority: 100 });
     const l = await fx.lead("t", Z("2026-10-13T18:09:00Z"));
-    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load" }))!;
+    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     bar("no hour_capacity, A wins", v.candidates.every((c) => !("hour_capacity" in c.rules)) && v.winner?.campaign_id === a);
   });
 
@@ -177,7 +177,7 @@ async function main() {
     const b = await fx.campaign("b", 3, true, true, { interestTag: "t", priority: 100 });
     await sentThisHour(fx, a, 3);
     const l = await fx.lead("t", Z("2026-10-13T18:09:00Z"));
-    const live = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load" }))!;
+    const live = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     const ca = live.candidates.find((c) => c.campaign_id === a)!;
     const cb = live.candidates.find((c) => c.campaign_id === b)!;
     bar("live (uncached) eval: A hour_capacity blocked with the exact detail",
@@ -216,7 +216,7 @@ async function main() {
     await fx.campaign("b", 3, true, true, { interestTag: "t", priority: 100 });
     await sentThisHour(fx, a, 5);
     const l = await fx.lead("t", Z("2026-10-13T18:09:00Z"));
-    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load" }))!;
+    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     bar("A has no hour_capacity rule", !("hour_capacity" in v.candidates.find((c) => c.campaign_id === a)!.rules));
     await route(fx, NOW);
     bar("routes to A", (await journeyOf(l))?.campaign_id === a);
@@ -230,7 +230,7 @@ async function main() {
     await sentThisHour(fx, a, 1);                                  // would be full if the rule applied
     await db.execute(sql`UPDATE campaign_stages SET window_start_min = 600, window_end_min = 660 WHERE campaign_id = ${a}`);
     const l = await fx.lead("t", Z("2026-10-13T18:09:00Z"));
-    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load" }))!;
+    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l, now: NOW, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     bar("A has no hour_capacity rule (window 10–11 ET closed at 14:10)",
       !("hour_capacity" in v.candidates.find((c) => c.campaign_id === a)!.rules));
     await route(fx, NOW);
@@ -273,7 +273,7 @@ async function main() {
     await fx.journeys(a, 3, Z("2026-10-12T15:00:00Z"));          // waiting backlog (yesterday, hour_start NULL)
     const l1 = await fx.lead("t", Z("2026-10-13T18:09:00Z"));
     const counts = await loadCampaignJourneyCounts(db, { orgId: fx.orgId, now: NOW });
-    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l1, now: NOW, counts, tagRules: "load" }))!;
+    const v = (await evaluateLeadRouting(db, { orgId: fx.orgId, leadEventId: l1, now: NOW, counts, tagRules: "load", carrierRejectedSuppression: false /* legacy test: predates carrier-rejection suppression */ }))!;
     bar("evaluation read A with room", v.winner?.campaign_id === a && counts.get(a)!.hour !== null &&
       hourCommitted(counts.get(a)!.hour!.counts) === 0);
     const deps = { hasHeadroom: async () => true };

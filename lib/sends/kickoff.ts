@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { sql } from "drizzle-orm";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { lifecycleStampInsertSql } from "@/lib/engagement/lifecycle-stamp";
 
 import type { db } from "@/db/client";
@@ -736,6 +737,10 @@ export async function kickoffStageSend(
       // P4: skip whoever lacks the data or would breach the segment limit —
       // NO_TAG_RULES (no layer) for a tag-less stage.
       tagRules,
+      // Carrier-rejected numbers (1amdve2850v): read at materialization, so a
+      // frozen pool stops reaching them at its next stage. Rows already pending
+      // are not re-checked by the drain.
+      carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
     },
     // Q4: the sending NUMBER's carrier allow-list, applied HERE so an excluded
     // contact never becomes a stage_sends row. ANDs with the campaign-level

@@ -14,6 +14,7 @@ import type { LifecycleExclusionKey } from "@/lib/sends/eligibility";
 // appearing in the UI. That is the same discipline the counts themselves
 // follow — see LIFECYCLE_EXCLUSION_KEYS in lib/sends/eligibility.ts.
 export const EXCLUSION_LABELS: Record<LifecycleExclusionKey, string> = {
+  carrier_rejected: "rejected by carriers",
   suppressed: "suppressed",
   bought_offer: "bought this offer",
   freeze_not_due: "freeze not due",

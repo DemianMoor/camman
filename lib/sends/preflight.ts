@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { resolveSendsPerSecond } from "@/lib/sends/circuit-breakers";
 import {
   buildStageEligibilityExclusions,
@@ -204,6 +205,8 @@ export async function preflightStageSend(
   // would refuse outright still reports who lacks the data.
   const rawTagRules = await loadStageTagRules(dbc, { orgId, stageId });
   const tagRules = countingTagRules(rawTagRules);
+  // Read once: the recipient count and the per-reason split must agree.
+  const carrierRejectedSuppression = await isCarrierRejectionSuppressionOn(orgId);
 
   // Recipient count via the SAME builder the kickoff materializes from.
   const cnt = (await dbc.execute(sql`
@@ -238,6 +241,7 @@ export async function preflightStageSend(
           offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
           offerLimitTimes: Number(row.offer_limit_times ?? 5),
           tagRules,
+          carrierRejectedSuppression,
         },
         // Q4: the same carrier policy kickoff will apply, so the previewed
         // recipient count equals what materializes. Omitting it here would make
@@ -266,6 +270,7 @@ export async function preflightStageSend(
     offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
     offerLimitTimes: Number(row.offer_limit_times ?? 5),
     tagRules,
+    carrierRejectedSuppression,
   }).filter((l) =>
     (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),
   );

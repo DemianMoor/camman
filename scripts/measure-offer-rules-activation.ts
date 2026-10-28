@@ -42,6 +42,7 @@ async function main() {
   console.log(`recipe from campaign ${c.id}, offer ${c.offer_id}`);
 
   const base = {
+    carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
     campaignId: c.id as number,
     orgId: c.org_id as string,
     segmentIds: (c.audience_segment_ids as number[]) ?? [],

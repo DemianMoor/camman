@@ -7,6 +7,7 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { snapshotAudience } from "@/lib/audience-snapshot";
 import { logCampaignEvent } from "@/lib/campaign-events";
+import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
 import { can, type Permission } from "@/lib/permissions";
 import { campaignStatusChangeSchema } from "@/lib/validators/campaigns";
 
@@ -197,6 +198,8 @@ export async function POST(
               // engine has since been switched off. Its chips were chosen
               // under those semantics.
               lifecycleRules: c.lifecycle_rules === true,
+              // The ORG's toggle at activation — the same read the preview made.
+              carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
               offerRulesEnabled: c.offer_rules_enabled === true,
               offerCooldownDays: c.offer_cooldown_days,
               offerLimitTimes: c.offer_limit_times,

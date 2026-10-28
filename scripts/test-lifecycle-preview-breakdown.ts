@@ -184,6 +184,7 @@ async function main() {
       previewAudience({
         orgId,
         lifecycleRules: true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         segmentIds: [segId],
         filters: { lifecycle_statuses: chips },
         offerId: offer.id,
@@ -307,6 +308,7 @@ async function main() {
       // Legacy behaviour is what this bar asserts; the lifecycle predicate
       // has its own suites. Explicit, because the field is required now.
       lifecycleRules: false,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       orgId,
       segmentIds: [segId],
       filters: { include_no_status: true },
@@ -331,6 +333,7 @@ async function main() {
       const z = await run({
         orgId,
         lifecycleRules: true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         segmentIds: [segId],
         filters: { lifecycle_statuses: [] },
         offerId: offer.id,
@@ -388,6 +391,7 @@ async function main() {
     const basePart = await previewAudienceBase({
       orgId,
       lifecycleRules: true,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       segmentIds: [segId],
     });
     const chipSets: string[][] = [
@@ -405,6 +409,7 @@ async function main() {
         const input = {
           orgId,
           lifecycleRules: true,
+          carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
           segmentIds: [segId],
           filters: { lifecycle_statuses: chips },
           offerId: offer.id,
@@ -432,6 +437,7 @@ async function main() {
     const redInput = {
       orgId,
       lifecycleRules: true,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       segmentIds: [segId],
       filters: { lifecycle_statuses: ["hot"] },
       offerId: offer.id,
@@ -450,13 +456,14 @@ async function main() {
     const legacyInput = {
       orgId,
       lifecycleRules: false,
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
       segmentIds: [segId],
       filters: { include_no_status: true },
       offerId: offer.id,
     };
     const legacyDiff = leafDiff(
       combinePreviewParts(
-        await previewAudienceBase({ orgId, lifecycleRules: false, segmentIds: [segId] }),
+        await previewAudienceBase({ orgId, lifecycleRules: false, carrierRejectedSuppression: false, segmentIds: [segId] }),
         poison(await previewAudience(legacyInput)),
         null,
       ),
@@ -509,6 +516,7 @@ async function main() {
           input: {
             orgId,
             lifecycleRules: true,
+            carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
             segmentIds: [segId],
             filters: { lifecycle_statuses: chips },
             offerId: offer.id,
@@ -522,6 +530,7 @@ async function main() {
         input: {
           orgId,
           lifecycleRules: true,
+          carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
           segmentIds: [segId],
           filters: { lifecycle_statuses: everyChip },
           offerId: offer.id,
@@ -536,6 +545,7 @@ async function main() {
         input: {
           orgId,
           lifecycleRules: true,
+          carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
           segmentIds: [segId],
           filters: { lifecycle_statuses: everyChip },
           offerId: offer.id,
@@ -548,6 +558,7 @@ async function main() {
         input: {
           orgId,
           lifecycleRules: true,
+          carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
           segmentIds: [segId],
           filters: { lifecycle_statuses: everyChip, carrier_filter: ["AT&T", "Verizon"] },
           offerId: offer.id,
@@ -558,6 +569,7 @@ async function main() {
         input: {
           orgId,
           lifecycleRules: true,
+          carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
           segmentIds: [],
           filters: { lifecycle_statuses: everyChip },
           offerId: offer.id,
@@ -611,6 +623,7 @@ async function main() {
         {
           orgId,
           lifecycleRules: true,
+          carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
           segmentIds: [segId],
           filters: { lifecycle_statuses: chips },
           offerId: offer.id,
@@ -634,10 +647,11 @@ async function main() {
       freezeSql.includes("contact_engagement"),
     );
     const freezeCombined = combinePreviewParts(
-      await previewAudienceBase({ orgId, lifecycleRules: true, segmentIds: [segId] }),
+      await previewAudienceBase({ orgId, lifecycleRules: true, carrierRejectedSuppression: false, segmentIds: [segId] }),
       await previewAudienceAudiencePart({
         orgId,
         lifecycleRules: true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         segmentIds: [segId],
         filters: { lifecycle_statuses: ["freeze"] },
         offerId: offer.id,
@@ -667,6 +681,7 @@ async function main() {
       previewAudience({
         orgId,
         lifecycleRules: true,
+        carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
         segmentIds: [segId],
         filters: { lifecycle_statuses: chips },
         offerId: offer.id,

@@ -1,5 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 
+import { carrierRejectedContactsSql } from "@/lib/carrier-rejection/eligibility";
 import { firstNameCleanLengthSql, tagMissingSql } from "@/lib/messages/tag-sql";
 import type { TagRules } from "@/lib/messages/render";
 import { TAGS } from "@/lib/messages/tags";
@@ -65,6 +66,11 @@ export interface StageEligibilityParams {
   // the outside. Required turns that into a compile error that enumerates the
   // callers for you.
   lifecycleRules: boolean;
+  // org_settings.carrier_rejection_suppression_enabled (ClickUp 1amdve2850v).
+  // On ⇒ the `carrier_rejected` layer. An ORG setting, unlike the campaign
+  // flags above, and NOT inside the lifecycleRules gate: it applies to every
+  // campaign. REQUIRED (CLAUDE.md §11b) — it decides who is excluded.
+  carrierRejectedSuppression: boolean;
   // P4: what the stage's personalization asks of each recipient
   // (loadStageTagRules). NO_TAG_RULES for a stage with no contact tag — then no
   // layer is built and nothing changes. REQUIRED (CLAUDE.md §11b): it decides
@@ -86,6 +92,10 @@ export interface StageEligibilityParams {
 // here but not built until PR 4b; they sort ahead of the content-dedup layers
 // per spec §8.3.
 export const EXCLUSION_PRIORITY = [
+  // Carrier-rejected numbers (1amdve2850v). FIRST: a number carriers refuse is
+  // unreachable whatever else is true of the person, so it is the reason to
+  // report when several apply.
+  "carrier_rejected",
   "suppressed",
   "bought_offer",
   "freeze_not_due",
@@ -124,8 +134,12 @@ export const LIFECYCLE_EXCLUSION_KEYS = EXCLUSION_PRIORITY.filter(
 
 export type LifecycleExclusionKey = (typeof LIFECYCLE_EXCLUSION_KEYS)[number];
 
-/** P4 keys that only a STAGE can produce (its tag rules); a campaign-level audience never has them. */
-export type StageOnlyExclusionKey = "missing_tag_data" | "segment_limit";
+/**
+ * Keys a campaign-level audience never reports as a layer: the P4 keys only a
+ * STAGE can produce (its tag rules), and carrier_rejected, which the audience
+ * removes from its SOURCE (excludeCarrierRejected) rather than as a layer.
+ */
+export type StageOnlyExclusionKey = "missing_tag_data" | "segment_limit" | "carrier_rejected";
 
 /**
  * Per-reason counters for the lifecycle layers. EVERY surface that reports why
@@ -375,6 +389,11 @@ export function buildStageEligibilityExclusions(
       : null;
 
   const layers: EligibilityLayer[] = [];
+
+  // Carrier-rejected numbers — outside the lifecycle gate, for every campaign.
+  if (p.carrierRejectedSuppression) {
+    layers.push({ key: "carrier_rejected", sql: carrierRejectedContactsSql(p.orgId) });
+  }
 
   // ── The lifecycle layers (PR 4b, spec §8.1) ────────────────────────────
   // Only for a lifecycle campaign. None of them filters messaging_status:

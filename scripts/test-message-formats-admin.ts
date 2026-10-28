@@ -5,7 +5,7 @@ import "./_env-preload";
 import { requirePreviewDb } from "./_require-preview-db"; // MUST be second
 import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
-import { can, type Role } from "@/lib/permissions";
+import { can, type Permission, type Role } from "@/lib/permissions";
 import { OPERATOR_ROUTE_MAP } from "@/lib/authz/route-map";
 import {
   countLiveStagesUsingFormat, createFormat, listFormats, makeDefaultFormat, updateFormat,
@@ -22,13 +22,15 @@ async function main() {
   console.log("Permissions (pure)");
   const roles: Role[] = ["viewer", "operator", "manager", "admin", "owner"];
   bar("M2.1 message_formats.view: every role", roles.every((r) => can(r, "message_formats.view")));
-  bar("M2.2 message_formats.manage: manager/admin/owner only — NOT operator, NOT viewer",
-    JSON.stringify(roles.map((r) => can(r, "message_formats.manage"))) === JSON.stringify([false, false, true, true, true]));
-  bar("M2.3 operator may only GET the list route",
+  // Operator+ manages formats and writes stage custom text (owner ruling 2026-10-28).
+  bar("M2.2 message_formats.manage + stages.custom_message: operator and above — NOT viewer",
+    (["message_formats.manage", "stages.custom_message"] as Permission[]).every((p) =>
+      JSON.stringify(roles.map((r) => can(r, p))) === JSON.stringify([false, true, true, true, true])));
+  bar("M2.3 operator reaches each route by exactly the methods it exports",
     JSON.stringify(OPERATOR_ROUTE_MAP["message-formats/list"]?.methods) === JSON.stringify(["GET"])
-      && OPERATOR_ROUTE_MAP["message-formats"] === null
-      && OPERATOR_ROUTE_MAP["message-formats/[id]"] === null
-      && OPERATOR_ROUTE_MAP["message-formats/[id]/make-default"] === null);
+      && JSON.stringify(OPERATOR_ROUTE_MAP["message-formats"]?.methods) === JSON.stringify(["POST"])
+      && JSON.stringify(OPERATOR_ROUTE_MAP["message-formats/[id]"]?.methods) === JSON.stringify(["PATCH"])
+      && JSON.stringify(OPERATOR_ROUTE_MAP["message-formats/[id]/make-default"]?.methods) === JSON.stringify(["POST"]));
 
   console.log("\nAdmin rules (preview, rolled back)");
   try {

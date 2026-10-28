@@ -509,10 +509,10 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "users/list": null, // settings / provider registry -- Owner only
 
   // ── message-formats (0216) ──────────────────────────────────────────────
-  // Operators PICK a format on a stage (the list) and never manage them.
-  "message-formats": null, // create — message_formats.manage (manager+)
-  "message-formats/[id]": null, // edit / enable — message_formats.manage
-  "message-formats/[id]/make-default": null, // message_formats.manage
+  // Operators pick AND manage formats (owner ruling 2026-10-28).
+  "message-formats": { methods: ["POST"] }, // create — message_formats.manage
+  "message-formats/[id]": { methods: ["PATCH"] }, // edit / enable — message_formats.manage
+  "message-formats/[id]/make-default": { methods: ["POST"] }, // message_formats.manage
   "message-formats/list": { methods: ["GET"] },
 
   // ── utm-tags ─────────────────────────────────────────────────────────────

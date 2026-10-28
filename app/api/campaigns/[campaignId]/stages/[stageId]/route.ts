@@ -442,7 +442,7 @@ export async function PATCH(
   }
   const current = existing[0];
 
-  // ── 0216: message shape (format / owner-only custom text) + send locks ──
+  // ── 0216: message shape (format / custom text) + send locks ──
   // The loop above copied whatever the form echoed; the shape is decided here
   // instead, against the STORED values, so an echo is never refused.
   delete updates.message_format_id;
@@ -463,7 +463,7 @@ export async function PATCH(
   const shape = decideStageFormatChange({
     current: { message_format_id: current.message_format_id, custom_text: current.custom_text },
     input: { message_format_id: input.message_format_id, custom_text: input.custom_text },
-    canCompliance: can(role, "compliance.manage"),
+    canCustomMessage: can(role, "stages.custom_message"),
     locked: formatLocked,
     formatUsable:
       input.custom_text == null && input.message_format_id != null

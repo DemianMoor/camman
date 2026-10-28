@@ -162,17 +162,18 @@ async function main() {
     const op = await session("operator");
     const opList = await op.call("GET", "/api/message-formats/list");
     check("operator: GET list 200", opList.status === 200, `${opList.status}`);
-    const opPost = await op.call("POST", "/api/message-formats", { name: "x", template: "{creative_text}{url}{stop_text}" });
-    check("operator: POST format ⇒ 403", opPost.status === 403, `${opPost.status}`);
+    // Operators manage formats and write custom text (owner ruling 2026-10-28).
+    const opPost = await op.call("POST", "/api/message-formats", { name: "op-made", template: "{creative_text}<new_row>{url}<new_row>{stop_text}" });
+    check("operator: POST format ⇒ 201", opPost.status === 201, JSON.stringify(opPost).slice(0, 200));
     const opFmts = (opList.body.data as { id: number }[]) ?? [];
-    const opPatch = await op.call("PATCH", `/api/message-formats/${opFmts[0]?.id}`, { name: "x" });
-    check("operator: PATCH format ⇒ 403", opPatch.status === 403, `${opPatch.status}`);
+    const opPatch = await op.call("PATCH", `/api/message-formats/${opPost.body.id}`, { name: "op-renamed" });
+    check("operator: PATCH format ⇒ 200", opPatch.status === 200, JSON.stringify(opPatch).slice(0, 200));
     const opFx = await fixture(op.orgId!, "regular", false, false);
     const opCustom = await op.call("PATCH", `/api/campaigns/${opFx.campaignId}/stages/${opFx.stageId}`, { custom_text: custom });
-    check("operator: set custom text ⇒ 403 compliance_field_locked", opCustom.status === 403 && reason(opCustom) === "compliance_field_locked", JSON.stringify(opCustom));
+    check("operator: set custom text ⇒ 200", opCustom.status === 200, JSON.stringify(opCustom).slice(0, 200));
     const opT2 = (opFmts as { id: number; name?: string }[]).find((f) => f.name?.startsWith("T2"));
     const opPick = await op.call("PATCH", `/api/campaigns/${opFx.campaignId}/stages/${opFx.stageId}`, { message_format_id: opT2?.id });
-    check("operator: pick another enabled format ⇒ 200", opPick.status === 200, JSON.stringify(opPick).slice(0, 200));
+    check("operator: leave custom text for another enabled format ⇒ 200", opPick.status === 200, JSON.stringify(opPick).slice(0, 200));
     const drip = await fixture(op.orgId!, "drip", true, false);
     const swap = await op.call("PATCH", `/api/campaigns/${drip.campaignId}/stages/${drip.stageId}`, { creative_id: drip.otherCreativeId });
     check("operator: drip creative change after send ⇒ 409 creative_locked_after_send", swap.status === 409 && reason(swap) === "creative_locked_after_send", JSON.stringify(swap));

@@ -124,7 +124,7 @@ export interface StageFormValues {
   full_url_auto: boolean;
   stop_text: string;
   // 0216: the message shape. message_format_id null on a NEW stage = the org
-  // default (the server trigger stamps it). custom_text is owner-only and wins
+  // default (the server trigger stamps it). custom_text (stages.custom_message) wins
   // when set.
   message_format_id: number | null;
   custom_text: string | null;
@@ -1592,7 +1592,7 @@ export function StageForm({
                 )}
               />
 
-                {/* 0216: message format (or owner-only custom text) + B5 warnings. */}
+                {/* 0216: message format (or custom text) + B5 warnings. */}
                 {formatsUi && (
                 <div className="grid gap-1">
                   <StageFormatField
@@ -1603,7 +1603,7 @@ export function StageForm({
                       form.setValue("message_format_id", next.message_format_id, { shouldDirty: true });
                       form.setValue("custom_text", next.custom_text, { shouldDirty: true });
                     }}
-                    canCustom={canEditCompliance}
+                    canCustom={can("stages.custom_message")}
                     locked={formatLocked}
                     disabled={isSubmitting}
                   />

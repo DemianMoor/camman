@@ -250,6 +250,15 @@ export const navGroups: NavGroup[] = [
         icon: LinkIcon,
         disabled: !isEntityAvailable("utm_tags"),
       },
+      // Message formats (0216): how brand / creative / link / opt-out text are
+      // assembled. Every role may view; operator+ manages (2026-10-28). Lives
+      // outside /settings because the Settings layout 404s the operator.
+      {
+        label: "Message Formats",
+        href: "/message-formats",
+        permission: "message_formats.view",
+        icon: MessageSquare,
+      },
     ],
   },
   {
@@ -271,17 +280,6 @@ export const navGroups: NavGroup[] = [
       },
       // Brand short domains (B1). The only write surface for them — the brand
       // form's single text field was removed, since a brand may hold several.
-      // Message formats (0216): how brand / creative / link / opt-out text are
-      // assembled. Everyone who reaches Settings may view; manager+ manages.
-      // Gated on providers.view, not message_formats.view: the operator holds
-      // the latter (the stage form lists formats) but the Settings layout
-      // 404s them, so the link must follow the layout's gate.
-      {
-        label: "Message Formats",
-        href: "/settings/message-formats",
-        permission: "providers.view",
-        icon: MessageSquare,
-      },
       {
         label: "Short Domains",
         href: "/settings/short-domains",

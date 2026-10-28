@@ -1,6 +1,6 @@
 # Feature — Multi-tenancy, Auth & Permissions
 
-_Last updated: 2026-09-16_
+_Last updated: 2026-10-28_
 
 ## 1. Purpose
 Isolate every org's data behind an `org_id`, authenticate users via Supabase Auth, and enforce a five-role permission model on both server and client. A missing `org_id` filter is a data-leak bug — this is the most safety-critical convention in the codebase.
@@ -243,7 +243,7 @@ as before.
 
 ### The permission set
 
-`operator` is **38 permissions** (36 at Phase 2; `provider_phones.view` since, and `creatives.archive` on 2026-09-15), defined standalone and deliberately **not**
+`operator` is **41 permissions** (36 at Phase 2; `provider_phones.view` since, `creatives.archive` on 2026-09-15, `message_formats.view` with 0216, and `message_formats.manage` + `stages.custom_message` on 2026-10-28), defined standalone and deliberately **not**
 spread from `viewerPerms`, which carries `contacts.view`, `opt_outs.view`,
 `clickers.view` and `segment_contacts.view` — the whole audience block.
 
@@ -382,6 +382,17 @@ preview builds the destination URL from `slug` and `external_url`, and a blanked
 field would show the operator a different URL than the send uses. The operator
 already sees sales-page URLs on the same form.
 
+### Message formats and custom stage text are open to the operator (2026-10-28)
+
+Owner ruling: operators manage the org's message formats and may write a
+custom message on a stage. `message_formats.manage` moved down to operator;
+custom text moved off `compliance.manage` onto a new, narrower
+`stages.custom_message` (operator and above), so `stop_text`, quiet hours,
+breakers and the rest stay owner-only. Custom text still must contain
+`{stop_text}`, so the footer cannot be dropped. The format page moved from
+`/settings/message-formats` to `/message-formats` because the Settings layout
+404s the operator. See [message-formats.md](message-formats.md).
+
 ### Operator stage saves and sending (2026-09-16)
 
 **Stage saves.** The stage drawer's save body (`buildStageCreateBody`) always
@@ -393,7 +404,8 @@ creatives (#188). The helper now takes `{ includeStopText }`; the stage creator
 and the split dialog pass `can("compliance.manage")`, and the Stop text input is
 locked for other roles. On create the server default ("Stop to END") applies; on
 edit the stored value is left alone. The server gate is unchanged. These two
-fields are the only `compliance_field_locked` gates in the API.
+fields are the only `compliance_field_locked` gates in the API (custom stage
+text uses its own `custom_message_locked`, 2026-10-28).
 
 The client change alone was **not** enough, and the operator probe showed it:
 `stageUpdateSchema` was `stageBaseSchema.partial()`, and Zod 4 keeps `.default()`

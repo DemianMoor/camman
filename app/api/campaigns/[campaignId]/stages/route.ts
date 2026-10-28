@@ -748,12 +748,12 @@ export async function POST(
     "stage_number"
   > & { stage_number?: number };
   // 0216: message shape. Nothing sent ⇒ the BEFORE INSERT trigger stamps the
-  // org default; a format must be enabled; custom text is owner-only and must
+  // org default; a format must be enabled; custom text needs stages.custom_message and must
   // carry {creative_text} {url} {stop_text}.
   const shape = decideStageFormatChange({
     current: null,
     input: { message_format_id: input.message_format_id, custom_text: input.custom_text },
-    canCompliance: can(role, "compliance.manage"),
+    canCustomMessage: can(role, "stages.custom_message"),
     locked: false, // a new stage has nothing prepared or sent
     formatUsable:
       input.custom_text == null && input.message_format_id != null

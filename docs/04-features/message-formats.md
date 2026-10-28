@@ -1,6 +1,6 @@
 # Message formats (0216)
 
-_Last updated: 2026-10-22 (flag-walk fixes: singular in-use message, By Format sidebar link, Settings link hidden from operators)_
+_Last updated: 2026-10-28 (operators manage formats and write stage custom text; page moved to /message-formats)_
 
 How the brand, the creative text, the link and the opt-out footer are assembled into one SMS. Spec: [docs/superpowers/specs/2026-10-19-message-personalization-formats-design.md](../superpowers/specs/2026-10-19-message-personalization-formats-design.md) (§B). Personalization tags (`{first_name}` …) are part A of the same spec. They render on regular stages since P4 and on drip since P5 (both below).
 
@@ -45,9 +45,9 @@ How the brand, the creative text, the link and the opt-out footer are assembled 
 
 A format must contain `{creative_text}`, `{url}` and `{stop_text}`, and only block tokens are allowed (`validateTemplate`).
 
-## Settings → Message formats
+## Message formats page
 
-[`/settings/message-formats`](../../app/(protected)/settings/message-formats/page.tsx) lists the formats with:
+[`/message-formats`](../../app/(protected)/message-formats/page.tsx) (sidebar, next to UTM Tags) lists the formats with:
 - the template, the enabled switch, the default marker and the count of live stages;
 - create / edit in a dialog with block buttons and a sample preview.
 
@@ -57,8 +57,8 @@ The rules live in [`lib/messages/format-admin.ts`](../../lib/messages/format-adm
 - **Editing a template is allowed while it is in use.** It applies to messages rendered from then on: regular rows are frozen at materialization, and drip renders at send.
 - **Permissions:**
   - `message_formats.view`: every role.
-  - `message_formats.manage`: manager, admin, owner. Never operator; operators only pick from enabled formats.
-  - The `/settings/message-formats` page sits under the Settings layout, which 404s the operator (`providers.view`). The sidebar link uses the same gate, so an operator never sees it; the operator still reads formats through the API for the stage-form picker.
+  - `message_formats.manage`: operator, manager, admin, owner (owner ruling 2026-10-28; before that manager+). Viewers only see the list.
+  - The page lives at `/message-formats`, **outside** the Settings layout (which 404s the operator), gated on `message_formats.view`; the sidebar link uses the same gate. It moved from `/settings/message-formats` on 2026-10-28. The operator route map allows `POST /api/message-formats`, `PATCH /api/message-formats/[id]` and `POST …/make-default`. Guards: `scripts/test-message-formats-admin.ts` (M2.2/M2.3), `scripts/test-message-formats-ui-flag.ts` (G20).
 
 ## Stage choice
 
@@ -69,7 +69,7 @@ The rules live in [`lib/messages/format-admin.ts`](../../lib/messages/format-adm
   - a disabled parent format is not copied, so the copy gets the default;
   - guard: `scripts/test-stage-format-copy-guard.ts` (in `check:guards`).
 - **Rules** (`decideStageFormatChange`). The form echoes every field, so only a different value counts as a change.
-  - **Custom text is owner-only** (`compliance.manage`), like `stop_text`. Setting it, editing it and leaving it all require it (`403 compliance_field_locked`).
+  - **Custom text needs `stages.custom_message`** (operator and above; split out of the owner-only `compliance.manage` on 2026-10-28). Setting it, editing it and leaving it all require it (`403 custom_message_locked`). The opt-out footer **text** (`stop_text`) stays owner-only; custom text must still carry `{stop_text}`, so the footer cannot be dropped.
   - **Custom text must contain** `{creative_text}`, `{url}` and `{stop_text}` (`400 custom_text_missing_required_block`). It may also contain `{brand}` and `<new_row>`. A stage with custom text still needs a creative.
   - **A format must be enabled** and the org's own (`400 format_unavailable`).
 - **Locks** (`stageFormatLocked` in [`lib/stages/format-lock.ts`](../../lib/stages/format-lock.ts); `stageHasSent` in [`lib/stages/send-locks.ts`](../../lib/stages/send-locks.ts)):

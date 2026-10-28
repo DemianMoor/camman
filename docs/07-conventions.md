@@ -4931,7 +4931,7 @@ Every SMS body is assembled by `lib/messages/` — `tags.ts` (personalization ta
 
 ## A stage's message shape: one renderer, stamped, locked after send (0216, 2026-10-19)
 
-- **Every body comes from `lib/messages/render.ts`** with the stage's shape (`shapeFromStage`: format template or owner-only custom text). Never hand-assemble brand/creative/link/footer. `buildStageSms` is T1 and stays byte-identical to the pre-format composer; trailing blank rows are trimmed for every shape.
+- **Every body comes from `lib/messages/render.ts`** with the stage's shape (`shapeFromStage`: format template or custom text — `stages.custom_message`, operator+). Never hand-assemble brand/creative/link/footer. `buildStageSms` is T1 and stays byte-identical to the pre-format composer; trailing blank rows are trimmed for every shape.
 - **Every `stage_sends` writer stamps `message_format_id` / `format_custom`** (`formatStamp`). The fields are REQUIRED on `StageSendInsertRow` and `DripSendInput` so a new writer cannot forget them (§11b).
 - **A stage derived from another copies its shape with `inheritedStageFormat`** — the copy-site guard (`scripts/test-stage-format-copy-guard.ts`) fails until a new `campaign_stages` insert site is classified. The BEFORE INSERT trigger only covers the base create path (org default).
 - **Shape and drip creative lock after the first `status='sent'` row** (`stageHasSent`). The stage form echoes every field, so route checks compare against the STORED value — an echo is never a change.

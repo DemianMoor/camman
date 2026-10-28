@@ -1,6 +1,6 @@
 # Drip — Partner reporting & signed report links
 
-_Last updated: 2026-10-12 (public report tab title leads with the partner name); 2026-10-12 (drip carry-over: Same day vs carried funnel split, migration 0204); 2026-10-09 (partner entity 0200: the signed link, the revenue toggle and the report scope live on `partners`; Partner column on the internal table; lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
+_Last updated: 2026-10-28 (Carrier-rejected column, internal page only); 2026-10-12 (public report tab title leads with the partner name); 2026-10-12 (drip carry-over: Same day vs carried funnel split, migration 0204); 2026-10-09 (partner entity 0200: the signed link, the revenue toggle and the report scope live on `partners`; Partner column on the internal table; lookup rate calibrated from upload/backfill batches only — drip batches excluded, C1 of the partner-attribution plan); 2026-10-08 (activity-dated rows: every column dated by its own event, a row for any activity even with zero intake; journey funnel Converted counts sales, not buyers; late-purchase reclassification completed → converted; journey funnel Total vs Today columns; Send cost / NET profit / ROI columns; Drip Phase 7, migrations 0171 / 0172; sales + revenue from the conversion ledger; conversion-events Phase 4 funnel note; drip-journeys now returns the funnel only)_
 
 What a lead partner is shown about the leads they sent us, how it is priced, and
 how they get to it without a CamMan account.
@@ -45,6 +45,7 @@ most recent journey that had already started when the send was created.
 | Sent, send cost | `stage_sends.sent_at` (status `sent`) |
 | Clicks | `clicks.clicked_at` |
 | Opt-outs (+ their share of send cost) | `opt_outs.created_at` — the STOP's arrival |
+| Carrier-rejected (internal only) | `lead_events.received_at` — leads that ARRIVED in the range, counted if their number meets the carrier-rejection rule **now**. The one column evaluated at read time: a past range moves as numbers are flagged or cleared |
 | Sales, Revenue | `conversion_events.created_at` — **detection**, not Keitaro's event time: the network lags by hours, and a day's number must not move after the day closes. A held (`pending`) payout approved later raises its *detection* day's revenue |
 
 Every event is attributed to the lead's partner × tag through its send
@@ -94,6 +95,7 @@ be flipped out of sandbox after leads have arrived under it). A sandbox key is
 | Delivered % | **`null`** when the provider reports no delivery receipts — see below |
 | Clicks, CTR | clean clicks only (not bot/prefetch/suspect), `clicked_at` in the range; CTR is `null` over zero sends. A click today on a message sent last week counts today |
 | Opt-outs | via `opt_out_attributions`, dated by the STOP's arrival (`opt_outs.created_at`) |
+| Carrier-rejected | **internal page only** (owner 2026-10-28). Distinct numbers among the leads received in the range that are in `carrier_rejected_phones` now — a lead-quality figure beside Leads. Computed only when the caller passes `{ includeCarrierRejected: true }` (the internal API does); the signed link never does, so the value is `null` in its payload, not hidden. Independent of the suppression toggle. See [carrier-rejected-numbers.md](carrier-rejected-numbers.md) |
 | Sales | counted PURCHASE events in `conversion_events` **detected in the range** (`created_at`) on the row's leads — `purchasesBySendSelect()` in [lib/sale-attribution.ts](../../lib/sale-attribution.ts), i.e. `is_purchase` event types in status `pending`/`approved`. A recipient with two conversions is **two** sales (the old `sale_status IN ('lead','sale')` column kept only the latest); a rejected or unmapped conversion is **not** a sale |
 | Lookup cost | see §3 |
 | Revenue | **off by default**, per-key toggle `partner_keys.report_show_revenue`. Dated by detection like Sales. **APPROVED conversions only** — a held (`pending`) payout is not partner revenue, and a rejected one was taken back |

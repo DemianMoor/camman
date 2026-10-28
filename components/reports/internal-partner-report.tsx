@@ -55,6 +55,7 @@ export function InternalPartnerReport() {
           token="" partnerName="All partners" showRevenue report={report}
           showDateControls={false}
           showPartnerColumn
+          showCarrierRejected
         />
       )}
     </div>

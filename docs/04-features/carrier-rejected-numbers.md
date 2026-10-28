@@ -1,6 +1,6 @@
 # Carrier-Rejected Numbers
 
-_Last updated: 2026-10-28 (PR 3: Settings > Sending card + contact detail); 2026-10-28 (PR 2: eligibility filters, toggle still off); 2026-10-24 (PR 1: ledger, crons, backfill)_
+_Last updated: 2026-10-28 (PR 4: partner report column); 2026-10-28 (PR 3: Settings > Sending card + contact detail); 2026-10-28 (PR 2: eligibility filters, toggle still off); 2026-10-24 (PR 1: ledger, crons, backfill)_
 
 ClickUp [1amdve2850v](https://app.clickup.com/t/1amdve2850v). Numbers that carriers
 repeatedly reject as dead or landline are marked **"Rejected by carriers"** and, while
@@ -17,8 +17,8 @@ is on. Turning it off makes the numbers eligible again, with no data lost.
 |---|---|---|
 | 1 | Migration 0225, code map, ledger, 15-min + daily crons, backfill, verification | LIVE 2026-10-28 (#403); backfill `MATCH` 24,955 |
 | 2 | Eligibility filters: audience (preview/snapshot/draft counts), drip routing (`rejected_by_carriers`), stage materialization | LIVE 2026-10-28 (#415) |
-| 3 | Settings > Sending UI (toggle, thresholds, code table, live count, CSV), contact detail status | this PR |
-| 4 | Partner report column | planned |
+| 3 | Settings > Sending UI (toggle, thresholds, code table, live count, CSV), contact detail status | LIVE 2026-10-28 (#416) |
+| 4 | Partner report column (internal only) | this PR |
 
 From PR 2 the toggle is live in every eligibility path (§6). It still ships OFF; the owner turns it on.
 
@@ -147,6 +147,11 @@ operators and tokens in [lib/authz/route-map.ts](../../lib/authz/route-map.ts).
 number currently meets the rule): counts, last code and provider, last rejection, and
 `suppression_on`. The page shows a "Rejected by carriers" badge and a card saying whether
 the number is currently being kept out of sends.
+
+**Partner report (PR 4)** — `Carrier-rejected` on the INTERNAL partner report and its CSV:
+of the leads received in the range, the distinct numbers meeting the rule now. Not on the
+signed partner link (owner 2026-10-28) — the value is never computed for it. Definition and
+dating: [drip-partner-reporting.md §1–2](drip-partner-reporting.md).
 
 ## 8. Verification
 

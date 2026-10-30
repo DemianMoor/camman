@@ -22,6 +22,8 @@ export interface PartnerKeyJson {
   interest_tag_mode: "force" | "default";
   interest_tag: string | null;
   field_mapping: Record<string, string>;
+  /** Whitelisted extra per-lead field names kept verbatim (0228). */
+  passthrough_fields: string[];
   sandbox: boolean;
   rate_per_sec: number;
   rate_per_day: number;

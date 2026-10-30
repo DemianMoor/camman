@@ -5,7 +5,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { applyPartnerKeyPatch, listKeyPostbacks } from "@/lib/partners/postbacks/config";
-import { deliveryEnabled, recentTestPostbackExists, sendTestPostback } from "@/lib/partners/postbacks/deliver";
+import { deliveryEnabled, sendTestPostback, type TestPostbackResult } from "@/lib/partners/postbacks/deliver";
 import type { SendResult } from "@/lib/partners/postbacks/http";
 import { can } from "@/lib/permissions";
 import { partnerKeyUpdateSchema } from "@/lib/validators/partner-keys";
@@ -121,10 +121,9 @@ async function main() {
     check("another org's key => key_not_found (route: 404)", threw, "key_not_found");
 
     await patch(k4, { passthrough_fields: ["list_id"], postback_url_template: "https://pb.example.com/t?c={conversion_id}&l={list_id}&token=SECRET1" });
-    check("no test row yet", await recentTestPostbackExists(db, { orgId, keyId: k4 }), false);
     const sent: string[] = [];
     const ok200 = async (url: string): Promise<SendResult> => { sent.push(url); return { status: 200, error: null, blocked: false, durationMs: 1 }; };
-    const r = await sendTestPostback(db, { orgId, keyId: k4 }, ok200);
+    const r = (await sendTestPostback(db, { orgId, keyId: k4 }, ok200)) as TestPostbackResult;
     check("sent exactly once", sent.length, 1);
     check("URL carries sample values", /[?&]l=test_list_id(&|$)/.test(sent[0]) && /c=test-/.test(sent[0]), true);
     check("result shape", { ok: r.ok, status_code: r.status_code, error: r.error, keys: Object.keys(r).sort() },
@@ -138,13 +137,46 @@ async function main() {
       { t: true, c: null, s: "delivered", a: 1, code: 200, e: null, d: true });
     check("row stores the masked URL", rows[0].last_url_masked, r.url_masked);
     check("payload is the sample", (rows[0].payload as { fields: Row }).fields, { list_id: "test_list_id" });
-    check("recent test row => rate limit applies (route: 429)", await recentTestPostbackExists(db, { orgId, keyId: k4 }), true);
-    check("other org not rate-limited by it", await recentTestPostbackExists(db, { orgId: orgB, keyId: k4 }), false);
+    const again = await sendTestPostback(db, { orgId, keyId: k4 }, ok200);
+    check("second call within 10 s => too_soon, no send (route: 429)", { again, sends: sent.length }, { again: { too_soon: true }, sends: 1 });
+    const slot = await sendTestPostback(db, { orgId: orgB, keyId: k4 }).catch((e: Error) => e.message);
+    check("other org is neither limited nor allowed (key_not_found)", slot, "key_not_found");
 
-    const bad = await sendTestPostback(db, { orgId, keyId: k4 }, async () => ({ status: 500, error: null, blocked: false, durationMs: 1 }));
+    // The window is measured from the claim row's created_at: age it out, then a second send is allowed.
+    await db.execute(sql`UPDATE partner_postbacks SET created_at = now() - interval '20 seconds' WHERE partner_key_id = ${k4}::int`);
+    const bad = (await sendTestPostback(db, { orgId, keyId: k4 }, async () => ({ status: 500, error: null, blocked: false, durationMs: 1 }))) as TestPostbackResult;
     check("500 => ok false, no retry", { ok: bad.ok, code: bad.status_code, error: bad.error }, { ok: false, code: 500, error: "HTTP 500" });
     const failedRow = await q<Row>(sql`SELECT status, attempts FROM partner_postbacks WHERE partner_key_id = ${k4}::int AND status = 'failed'`);
     check("failed test row, attempts 1", failedRow, [{ status: "failed", attempts: 1 }]);
+
+    // Concurrent test sends: the slot is claimed BEFORE the (slow) send.
+    console.log("\nA4b. concurrent test sends:");
+    const k4b = await mk(orgId, "a4b");
+    await patch(k4b, { postback_url_template: TPL });
+    let calls = 0;
+    const slow = async (): Promise<SendResult> => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 1500));
+      return { status: 200, error: null, blocked: false, durationMs: 1500 };
+    };
+    const [c1, c2] = await Promise.all([
+      sendTestPostback(db, { orgId, keyId: k4b }, slow),
+      sendTestPostback(db, { orgId, keyId: k4b }, slow),
+    ]);
+    const tooSoon = [c1, c2].filter((c) => "too_soon" in c).length;
+    check("exactly one send call", calls, 1);
+    check("one result, one too_soon", { tooSoon, sent: [c1, c2].filter((c) => "ok" in c).length }, { tooSoon: 1, sent: 1 });
+    check("exactly one row, delivered", (await q<Row>(sql`SELECT status, attempts FROM partner_postbacks WHERE partner_key_id = ${k4b}::int`)),
+      [{ status: "delivered", attempts: 1 }]);
+    // A call arriving while the first is still SENDING (row pending) is also refused.
+    const k4c = await mk(orgId, "a4c");
+    await patch(k4c, { postback_url_template: TPL });
+    let calls2 = 0;
+    const first = sendTestPostback(db, { orgId, keyId: k4c }, async () => { calls2++; await new Promise((r) => setTimeout(r, 1500)); return { status: 200, error: null, blocked: false, durationMs: 1 }; });
+    await new Promise((r) => setTimeout(r, 500));
+    const mid = await sendTestPostback(db, { orgId, keyId: k4c }, async () => { calls2++; return { status: 200, error: null, blocked: false, durationMs: 1 }; });
+    await first;
+    check("call during an in-flight send => too_soon, one send total", { mid, calls2 }, { mid: { too_soon: true }, calls2: 1 });
 
     // ── A5 ─────────────────────────────────────────────────────────────
     console.log("\nA5. log:");

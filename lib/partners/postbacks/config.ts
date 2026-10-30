@@ -127,12 +127,20 @@ export async function listKeyPostbacks(
   dbc: DbOrTx,
   o: { orgId: string; keyId: number; failedOnly: boolean },
 ): Promise<PostbackLogRow[]> {
-  return (await dbc.execute(sql`
+  const rows = (await dbc.execute(sql`
     SELECT id, created_at, is_test, conversion_event_id, status, attempts, last_response_code,
            last_error, last_url_masked, last_attempt_at, delivered_at
     FROM partner_postbacks
     WHERE org_id = ${o.orgId}::uuid AND partner_key_id = ${o.keyId}::int
       ${o.failedOnly ? sql`AND status = 'failed'` : sql``}
     ORDER BY created_at DESC, id DESC
-    LIMIT 50`)) as unknown as PostbackLogRow[];
+    LIMIT 50`)) as unknown as Record<string, unknown>[];
+  // Raw db.execute rows carry Date objects for timestamptz; the declared type is string.
+  return rows.map((r) => {
+    const out = { ...r };
+    for (const f of ["created_at", "last_attempt_at", "delivered_at"]) {
+      if (out[f] instanceof Date) out[f] = (out[f] as Date).toISOString();
+    }
+    return out as unknown as PostbackLogRow;
+  });
 }

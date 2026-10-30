@@ -226,44 +226,76 @@ export type TestPostbackResult = {
   error: string | null;
 };
 
-/** A test row for this key created within the last 10 s (the route's rate limit). */
-export async function recentTestPostbackExists(dbc: DbOrTx, o: { orgId: string; keyId: number }): Promise<boolean> {
-  const r = (await dbc.execute(sql`
-    SELECT EXISTS (
-      SELECT 1 FROM partner_postbacks
-      WHERE org_id = ${o.orgId}::uuid AND partner_key_id = ${o.keyId}::int AND is_test
-        AND created_at > now() - interval '10 seconds') AS recent`)) as unknown as { recent: boolean }[];
-  return r[0]?.recent === true;
-}
+export type TestPostbackOutcome = TestPostbackResult | { too_soon: true };
+
+// Per-key advisory-lock namespace for test sends. A bigint far from ENQUEUE_LOCK_KEY
+// (7_228_000_000_001) and from hashtext() int4 keys, which are < 2^31.
+const TEST_LOCK_BASE = 7_228_100_000_000;
 
 /**
- * Fire ONE sample postback with the key's CURRENT saved template. No retries; one
- * `is_test` row records it (conversion_event_id NULL). Works whether or not the key
- * has postbacks enabled. Throws `no_template` if the key has none saved, and
- * `key_not_found` for a key outside the org.
+ * Fire ONE sample postback with the key's CURRENT saved template. No retries. Works
+ * whether or not the key has postbacks enabled.
+ *
+ * WARNING: the delivery KILL SWITCH is NOT checked here. It is enforced by the CALLER
+ * (the postback-test route returns 409 when `deliveryEnabled()` is false); any new
+ * caller must check `deliveryEnabled()` itself.
+ *
+ * The 10 s limit is claimed BEFORE sending: in one short transaction, under a per-key
+ * advisory lock, it checks for an `is_test` row created < 10 s ago and otherwise inserts
+ * this send's row as `pending` (attempts 0), then commits; only then does it send and
+ * UPDATE the row with the result. Two concurrent calls therefore cannot both send; the
+ * loser gets `{ too_soon: true }` (route: 429). A row left `pending` by a crash is
+ * harmless: the delivery runner claims only `NOT is_test` rows.
+ *
+ * Throws `no_template` if the key has none saved, `key_not_found` for a key outside the org.
  */
 export async function sendTestPostback(
   dbc: DbOrTx,
   o: { orgId: string; keyId: number },
   send: (url: string) => Promise<SendResult> = (url) => sendPostback(url),
-): Promise<TestPostbackResult> {
-  const k = (await dbc.execute(sql`
-    SELECT postback_url_template, postback_include_payout, passthrough_fields
-    FROM partner_keys WHERE id = ${o.keyId}::int AND org_id = ${o.orgId}::uuid`)) as unknown as {
-    postback_url_template: string | null;
-    postback_include_payout: boolean;
-    passthrough_fields: string[];
-  }[];
-  if (!k[0]) throw new Error("key_not_found");
-  if (!k[0].postback_url_template) throw new Error("no_template");
+): Promise<TestPostbackOutcome> {
+  const claimed = await dbc.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${TEST_LOCK_BASE + o.keyId}::bigint)`);
+    const k = (await tx.execute(sql`
+      SELECT postback_url_template, postback_include_payout, passthrough_fields
+      FROM partner_keys WHERE id = ${o.keyId}::int AND org_id = ${o.orgId}::uuid`)) as unknown as {
+      postback_url_template: string | null;
+      postback_include_payout: boolean;
+      passthrough_fields: string[];
+    }[];
+    if (!k[0]) throw new Error("key_not_found");
+    if (!k[0].postback_url_template) throw new Error("no_template");
 
-  const payload = samplePayload(k[0].passthrough_fields);
+    const recent = (await tx.execute(sql`
+      SELECT EXISTS (
+        SELECT 1 FROM partner_postbacks
+        WHERE org_id = ${o.orgId}::uuid AND partner_key_id = ${o.keyId}::int AND is_test
+          AND created_at > clock_timestamp() - interval '10 seconds') AS recent`)) as unknown as { recent: boolean }[];
+    if (recent[0]?.recent) return null;
+
+    const payload = samplePayload(k[0].passthrough_fields);
+    const ins = (await tx.execute(sql`
+      INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts)
+      VALUES (${o.orgId}::uuid, ${o.keyId}::int, true, ${JSON.stringify(payload)}::jsonb, 'pending', 0)
+      RETURNING id`)) as unknown as { id: number }[];
+    return { id: Number(ins[0].id), payload, template: k[0].postback_url_template, includePayout: k[0].postback_include_payout };
+  });
+  if (!claimed) return { too_soon: true };
+
+  const record = (r: { status: string; code: number | null; error: string | null; masked: string | null }) =>
+    dbc.execute(sql`
+      UPDATE partner_postbacks
+      SET status = ${r.status}, attempts = 1, last_attempt_at = now(),
+          delivered_at = ${r.status === "delivered" ? sql`now()` : sql`NULL`},
+          last_response_code = ${r.code}::int, last_error = ${r.error}, last_url_masked = ${r.masked}
+      WHERE id = ${claimed.id}::bigint AND org_id = ${o.orgId}::uuid`);
+
   let url: string;
   try {
-    url = renderPostbackUrl(k[0].postback_url_template, payload, k[0].postback_include_payout);
+    url = renderPostbackUrl(claimed.template, claimed.payload, claimed.includePayout);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await insertTestRow(dbc, o, payload, { status: "failed", code: null, error: message, masked: null, delivered: false });
+    await record({ status: "failed", code: null, error: message, masked: null });
     return { ok: false, status_code: null, url_masked: "", error: message };
   }
 
@@ -271,21 +303,6 @@ export async function sendTestPostback(
   const res = await send(url);
   const delivered = classifyResponse(res) === "delivered";
   const error = res.error ?? (delivered ? null : `HTTP ${res.status}`);
-  await insertTestRow(dbc, o, payload, {
-    status: delivered ? "delivered" : "failed", code: res.status, error, masked, delivered,
-  });
+  await record({ status: delivered ? "delivered" : "failed", code: res.status, error, masked });
   return { ok: delivered, status_code: res.status, url_masked: masked, error };
-}
-
-async function insertTestRow(
-  dbc: DbOrTx,
-  o: { orgId: string; keyId: number },
-  payload: PostbackPayload,
-  r: { status: string; code: number | null; error: string | null; masked: string | null; delivered: boolean },
-) {
-  await dbc.execute(sql`
-    INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts, last_attempt_at,
-                                   delivered_at, last_response_code, last_error, last_url_masked)
-    VALUES (${o.orgId}::uuid, ${o.keyId}::int, true, ${JSON.stringify(payload)}::jsonb, ${r.status}, 1, now(),
-            ${r.delivered ? sql`now()` : sql`NULL`}, ${r.code}::int, ${r.error}, ${r.masked})`);
 }

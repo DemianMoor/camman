@@ -91,6 +91,20 @@ export const KEY_LIST_SQL: SQL = sql`
       SELECT count(*) AS total_leads FROM lead_inbox WHERE partner_key_id = k.id
     ) l ON true`;
 
+const KEY_DATE_FIELDS = ["created_at", "rotated_at", "last_seen_at", "postback_active_since"] as const;
+
+/** Raw db.execute rows carry Date objects for timestamptz; make the declared `string` true. */
+export function normalizeKeyRows(rows: unknown): PartnerKeyJson[] {
+  return (rows as Record<string, unknown>[]).map((r) => {
+    const out = { ...r };
+    for (const f of KEY_DATE_FIELDS) {
+      const v = out[f];
+      if (v instanceof Date) out[f] = v.toISOString();
+    }
+    return out as unknown as PartnerKeyJson;
+  });
+}
+
 /** Partner rows without their keys, as `FROM partners p …`; the caller appends WHERE / ORDER BY. */
 export const PARTNER_ROW_SQL: SQL = sql`
     SELECT p.id, p.slug, p.name, p.status, p.archived_at, p.created_at,
@@ -106,9 +120,9 @@ export async function loadPartner(orgId: string, partnerId: number): Promise<Par
   const ps = (await db.execute(sql`${PARTNER_ROW_SQL}
     WHERE p.id = ${partnerId} AND p.org_id = ${orgId}::uuid`)) as unknown as PartnerRowSql[];
   if (!ps[0]) return null;
-  const ks = (await db.execute(sql`${KEY_LIST_SQL}
+  const ks = normalizeKeyRows(await db.execute(sql`${KEY_LIST_SQL}
     WHERE k.partner_id = ${partnerId} AND k.org_id = ${orgId}::uuid
-    ORDER BY (k.status = 'active') DESC, k.created_at`)) as unknown as PartnerKeyJson[];
+    ORDER BY (k.status = 'active') DESC, k.created_at`));
   return { ...ps[0], keys: ks };
 }
 
@@ -117,9 +131,9 @@ export async function listPartners(orgId: string): Promise<{ data: PartnerJson[]
   const ps = (await db.execute(sql`${PARTNER_ROW_SQL}
     WHERE p.org_id = ${orgId}::uuid
     ORDER BY (p.status = 'active') DESC, p.slug`)) as unknown as PartnerRowSql[];
-  const ks = (await db.execute(sql`${KEY_LIST_SQL}
+  const ks = normalizeKeyRows(await db.execute(sql`${KEY_LIST_SQL}
     WHERE k.org_id = ${orgId}::uuid
-    ORDER BY (k.status = 'active') DESC, k.created_at`)) as unknown as PartnerKeyJson[];
+    ORDER BY (k.status = 'active') DESC, k.created_at`));
   const byPartner = new Map<number, PartnerKeyJson[]>();
   const unassigned: PartnerKeyJson[] = [];
   for (const k of ks) {

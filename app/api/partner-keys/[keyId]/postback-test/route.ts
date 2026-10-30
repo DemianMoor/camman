@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
-import { deliveryEnabled, recentTestPostbackExists, sendTestPostback } from "@/lib/partners/postbacks/deliver";
+import { deliveryEnabled, sendTestPostback } from "@/lib/partners/postbacks/deliver";
 import { can } from "@/lib/permissions";
 
 export const maxDuration = 30;
@@ -23,11 +23,12 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ ke
   if (keyId === null) return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION, { field: "keyId" });
 
   if (!deliveryEnabled()) return apiError(409, "Postback delivery is switched off", API_ERROR_CODES.CONFLICT);
-  if (await recentTestPostbackExists(db, { orgId, keyId })) {
-    return apiError(429, "Wait a few seconds between test sends", API_ERROR_CODES.RATE_LIMITED);
-  }
   try {
-    return NextResponse.json(await sendTestPostback(db, { orgId, keyId }));
+    const out = await sendTestPostback(db, { orgId, keyId });
+    if ("too_soon" in out) {
+      return apiError(429, "Wait a few seconds between test sends", API_ERROR_CODES.RATE_LIMITED);
+    }
+    return NextResponse.json(out);
   } catch (err) {
     const m = err instanceof Error ? err.message : "";
     if (m === "key_not_found") {

@@ -129,6 +129,10 @@
       "schedule": "15 4 * * *"
     },
     {
+      "path": "/api/cron/partner-postbacks",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/cron/delivery-rollup",
       "schedule": "3,13,23,33,43,53 * * * *"
     },

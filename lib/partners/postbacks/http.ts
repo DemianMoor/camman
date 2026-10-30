@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { ClientRequest, IncomingMessage } from "node:http";
 import https from "node:https";
 import { isIP } from "node:net";
 import { BlockedAddressError, isBlockedAddress, safeLookup } from "@/lib/brand-landing-probe";
@@ -36,22 +37,55 @@ export async function sendPostback(url: string, timeoutMs = 5000): Promise<SendR
     return done(null, "address is private or reserved", true);
   }
 
-  return new Promise<SendResult>((resolve) => {
-    try {
-      const req = https.request(
+  const r = await statusWithin(
+    (onResponse) =>
+      https.request(
         u,
-        { method: "GET", lookup: safeLookup, timeout: timeoutMs, headers: { "user-agent": "CampaignManager-Postback/1.0" } },
-        (res) => {
-          const status = res.statusCode ?? 0;
-          res.resume();
-          resolve(done(status, null, false));
-        },
-      );
-      req.on("timeout", () => req.destroy(new Error(`no response within ${timeoutMs}ms`)));
-      req.on("error", (err) => resolve(done(null, err.message, err instanceof BlockedAddressError)));
+        { method: "GET", lookup: safeLookup, headers: { "user-agent": "CampaignManager-Postback/1.0" } },
+        onResponse,
+      ),
+    timeoutMs,
+  );
+  return done(r.status, r.error?.message ?? null, r.error instanceof BlockedAddressError);
+}
+
+/**
+ * Run one request and settle with its status line, bounded by WALL-CLOCK
+ * `timeoutMs` (a socket idle timeout alone lets a server that trickles bytes hold
+ * the request open indefinitely). Settles exactly once. The response is destroyed
+ * as soon as the status is read: the body is never wanted.
+ *
+ * Exported for the test, which drives it over plain http to a local server
+ * (sendPostback itself refuses loopback).
+ */
+export function statusWithin(
+  start: (onResponse: (res: IncomingMessage) => void) => ClientRequest,
+  timeoutMs: number,
+): Promise<{ status: number | null; error: Error | null }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let req: ClientRequest | undefined;
+    const finish = (status: number | null, error: Error | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status, error });
+    };
+    const timer = setTimeout(() => {
+      const err = new Error(`no response within ${timeoutMs}ms`);
+      finish(null, err);
+      req?.destroy(err);
+    }, timeoutMs);
+    try {
+      req = start((res) => {
+        const status = res.statusCode ?? 0;
+        res.destroy();
+        finish(status, null);
+      });
+      req.on("error", (err) => finish(null, err));
       req.end();
     } catch (err) {
-      resolve(done(null, err instanceof Error ? err.message : String(err), false));
+      finish(null, err instanceof Error ? err : new Error(String(err)));
     }
   });
 }

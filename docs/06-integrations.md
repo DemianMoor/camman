@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
+_Last updated: 2026-10-31 (outbound partner postbacks, PARTNER_POSTBACKS_DELIVERY_ENABLED); 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -122,6 +122,22 @@ externally reachable surface, so it belongs here.
 
 See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 
+## Outbound: partner sales postbacks (0228)
+
+We `GET` a URL the partner configured on their intake key when one of their leads buys. The host is partner-chosen, so
+the request is locked down: https on port 443 only, private/reserved addresses refused at connect time, redirects never
+followed, 5 s timeout, response body discarded. Credentials in the URL are rejected, and sensitive query values are
+masked in every stored or displayed copy.
+
+| | |
+|---|---|
+| Config | per key, `partner_keys.postback_*`, at `/settings/partners` |
+| Runtime | `/api/cron/partner-postbacks` (`*/5`), `CRON_SECRET` |
+| Kill switch | `PARTNER_POSTBACKS_DELIVERY_ENABLED` (must be `true`; unset or anything else means nothing is sent) |
+| Delivery guarantee | at-least-once; the partner dedupes on `{conversion_id}` |
+
+See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
+
 ## Environment variables
 
 | Variable | Scope | Purpose |
@@ -132,6 +148,7 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 | `DATABASE_URL` | server | Postgres connection (Supabase **transaction** pooler, port `6543`, `?prepare=false`). URL-encode special chars in the password (`#`/`&`) or rotate to alphanumerics — `#` silently truncates the string. One job derives a **session**-mode URL from this same string (port `5432`, `prepare` dropped) — see below; there is deliberately no second connection-string variable |
 | `NEXT_PUBLIC_SITE_URL` | public | **primary** app origin; auth callback base, internal alert deep-links, and every provider webhook/callback URL we register. Must match the deployed origin in prod |
 | `NEXT_PUBLIC_PARTNER_HOST` | public | **optional** partner-facing origin. Only affects URLs handed to a partner: the lead intake endpoint in Settings → Partners, and `/docs/partner-api`. Unset ⇒ those fall back to the operator's current browser origin (single-hostname behavior). Never used for auth, alerts, or webhooks. Inlined at **build time** — changing it requires a redeploy |
+| `PARTNER_POSTBACKS_DELIVERY_ENABLED` | server | global kill switch for outbound partner sales postbacks. Must be exactly `true` for the delivery cron and Send test to send; otherwise the cron only records its heartbeat (`skipped_kill_switch`) and Send test answers 409. Set in Vercel |
 | `SPAM_PROVIDER` | server | which spam provider (`classifier` is the only option) |
 | `CLASSIFIER_URL` | server | Cloud Run URL of the classifier service |
 | `CLASSIFIER_API_KEY` | server | `X-API-Key` for the classifier |

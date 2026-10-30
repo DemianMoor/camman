@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-28_
+_Last updated: 2026-10-31 (partner postbacks rules)_
 
 ## ⭐ A migration number is reserved by rebasing on origin/main the moment the file is created (2026-10-23)
 
@@ -4961,3 +4961,14 @@ Every SMS body is assembled by `lib/messages/` — `tags.ts` (personalization ta
 - **TextHub DLRs are never read** for this purpose — they are fabricated.
 - **Not an opt-out.** The ledger is applied as an eligibility filter only while `org_settings.carrier_rejection_suppression_enabled` is on; nothing writes `opt_outs`.
 - **Don't self-join a large CTE on a key.** CTE row estimates are tiny, so `o LEFT JOIN (SELECT … FROM o GROUP BY phone)` was planned as a ~1M x ~700K nested loop and cancelled at 600 s on prod. Use a window (`max(...) FILTER (...) OVER (PARTITION BY ...)`), or materialize into a table and `ANALYZE` it — the ledger rebuild `ANALYZE`s before its recompute for the same reason.
+
+## Partner postbacks: ledger-triggered, idempotent, at-least-once, never on the send path (0228, 2026-10-31)
+
+See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
+
+- **Idempotency is a unique index, not a check.** `partner_postbacks` has `UNIQUE (partner_key_id, conversion_event_id) WHERE NOT is_test`; enqueue is `INSERT … ON CONFLICT DO NOTHING`. An in-place ledger update (revenue, status) can therefore never queue a second postback. Never replace this with a SELECT-then-INSERT.
+- **Delivery is at-least-once.** The claim is one autocommit `UPDATE` that leases rows for 2 minutes; no transaction is held across HTTP. A runner killed after the partner answered re-sends. `{conversion_id}` is the partner's dedupe key and is documented as such.
+- **Never from the send path.** Postbacks are queued from the conversion ledger by drip-monitors and sent by their own cron. Nothing under `lib/sends/` or `lib/drip/{send-one,scheduler,followups}.ts` may import `lib/partners/postbacks`; `scripts/test-postback-send-path-guard.ts` (in `check:guards`) fails if one does (comments stripped first). A slow or dead partner URL must never be able to slow or stop an SMS.
+- **Time budgets.** The delivery cron stops picking up rows after 40 s (`RUN_DEADLINE_MS`, route `maxDuration = 60`); a claimed row not finished within its 2-minute lease comes due again.
+- **Client code may import only `lib/partners/postbacks/template.ts`** (pure). `http`, `deliver`, `enqueue` and `config` are server-only.
+- **Do not trigger on journey state, and never backfill** (owner decisions 2026-10-30): a postback fires for an approved purchase whatever the journey ended as, and only for ledger rows created at/after `postback_active_since`.

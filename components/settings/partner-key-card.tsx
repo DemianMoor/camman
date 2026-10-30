@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PartnerKeyPassthrough } from "@/components/settings/partner-key-passthrough";
+import { PartnerKeyPostback } from "@/components/settings/partner-key-postback";
 import { toastApiError } from "@/lib/api/toast-error";
 import { partnerBase } from "@/lib/app-origin";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
@@ -264,6 +265,19 @@ export function PartnerKeyCard({
           key={row.passthrough_fields.join("|")}
           keyId={row.id}
           saved={row.passthrough_fields}
+          canManage={canManage}
+          onChanged={onChanged}
+        />
+
+        <PartnerKeyPostback
+          key={[
+            row.postback_enabled,
+            row.postback_url_template,
+            row.postback_include_payout,
+            row.postback_first_purchase_only,
+            row.passthrough_fields.join(","),
+          ].join("|")}
+          row={row}
           canManage={canManage}
           onChanged={onChanged}
         />

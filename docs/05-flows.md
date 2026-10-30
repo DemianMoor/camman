@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -667,6 +667,38 @@ Settings > Sending (PR 3) writes the same table outside the cron: `PUT
 org)` in the save transaction, after the `org_settings` UPDATE and its
 `org_setting_events` row. It does not take the cron lease; both are full recomputes from
 the ledger, so whichever commits last is correct.
+
+## L5. Partner sales postbacks (0228: enqueue in drip-monitors, `*/5 * * * *` delivery)
+
+See [04-features/partner-postbacks.md](04-features/partner-postbacks.md). Triggered by the conversion ledger, never by
+the send path (guard: `scripts/test-postback-send-path-guard.ts`).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant L as conversion_events (ledger)
+  participant M as /api/cron/drip-monitors
+  participant Q as partner_postbacks
+  participant D as /api/cron/partner-postbacks
+  participant P as Partner URL
+  participant T as Telegram
+  Note over L: approved is_purchase sale, created at/after postback_active_since
+  M->>M: lifecycle sweep, then advisory lock
+  M->>L: read approved purchases on postback-enabled keys
+  M->>Q: INSERT ... ON CONFLICT DO NOTHING (one per key + conversion)
+  D->>D: kill switch off? record heartbeat and stop
+  D->>Q: claim due rows (SKIP LOCKED, 2-minute lease)
+  D->>P: GET rendered template (https 443, no redirects, 5 s)
+  alt 2xx
+    D->>Q: status delivered
+  else 408 / 429 / 5xx / network
+    D->>Q: pending, next attempt 1m / 5m / 30m / 2h / 6h / 24h
+  else other, or attempt 7
+    D->>Q: status failed
+    D->>T: latched failed-postback alert (per key)
+  end
+  M->>T: stale-heartbeat alert, only once postbacks are live
+```
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)
 

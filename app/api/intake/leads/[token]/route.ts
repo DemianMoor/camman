@@ -3,7 +3,7 @@ import { after, NextResponse, type NextRequest } from "next/server";
 import { db } from "@/db/client";
 import { notifyOnTransition } from "@/lib/alerts/alert-state";
 import { requestPoke } from "@/lib/drip/poke";
-import { captureLeads, prepareLead } from "@/lib/intake/capture";
+import { captureLeads, leadResponseEntries, prepareLead } from "@/lib/intake/capture";
 import { MAX_LEADS_PER_CALL } from "@/lib/intake/fields";
 import { resolvePartnerKey, secretMatches, touchLastSeen } from "@/lib/intake/partner-key";
 import { consume, recordAuthFailure } from "@/lib/intake/rate-limit";
@@ -264,12 +264,7 @@ export async function POST(
       rejected,
       sandbox: key.sandbox,
       // Ids in the caller's original order, so a partner can reconcile by index.
-      leads: results.map((r, i) => ({
-        id: r.id,
-        status: r.status,
-        duplicate: r.duplicate,
-        ...(prepared[i].error ? { error: prepared[i].error } : {}),
-      })),
+      leads: leadResponseEntries(results, prepared),
     },
     { status: 202 },
   );

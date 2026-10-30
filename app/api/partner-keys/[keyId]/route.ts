@@ -112,6 +112,7 @@ export async function PATCH(
       ...(input.interest_tag_mode !== undefined ? { interest_tag_mode: input.interest_tag_mode } : {}),
       ...(input.interest_tag !== undefined ? { interest_tag: input.interest_tag } : {}),
       ...(input.field_mapping !== undefined ? { field_mapping: input.field_mapping } : {}),
+      ...(input.passthrough_fields !== undefined ? { passthrough_fields: input.passthrough_fields } : {}),
       ...(input.sandbox !== undefined ? { sandbox: input.sandbox } : {}),
       ...(input.rate_per_sec !== undefined ? { rate_per_sec: input.rate_per_sec } : {}),
       ...(input.rate_per_day !== undefined ? { rate_per_day: input.rate_per_day } : {}),

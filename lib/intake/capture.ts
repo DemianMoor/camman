@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import { validatePhone } from "@/lib/phone-validation";
 import { extractLeadFields } from "./fields";
+import { extractPassthrough } from "./passthrough";
 import type { DbOrTx, ResolvedPartnerKey } from "./partner-key";
 
 // lead_inbox capture — step 4 of the Q7 webhook pattern: one committed INSERT
@@ -14,6 +15,10 @@ export interface PreparedLead {
   status: "received" | "rejected";
   error: string | null;
   dedup_key: string | null;
+  /** Whitelisted passthrough fields (0228), or null when none were sent. */
+  partner_data: Record<string, string> | null;
+  /** Non-fatal passthrough problems; reported to the partner, never failing the lead. */
+  warnings: string[];
 }
 
 /**
@@ -49,7 +54,7 @@ export function prepareLead(
   // getting strict validation on a sandbox key.
   key: Pick<
     ResolvedPartnerKey,
-    "field_mapping" | "interest_tag_mode" | "interest_tag" | "sandbox"
+    "field_mapping" | "interest_tag_mode" | "interest_tag" | "sandbox" | "passthrough_fields"
   >,
   receivedAt: Date,
 ): PreparedLead {
@@ -61,6 +66,8 @@ export function prepareLead(
       status: "rejected",
       error: "Lead must be a JSON object",
       dedup_key: null,
+      partner_data: null,
+      warnings: [],
     };
   }
 
@@ -73,6 +80,9 @@ export function prepareLead(
   const interest_tag =
     key.interest_tag_mode === "force" ? key.interest_tag : supplied || key.interest_tag || null;
 
+  // Extracted before phone validation so a rejected lead keeps its partner data.
+  const { data: partner_data, warnings } = extractPassthrough(raw, key.passthrough_fields);
+
   const rawPhone = fields.phone;
   if (rawPhone === undefined || rawPhone === null || String(rawPhone).trim() === "") {
     return {
@@ -80,6 +90,7 @@ export function prepareLead(
       status: "rejected",
       error: "Missing required field: phone",
       dedup_key: null,
+      partner_data, warnings,
     };
   }
 
@@ -110,6 +121,7 @@ export function prepareLead(
       // number", which is what a partner quotes back when asking what is wrong.
       error: parsed.error ?? "Invalid phone number",
       dedup_key: null,
+      partner_data, warnings,
     };
   }
 
@@ -120,6 +132,8 @@ export function prepareLead(
     status: "received",
     error: null,
     dedup_key: leadDedupKey(parsed.normalized, receivedAt),
+    partner_data,
+    warnings,
   };
 }
 
@@ -188,14 +202,15 @@ export async function captureLeads(
     (l) => sql`(
       ${orgId}::uuid, ${partnerKeyId}, ${partnerSlug}, ${receivedAt.toISOString()}::timestamptz,
       ${JSON.stringify(l.raw)}::jsonb, ${l.phone_e164}, ${l.interest_tag}, ${sandbox},
-      ${l.status}, ${l.error}, ${l.dedup_key}
+      ${l.status}, ${l.error}, ${l.dedup_key},
+      ${l.partner_data ? JSON.stringify(l.partner_data) : null}::jsonb
     )`,
   );
 
   const rows = (await dbc.execute(sql`
     INSERT INTO lead_inbox
       (org_id, partner_key_id, partner_slug, received_at, raw, phone_e164, interest_tag,
-       sandbox, status, error, dedup_key)
+       sandbox, status, error, dedup_key, partner_data)
     VALUES ${sql.join(values, sql`, `)}
     ON CONFLICT (partner_key_id, dedup_key) WHERE dedup_key IS NOT NULL
     DO UPDATE SET received_at = lead_inbox.received_at
@@ -213,4 +228,21 @@ export async function captureLeads(
     const u = byUnique[slot[i]];
     return isFirst[i] ? u : { ...u, duplicate: true };
   });
+}
+
+/**
+ * The per-lead entries of the 202 body, in the caller's order.
+ *
+ * `warnings` is added only when non-empty, so a key with no whitelist gets
+ * exactly the shape it always got (`id, status, duplicate`, plus `error` on a
+ * rejected lead) - partner integrations parse this.
+ */
+export function leadResponseEntries(results: CaptureResult[], prepared: PreparedLead[]) {
+  return results.map((r, i) => ({
+    id: r.id,
+    status: r.status,
+    duplicate: r.duplicate,
+    ...(prepared[i].error ? { error: prepared[i].error } : {}),
+    ...(prepared[i].warnings.length > 0 ? { warnings: prepared[i].warnings } : {}),
+  }));
 }

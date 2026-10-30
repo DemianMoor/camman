@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { LEAD_FIELD_KEYS } from "@/lib/intake/fields";
+import { passthroughNamesError } from "@/lib/intake/passthrough";
 
 // Partner-key management validators — Drip Phase 2.
 //
@@ -26,6 +27,14 @@ const shared = {
   interest_tag_mode: z.enum(["force", "default"]),
   interest_tag: z.string().trim().max(64).nullable().optional(),
   field_mapping: fieldMapping.optional(),
+  // Whitelist of extra payload fields kept verbatim on the lead (0228).
+  passthrough_fields: z
+    .array(z.string())
+    .superRefine((names, ctx) => {
+      const message = passthroughNamesError(names);
+      if (message) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    })
+    .optional(),
   sandbox: z.boolean().optional(),
   rate_per_sec: z.number().int().positive().max(10000).optional(),
   rate_per_day: z.number().int().positive().max(10_000_000).optional(),

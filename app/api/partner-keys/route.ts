@@ -91,6 +91,7 @@ export async function POST(req: NextRequest) {
         interest_tag_mode: input.interest_tag_mode,
         interest_tag: input.interest_tag ?? null,
         field_mapping: input.field_mapping ?? {},
+        passthrough_fields: input.passthrough_fields ?? [],
         // The column default is already true; passing it through means an
         // explicit `sandbox: false` at creation is still possible for an
         // operator who knows what they are doing.

@@ -32,6 +32,8 @@ function check(label: string, actual: unknown, expected: unknown) {
 const SANDBOX_KEY = {
   field_mapping: {}, interest_tag_mode: "default" as const,
   interest_tag: null, sandbox: true,
+  // These checks are about phone validation only; no passthrough whitelist applies.
+  passthrough_fields: [] as string[],
 };
 const LIVE_KEY = { ...SANDBOX_KEY, sandbox: false };
 const AT = new Date("2026-10-01T12:00:00Z");

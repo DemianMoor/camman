@@ -62,6 +62,8 @@ export interface ResolvedPartnerKey {
   interest_tag_mode: "force" | "default";
   interest_tag: string | null;
   field_mapping: Record<string, string>;
+  /** Whitelist of extra payload field names kept verbatim as lead partner_data (0228). */
+  passthrough_fields: string[];
   sandbox: boolean;
   rate_per_sec: number;
   rate_per_day: number;
@@ -89,7 +91,7 @@ export async function resolvePartnerKey(
 ): Promise<ResolvedPartnerKey | null> {
   const rows = (await dbc.execute(sql`
     SELECT k.id, k.org_id, k.partner_slug, k.name, k.secret_hash, k.interest_tag_mode, k.interest_tag,
-           k.field_mapping, k.sandbox, k.rate_per_sec, k.rate_per_day, k.max_payload_bytes, k.status,
+           k.field_mapping, k.passthrough_fields, k.sandbox, k.rate_per_sec, k.rate_per_day, k.max_payload_bytes, k.status,
            p.status AS partner_status
     FROM partner_keys k
     LEFT JOIN partners p ON p.id = k.partner_id

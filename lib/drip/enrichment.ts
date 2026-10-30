@@ -12,6 +12,7 @@ import {
   normalizeZipInput,
 } from "@/lib/contact-attributes";
 import { extractLeadFields } from "@/lib/intake/fields";
+import type { DbOrTx } from "@/lib/intake/partner-key";
 import { enqueueNormalized } from "@/lib/telnyx/enqueue";
 import { bumpIntakeCounters, counterForLineType } from "./counters";
 import {
@@ -71,6 +72,7 @@ interface InboxRow {
   received_at: string;
   status: string;
   field_mapping: Record<string, string> | null;
+  partner_data: Record<string, string> | null;
   line_type: string | null;
   lookup_complete: boolean;
 }
@@ -206,6 +208,32 @@ export async function runEnrichmentBatch(
   return total;
 }
 
+/**
+ * The arrival-ledger insert, split out of runEnrichmentOnce so it can be tested
+ * on fixture rows (the sweeper itself claims whichever org's leads are oldest).
+ * Carries the inbox row's partner_data (0228) onto the event.
+ */
+export async function insertLeadEvent(
+  tx: DbOrTx,
+  orgId: string,
+  row: Pick<
+    InboxRow,
+    "id" | "partner_key_id" | "partner_slug" | "interest_tag" | "received_at" | "sandbox" | "partner_data"
+  >,
+  contactId: string,
+  lineType: string | null,
+): Promise<void> {
+  await tx.execute(sql`
+    INSERT INTO lead_events
+      (org_id, contact_id, partner_key_id, partner_slug, interest_tag,
+       received_at, inbox_id, sandbox, line_type, partner_data)
+    VALUES (${orgId}::uuid, ${contactId}::uuid, ${row.partner_key_id}, ${row.partner_slug},
+            ${row.interest_tag}, ${row.received_at}::timestamptz, ${row.id}::uuid,
+            ${row.sandbox}, ${lineType},
+            ${row.partner_data ? JSON.stringify(row.partner_data) : null}::jsonb)
+    ON CONFLICT (inbox_id) WHERE inbox_id IS NOT NULL DO NOTHING`);
+}
+
 /** Claim one batch for ONE org and drive every row to its next state. One transaction. */
 async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
   const res: EnrichmentResult = {
@@ -256,7 +284,7 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
     // guarantees a single runner anyway.
     const rows = (await tx.execute(sql`
       SELECT li.id, li.org_id, li.partner_key_id, li.partner_slug, li.raw, li.phone_e164,
-             li.interest_tag, li.sandbox, li.received_at, li.status,
+             li.interest_tag, li.sandbox, li.received_at, li.status, li.partner_data,
              pk.field_mapping,
              pk.partner_id,
              pl.line_type,
@@ -407,14 +435,7 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
       // The arrival ledger. ON CONFLICT DO NOTHING against the partial unique
       // on inbox_id makes a crashed-and-retried batch a no-op rather than a
       // second event for the same arrival.
-      await tx.execute(sql`
-        INSERT INTO lead_events
-          (org_id, contact_id, partner_key_id, partner_slug, interest_tag,
-           received_at, inbox_id, sandbox, line_type)
-        VALUES (${orgId}::uuid, ${contactId}::uuid, ${row.partner_key_id}, ${row.partner_slug},
-                ${row.interest_tag}, ${row.received_at}::timestamptz, ${row.id}::uuid,
-                ${row.sandbox}, ${lineType})
-        ON CONFLICT (inbox_id) WHERE inbox_id IS NOT NULL DO NOTHING`);
+      await insertLeadEvent(tx, orgId, row, contactId, lineType);
 
       await addContactsToGroup(tx, {
         orgId,

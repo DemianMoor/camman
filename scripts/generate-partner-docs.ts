@@ -1,7 +1,14 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { SANDBOX_PHONE_NOTE } from "@/lib/intake/api-contract";
+import {
+  PASSTHROUGH_DOC,
+  POSTBACK_DOC,
+  POSTBACK_PLACEHOLDERS,
+  SANDBOX_PHONE_NOTE,
+  WARNINGS_NOTE,
+  formatDelay,
+} from "@/lib/intake/api-contract";
 import { LEAD_FIELDS, MAX_LEADS_PER_CALL } from "@/lib/intake/fields";
 
 // Generates docs/partners/lead-intake.md FROM lib/intake/fields.ts.
@@ -75,8 +82,8 @@ A single lead object, or an array of up to **${MAX_LEADS_PER_CALL}** of them.
 ]
 \`\`\`
 
-Only \`phone\` is required. Send whatever else you have — **unknown fields are
-kept**, not discarded, so nothing is lost if you send more than the list below.
+Only \`phone\` is required. Unknown fields are ignored; see
+[Passthrough fields](#passthrough-fields) for extra fields agreed with you.
 
 ## Fields
 
@@ -86,6 +93,42 @@ ${rows}
 
 If your field names differ from ours, tell us and we map them on our side — you
 do not need to change your payload.
+
+## ${PASSTHROUGH_DOC.title}
+
+${PASSTHROUGH_DOC.intro}
+
+${PASSTHROUGH_DOC.rules.map((r) => `- ${r}`).join("\n")}
+
+\`\`\`json
+${JSON.stringify(PASSTHROUGH_DOC.example, null, 2)}
+\`\`\`
+
+## ${POSTBACK_DOC.title}
+
+${POSTBACK_DOC.intro}
+
+${POSTBACK_DOC.placeholderIntro}
+
+| Placeholder | Value |
+|---|---|
+${POSTBACK_PLACEHOLDERS.map((p) => `| \`{${p.name}}\` | ${p.meaning} |`).join("\n")}
+
+Example URL:
+
+\`\`\`
+${POSTBACK_DOC.exampleUrl}
+\`\`\`
+
+### Delivery and retries
+
+${POSTBACK_DOC.retryIntro}
+
+${POSTBACK_DOC.retryDelaysMs.map((ms, i) => `${i + 1}. ${formatDelay(ms)}`).join("\n")}
+
+${POSTBACK_DOC.retryOutro}
+
+${POSTBACK_DOC.rules.map((r) => `> **Note:** ${r}`).join("\n")}
 
 ## Responses
 
@@ -115,6 +158,7 @@ A \`202\` body looks like:
 \`\`\`
 
 \`leads\` is in the same order you sent them, so you can reconcile by index.
+${WARNINGS_NOTE}
 
 ### Duplicates are safe
 

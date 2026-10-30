@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import PartnerApiDocsPage from "@/app/docs/partner-api/page";
 import { RESPONSE_CODES } from "@/lib/intake/api-contract";
+import { PASSTHROUGH_LIMITS, SYSTEM_PLACEHOLDERS } from "@/lib/intake/passthrough";
+import { RETRY_DELAYS_MS } from "@/lib/partners/postbacks/constants";
 import { LEAD_FIELDS, LEAD_FIELD_KEYS, canonicalFieldKey } from "@/lib/intake/fields";
 
 // Drift guard for the PUBLIC partner API docs (/docs/partner-api).
@@ -143,6 +145,31 @@ function main() {
     .filter((s) => !/YOUR_SECRET|&lt;|placeholder/i.test(s))
     .filter((s) => /[A-Za-z0-9_-]{24,}/.test(s));
   check("⭐ no credential-shaped string outside the placeholders", secretish, []);
+
+  // ── 5. passthrough fields + sales postbacks (generic mechanism) ──────────
+  console.log("\n⭐ passthrough / postback sections vs their sources:");
+  const text = html.replace(/<[^>]+>/g, " ").replace(/&quot;/g, '"').replace(/\s+/g, " ");
+  const phOnPage = [...html.matchAll(/data-placeholder="([^"]+)"/g)].map((m) => m[1]).sort();
+  check("⭐ placeholders on the page EQUAL SYSTEM_PLACEHOLDERS (sorted)",
+        phOnPage, [...SYSTEM_PLACEHOLDERS].sort());
+  for (const n of [PASSTHROUGH_LIMITS.maxFields, PASSTHROUGH_LIMITS.maxValueLength, PASSTHROUGH_LIMITS.maxTotalBytes]) {
+    check(`page text contains the limit ${n}`, new RegExp(`\\b${n}\\b`).test(text), true);
+  }
+  const fmt = (ms: number) =>
+    ms < 3_600_000 ? `${ms / 60_000} min` : `${ms / 3_600_000} h`;
+  const retryOnPage = [...html.matchAll(/data-retry-delay="(\d+)"/g)].map((m) => Number(m[1]));
+  check("⭐ the retry schedule rendered EQUALS RETRY_DELAYS_MS",
+        retryOnPage, [...RETRY_DELAYS_MS]);
+  for (const ms of RETRY_DELAYS_MS) {
+    check(`retry delay "${fmt(ms)}" appears in the page text`, text.includes(fmt(ms)), true);
+  }
+  for (const phrase of ["unknown fields are ignored", "at least once", "conversion_id"]) {
+    check(`page contains "${phrase}"`, text.toLowerCase().includes(phrase), true);
+  }
+  // Per-key values live on the key card, never on this shared public page.
+  for (const lit of ["list_id", "relay_lead_id"]) {
+    check(`no per-key value "${lit}" on the public page`, html.includes(lit), false);
+  }
 
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);
   if (failures > 0) process.exitCode = 1;

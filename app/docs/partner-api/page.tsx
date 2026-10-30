@@ -7,6 +7,11 @@ import {
   ENDPOINT_METHOD,
   ENDPOINT_PATH,
   EXAMPLE_202_RESPONSE,
+  PASSTHROUGH_DOC,
+  POSTBACK_DOC,
+  POSTBACK_PLACEHOLDERS,
+  WARNINGS_NOTE,
+  formatDelay,
   RESPONSE_CODES,
   SANDBOX_PHONE_NOTE,
   SANDBOX_STEPS,
@@ -98,7 +103,8 @@ export default function PartnerApiDocsPage() {
 
   const toc = [
     ["auth", "Authentication"], ["endpoint", "Endpoint"], ["request", "Request format"],
-    ["curl", "Quick start"], ["fields", "Fields"], ["responses", "Response codes"],
+    ["curl", "Quick start"], ["fields", "Fields"], ["passthrough", "Passthrough fields"],
+    ["postbacks", "Sales postbacks"], ["responses", "Response codes"],
     ["batching", "Batching"], ["limits", "Rate limits"], ["sandbox", "Sandbox"],
     ["changelog", "Changelog"], ["support", "Support"],
   ] as const;
@@ -192,8 +198,9 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
             {j(exampleBatch())}
           </Block>
           <p className="text-sm leading-relaxed">
-            Objects within a batch need not share the same fields. Unrecognised fields are
-            retained rather than discarded.
+            Objects within a batch need not share the same fields. Unknown fields are ignored;
+            see <a href="#passthrough" className="underline">Passthrough fields</a> for
+            extra fields agreed with you.
           </p>
         </Section>
 
@@ -208,7 +215,7 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
           <Block label="202 response">{j(EXAMPLE_202_RESPONSE)}</Block>
           <p className="text-sm leading-relaxed">
             The <Code>leads</Code> array preserves request order, allowing reconciliation by
-            index.
+            index. {WARNINGS_NOTE}
           </p>
         </Section>
 
@@ -290,6 +297,58 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
               </dl>
             </>
           )}
+        </Section>
+
+        <Section id="passthrough" title={PASSTHROUGH_DOC.title}>
+          <p className="text-sm leading-relaxed">{PASSTHROUGH_DOC.intro}</p>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-relaxed">
+            {PASSTHROUGH_DOC.rules.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+          <Block label="Example — agreed names your_field and another_field">
+            {j(PASSTHROUGH_DOC.example)}
+          </Block>
+        </Section>
+
+        <Section id="postbacks" title={POSTBACK_DOC.title}>
+          <p className="text-sm leading-relaxed">{POSTBACK_DOC.intro}</p>
+          <p className="mt-3 text-sm leading-relaxed">{POSTBACK_DOC.placeholderIntro}</p>
+          <div className="my-4 overflow-x-auto rounded-md border">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50 text-xs">
+                <tr>
+                  <th className="p-2 text-left">Placeholder</th>
+                  <th className="p-2 text-left">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {POSTBACK_PLACEHOLDERS.map((p) => (
+                  <tr key={p.name} className="border-t align-top" data-placeholder={p.name}>
+                    <td className="p-2 font-mono text-[13px]">{`{${p.name}}`}</td>
+                    <td className="p-2">{p.meaning}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Block label="Example URL">{POSTBACK_DOC.exampleUrl}</Block>
+          <h3 className="mt-6 mb-2 text-sm font-semibold">Delivery and retries</h3>
+          <p className="text-sm leading-relaxed">{POSTBACK_DOC.retryIntro}</p>
+          <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm leading-relaxed">
+            {POSTBACK_DOC.retryDelaysMs.map((ms) => (
+              <li key={ms} data-retry-delay={ms}>{formatDelay(ms)}</li>
+            ))}
+          </ol>
+          <p className="mt-2 text-sm leading-relaxed">{POSTBACK_DOC.retryOutro}</p>
+          {POSTBACK_DOC.rules.map((r) => (
+            <p
+              key={r}
+              className="mt-3 rounded-md border-l-2 border-amber-500 bg-amber-500/5 p-3 text-sm leading-relaxed"
+            >
+              <strong>Note:</strong> {r}
+            </p>
+          ))}
         </Section>
 
         <Section id="responses" title="Response codes">

@@ -11,6 +11,7 @@ import { checkTelnyxBalance } from "./lookup-guard";
 import { isPokeEnabled } from "./poke";
 import { runDripOptOutMonitor } from "./optout-monitor";
 import { sweepJourneyLifecycle } from "./lifecycle-sweep";
+import { enqueuePartnerPostbacks } from "@/lib/partners/postbacks/enqueue";
 
 // Drip monitors (Drip Phase 3). Runs as a SEPARATE cron from the sweeper it
 // watches — a job that checks its own liveness reports nothing when it is the
@@ -58,6 +59,8 @@ export interface DripMonitorResult {
   balanceFiring: boolean;
   /** Journey terminal transitions closed on this tick (Drip Phase 6). */
   lifecycle: Awaited<ReturnType<typeof sweepJourneyLifecycle>>;
+  /** Partner sales postbacks queued from the ledger on this tick (0 if the enqueue failed). */
+  postbacksQueued: number;
   /** Per org, last LEAD_TO_SEND_WINDOW_MIN minutes. Empty while pokes are off. */
   leadToSend: { orgId: string; latency: LeadLatency; verdict: "fire" | "resolve" | "hold" | "too_few" }[];
   alerts: string[];
@@ -151,6 +154,15 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
   // archive close at their source instead.
   const lifecycle = await sweepJourneyLifecycle();
 
+  // Partner sales postbacks, queued from the conversion_events ledger right
+  // after the sweep. Best-effort: a failure must not stop the monitors below.
+  const postbacksQueued = await enqueuePartnerPostbacks(db)
+    .then((r) => r.queued)
+    .catch((err) => {
+      console.error("[drip-monitors] postback enqueue failed (swallowed):", err);
+      return 0;
+    });
+
   // Best-effort: a latency query that fails must not stop the monitors below.
   const leadToSend = await checkLeadToSend(alerts).catch((err) => {
     console.error("[drip-monitors] lead-to-send check failed (swallowed):", err);
@@ -172,6 +184,7 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
     balanceThreshold,
     balanceFiring,
     lifecycle,
+    postbacksQueued,
     leadToSend,
     alerts,
   };

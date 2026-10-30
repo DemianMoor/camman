@@ -47,6 +47,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // and its heartbeat was also being stamped by the follow-ups job.
       HEARTBEAT_JOBS.dripScheduler,
       HEARTBEAT_JOBS.dripFollowups,
+      HEARTBEAT_JOBS.partnerPostbacks,
     ]);
     // Drip Daily results rollup (0208): the one job here that ALERTS, latched —
     // its refresh would otherwise have no watcher outside itself.

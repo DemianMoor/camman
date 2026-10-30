@@ -251,6 +251,15 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     first_run_grace_hours: 48,
     label: "Contact lifecycle day rollup (nightly)",
   },
+  // Partner sales postback delivery (*/5). Stamped on every completed run,
+  // INCLUDING a kill-switch-off run, so a deliberately-off switch is not read as
+  // a dead cron. Watched by /api/cron/drip-monitors.
+  partnerPostbacks: {
+    job_name: "partner-postbacks",
+    max_age_hours: 1, // every 5 min; 1h is ~11 missed runs
+    first_run_grace_hours: 0.5,
+    label: "Partner postback delivery (every 5 min)",
+  },
   // ---- Tells (spec §4.5) — MUTUAL WATCH, because these two are the sole
   // detection layer for broken STOP intake and a dead job cannot report itself
   // dead. tellsMonitors (hourly) checks tellsSweep; tellsSweep (*/5) checks

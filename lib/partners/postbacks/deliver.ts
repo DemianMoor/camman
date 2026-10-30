@@ -28,6 +28,10 @@ export type DeliveryResult = {
   retried: number;
   failed: number;
   cancelled: number;
+  /** Rows whose processing threw; they come due again when their 2-minute claim lapses. */
+  errors: number;
+  /** Claimed but not started before the run deadline; they come due again when the claim lapses. */
+  deferred: number;
   skipped_kill_switch: boolean;
 };
 
@@ -43,7 +47,17 @@ type Claimed = {
   postback_include_payout: boolean;
 };
 
+type KeyOutcome = {
+  orgId: string;
+  name: string;
+  delivered?: boolean;
+  failed?: { masked: string | null; code: number | null; error: string | null };
+};
+
 const CONCURRENCY = 5;
+// Stop picking up rows after this long, so the batch (plus the per-key alerts)
+// fits inside the route's maxDuration = 60.
+const RUN_DEADLINE_MS = 40_000;
 
 export async function runPostbackDelivery(
   o: {
@@ -51,11 +65,17 @@ export async function runPostbackDelivery(
     send?: (url: string) => Promise<SendResult>;
     /** TESTS ONLY: restrict the claim to one org on a shared database. Production never passes it. */
     orgId?: string;
+    /** TESTS ONLY: override the 40 s pick-up deadline. */
+    deadlineMs?: number;
   } = {},
 ): Promise<DeliveryResult> {
-  const out: DeliveryResult = { claimed: 0, delivered: 0, retried: 0, failed: 0, cancelled: 0, skipped_kill_switch: false };
+  const out: DeliveryResult = {
+    claimed: 0, delivered: 0, retried: 0, failed: 0, cancelled: 0, errors: 0, deferred: 0, skipped_kill_switch: false,
+  };
   if (!deliveryEnabled()) return { ...out, skipped_kill_switch: true };
 
+  const startedAt = Date.now();
+  const deadlineMs = o.deadlineMs ?? RUN_DEADLINE_MS;
   const limit = o.limit ?? 50;
   const send = o.send ?? ((url: string) => sendPostback(url));
   const orgFilter = o.orgId ? sql`AND org_id = ${o.orgId}::uuid` : sql``;
@@ -64,7 +84,7 @@ export async function runPostbackDelivery(
     UPDATE partner_postbacks p
     SET next_attempt_at = now() + interval '2 minutes'
     FROM partner_keys k
-    WHERE k.id = p.partner_key_id
+    WHERE k.id = p.partner_key_id AND k.org_id = p.org_id
       AND p.id IN (
         SELECT id FROM partner_postbacks
         WHERE status = 'pending' AND NOT is_test AND next_attempt_at <= now() ${orgFilter}
@@ -78,7 +98,7 @@ export async function runPostbackDelivery(
   out.claimed = rows.length;
 
   // Per key, the outcome that decides its alert: any failure this run wins over a delivery.
-  const keyOutcome = new Map<number, { orgId: string; name: string; delivered?: boolean; failed?: { masked: string | null; code: number | null; error: string | null } }>();
+  const keyOutcome = new Map<number, KeyOutcome>();
 
   const processRow = async (r: Claimed) => {
     const id = Number(r.id);
@@ -89,7 +109,7 @@ export async function runPostbackDelivery(
     if (!r.postback_enabled) {
       await db.execute(sql`
         UPDATE partner_postbacks SET status = 'cancelled', last_error = 'postback_disabled'
-        WHERE id = ${id}::bigint AND status = 'pending'`);
+        WHERE id = ${id}::bigint AND org_id = ${r.org_id}::uuid AND status = 'pending'`);
       out.cancelled++;
       return;
     }
@@ -102,7 +122,7 @@ export async function runPostbackDelivery(
       const message = err instanceof Error ? err.message : String(err);
       await db.execute(sql`
         UPDATE partner_postbacks SET status = 'failed', last_error = ${message}, last_attempt_at = now()
-        WHERE id = ${id}::bigint AND status = 'pending'`);
+        WHERE id = ${id}::bigint AND org_id = ${r.org_id}::uuid AND status = 'pending'`);
       out.failed++;
       ko.failed = { masked: null, code: null, error: message };
       return;
@@ -116,6 +136,7 @@ export async function runPostbackDelivery(
     const delay = verdict === "retry" ? nextAttemptDelayMs(attempts) : null;
     const status = verdict === "delivered" ? "delivered" : delay === null ? "failed" : "pending";
 
+    // status = 'pending' guard: a concurrent cancel is not overwritten.
     await db.execute(sql`
       UPDATE partner_postbacks
       SET status = ${status},
@@ -128,7 +149,7 @@ export async function runPostbackDelivery(
           last_response_code = ${res.status}::int,
           last_error = ${error},
           last_url_masked = ${masked}
-      WHERE id = ${id}::bigint`);
+      WHERE id = ${id}::bigint AND org_id = ${r.org_id}::uuid AND status = 'pending'`);
 
     if (status === "delivered") {
       out.delivered++;
@@ -144,29 +165,43 @@ export async function runPostbackDelivery(
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, rows.length) }, async () => {
-      while (next < rows.length) await processRow(rows[next++]);
+      while (next < rows.length && Date.now() - startedAt < deadlineMs) {
+        const r = rows[next++];
+        try {
+          await processRow(r);
+        } catch (err) {
+          // Isolated: the row keeps its 2-minute claim and comes due again. No URL in the log.
+          out.errors++;
+          console.error(`[partner-postbacks] row ${r.id} failed (left for retry):`, err instanceof Error ? err.message : err);
+        }
+      }
     }),
   );
+  out.deferred = rows.length - next;
 
   for (const [keyId, ko] of keyOutcome) {
     const alertKey = `partner-postback-failed:${keyId}`;
-    if (!ko.failed) {
-      if (ko.delivered) await clearAlert(db, { alertKey, orgId: ko.orgId });
-      continue;
+    try {
+      if (!ko.failed) {
+        if (ko.delivered) await clearAlert(db, { alertKey, orgId: ko.orgId });
+        continue;
+      }
+      const n = (await db.execute(sql`
+        SELECT count(*)::int AS n FROM partner_postbacks
+        WHERE partner_key_id = ${keyId}::int AND org_id = ${ko.orgId}::uuid AND status = 'failed' AND NOT is_test
+          AND last_attempt_at >= now() - interval '24 hours'`)) as unknown as { n: number }[];
+      const f = ko.failed;
+      const last = f.masked
+        ? `${f.masked} → ${f.code ?? f.error ?? "no response"}`
+        : `not sent: ${f.error}`;
+      await notifyOnTransition(db, {
+        alertKey,
+        orgId: ko.orgId,
+        text: `🔴 Partner postback failed — key "${ko.name}" (#${keyId})\n${n[0]?.n ?? 0} failed in the last 24 h\nLast: ${last}`,
+      });
+    } catch (err) {
+      console.error(`[partner-postbacks] alert for key ${keyId} failed (swallowed):`, err instanceof Error ? err.message : err);
     }
-    const n = (await db.execute(sql`
-      SELECT count(*)::int AS n FROM partner_postbacks
-      WHERE partner_key_id = ${keyId}::int AND status = 'failed' AND NOT is_test
-        AND last_attempt_at >= now() - interval '24 hours'`)) as unknown as { n: number }[];
-    const f = ko.failed;
-    const last = f.masked
-      ? `${f.masked} → ${f.code ?? f.error ?? "no response"}`
-      : `not sent: ${f.error}`;
-    await notifyOnTransition(db, {
-      alertKey,
-      orgId: ko.orgId,
-      text: `🔴 Partner postback failed — key "${ko.name}" (#${keyId})\n${n[0]?.n ?? 0} failed in the last 24 h\nLast: ${last}`,
-    });
   }
 
   return out;

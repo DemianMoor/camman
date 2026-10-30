@@ -3,6 +3,9 @@ import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — 
 
 import { sql } from "drizzle-orm";
 
+import { NextRequest } from "next/server";
+
+import { GET as cronGET } from "@/app/api/cron/partner-postbacks/route";
 import { db } from "@/db/client";
 import { runPostbackDelivery } from "@/lib/partners/postbacks/deliver";
 import type { SendResult } from "@/lib/partners/postbacks/http";
@@ -46,10 +49,13 @@ const res = (status: number | null, blocked = false): SendResult => ({
 // Fake transport: the response for a URL is picked by its `c` (conversion_id) param.
 const calls: string[] = [];
 const plan = new Map<string, SendResult>();
+const throwFor = new Set<string>();
 let sendDelayMs = 0;
 async function fakeSend(url: string): Promise<SendResult> {
   calls.push(url);
   if (sendDelayMs) await new Promise((r) => setTimeout(r, sendDelayMs));
+  const c = new URL(url).searchParams.get("c") ?? "";
+  if (throwFor.has(c)) throw new Error(`injected transport crash for ${c}`);
   return plan.get(new URL(url).searchParams.get("c") ?? "") ?? res(200);
 }
 
@@ -76,6 +82,10 @@ async function main() {
     const key = await mkKey("main");
     const keyOff = await mkKey("off");
     const keyTpl = await mkKey("tpl");
+    const keyBad = await mkKey("bad");
+    // A placeholder in the host: renders to a different host than the template's ⇒ renderPostbackUrl throws.
+    await db.execute(sql`UPDATE partner_keys SET postback_url_template = 'https://{tok}.example.com/pb?c={conversion_id}'
+                         WHERE id = ${keyBad}::int`);
 
     /** A due pending row; conversion_id doubles as the fake transport's routing key. */
     const mkRow = async (keyId: number, cid: string) => {
@@ -102,7 +112,7 @@ async function main() {
         FROM partner_postbacks WHERE id = ${id}::bigint`))[0];
     const makeDue = (id: number) =>
       db.execute(sql`UPDATE partner_postbacks SET next_attempt_at = now() - interval '1 second' WHERE id = ${id}::bigint`);
-    const run = (o: { limit?: number } = {}) => runPostbackDelivery({ ...o, send: fakeSend, orgId });
+    const run = (o: { limit?: number; deadlineMs?: number } = {}) => runPostbackDelivery({ ...o, send: fakeSend, orgId });
     const alert = async (k: number) =>
       (await q<{ state: string }>(sql`SELECT state FROM alert_state WHERE alert_key = ${`partner-postback-failed:${k}`}`))[0]?.state ?? null;
 
@@ -222,6 +232,75 @@ async function main() {
     check("⭐ no last_url_masked contains the token value", masked.filter((r) => r.masked?.includes(SECRET)).length, 0);
     check("⭐ ...the token param is masked as ***", masked.every((r) => r.masked?.includes("token=***")), true);
     check("D1 masked URL exactly", (await row(d1)).masked, "https://pb.example.com/v1?c=D1&token=***");
+
+    // ── D9 render throws ⇒ failed, last_error = the message, never sent ─
+    console.log("\nD9. template renders to another host:");
+    const d9 = await mkRow(keyBad, "D9");
+    calls.length = 0;
+    const r9 = await run();
+    const s9 = await row(d9);
+    check("⭐ failed, last_error is the thrown message, attempts 0",
+          [s9.status, s9.err, s9.attempts], ["failed", "Rendered postback URL does not match the template host", 0]);
+    check("⭐ send never called", calls.length, 0);
+    check("result.failed", r9.failed, 1);
+    check("alert firing for that key", await alert(keyBad), "firing");
+
+    // ── D10 one row's send throws ⇒ the others still land; errors = 1 ──
+    console.log("\nD10. per-row error isolation:");
+    const d10 = [];
+    for (let i = 0; i < 6; i++) d10.push(await mkRow(key, `D10-${i}`));
+    throwFor.add("D10-2");
+    calls.length = 0;
+    const r10 = await run();
+    throwFor.clear();
+    check("⭐ run resolves: errors 1, delivered 5", [r10.errors, r10.delivered, r10.claimed], [1, 5, 6]);
+    const others = await Promise.all(d10.filter((_, i) => i !== 2).map(row));
+    check("⭐ the other 5 rows recorded delivered", others.map((s) => [s.status, s.attempts]), Array(5).fill(["delivered", 1]));
+    const crashed = await row(d10[2]);
+    check("⭐ the crashed row is left pending, attempts 0, on its 2-minute claim",
+          [crashed.status, crashed.attempts, crashed.due_in_s > 100 && crashed.due_in_s <= 120], ["pending", 0, true]);
+
+    // ── D11 run deadline ⇒ rows not started are deferred on their claim ─
+    console.log("\nD11. run deadline:");
+    const d11 = [];
+    for (let i = 0; i < 10; i++) d11.push(await mkRow(key, `D11-${i}`));
+    calls.length = 0;
+    sendDelayMs = 1500;
+    const r11 = await run({ deadlineMs: 1000 }); // the first wave of 5 starts before 1 s and ends after it
+    sendDelayMs = 0;
+    check("⭐ claimed 10, delivered 5, deferred 5, sent 5", [r11.claimed, r11.delivered, r11.deferred, calls.length], [10, 5, 5, 5]);
+    const states11 = await Promise.all(d11.map(row));
+    const deferred11 = states11.filter((s) => s.status === "pending");
+    check("⭐ 5 deferred rows: pending, attempts 0, still on the claim",
+          [deferred11.length, deferred11.every((s) => s.attempts === 0 && s.due_in_s > 100)], [5, true]);
+
+    // ── D12 cron route: kill switch off ⇒ heartbeat stamped, nothing claimed ─
+    console.log("\nD12. cron route heartbeat:");
+    const HB = "partner-postbacks";
+    const hbBefore = (await q<{ wm: string | null }>(sql`SELECT watermark::text AS wm FROM cron_locks WHERE job_name = ${HB}`))[0];
+    const secret = `test-${RUN}`;
+    process.env.CRON_SECRET = secret;
+    try {
+      const unauth = await cronGET(new NextRequest("http://localhost/api/cron/partner-postbacks"));
+      check("no secret ⇒ 401", unauth.status, 401);
+      delete process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED;
+      const d12 = await mkRow(key, "D12");
+      calls.length = 0;
+      const resp = await cronGET(new NextRequest("http://localhost/api/cron/partner-postbacks",
+                                                  { headers: { authorization: `Bearer ${secret}` } }));
+      process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED = "true";
+      check("⭐ kill switch off ⇒ 200 skipped_kill_switch", [resp.status, (await resp.json()).skipped_kill_switch], [200, true]);
+      const hb = (await q<{ age_s: number }>(sql`
+        SELECT extract(epoch FROM now() - watermark)::float AS age_s FROM cron_locks WHERE job_name = ${HB}`))[0];
+      check("⭐ heartbeat stamped within the last 10 s", hb !== undefined && hb.age_s < 10, true);
+      check("...and the due row was not touched", [(await row(d12)).status, (await row(d12)).attempts], ["pending", 0]);
+    } finally {
+      // Restore the heartbeat row exactly as found.
+      if (hbBefore === undefined) await db.execute(sql`DELETE FROM cron_locks WHERE job_name = ${HB}`);
+      else await db.execute(sql`UPDATE cron_locks SET watermark = ${hbBefore.wm}::timestamptz WHERE job_name = ${HB}`);
+      const after = (await q<{ wm: string | null }>(sql`SELECT watermark::text AS wm FROM cron_locks WHERE job_name = ${HB}`))[0];
+      check("heartbeat row restored to its prior state", after?.wm ?? "absent", hbBefore?.wm ?? "absent");
+    }
   } finally {
     // Cleanup BY ID, FK-safe order: postbacks → alert rows → keys → partners → org.
     console.log("\ncleanup:");

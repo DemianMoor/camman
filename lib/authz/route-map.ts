@@ -335,6 +335,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "partner-keys": null, // drip / partner intake -- hidden from the operator
   "partner-keys/[keyId]": null, // drip / partner intake -- hidden from the operator
   "partner-keys/[keyId]/rotate": null, // drip / partner intake -- hidden from the operator
+  "partner-keys/[keyId]/postback-test": null, // drip / partner intake -- hidden from the operator
+  "partner-keys/[keyId]/postbacks": null, // drip / partner intake -- hidden from the operator
   // ── partners (0200) ──────────────────────────────────────────────────────────
   "partners": null, // drip / partner intake -- hidden from the operator
   "partners/[partnerId]": null, // drip / partner intake -- hidden from the operator

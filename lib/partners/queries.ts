@@ -24,6 +24,12 @@ export interface PartnerKeyJson {
   field_mapping: Record<string, string>;
   /** Whitelisted extra per-lead field names kept verbatim (0228). */
   passthrough_fields: string[];
+  postback_enabled: boolean;
+  postback_url_template: string | null;
+  postback_include_payout: boolean;
+  postback_first_purchase_only: boolean;
+  postback_event_keys: string[];
+  postback_active_since: string | null;
   sandbox: boolean;
   rate_per_sec: number;
   rate_per_day: number;
@@ -60,7 +66,9 @@ export interface PartnerJson {
 /** Key rows with usage, as `FROM partner_keys k …`; the caller appends WHERE / ORDER BY. */
 export const KEY_LIST_SQL: SQL = sql`
     SELECT k.id, k.partner_id, k.partner_slug, k.name, k.interest_tag_mode, k.interest_tag,
-           k.field_mapping, k.passthrough_fields, k.sandbox, k.rate_per_sec, k.rate_per_day,
+           k.field_mapping, k.passthrough_fields, k.postback_enabled, k.postback_url_template,
+           k.postback_include_payout, k.postback_first_purchase_only, k.postback_event_keys,
+           k.postback_active_since, k.sandbox, k.rate_per_sec, k.rate_per_day,
            k.max_payload_bytes, k.status, k.created_at, k.rotated_at, k.last_seen_at,
            k.secret_last4,
            COALESCE(u.accepted_today, 0)::int AS accepted_today,

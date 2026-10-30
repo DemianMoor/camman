@@ -35,6 +35,13 @@ const shared = {
       if (message) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
     })
     .optional(),
+  // Partner sales postbacks (0228). The template is cross-checked against the MERGED
+  // key in lib/partners/postbacks/config.ts, not here: it depends on passthrough_fields.
+  postback_enabled: z.boolean().optional(),
+  postback_url_template: z.string().trim().max(2048).nullable().optional(),
+  postback_include_payout: z.boolean().optional(),
+  postback_first_purchase_only: z.boolean().optional(),
+  postback_event_keys: z.array(z.enum(["purchase"])).min(1).optional(),
   sandbox: z.boolean().optional(),
   rate_per_sec: z.number().int().positive().max(10000).optional(),
   rate_per_day: z.number().int().positive().max(10_000_000).optional(),

@@ -7,7 +7,7 @@ import { NextRequest } from "next/server";
 
 import { GET as cronGET } from "@/app/api/cron/partner-postbacks/route";
 import { db } from "@/db/client";
-import { runPostbackDelivery } from "@/lib/partners/postbacks/deliver";
+import { anyPostbackKeyEnabled, runPostbackDelivery } from "@/lib/partners/postbacks/deliver";
 import type { SendResult } from "@/lib/partners/postbacks/http";
 import { createPartnerWithKey } from "./_partner-fixture";
 
@@ -133,6 +133,7 @@ async function main() {
     check("⭐ delivered, attempts 1, delivered_at set, code 200", [s1.status, s1.attempts, s1.delivered, s1.code], ["delivered", 1, true, 200]);
     check("sent once to the rendered URL", calls, [`https://pb.example.com/v1?c=D1&token=${SECRET}`]);
     check("alert cleared (ok row)", await alert(key), "ok");
+    check("anyPostbackKeyEnabled sees the enabled fixture keys (watchdog gate input)", await anyPostbackKeyEnabled(), true);
 
     // ── D2 500 ⇒ retry ×6 ⇒ failed after attempt 7 ────────────────────
     console.log("\nD2. 500 ⇒ backoff, then failed after attempt 7:");

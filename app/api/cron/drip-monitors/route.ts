@@ -5,6 +5,8 @@ import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { runDripMonitors } from "@/lib/drip/monitors";
+import { anyPostbackKeyEnabled, deliveryEnabled } from "@/lib/partners/postbacks/deliver";
+import { shouldAlertPostbackHeartbeat } from "@/lib/partners/postbacks/heartbeat-gate";
 import { can } from "@/lib/permissions";
 import { checkHeartbeats, HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 
@@ -47,7 +49,6 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // and its heartbeat was also being stamped by the follow-ups job.
       HEARTBEAT_JOBS.dripScheduler,
       HEARTBEAT_JOBS.dripFollowups,
-      HEARTBEAT_JOBS.partnerPostbacks,
     ]);
     // Drip Daily results rollup (0208): the one job here that ALERTS, latched —
     // its refresh would otherwise have no watcher outside itself.
@@ -63,7 +64,25 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     } else {
       await clearAlert(db, { alertKey: "drip-daily-rollup-stale" });
     }
-    return { ...monitors, heartbeats: [...heartbeats, dailyRollup] };
+    // Partner postback delivery: also ALERTS, latched — but only once postbacks
+    // are live (kill switch on, or any key enabled), so a job that has never
+    // run before go-live pages nobody.
+    const [postbacks] = await checkHeartbeats(db, [HEARTBEAT_JOBS.partnerPostbacks]);
+    const switchOn = deliveryEnabled();
+    // The key read is only needed when it can change the answer.
+    const anyKeyEnabled = postbacks.stale && !switchOn ? await anyPostbackKeyEnabled() : false;
+    if (shouldAlertPostbackHeartbeat({ stale: postbacks.stale, deliveryEnabled: switchOn, anyKeyEnabled })) {
+      await notifyOnTransition(db, {
+        alertKey: "partner-postbacks-stale",
+        text:
+          `⚠️ Partner postbacks: the delivery cron has not run for ` +
+          `${postbacks.age_hours == null ? "ever (no heartbeat)" : `${postbacks.age_hours} h`} ` +
+          `(limit ${postbacks.max_age_hours} h). Partner sales postbacks are not being sent. Check /api/cron/partner-postbacks in Vercel.`,
+      });
+    } else {
+      await clearAlert(db, { alertKey: "partner-postbacks-stale" });
+    }
+    return { ...monitors, heartbeats: [...heartbeats, dailyRollup, postbacks] };
   });
 
   if (!leased.ran) {

@@ -206,3 +206,14 @@ export async function runPostbackDelivery(
 
   return out;
 }
+
+/**
+ * Whether any key, in any org, has postbacks switched on. Read by the
+ * drip-monitors watchdog (a system cron, cross-org by design: it only gates
+ * whether a dead delivery cron pages).
+ */
+export async function anyPostbackKeyEnabled(): Promise<boolean> {
+  const r = (await db.execute(sql`
+    SELECT EXISTS (SELECT 1 FROM partner_keys WHERE postback_enabled) AS on`)) as unknown as { on: boolean }[];
+  return r[0]?.on === true;
+}

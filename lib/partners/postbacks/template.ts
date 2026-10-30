@@ -36,6 +36,17 @@ export function postbackConfigError(c: {
     if (m[1] === "payout" && !includePayout) return "{payout} needs \u201cInclude payout\u201d switched on";
   }
 
+  // A placeholder anywhere up to the end of the authority could change the host at render.
+  const schemeEnd = template.indexOf("://");
+  if (schemeEnd !== -1) {
+    const rest = template.slice(schemeEnd + 3);
+    const authLen = rest.search(/[/?#]/);
+    const authorityEnd = schemeEnd + 3 + (authLen === -1 ? rest.length : authLen);
+    for (const m of template.matchAll(PLACEHOLDER_RE)) {
+      if (m.index < authorityEnd) return "Placeholders are only allowed in the path or query";
+    }
+  }
+
   let url: URL;
   try {
     url = new URL(template.replace(PLACEHOLDER_RE, "x"));
@@ -48,7 +59,22 @@ export function postbackConfigError(c: {
   return null;
 }
 
+// Lone surrogates make encodeURIComponent throw; replace them with U+FFFD.
+const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+const encodeValue = (v: string) => encodeURIComponent(v.replace(LONE_SURROGATE_RE, "�"));
+
+/** Throws if the rendered URL is not https or its host differs from the template's. */
 export function renderPostbackUrl(template: string, p: PostbackPayload, includePayout: boolean): string {
+  const rendered = renderRaw(template, p, includePayout);
+  const expected = new URL(template.replace(PLACEHOLDER_RE, "x"));
+  const actual = new URL(rendered);
+  if (actual.protocol !== "https:" || actual.hostname !== expected.hostname) {
+    throw new Error("Rendered postback URL does not match the template host");
+  }
+  return rendered;
+}
+
+function renderRaw(template: string, p: PostbackPayload, includePayout: boolean): string {
   return template.replace(PLACEHOLDER_RE, (_, name: string) => {
     let value: string | null | undefined;
     switch (name) {
@@ -60,7 +86,7 @@ export function renderPostbackUrl(template: string, p: PostbackPayload, includeP
       case "payout": value = includePayout ? p.payout : ""; break;
       default: value = Object.prototype.hasOwnProperty.call(p.fields, name) ? p.fields[name] : "";
     }
-    return encodeURIComponent(value ?? "");
+    return encodeValue(value ?? "");
   });
 }
 

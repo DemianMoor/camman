@@ -2,7 +2,19 @@ import "server-only";
 
 import { sql } from "drizzle-orm";
 
+import { db } from "@/db/client";
 import type { DbOrTx } from "@/lib/intake/partner-key";
+
+// Transaction-scoped advisory lock key that SERIALISES enqueuePartnerPostbacks
+// runs. Guards first-only mode: two overlapping runs (the cron and the manual
+// drip-monitors trigger, which runs without the cron lease) can each pick a
+// DIFFERENT "earliest approved purchase" for one journey when an earlier sale is
+// approved between their snapshots — neither sees the other's uncommitted row,
+// and the unique keys differ, so the partner would get two "first" postbacks.
+// Holding this lock, the second run's INSERT starts after the first commits and
+// its NOT EXISTS sees that row. Fixed and outside the int4 range of the
+// hashtext()-derived keys used elsewhere, so it cannot collide with them.
+export const ENQUEUE_LOCK_KEY = 7_228_000_000_001; // < 2^53, exact as a JS number
 
 // Queue partner sales postbacks FROM THE LEDGER (spec R3: journey state is not a
 // usable trigger — the lifecycle sweep skips posture-off orgs and never
@@ -25,9 +37,16 @@ import type { DbOrTx } from "@/lib/intake/partner-key";
 // "no real row for this journey yet" and pick the journey's earliest approved
 // purchase by (occurred_at, id).
 //
-// Every join is org-matched. The statement takes no parameters.
+// Every join is org-matched. The INSERT takes no parameters.
 export async function enqueuePartnerPostbacks(dbc: DbOrTx): Promise<{ queued: number }> {
-  const rows = (await dbc.execute(sql`
+  // Pooled client ⇒ open a transaction; a caller's transaction is used as-is
+  // (the xact lock is then held until the caller commits).
+  return dbc === db ? db.transaction((tx) => enqueueLocked(tx)) : enqueueLocked(dbc);
+}
+
+async function enqueueLocked(t: DbOrTx): Promise<{ queued: number }> {
+  await t.execute(sql`SELECT pg_advisory_xact_lock(${ENQUEUE_LOCK_KEY}::bigint)`);
+  const rows = (await t.execute(sql`
     INSERT INTO partner_postbacks
       (org_id, partner_key_id, conversion_event_id, drip_journey_id, lead_event_id, payload)
     SELECT ce.org_id, k.id, ce.id, j.id, le.id,

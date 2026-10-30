@@ -11,7 +11,7 @@ import {
   reclassifyCompletedJourneysOnPurchase,
 } from "@/lib/drip/lifecycle";
 import type { DbOrTx } from "@/lib/intake/partner-key";
-import { enqueuePartnerPostbacks } from "@/lib/partners/postbacks/enqueue";
+import { ENQUEUE_LOCK_KEY, enqueuePartnerPostbacks } from "@/lib/partners/postbacks/enqueue";
 import { createPartnerWithKey } from "./_partner-fixture";
 
 // Partner sales postbacks — enqueue from the conversion_events ledger (E1-E8).
@@ -32,8 +32,15 @@ import { createPartnerWithKey } from "./_partner-fixture";
 // Run: node scripts/with-preview-env.mjs npx tsx --conditions=react-server --conditions=import scripts/test-postback-enqueue-db.ts
 
 let failures = 0;
+/** JSON with object keys sorted at every level, so equality is per key, not key order. */
+function canon(v: unknown): string {
+  return JSON.stringify(v, (_k, x) =>
+    x && typeof x === "object" && !Array.isArray(x)
+      ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as Record<string, unknown>)[k]]))
+      : x);
+}
 function check(label: string, actual: unknown, expected: unknown) {
-  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  const ok = canon(actual) === canon(expected);
   if (!ok) failures++;
   console.log(`${ok ? "  PASS" : "  FAIL"}  ${label}`);
   if (!ok) console.log(`        expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
@@ -86,6 +93,7 @@ async function main() {
       const keyFirst = await mkKey(orgId, "first", { firstOnly: true });
       const keyOff = await mkKey(orgId, "off", { enabled: false });
       const keyB = await mkKey(orgB, "orgb");
+      const keyJ1 = await mkKey(orgId, "e6j1"); // E6 journey 1's lead: a DIFFERENT enabled key
 
       const mkCampaign = async (org: string, type: "drip" | "regular") =>
         Number((await q<{ id: number }>(tx, sql`
@@ -228,10 +236,31 @@ async function main() {
       await enqueueTwice();
       check("⭐ a third purchase later ⇒ still 1", (await rowsForJourney(j5f)).length, 1);
 
+      // E5b: the first-only NOT EXISTS guard. The journey's earliest purchase is
+      // still PENDING, so the later approved one is "first" and fires. When the
+      // earlier one is approved it becomes the earliest approved purchase — only
+      // the "journey already has a real row" guard keeps it from firing too.
+      const c5g = await mkContact(orgId);
+      const j5g = await mkJourney(orgId, camp, c5g, await mkLead(orgId, c5g, keyFirst, { relay_lead_id: "R5G" }), "active");
+      const ce5gEarly = await mkSale({ cid: c5g, occurredAgo: "3 hours", status: "pending" });
+      const ce5gLate = await mkSale({ cid: c5g, occurredAgo: "1 hour" });
+      await enqueueTwice();
+      const r5g = await rowsForJourney(j5g);
+      check("⭐ first-only, earliest pending ⇒ 1 row, the later approved one",
+            [r5g.length, Number(r5g[0]?.conversion_event_id)], [1, ce5gLate]);
+      await tx.execute(sql`UPDATE conversion_events SET status = 'approved', updated_at = now() WHERE id = ${ce5gEarly}::bigint`);
+      await enqueueTwice();
+      const r5g2 = await rowsForJourney(j5g);
+      check("⭐ earlier one flipped to approved ⇒ still exactly 1 row (the later one)",
+            [r5g2.length, Number(r5g2[0]?.conversion_event_id)], [1, ce5gLate]);
+
       // ── E6 re-entry: sale after journey 2's routed_at ⇒ journey 2's lead ─
       console.log("\nE6. re-entry on the same campaign:");
       const c6 = await mkContact(orgId);
-      const le6a = await mkLead(orgId, c6, key, { relay_lead_id: "R6-J1" });
+      // Journey 1's lead is on keyJ1, journey 2's on key: a broken next-journey
+      // anchor shows up as an extra row on keyJ1 instead of hiding behind
+      // ON CONFLICT (same key + same conversion).
+      const le6a = await mkLead(orgId, c6, keyJ1, { relay_lead_id: "R6-J1" });
       const j6a = await mkJourney(orgId, camp, c6, le6a, "completed", "10 days");
       const le6b = await mkLead(orgId, c6, key, { relay_lead_id: "R6-J2" });
       const j6b = await mkJourney(orgId, camp, c6, le6b, "completed", "1 day");
@@ -293,8 +322,18 @@ async function main() {
       const byKey = await q<{ k: number; n: number }>(tx, sql`
         SELECT partner_key_id AS k, count(*)::int AS n FROM partner_postbacks
         WHERE org_id IN (${orgId}::uuid, ${orgB}::uuid) GROUP BY 1 ORDER BY 1`);
-      check("fixture totals per key (every: E1+E2+E3+E4+E5×2+E6+E8 = 8, first-only: 1)",
-            byKey.map((r) => [Number(r.k), Number(r.n)]), [[key, 8], [keyFirst, 1]]);
+      check("fixture totals per key (every: E1+E2+E3+E4+E5×2+E6+E8 = 8, first-only: E5+E5b = 2, E6 journey-1 key: 0)",
+            byKey.map((r) => [Number(r.k), Number(r.n)]), [[key, 8], [keyFirst, 2]]);
+
+      // The serialising advisory lock is taken in the caller's transaction (and
+      // held until it ends). A bigint key shows as classid = high 32 bits,
+      // objid = low 32 bits, objsubid = 1.
+      check("⭐ enqueue holds the ENQUEUE_LOCK_KEY xact advisory lock in the caller's tx",
+            (await q<{ n: number }>(tx, sql`
+              SELECT count(*)::int AS n FROM pg_locks
+              WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted AND objsubid = 1
+                AND classid = (${ENQUEUE_LOCK_KEY}::bigint >> 32)::oid
+                AND objid = (${ENQUEUE_LOCK_KEY}::bigint & 4294967295)::oid`))[0].n, 1);
 
       throw new Error("ROLLBACK");
     });

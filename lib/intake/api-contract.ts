@@ -148,6 +148,10 @@ export const WARNINGS_NOTE =
   "part of that lead was dropped (for example a passthrough field whose value was too " +
   "long); the lead itself is still accepted.";
 
+/** The one sentence about unknown fields; rendered on the page, in the markdown, in PASSTHROUGH_DOC and the changelog. */
+export const UNKNOWN_FIELDS_NOTE =
+  "Unknown fields are ignored: we do not use them, but they are stored with the lead as received.";
+
 /** Human label for a retry delay; shared by both renderers. */
 export function formatDelay(ms: number): string {
   return ms < 3_600_000 ? `${ms / 60_000} min` : `${ms / 3_600_000} h`;
@@ -165,7 +169,7 @@ export const PASSTHROUGH_DOC = {
     "sales postbacks (see below). The agreed names are given to you directly.",
   rules: [
     "Field names are matched case-insensitively.",
-    "Unknown fields are ignored: only the standard fields above and your agreed names are used.",
+    UNKNOWN_FIELDS_NOTE,
     `Up to ${PASSTHROUGH_LIMITS.maxFields} agreed fields; each name is at most ${PASSTHROUGH_LIMITS.maxNameLength} characters (lowercase letters, digits and underscore, starting with a letter).`,
     `Each value is at most ${PASSTHROUGH_LIMITS.maxValueLength} characters, and all passthrough values together are at most ${PASSTHROUGH_LIMITS.maxTotalBytes} bytes.`,
     "A field with a value that does not fit the limits is dropped and the lead is still accepted; the lead's entry in the 202 response then carries a `warnings` array.",
@@ -197,7 +201,7 @@ export const POSTBACK_DOC = {
     "postback is sent for every approved purchase or only the first one per lead.",
   placeholderIntro:
     "Your URL is a template. Write any of these in curly braces and we fill them in, " +
-    "together with your agreed passthrough field names (for example {your_field}). " +
+    "together with your agreed passthrough field names (for example `{your_field}`). " +
     "Values are URL-encoded; a value we do not have renders empty.",
   exampleUrl:
     "https://example.com/postback?ref={your_field}&status={status}&conversion_id={conversion_id}",
@@ -207,7 +211,7 @@ export const POSTBACK_DOC = {
   retryDelaysMs: RETRY_DELAYS_MS,
   retryOutro: "After the last retry we stop.",
   rules: [
-    "Delivery is at least once: the same sale can reach you more than once. De-duplicate on {conversion_id}.",
+    "Delivery is at least once: the same sale can reach you more than once. De-duplicate on `{conversion_id}`.",
   ],
 };
 
@@ -277,7 +281,7 @@ export const API_CHANGELOG: ChangelogEntry[] = [
   {
     date: "2026-10-31",
     changes: [
-      "Added passthrough fields: extra field names agreed per partner are stored with the lead. Unknown fields are ignored; a value that does not fit the limits is dropped (the lead is kept) and reported in a `warnings` array on that lead's 202 entry.",
+      "Added passthrough fields: extra field names agreed per partner are stored with the lead. " + UNKNOWN_FIELDS_NOTE + " A value that does not fit the limits is dropped (the lead is kept) and reported in a `warnings` array on that lead's 202 entry.",
       "Added sales postbacks: an HTTP GET to your https URL when a lead you sent makes an approved purchase, with retries. No change to existing request fields or response codes.",
     ],
   },

@@ -8,6 +8,7 @@ import {
   ENDPOINT_PATH,
   EXAMPLE_202_RESPONSE,
   PASSTHROUGH_DOC,
+  UNKNOWN_FIELDS_NOTE,
   POSTBACK_DOC,
   POSTBACK_PLACEHOLDERS,
   WARNINGS_NOTE,
@@ -58,6 +59,15 @@ const BASE = partnerOrigin() ?? "https://<your-camman-host>";
 function Code({ children }: { children: React.ReactNode }) {
   return (
     <code className="bg-muted rounded px-1.5 py-0.5 font-mono text-[0.85em]">{children}</code>
+  );
+}
+
+/** Renders `backticked` spans of a shared contract string as <Code>. */
+function Rich({ text }: { text: string }) {
+  return (
+    <>
+      {text.split("`").map((part, i) => (i % 2 === 1 ? <Code key={i}>{part}</Code> : part))}
+    </>
   );
 }
 
@@ -198,8 +208,7 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
             {j(exampleBatch())}
           </Block>
           <p className="text-sm leading-relaxed">
-            Objects within a batch need not share the same fields. Unknown fields are ignored;
-            see <a href="#passthrough" className="underline">Passthrough fields</a> for
+            Objects within a batch need not share the same fields. {UNKNOWN_FIELDS_NOTE} See <a href="#passthrough" className="underline">Passthrough fields</a> for
             extra fields agreed with you.
           </p>
         </Section>
@@ -215,7 +224,7 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
           <Block label="202 response">{j(EXAMPLE_202_RESPONSE)}</Block>
           <p className="text-sm leading-relaxed">
             The <Code>leads</Code> array preserves request order, allowing reconciliation by
-            index. {WARNINGS_NOTE}
+            index. <Rich text={WARNINGS_NOTE} />
           </p>
         </Section>
 
@@ -303,7 +312,7 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
           <p className="text-sm leading-relaxed">{PASSTHROUGH_DOC.intro}</p>
           <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-relaxed">
             {PASSTHROUGH_DOC.rules.map((r) => (
-              <li key={r}>{r}</li>
+              <li key={r}><Rich text={r} /></li>
             ))}
           </ul>
           <Block label="Example — agreed names your_field and another_field">
@@ -313,7 +322,7 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
 
         <Section id="postbacks" title={POSTBACK_DOC.title}>
           <p className="text-sm leading-relaxed">{POSTBACK_DOC.intro}</p>
-          <p className="mt-3 text-sm leading-relaxed">{POSTBACK_DOC.placeholderIntro}</p>
+          <p className="mt-3 text-sm leading-relaxed"><Rich text={POSTBACK_DOC.placeholderIntro} /></p>
           <div className="my-4 overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
               <thead className="bg-muted/50 text-xs">
@@ -346,7 +355,7 @@ Authorization: Bearer <YOUR_SECRET>`}</Block>
               key={r}
               className="mt-3 rounded-md border-l-2 border-amber-500 bg-amber-500/5 p-3 text-sm leading-relaxed"
             >
-              <strong>Note:</strong> {r}
+              <strong>Note:</strong> <Rich text={r} />
             </p>
           ))}
         </Section>
@@ -503,7 +512,7 @@ Retry-After: 21600
                 <div className="font-mono text-sm font-medium">{e.date}</div>
                 <ul className="mt-1 list-disc space-y-1 pl-5 text-sm leading-relaxed">
                   {e.changes.map((c) => (
-                    <li key={c} className="text-muted-foreground">{c}</li>
+                    <li key={c} className="text-muted-foreground"><Rich text={c} /></li>
                   ))}
                 </ul>
               </div>

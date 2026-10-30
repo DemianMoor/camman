@@ -6,6 +6,7 @@ import {
   POSTBACK_DOC,
   POSTBACK_PLACEHOLDERS,
   SANDBOX_PHONE_NOTE,
+  UNKNOWN_FIELDS_NOTE,
   WARNINGS_NOTE,
   formatDelay,
 } from "@/lib/intake/api-contract";
@@ -82,7 +83,7 @@ A single lead object, or an array of up to **${MAX_LEADS_PER_CALL}** of them.
 ]
 \`\`\`
 
-Only \`phone\` is required. Unknown fields are ignored; see
+Only \`phone\` is required. ${UNKNOWN_FIELDS_NOTE} See
 [Passthrough fields](#passthrough-fields) for extra fields agreed with you.
 
 ## Fields

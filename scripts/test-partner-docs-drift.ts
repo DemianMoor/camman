@@ -152,18 +152,25 @@ function main() {
   const phOnPage = [...html.matchAll(/data-placeholder="([^"]+)"/g)].map((m) => m[1]).sort();
   check("⭐ placeholders on the page EQUAL SYSTEM_PLACEHOLDERS (sorted)",
         phOnPage, [...SYSTEM_PLACEHOLDERS].sort());
-  for (const n of [PASSTHROUGH_LIMITS.maxFields, PASSTHROUGH_LIMITS.maxValueLength, PASSTHROUGH_LIMITS.maxTotalBytes]) {
-    check(`page text contains the limit ${n}`, new RegExp(`\\b${n}\\b`).test(text), true);
+  // Scoped to the passthrough section's own text: a bare number anywhere on the
+  // page (a changelog date, a rate figure) would satisfy the check vacuously.
+  const ptHtml = html.match(/<section id="passthrough"[\s\S]*?<\/section>/)?.[0] ?? "";
+  const ptText = ptHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  check("passthrough section was found", ptHtml.length > 0, true);
+  for (const n of [PASSTHROUGH_LIMITS.maxFields, PASSTHROUGH_LIMITS.maxNameLength,
+                   PASSTHROUGH_LIMITS.maxValueLength, PASSTHROUGH_LIMITS.maxTotalBytes]) {
+    check(`passthrough section contains the limit ${n}`, new RegExp(`\\b${n}\\b`).test(ptText), true);
   }
   const fmt = (ms: number) =>
     ms < 3_600_000 ? `${ms / 60_000} min` : `${ms / 3_600_000} h`;
-  const retryOnPage = [...html.matchAll(/data-retry-delay="(\d+)"/g)].map((m) => Number(m[1]));
+  const retryItems = [...html.matchAll(/<li data-retry-delay="(\d+)">([^<]*)<\/li>/g)]
+    .map((m) => [Number(m[1]), m[2]]);
   check("⭐ the retry schedule rendered EQUALS RETRY_DELAYS_MS",
-        retryOnPage, [...RETRY_DELAYS_MS]);
-  for (const ms of RETRY_DELAYS_MS) {
-    check(`retry delay "${fmt(ms)}" appears in the page text`, text.includes(fmt(ms)), true);
-  }
-  for (const phrase of ["unknown fields are ignored", "at least once", "conversion_id"]) {
+        retryItems.map((r) => r[0]), [...RETRY_DELAYS_MS]);
+  check("⭐ each retry item's text is exactly its formatted delay",
+        retryItems.map((r) => r[1]), RETRY_DELAYS_MS.map(fmt));
+  for (const phrase of ["unknown fields are ignored", "stored with the lead as received",
+                        "at least once", "conversion_id"]) {
     check(`page contains "${phrase}"`, text.toLowerCase().includes(phrase), true);
   }
   // Per-key values live on the key card, never on this shared public page.

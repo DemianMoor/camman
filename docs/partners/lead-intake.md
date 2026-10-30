@@ -39,7 +39,7 @@ A single lead object, or an array of up to **500** of them.
 ]
 ```
 
-Only `phone` is required. Unknown fields are ignored; see
+Only `phone` is required. Unknown fields are ignored: we do not use them, but they are stored with the lead as received. See
 [Passthrough fields](#passthrough-fields) for extra fields agreed with you.
 
 ## Fields
@@ -69,7 +69,7 @@ do not need to change your payload.
 Besides the fields above, we can agree a short list of extra field names with you. Values you send in those fields are stored with the lead and handed back to you in sales postbacks (see below). The agreed names are given to you directly.
 
 - Field names are matched case-insensitively.
-- Unknown fields are ignored: only the standard fields above and your agreed names are used.
+- Unknown fields are ignored: we do not use them, but they are stored with the lead as received.
 - Up to 10 agreed fields; each name is at most 40 characters (lowercase letters, digits and underscore, starting with a letter).
 - Each value is at most 256 characters, and all passthrough values together are at most 2048 bytes.
 - A field with a value that does not fit the limits is dropped and the lead is still accepted; the lead's entry in the 202 response then carries a `warnings` array.
@@ -86,7 +86,7 @@ Besides the fields above, we can agree a short list of extra field names with yo
 
 If agreed, we notify a URL of yours when a lead you sent makes an approved purchase. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a postback is sent for every approved purchase or only the first one per lead.
 
-Your URL is a template. Write any of these in curly braces and we fill them in, together with your agreed passthrough field names (for example {your_field}). Values are URL-encoded; a value we do not have renders empty.
+Your URL is a template. Write any of these in curly braces and we fill them in, together with your agreed passthrough field names (for example `{your_field}`). Values are URL-encoded; a value we do not have renders empty.
 
 | Placeholder | Value |
 |---|---|
@@ -116,7 +116,7 @@ Any 2xx response means delivered. A timeout, a 5xx, 408 or 429 is retried; other
 
 After the last retry we stop.
 
-> **Note:** Delivery is at least once: the same sale can reach you more than once. De-duplicate on {conversion_id}.
+> **Note:** Delivery is at least once: the same sale can reach you more than once. De-duplicate on `{conversion_id}`.
 
 ## Responses
 

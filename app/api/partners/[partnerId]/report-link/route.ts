@@ -53,7 +53,7 @@ export async function POST(
 
   // The preconditions issueReportToken enforces in SQL, told apart here so the
   // operator learns WHY rather than seeing a dead URL (ruling Q7).
-  const partner = await loadPartner(orgId, id);
+  const partner = await loadPartner(orgId, id, true);
   if (!partner) return apiError(404, "Partner not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner" });
   if (partner.status !== "active") {
     return apiError(409, "An archived partner cannot have a report link", API_ERROR_CODES.CONFLICT, {

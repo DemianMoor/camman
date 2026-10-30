@@ -66,6 +66,8 @@ export function PartnerKeyPostback({
   const [template, setTemplate] = useState(row.postback_url_template ?? "");
   const [includePayout, setIncludePayout] = useState(row.postback_include_payout);
   const [firstOnly, setFirstOnly] = useState(row.postback_first_purchase_only);
+  // The server's own validation message from the last failed save (client and server checks can drift).
+  const [serverError, setServerError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [failedOnly, setFailedOnly] = useState(false);
@@ -113,7 +115,11 @@ export function PartnerKeyPostback({
         postback_first_purchase_only: firstOnly,
       }),
     });
-    if (!r.ok) return toastApiError(r);
+    if (!r.ok) {
+      setServerError(r.status === 400 ? r.error : null);
+      return toastApiError(r);
+    }
+    setServerError(null);
     toast.success("Postback settings saved");
     onChanged();
   };
@@ -207,7 +213,10 @@ export function PartnerKeyPostback({
           className="font-mono text-xs"
           placeholder="https://partner.example/pb?rid={relay_lead_id}&c={conversion_id}&s={status}"
           value={template}
-          onChange={(e) => setTemplate(e.target.value)}
+          onChange={(e) => {
+            setTemplate(e.target.value);
+            setServerError(null);
+          }}
           disabled={!canManage || saveApi.isLoading}
         />
         {canManage && (
@@ -224,7 +233,7 @@ export function PartnerKeyPostback({
             ))}
           </div>
         )}
-        {templateError && <p className="text-destructive text-xs">{templateError}</p>}
+        {(templateError ?? serverError) && <p className="text-destructive text-xs">{templateError ?? serverError}</p>}
       </div>
 
       <div className="flex items-start gap-2">

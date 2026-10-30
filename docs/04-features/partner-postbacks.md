@@ -67,6 +67,8 @@ UI: [components/settings/partner-key-postback.tsx](../../components/settings/par
 3. Enable, then watch the **Postback log** (last 50 rows, optional "Failed only"): time (ET), test/live, conversion id,
    masked URL, code, attempts, status. The log is shown only to users who can manage keys.
 
+**Who sees the template.** `postback_url_template` can carry a secret query value, so it is returned raw only to callers with `partner_keys.manage`; view-only callers (`partner_keys.view`) get `maskUrl(template)` from every key read (`normalizeKeyRows(rows, canManage)` in [lib/partners/queries.ts](../../lib/partners/queries.ts); test `scripts/test-partner-key-template-masking.ts`).
+
 URLs are stored and shown **masked**: query values whose name contains `token`, `key`, `secret`, `sig`, `auth` or
 `pass` become `***`. The raw URL is never logged or returned.
 

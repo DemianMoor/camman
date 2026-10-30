@@ -35,7 +35,7 @@ export async function GET() {
     ORDER BY (k.status = 'active') DESC, k.partner_slug, k.created_at
   `);
 
-  return NextResponse.json({ data: normalizeKeyRows(rows) });
+  return NextResponse.json({ data: normalizeKeyRows(rows, can(role, "partner_keys.manage")) });
 }
 
 export async function POST(req: NextRequest) {

@@ -67,5 +67,10 @@ check("applyPartnerKeyPatch: select and update both org-filtered", (patchFn.matc
 // The delivery runner must never claim test rows (sendTestPostback leaves a pending row mid-send).
 check("runner claims only NOT is_test rows", /status = 'pending' AND NOT is_test AND next_attempt_at <= now\(\)/.test(deliver));
 
+// Template masking: every view-gated read of key JSON passes the caller's manage right.
+check("GET /api/partner-keys masks for non-manage", /normalizeKeyRows\(rows, can\(role, "partner_keys\.manage"\)\)/.test(read("app/api/partner-keys/route.ts")));
+check("GET /api/partners masks for non-manage", /listPartners\(orgId, can\(role, "partner_keys\.manage"\)\)/.test(read("app/api/partners/route.ts")));
+check("GET /api/partners/[id] masks for non-manage", /loadPartner\(orgId, id, can\(role, "partner_keys\.manage"\)\)/.test(read("app/api/partners/[partnerId]/route.ts")));
+
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

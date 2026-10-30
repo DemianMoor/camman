@@ -31,7 +31,7 @@ export async function GET(
   const id = parseId((await params).partnerId);
   if (id === null) return apiError(400, "Invalid id", API_ERROR_CODES.VALIDATION, { field: "partnerId" });
 
-  const partner = await loadPartner(orgId, id);
+  const partner = await loadPartner(orgId, id, can(role, "partner_keys.manage"));
   if (!partner) return apiError(404, "Partner not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner" });
   return NextResponse.json(partner);
 }
@@ -79,7 +79,7 @@ export async function PATCH(
     .returning({ id: partners.id });
   if (!updated[0]) return apiError(404, "Partner not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner" });
 
-  return NextResponse.json(await loadPartner(orgId, id));
+  return NextResponse.json(await loadPartner(orgId, id, true));
 }
 
 // No DELETE. partner_keys.partner_id is ON DELETE RESTRICT and the keys' leads

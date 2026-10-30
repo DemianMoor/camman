@@ -269,13 +269,13 @@ export function PartnerKeyCard({
           onChanged={onChanged}
         />
 
+        {/* Remounts only when the SAVED postback fields change, so unsaved edits and the test result survive unrelated reloads. */}
         <PartnerKeyPostback
           key={[
             row.postback_enabled,
             row.postback_url_template,
             row.postback_include_payout,
             row.postback_first_purchase_only,
-            row.passthrough_fields.join(","),
           ].join("|")}
           row={row}
           canManage={canManage}

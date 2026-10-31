@@ -14,6 +14,10 @@ the passthrough-fields half is in [partner-lead-intake.md](partner-lead-intake.m
   `status = 'approved'`, attributed to a **drip journey** whose lead arrived on a key with postbacks enabled.
   Upsell and registration events never fire. A later rejection is visible in the ledger and **nothing is sent**
   (no reversal postbacks in v1).
+- **`{status}` is always `approved`.** The payload is snapshotted at enqueue, so delivery re-reads the ledger row
+  (org-matched) when it claims a live row: if its status is no longer `'approved'` (rejected while the postback was
+  pending), the row is `cancelled` with `last_error = 'no_longer_approved'` and nothing is sent. A sale re-approved
+  afterwards is not re-queued (the per-key/conversion unique index already holds the cancelled row).
 - **Regardless of journey state**, including `opted_out`. The trigger is the ledger, never the journey (the
   lifecycle sweep skips posture-off orgs and never reclassifies `opted_out`).
 - **Never backfilled.** Only ledger rows created at/after the key's `postback_active_since` (stamped when postbacks
@@ -54,7 +58,11 @@ sensitivity as the report revenue toggle. Off means the placeholder is refused a
   must dedupe on **`{conversion_id}`**. (One real postback per key and conversion is also enforced on our side by a
   partial unique index.)
 - **Kill switch:** env `PARTNER_POSTBACKS_DELIVERY_ENABLED` must be `true`. Otherwise the cron only records its
-  heartbeat and answers `skipped_kill_switch: true`, and Send test answers 409.
+  heartbeat and answers `skipped_kill_switch: true`, and Send test answers 409. Enqueue does **not** check the
+  switch: an enabled key keeps queueing rows, which go out in a burst once delivery is switched on. The key JSON
+  carries `postback_delivery_enabled` (the switch, evaluated server-side in `normalizeKeyRows`), and the "Sales
+  postback" section shows *"Delivery is switched off for this environment — postbacks are queued but not sent"* when
+  the key is enabled and delivery is off.
 
 ## Operating it (Settings → Partners → key card → "Sales postback")
 
@@ -77,7 +85,14 @@ URLs are stored and shown **masked**: query values whose name contains `token`, 
 - `partner-postback-failed:<keyId>`: one latched Telegram message per key when a delivery fails permanently or exhausts
   its retries; clears on the key's next delivery.
 - `partner-postbacks-stale`: raised by `/api/cron/drip-monitors` when the delivery cron's heartbeat is stale, **only once
-  postbacks are live** (kill switch on, or any key enabled), so a deliberately-off feature does not page.
+  postbacks are live** (kill switch on, or any key enabled), so a deliberately-off feature does not page. The check is
+  wrapped in try/catch: a throw there cannot 500 drip-monitors after its work is done.
+- `partner-postbacks-enqueue-failed`: raised by `runDripMonitors` ([lib/drip/monitors.ts](../../lib/drip/monitors.ts))
+  when `enqueuePartnerPostbacks` throws, gated on the same go-live predicate (`postbacksLive` in
+  [heartbeat-gate.ts](../../lib/partners/postbacks/heartbeat-gate.ts)); cleared by the next successful enqueue.
+  Enqueue stays best-effort (the monitors continue), but it is no longer silent: both heartbeats stay fresh while it
+  fails, and a sale older than enqueue's 30-day window is never queued. The text carries the error class and a
+  capped first-line message only (never SQL or URLs).
 
 ## Go-live (owner steps)
 

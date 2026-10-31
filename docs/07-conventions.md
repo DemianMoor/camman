@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-10-31 (partner postbacks rules)_
+_Last updated: 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 ## ⭐ A migration number is reserved by rebasing on origin/main the moment the file is created (2026-10-23)
 
@@ -4972,3 +4972,5 @@ See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
 - **Time budgets.** The delivery cron stops picking up rows after 40 s (`RUN_DEADLINE_MS`, route `maxDuration = 60`); a claimed row not finished within its 2-minute lease comes due again.
 - **Client code may import only `lib/partners/postbacks/template.ts`** (pure). `http`, `deliver`, `enqueue` and `config` are server-only.
 - **Do not trigger on journey state, and never backfill** (owner decisions 2026-10-30): a postback fires for an approved purchase whatever the journey ended as, and only for ledger rows created at/after `postback_active_since`.
+- **The payload is a snapshot; the ledger is re-checked at send time.** `{status}` is frozen at enqueue, so the delivery claim re-reads the linked `conversion_events.status` (org-matched) for every live row and cancels it unsent (`last_error = 'no_longer_approved'`) if the sale is no longer `'approved'`. Anything else stored in the payload that the owner rules must hold at SEND time needs the same re-check — do not trust the snapshot for it. Covered by D13 in `scripts/test-postback-deliver-db.ts`.
+- **Best-effort is not silent.** A partner-postbacks step that swallows its error (enqueue in drip-monitors) must still raise a latched alert, gated on `postbacksLive()` so nothing pages before go-live — a fresh heartbeat around a swallowed failure is invisible otherwise.

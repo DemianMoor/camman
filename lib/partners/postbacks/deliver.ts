@@ -18,6 +18,13 @@ import { maskUrl, renderPostbackUrl, samplePayload, type PostbackPayload } from 
 //
 // The key is re-read at claim time: a key disabled while rows are pending cancels
 // them unsent, and the CURRENT template renders the URL (an edit applies to retries).
+//
+// The ledger status is re-read at claim time too: `{status}` was snapshotted at
+// enqueue, so a sale rejected (or otherwise moved off 'approved') while its row is
+// pending would otherwise go out as "approved". Such a row is cancelled unsent with
+// last_error 'no_longer_approved' (owner decision 2: approved only). Live rows only;
+// a live row's conversion_event_id is never NULL in practice (enqueue always sets it,
+// and the FK is ON DELETE RESTRICT), and a NULL one has no ledger row to re-check.
 
 export function deliveryEnabled(): boolean {
   return process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED === "true";
@@ -46,6 +53,9 @@ type Claimed = {
   postback_enabled: boolean;
   postback_url_template: string | null;
   postback_include_payout: boolean;
+  /** The ledger row's CURRENT status (org-matched); NULL when the row has no conversion. */
+  ledger_status: string | null;
+  has_conversion: boolean;
 };
 
 type KeyOutcome = {
@@ -94,7 +104,10 @@ export async function runPostbackDelivery(
         FOR UPDATE SKIP LOCKED
       )
     RETURNING p.id, p.org_id::text AS org_id, p.partner_key_id, p.attempts, p.payload,
-              k.name AS key_name, k.postback_enabled, k.postback_url_template, k.postback_include_payout
+              k.name AS key_name, k.postback_enabled, k.postback_url_template, k.postback_include_payout,
+              p.conversion_event_id IS NOT NULL AS has_conversion,
+              (SELECT ce.status FROM conversion_events ce
+               WHERE ce.id = p.conversion_event_id AND ce.org_id = p.org_id) AS ledger_status
   `)) as unknown as Claimed[];
   out.claimed = rows.length;
 
@@ -110,6 +123,14 @@ export async function runPostbackDelivery(
     if (!r.postback_enabled) {
       await db.execute(sql`
         UPDATE partner_postbacks SET status = 'cancelled', last_error = 'postback_disabled'
+        WHERE id = ${id}::bigint AND org_id = ${r.org_id}::uuid AND status = 'pending'`);
+      out.cancelled++;
+      return;
+    }
+
+    if (r.has_conversion && r.ledger_status !== "approved") {
+      await db.execute(sql`
+        UPDATE partner_postbacks SET status = 'cancelled', last_error = 'no_longer_approved'
         WHERE id = ${id}::bigint AND org_id = ${r.org_id}::uuid AND status = 'pending'`);
       out.cancelled++;
       return;

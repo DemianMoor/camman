@@ -11,7 +11,7 @@ import { anyPostbackKeyEnabled, runPostbackDelivery } from "@/lib/partners/postb
 import type { SendResult } from "@/lib/partners/postbacks/http";
 import { createPartnerWithKey } from "./_partner-fixture";
 
-// Partner postback delivery runner (D1-D8).
+// Partner postback delivery runner (D1-D13).
 //
 // Preview DB only. NOT one rolled-back transaction: the runner claims and writes
 // on the pooled `db` (no transaction may be held across HTTP), so fixtures are
@@ -67,6 +67,7 @@ async function main() {
   const partnerIds: number[] = [];
   const keyIds: number[] = [];
   const postbackIds: number[] = [];
+  const conversionIds: number[] = [];
 
   try {
     const mkKey = async (slug: string) => {
@@ -275,6 +276,34 @@ async function main() {
     check("⭐ 5 deferred rows: pending, attempts 0, still on the claim",
           [deferred11.length, deferred11.every((s) => s.attempts === 0 && s.due_in_s > 100)], [5, true]);
 
+    // ── D13 ledger moved off 'approved' while pending ⇒ cancelled, never sent ─
+    console.log("\nD13. sale no longer approved at claim time:");
+    const mkConversion = async (status: string) => {
+      const id = Number((await q<{ id: number }>(sql`
+        INSERT INTO conversion_events (org_id, keitaro_event_id, keitaro_status, keitaro_type, status, occurred_at)
+        VALUES (${orgId}::uuid, ${`${RUN}-${conversionIds.length}`}, 'sale', 'sale', ${status}, now())
+        RETURNING id`))[0].id);
+      conversionIds.push(id);
+      return id;
+    };
+    const ceRejected = await mkConversion("approved");
+    const ceStill = await mkConversion("approved");
+    const d13a = await mkRow(key, "D13a");
+    const d13b = await mkRow(key, "D13b");
+    await db.execute(sql`UPDATE partner_postbacks SET conversion_event_id = ${ceRejected}::bigint WHERE id = ${d13a}::bigint`);
+    await db.execute(sql`UPDATE partner_postbacks SET conversion_event_id = ${ceStill}::bigint WHERE id = ${d13b}::bigint`);
+    // Rejected after enqueue: the payload still says "approved".
+    await db.execute(sql`UPDATE conversion_events SET status = 'rejected' WHERE id = ${ceRejected}::bigint`);
+    calls.length = 0;
+    const r13 = await run();
+    const s13a = await row(d13a);
+    const s13b = await row(d13b);
+    check("⭐ rejected sale: cancelled, last_error no_longer_approved, attempts 0",
+          [s13a.status, s13a.err, s13a.attempts], ["cancelled", "no_longer_approved", 0]);
+    check("⭐ still-approved sale: delivered", [s13b.status, s13b.attempts], ["delivered", 1]);
+    check("⭐ only the approved one was sent", calls, [`https://pb.example.com/v1?c=D13b&token=${SECRET}`]);
+    check("result counts (claimed, cancelled, delivered)", [r13.claimed, r13.cancelled, r13.delivered], [2, 1, 1]);
+
     // ── D12 cron route: kill switch off ⇒ heartbeat stamped, nothing claimed ─
     console.log("\nD12. cron route heartbeat:");
     const HB = "partner-postbacks";
@@ -306,14 +335,17 @@ async function main() {
     // Cleanup BY ID, FK-safe order: postbacks → alert rows → keys → partners → org.
     console.log("\ncleanup:");
     if (postbackIds.length) await db.execute(sql`DELETE FROM partner_postbacks WHERE id = ANY(${`{${postbackIds.join(",")}}`}::bigint[])`);
+    if (conversionIds.length) await db.execute(sql`DELETE FROM conversion_events WHERE id = ANY(${`{${conversionIds.join(",")}}`}::bigint[])`);
     const alertKeys = keyIds.map((k) => `partner-postback-failed:${k}`);
     if (alertKeys.length) await db.execute(sql`DELETE FROM alert_state WHERE alert_key = ANY(${`{${alertKeys.join(",")}}`}::text[])`);
     if (keyIds.length) await db.execute(sql`DELETE FROM partner_keys WHERE id = ANY(${`{${keyIds.join(",")}}`}::int[])`);
     if (partnerIds.length) await db.execute(sql`DELETE FROM partners WHERE id = ANY(${`{${partnerIds.join(",")}}`}::int[])`);
     await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
 
-    const left = (await q<{ orgs: number; keys: number; partners: number; pbs: number; alerts: number }>(sql`
+    const left = (await q<{ orgs: number; keys: number; partners: number; pbs: number; alerts: number; ces: number }>(sql`
       SELECT (SELECT count(*)::int FROM organizations WHERE id = ${orgId}::uuid) AS orgs,
+             (SELECT count(*)::int FROM conversion_events WHERE org_id = ${orgId}::uuid
+                OR id = ANY(${`{${conversionIds.join(",") || "0"}}`}::bigint[])) AS ces,
              (SELECT count(*)::int FROM partner_keys WHERE org_id = ${orgId}::uuid) AS keys,
              (SELECT count(*)::int FROM partners WHERE org_id = ${orgId}::uuid) AS partners,
              (SELECT count(*)::int FROM partner_postbacks WHERE org_id = ${orgId}::uuid
@@ -321,7 +353,7 @@ async function main() {
              (SELECT count(*)::int FROM alert_state WHERE org_id = ${orgId}::uuid
                 OR alert_key = ANY(${`{${keyIds.map((k) => `partner-postback-failed:${k}`).join(",")}}`}::text[])) AS alerts`))[0];
     console.log(`  left behind: ${JSON.stringify(left)}`);
-    check("⭐ zero fixture rows remain", left, { orgs: 0, keys: 0, partners: 0, pbs: 0, alerts: 0 });
+    check("⭐ zero fixture rows remain", left, { orgs: 0, ces: 0, keys: 0, partners: 0, pbs: 0, alerts: 0 });
   }
 
   console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

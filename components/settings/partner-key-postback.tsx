@@ -180,6 +180,15 @@ export function PartnerKeyPostback({
         )}
       </p>
 
+      {row.postback_enabled && !row.postback_delivery_enabled && (
+        <p
+          role="status"
+          className="rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-300"
+        >
+          Delivery is switched off for this environment — postbacks are queued but not sent.
+        </p>
+      )}
+
       <fieldset className="space-y-1" disabled={!canManage || saveApi.isLoading}>
         <legend className="text-xs font-medium">Count</legend>
         <label className="flex items-center gap-2 text-xs">

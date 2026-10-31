@@ -3,6 +3,7 @@ import "server-only";
 import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { deliveryEnabled } from "@/lib/partners/postbacks/deliver";
 import { maskUrl } from "@/lib/partners/postbacks/template";
 import { PARTNER_CAN_HAVE_LINK } from "@/lib/reporting/partner-report-token";
 
@@ -38,6 +39,10 @@ export interface PartnerKeyJson {
   postback_first_purchase_only: boolean;
   postback_event_keys: string[];
   postback_active_since: string | null;
+  /** NOT a key column: whether postback delivery is switched on for this environment
+   *  (PARTNER_POSTBACKS_DELIVERY_ENABLED, evaluated server-side). Same for every key;
+   *  the UI warns when a key is enabled but delivery is off (rows queue, nothing sends). */
+  postback_delivery_enabled: boolean;
   sandbox: boolean;
   rate_per_sec: number;
   rate_per_day: number;
@@ -103,8 +108,9 @@ const KEY_DATE_FIELDS = ["created_at", "rotated_at", "last_seen_at", "postback_a
 
 /** Raw db.execute rows carry Date objects for timestamptz; make the declared `string` true. */
 export function normalizeKeyRows(rows: unknown, canManage: boolean): PartnerKeyJson[] {
+  const postbackDeliveryEnabled = deliveryEnabled();
   return (rows as Record<string, unknown>[]).map((r) => {
-    const out = { ...r };
+    const out: Record<string, unknown> = { ...r, postback_delivery_enabled: postbackDeliveryEnabled };
     if (!canManage && typeof out.postback_url_template === "string") {
       out.postback_url_template = maskUrl(out.postback_url_template);
     }

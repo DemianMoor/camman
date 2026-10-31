@@ -1,6 +1,6 @@
 # Drip lead enrichment (Phase 3)
 
-_Last updated: 2026-10-23 (0222 toll-free gate link); 2026-10-22 (zip attribute, 0219); 2026-10-21 (the contact gets its lookup line_type at creation; 0218 gate); 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
+_Last updated: 2026-10-30 (partner_data passthrough copy, 0228); 2026-10-23 (0222 toll-free gate link); 2026-10-22 (zip attribute, 0219); 2026-10-21 (the contact gets its lookup line_type at creation; 0218 gate); 2026-10-12 (poke chain, 0206); 2026-10-11 (batches until the 45 s deadline; no head-of-line block on the lookup cap); 2026-10-09 (digest lookup cost uses the bulk-batch-only calibrated rate); 2026-10-07_
 
 The consumer of `lead_inbox`. Normalizes a captured lead, resolves its line type through the
 **existing** Telnyx lookup queue, discards landlines, and turns everything else into a contact with
@@ -216,6 +216,13 @@ transaction and the status write is the commit point. A re-run after a crash bet
 and "mark processed" is a no-op, because `lead_events` carries a partial `UNIQUE (inbox_id)` and the
 insert is `ON CONFLICT DO NOTHING`. Contact and attribute writes are upserts;
 `COALESCE(EXCLUDED.x, existing)` means a later, sparser lead can never blank a value already known.
+
+## Partner passthrough data (0228, 2026-10-30)
+
+`insertLeadEvent` in [lib/drip/enrichment.ts](../../lib/drip/enrichment.ts) copies
+`lead_inbox.partner_data` onto the new `lead_events.partner_data` (NULL stays NULL). It is a plain
+copy of what intake already validated; enrichment neither re-validates nor reads the key's
+whitelist. See [partner-lead-intake.md](partner-lead-intake.md#passthrough-fields-0228-2026-10-30).
 
 ## ZIP code (0219, 2026-10-20)
 

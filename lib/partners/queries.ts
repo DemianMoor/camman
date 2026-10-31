@@ -22,6 +22,8 @@ export interface PartnerKeyJson {
   interest_tag_mode: "force" | "default";
   interest_tag: string | null;
   field_mapping: Record<string, string>;
+  /** Whitelisted extra per-lead field names kept verbatim (0228). */
+  passthrough_fields: string[];
   sandbox: boolean;
   rate_per_sec: number;
   rate_per_day: number;
@@ -58,7 +60,7 @@ export interface PartnerJson {
 /** Key rows with usage, as `FROM partner_keys k …`; the caller appends WHERE / ORDER BY. */
 export const KEY_LIST_SQL: SQL = sql`
     SELECT k.id, k.partner_id, k.partner_slug, k.name, k.interest_tag_mode, k.interest_tag,
-           k.field_mapping, k.sandbox, k.rate_per_sec, k.rate_per_day,
+           k.field_mapping, k.passthrough_fields, k.sandbox, k.rate_per_sec, k.rate_per_day,
            k.max_payload_bytes, k.status, k.created_at, k.rotated_at, k.last_seen_at,
            k.secret_last4,
            COALESCE(u.accepted_today, 0)::int AS accepted_today,

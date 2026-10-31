@@ -5314,6 +5314,23 @@ export const partner_keys = pgTable(
     report_show_revenue: boolean("report_show_revenue")
       .notNull()
       .default(false),
+    // Partner passthrough + sales postbacks (0228). All default to off/empty.
+    passthrough_fields: jsonb("passthrough_fields").notNull().default([]),
+    postback_enabled: boolean("postback_enabled").notNull().default(false),
+    postback_url_template: text("postback_url_template"),
+    postback_include_payout: boolean("postback_include_payout")
+      .notNull()
+      .default(false),
+    postback_first_purchase_only: boolean("postback_first_purchase_only")
+      .notNull()
+      .default(false),
+    postback_event_keys: text("postback_event_keys")
+      .array()
+      .notNull()
+      .default(sql`'{purchase}'`),
+    postback_active_since: timestamp("postback_active_since", {
+      withTimezone: true,
+    }),
   },
   (table) => [
     uniqueIndex("partner_keys_token_uniq").on(table.token),
@@ -5338,6 +5355,18 @@ export const partner_keys = pgTable(
     check(
       "partner_keys_max_payload_bytes_check",
       sql`${table.max_payload_bytes} BETWEEN 1024 AND 4194304`,
+    ),
+    check(
+      "partner_keys_passthrough_fields_check",
+      sql`jsonb_typeof(${table.passthrough_fields}) = 'array' AND jsonb_array_length(${table.passthrough_fields}) <= 10`,
+    ),
+    check(
+      "partner_keys_postback_event_keys_check",
+      sql`${table.postback_event_keys} <@ ARRAY['purchase']::text[] AND cardinality(${table.postback_event_keys}) >= 1`,
+    ),
+    check(
+      "partner_keys_postback_enabled_needs_template_check",
+      sql`(NOT ${table.postback_enabled} OR ${table.postback_url_template} IS NOT NULL) AND (${table.postback_url_template} IS NULL OR char_length(${table.postback_url_template}) <= 2048)`,
     ),
   ],
 );
@@ -5379,6 +5408,8 @@ export const lead_inbox = pgTable(
     processed_at: timestamp("processed_at", { withTimezone: true }),
     error: text("error"),
     dedup_key: text("dedup_key"),
+    // Whitelisted passthrough fields captured at intake (0228).
+    partner_data: jsonb("partner_data"),
   },
   (table) => [
     uniqueIndex("lead_inbox_dedup_uniq")
@@ -5507,6 +5538,8 @@ export const lead_events = pgTable(
     // time, and never-evaluated leads are always taken first. NULL = never
     // deferred. See lib/drip/routing.ts.
     drip_recheck_at: timestamp("drip_recheck_at", { withTimezone: true }),
+    // Passthrough fields copied from lead_inbox.partner_data (0228).
+    partner_data: jsonb("partner_data"),
     created_at: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -5531,6 +5564,69 @@ export const lead_events = pgTable(
     ),
   ],
 );
+
+// Sales postbacks to partners (0228). One row per (key, conversion) outbox
+// entry; test rows (is_test, NULL conversion) are exempt from the uniqueness.
+// conversion_event_id is RESTRICT on purpose: deleting a ledger row with a
+// postback behind it must fail loudly.
+export const partner_postbacks = pgTable(
+  "partner_postbacks",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    partner_key_id: integer("partner_key_id")
+      .notNull()
+      .references(() => partner_keys.id, { onDelete: "restrict" }),
+    conversion_event_id: bigint("conversion_event_id", {
+      mode: "number",
+    }).references(() => conversion_events.id, { onDelete: "restrict" }),
+    drip_journey_id: uuid("drip_journey_id").references(
+      () => drip_journeys.id,
+      { onDelete: "set null" },
+    ),
+    lead_event_id: uuid("lead_event_id").references(() => lead_events.id, {
+      onDelete: "set null",
+    }),
+    is_test: boolean("is_test").notNull().default(false),
+    payload: jsonb("payload").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    next_attempt_at: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    last_attempt_at: timestamp("last_attempt_at", { withTimezone: true }),
+    delivered_at: timestamp("delivered_at", { withTimezone: true }),
+    last_response_code: integer("last_response_code"),
+    last_error: text("last_error"),
+    last_url_masked: text("last_url_masked"),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("partner_postbacks_key_conversion_uniq")
+      .on(table.partner_key_id, table.conversion_event_id)
+      .where(sql`NOT ${table.is_test}`),
+    index("partner_postbacks_due_idx")
+      .on(table.next_attempt_at)
+      .where(sql`${table.status} = 'pending'`),
+    index("partner_postbacks_key_created_idx").on(
+      table.partner_key_id,
+      table.created_at.desc(),
+    ),
+    index("partner_postbacks_journey_idx")
+      .on(table.drip_journey_id)
+      .where(sql`NOT ${table.is_test}`),
+    check(
+      "partner_postbacks_status_check",
+      sql`${table.status} IN ('pending', 'delivered', 'failed', 'cancelled')`,
+    ),
+  ],
+);
+
+export type PartnerPostback = typeof partner_postbacks.$inferSelect;
 
 // Per-partner, per-ET-day outcome counters.
 //

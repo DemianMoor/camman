@@ -23,6 +23,7 @@ import { FormDialog } from "@/components/ui/form-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { PartnerKeyPassthrough } from "@/components/settings/partner-key-passthrough";
 import { toastApiError } from "@/lib/api/toast-error";
 import { partnerBase } from "@/lib/app-origin";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
@@ -258,6 +259,14 @@ export function PartnerKeyCard({
             </div>
           </div>
         )}
+
+        <PartnerKeyPassthrough
+          key={row.passthrough_fields.join("|")}
+          keyId={row.id}
+          saved={row.passthrough_fields}
+          canManage={canManage}
+          onChanged={onChanged}
+        />
       </CardContent>
 
       {/* ---- rotate confirmation ---- */}

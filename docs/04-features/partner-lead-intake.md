@@ -1,6 +1,6 @@
 # Partner lead intake (Drip Phase 2)
 
-_Last updated: 2026-10-20_
+_Last updated: 2026-10-30_
 
 Real-time capture of partner-submitted leads. **Zero sends, zero processing.** The endpoint
 authenticates, rate-limits, validates shape, writes one row, and returns. Everything downstream —
@@ -197,6 +197,32 @@ attempts scale with failure count, not request rate.
 **Deferred to Phase 3: the backlog alert.** In Phase 2 nothing consumes `lead_inbox` by design, so
 "backlog > X unprocessed for > 10 min" would fire on the first lead and stay firing forever. It
 ships with its consumer.
+
+## Passthrough fields (0228, 2026-10-30)
+
+A key can whitelist up to 10 extra per-lead field names (`partner_keys.passthrough_fields`, JSONB
+array, default `[]`), for example the partner's own `list_id`. Pure logic lives in
+[lib/intake/passthrough.ts](../../lib/intake/passthrough.ts) (`PASSTHROUGH_LIMITS`,
+`passthroughNamesError`, `extractPassthrough`).
+
+- **Names:** lowercase letters, digits and underscores, starting with a letter, at most 40 characters;
+  not a built-in lead field, not a reserved placeholder name (`status`, `event`, `conversion_id`,
+  `occurred_at`, `currency`, `payout`), no duplicates. The key create / PATCH validators run
+  `passthroughNamesError`; the key list and detail routes return the list.
+- **Matching:** a payload key matches a name when `key.trim().toLowerCase() === name`; the first
+  non-empty match wins. Unknown fields are ignored (they stay only in `lead_inbox.raw`).
+- **Storage:** matched values are stringified scalars in `lead_inbox.partner_data` (NULL when none).
+  Enrichment copies it to `lead_events.partner_data` ([drip-lead-enrichment.md](drip-lead-enrichment.md)).
+- **Limits:** a value is at most 256 characters and the stored object at most 2048 bytes. A bad value
+  (not a string / number / boolean, too long, or over the byte budget; once one field overflows, later
+  fields are dropped too) is **dropped, never failing the lead**. The 202 response's per-lead entry then
+  gains `warnings: string[]`, present only when non-empty.
+- **UI:** the key card's "Passthrough fields" section
+  ([components/settings/partner-key-passthrough.tsx](../../components/settings/partner-key-passthrough.tsx)):
+  chip input with live validation and an `n / 10` counter, saved through the key PATCH
+  (`partner_keys.manage`), and a read-only "Copy partner instructions" block (field names, limits in
+  words, an example lead built from `exampleLead()`).
+- The public partner docs page does not describe passthrough yet.
 
 ## UI
 

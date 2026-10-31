@@ -1,6 +1,6 @@
 # 03 — Data Model
 
-_Last updated: 2026-10-27 (0227 offer_group_exposure_mv — offer exposure per lifecycle cohort); 2026-10-26 (0226 offer_group_lifecycle_v2_mv — Hot and Warm separate; lookup_group_stats_cache note: manual-only refresh, measured compute time); 2026-10-24 (0225 carrier_rejections / carrier_phone_delivery / carrier_rejected_phones + org_settings carrier_rejection_*); 2026-10-23 (0222 contact_groups.allow_toll_free + mobile-only defaults; 0220 lifecycle_day_rollup campaign_kind/purchases/new_clickers + warm split cohorts, stage_send_lifecycle.last_click_at); 2026-10-22 (0219 contact_attributes.zip); 2026-10-21 (0218 contact_groups.allow_voip / allow_unknown); 2026-10-19 (0216 message_formats + stage format columns + send stamp; 0215 lifecycle cohort Sent 30d; 0214 offer_group_lifecycle_mv; 0213 drip_routing_hour_overflow; 0212 landing-URL trigger + brands_landing_pair_uniq; 0211 brands.landing_path; 0210 drip routing send capacity; 0209 drip hourly send cap; 0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
+_Last updated: 2026-10-30 (0228 partner passthrough fields + sales postbacks schema, inert); 2026-10-27 (0227 offer_group_exposure_mv — offer exposure per lifecycle cohort); 2026-10-26 (0226 offer_group_lifecycle_v2_mv — Hot and Warm separate; lookup_group_stats_cache note: manual-only refresh, measured compute time); 2026-10-24 (0225 carrier_rejections / carrier_phone_delivery / carrier_rejected_phones + org_settings carrier_rejection_*); 2026-10-23 (0222 contact_groups.allow_toll_free + mobile-only defaults; 0220 lifecycle_day_rollup campaign_kind/purchases/new_clickers + warm split cohorts, stage_send_lifecycle.last_click_at); 2026-10-22 (0219 contact_attributes.zip); 2026-10-21 (0218 contact_groups.allow_voip / allow_unknown); 2026-10-19 (0216 message_formats + stage format columns + send stamp; 0215 lifecycle cohort Sent 30d; 0214 offer_group_lifecycle_mv; 0213 drip_routing_hour_overflow; 0212 landing-URL trigger + brands_landing_pair_uniq; 0211 brands.landing_path; 0210 drip routing send capacity; 0209 drip hourly send cap; 0208 drip_daily_rollup; 0206 drip poke chain, 0207 scheduler fairness)_
 
 Schema lives in a single file: [`db/schema.ts`](../db/schema.ts) (~1,880 lines, Drizzle). Migrations are **hand-authored** SQL in [`db/migrations/`](../db/migrations/) (`0001`…`0070`). `db/schema.ts` is the Drizzle representation; where it lags a migration, **the migration is the DB source of truth** (see the rule-type notes below).
 
@@ -224,6 +224,11 @@ erDiagram
   contact_groups ||--o{ partner_attribution_recalcs : "recalc jobs (0201)"
   organizations ||--o{ partner_keys : "drip partner intake keys"
   partner_keys ||--o{ lead_intake_daily : "per ET-day counters"
+  partner_keys ||--o{ partner_postbacks : "postback outbox (0228, RESTRICT)"
+  conversion_events |o--o{ partner_postbacks : "one real postback per key+conversion (0228, RESTRICT; NULL = test)"
+  drip_journeys |o--o{ partner_postbacks : "journey (0228, SET NULL)"
+  lead_events |o--o{ partner_postbacks : "lead (0228, SET NULL)"
+  organizations ||--o{ partner_postbacks : "org (0228, cascade)"
   partner_keys ||--o{ lead_intake_hourly : "per-hour counters (0199)"
   campaigns ||--|| drip_campaign_configs : "drip config (carry_days, admission_widened_at: 0204; entering active/paused stamps it: 0205)"
   campaigns ||--o{ drip_journeys : "carried_days (0204)"
@@ -243,6 +248,38 @@ erDiagram
     timestamptz admission_widened_at "trigger-stamped (0204), forward-only (0205)"
     int hourly_cap "first sends per ET clock hour, NULL = no limit, CHECK > 0 (0209)"
     boolean hourly_carry "queue unsent leads into later hours, default false (0209)"
+  }
+  partner_keys {
+    jsonb passthrough_fields "whitelist of extra lead field names, max 10, default [] (0228)"
+    boolean postback_enabled "default false (0228); needs postback_url_template"
+    text postback_url_template "max 2048 chars (0228)"
+    boolean postback_include_payout "default false (0228)"
+    boolean postback_first_purchase_only "default false (0228)"
+    text_array postback_event_keys "subset of purchase, default purchase (0228)"
+    timestamptz postback_active_since "(0228)"
+  }
+  lead_inbox {
+    jsonb partner_data "whitelisted passthrough values, NULL = none (0228)"
+  }
+  lead_events {
+    jsonb partner_data "copied from lead_inbox at enrichment (0228)"
+  }
+  partner_postbacks {
+    bigserial id PK
+    uuid org_id
+    int partner_key_id
+    bigint conversion_event_id "NULL only for test postbacks"
+    uuid drip_journey_id
+    uuid lead_event_id
+    boolean is_test
+    jsonb payload
+    text status "pending, delivered, failed or cancelled"
+    int attempts
+    timestamptz next_attempt_at
+    timestamptz delivered_at
+    int last_response_code
+    text last_error
+    text last_url_masked
   }
   drip_journeys {
     smallint carried_days "ET days between arrival and routing, default 0 (0204)"
@@ -537,10 +574,11 @@ Raw capture for partner-submitted leads. **Nothing consumes these tables yet** �
 | Table | Grain / keys | Notes |
 |---|---|---|
 | `partners` | PK(`id`), UNIQUE(`org_id`,`slug`), partial UNIQUE(`report_token_hash`) `WHERE NOT NULL`, CHECK `status IN ('active','archived')`, CHECK slug `^[a-z0-9][a-z0-9_-]*$` | **The partner entity (migration 0200).** One row per commercial partner; its credentials are `partner_keys` rows (`partner_keys.partner_id`, `ON DELETE RESTRICT`). Owns the signed report link (`report_token_hash` SHA-256, `report_token_issued_at`, `report_token_expires_at`) and `report_show_revenue` (default **false**), moved here from the key. `status` archived ⇒ intake 403 on every key + link dead; restore flips both back. RLS + SELECT-only org policy. Backfilled 1:1 from the existing keys |
-| `partner_keys` | PK(`id`), UNIQUE(`token`), INDEX(`org_id`,`partner_slug`) (the per-org slug UNIQUE was **dropped** in 0200 — two keys of one partner share the slug), INDEX(`partner_id`) | One credential per partner **key**; `partner_id` → `partners`, **NOT NULL since 0201** (ruling C2, finished: additive led code). The four `report_*` columns and `report_show_revenue` are **dead copies** since 0200 (the live values are on `partners`), kept until a destructive migration drops them. `token` is **plaintext and indexed** (addressing — it is resolved by equality before any org context exists); `secret_hash` is a **one-way SHA-256** (authentication). `sandbox` defaults **true**. Carries the per-key contract: `rate_per_sec`, `rate_per_day`, `max_payload_bytes`, `field_mapping` JSONB, `interest_tag` + `interest_tag_mode` (`force`/`default`). RLS + SELECT-only org policy. **Signed report links (0172):** `report_token_hash` (SHA-256, partial UNIQUE `WHERE NOT NULL` — the plaintext is returned once at issue and is unrecoverable), `report_token_issued_at`, `report_token_expires_at`, `report_show_revenue` (default **false**) |
+| `partner_keys` | PK(`id`), UNIQUE(`token`), INDEX(`org_id`,`partner_slug`) (the per-org slug UNIQUE was **dropped** in 0200 — two keys of one partner share the slug), INDEX(`partner_id`) | One credential per partner **key**; `partner_id` → `partners`, **NOT NULL since 0201** (ruling C2, finished: additive led code). The four `report_*` columns and `report_show_revenue` are **dead copies** since 0200 (the live values are on `partners`), kept until a destructive migration drops them. `token` is **plaintext and indexed** (addressing — it is resolved by equality before any org context exists); `secret_hash` is a **one-way SHA-256** (authentication). `sandbox` defaults **true**. Carries the per-key contract: `rate_per_sec`, `rate_per_day`, `max_payload_bytes`, `field_mapping` JSONB, `interest_tag` + `interest_tag_mode` (`force`/`default`). RLS + SELECT-only org policy. **Passthrough + postback columns (0228, all inert by default):** `passthrough_fields` JSONB array NOT NULL default `[]` (CHECK array, <= 10 names; names validated app-side by `passthroughNamesError`), `postback_enabled` (default false), `postback_url_template` (<= 2048; CHECK: enabled needs a template), `postback_include_payout` / `postback_first_purchase_only` (default false), `postback_event_keys text[]` (CHECK subset of `{purchase}`, non-empty, default `{purchase}`), `postback_active_since`. **Signed report links (0172):** `report_token_hash` (SHA-256, partial UNIQUE `WHERE NOT NULL` — the plaintext is returned once at issue and is unrecoverable), `report_token_issued_at`, `report_token_expires_at`, `report_show_revenue` (default **false**) |
+| `partner_postbacks` | PK(`id` bigserial), partial UNIQUE(`partner_key_id`,`conversion_event_id`) `WHERE NOT is_test`, INDEX(`next_attempt_at`) `WHERE status='pending'`, INDEX(`partner_key_id`,`created_at` DESC), partial INDEX(`drip_journey_id`) `WHERE NOT is_test`, CHECK `status IN ('pending','delivered','failed','cancelled')` | **Sales-postback outbox (migration 0228, schema only; nothing writes it yet).** One row per sale reported back to a partner. `payload` JSONB, `status`, `attempts`, `next_attempt_at`, `last_attempt_at`, `delivered_at`, `last_response_code`, `last_error`, `last_url_masked` (the URL with secrets masked). `conversion_event_id` is **ON DELETE RESTRICT** (a ledger row with a postback behind it cannot be deleted) and NULL only for `is_test` postbacks; `partner_key_id` RESTRICT; `drip_journey_id` / `lead_event_id` SET NULL; `org_id` cascade. RLS + SELECT-only org policy |
 | `partner_attribution_recalcs` | PK(`id` bigserial), INDEX(`org_id`,`status`,`requested_at`), INDEX(`contact_group_id`), CHECK `reason IN ('link','unlink','relink','manual')`, CHECK `status IN ('queued','running','done','failed')` | **Recalculation jobs (0201, recon §5.3).** One row is queued when a group's partner link changes (`PATCH /api/contact-groups/[id]`); Phase 3's cron consumes it per campaign. `contact_group_id` → `contact_groups` CASCADE, `org_id` → `organizations` CASCADE. RLS + SELECT-only org policy |
 | `drip_membership_stamp_backup` | PK(`contact_id`,`contact_group_id`) | **Script artifact, not a migration** (Phase 2, owner fix F1): `scripts/repair-drip-membership-appearance.ts --apply` writes `old_created_at` / `new_created_at` for every `contact_contact_groups` row it re-dates (append-only, `ON CONFLICT DO NOTHING`), then updates from it; `--revert --apply` restores from it. RLS enabled, no policy. Dropped only on the owner's say-so after the revert window |
-| `lead_inbox` | PK(`id`), partial UNIQUE(`partner_key_id`,`dedup_key`) `WHERE dedup_key IS NOT NULL` | The raw payload in `raw` JSONB, plus addressing columns (`phone_e164`, `interest_tag`, `sandbox`). `normalized` stays NULL until Phase 3. `status` ∈ `received`/`processed`/`rejected`/`landline`/`duplicate`; index `(status, received_at)` is the worker's queue scan. `partner_slug` is denormalized and the FK is **ON DELETE RESTRICT** so provenance survives a rename and a key with leads cannot be deleted. RLS + SELECT-only org policy |
+| `lead_inbox` | PK(`id`), partial UNIQUE(`partner_key_id`,`dedup_key`) `WHERE dedup_key IS NOT NULL` | The raw payload in `raw` JSONB, plus `partner_data` JSONB *(0228, nullable: the whitelisted passthrough fields, NULL when none)*, plus addressing columns (`phone_e164`, `interest_tag`, `sandbox`). `normalized` stays NULL until Phase 3. `status` ∈ `received`/`processed`/`rejected`/`landline`/`duplicate`; index `(status, received_at)` is the worker's queue scan. `partner_slug` is denormalized and the FK is **ON DELETE RESTRICT** so provenance survives a rename and a key with leads cannot be deleted. RLS + SELECT-only org policy |
 | `partner_key_usage` | PK(`partner_key_id`,`window_kind`,`window_start`) | Rate-limit counters. **Units differ by `window_kind`**: `sec` counts REQUESTS, `day` counts LEADS, `auth_fail` counts failed secret checks on a resolved token. `day`/`auth_fail` windows start at the **ET** calendar day. RLS + SELECT-only org policy |
 | `alert_state` | PK(`alert_key`) | Generic state-transition gate for alerts (`ok`/`firing`). **Infra table: RLS on, NO policies**, same posture as `cron_locks`/`geoip_cache` |
 
@@ -562,7 +600,7 @@ The consumer side of [partner intake](#partner-lead-intake-migrations-01520154-d
 
 | Table | Grain / keys | Notes |
 |---|---|---|
-| `lead_events` | PK(`id`), partial UNIQUE(`inbox_id`) `WHERE inbox_id IS NOT NULL` | One row per lead that became a contact — WHEN it arrived, FROM WHOM, under WHICH tag. Backs the ">1 week in the system re-qualifies" rule and Phase 7 reporting. **`inbox_id` is `ON DELETE SET NULL`, not cascade**: landline leads are deleted from `lead_inbox` and a cascade would destroy the evidence. The partial UNIQUE makes the sweeper crash-safe |
+| `lead_events` | PK(`id`), partial UNIQUE(`inbox_id`) `WHERE inbox_id IS NOT NULL` | `partner_data` JSONB *(0228, nullable)* is copied from `lead_inbox.partner_data` when the lead becomes a contact. One row per lead that became a contact — WHEN it arrived, FROM WHOM, under WHICH tag. Backs the ">1 week in the system re-qualifies" rule and Phase 7 reporting. **`inbox_id` is `ON DELETE SET NULL`, not cascade**: landline leads are deleted from `lead_inbox` and a cascade would destroy the evidence. The partial UNIQUE makes the sweeper crash-safe |
 | `lead_intake_daily` | PK(`org_id`, `partner_key_id`, `day_et`, `interest_tag`) *(widened, 0171)* | Per-partner, per-**tag**, per-**ET**-day outcome counters: `received`, `mobile`, `voip`, `unknown`, `landline`, `rejected`, `duplicate`, `sandbox`, `lookups_spent`. Exists because **the rows do not survive** — written in the same transaction as the delete. `sandbox` is **exclusive** of every other column; `lookups_spent` counts Telnyx **calls**, not leads. ⚠️ `interest_tag` is `NOT NULL DEFAULT ''` — rows written before 0171 sit under `''` even where their sends carry a real tag, which is why the partner report keys off a UNION of both sources rather than coalescing one onto the other |
 | `lead_intake_hourly` | PK(`partner_key_id`, `org_id`, `hour_et`, `interest_tag`) *(0199)*; index (`org_id`, `hour_et` DESC) | The **hourly** twin of `lead_intake_daily` — same nine counter columns, keyed by `hour_et` = the **start of the processing hour** as a `timestamptz` (CHECK: on the hour, truncated in UTC; ET's whole-hour offset makes that the ET hour, and the two DST fall-back 01:00s stay distinct rows). Written by `bumpIntakeCounters` ([lib/drip/counters.ts](../lib/drip/counters.ts)) in **one statement** with the daily row (data-modifying CTE), so for every ET day `SUM(hourly rows in the day) = daily row` per org × partner × tag; the hourly digest re-checks this and warns when it breaks. PK leads with `partner_key_id` so it covers that FK. RLS: enabled, SELECT-only, org-scoped (same as daily). **No backfill** — rows start at the first hour after 0199 shipped. Feeds the hourly partner-intake Telegram digest ([04-features/drip-lead-enrichment.md](04-features/drip-lead-enrichment.md#hourly-partner-intake-digest)) |
 

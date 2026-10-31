@@ -6,7 +6,7 @@ import { partner_keys } from "@/db/schema";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, isUniqueViolation, requireApiMembership } from "@/lib/api/helpers";
 import { generateSecret, generateToken, hashSecret } from "@/lib/intake/partner-key";
-import { KEY_LIST_SQL } from "@/lib/partners/queries";
+import { KEY_LIST_SQL, normalizeKeyRows } from "@/lib/partners/queries";
 import { can } from "@/lib/permissions";
 import { partnerKeyCreateSchema } from "@/lib/validators/partner-keys";
 
@@ -35,7 +35,7 @@ export async function GET() {
     ORDER BY (k.status = 'active') DESC, k.partner_slug, k.created_at
   `);
 
-  return NextResponse.json({ data: rows });
+  return NextResponse.json({ data: normalizeKeyRows(rows, can(role, "partner_keys.manage")) });
 }
 
 export async function POST(req: NextRequest) {

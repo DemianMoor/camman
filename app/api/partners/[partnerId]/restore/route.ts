@@ -35,9 +35,9 @@ export async function POST(
     .set({ status: "active", archived_at: null })
     .where(and(eq(partners.id, id), eq(partners.org_id, orgId), eq(partners.status, "archived")))
     .returning({ id: partners.id });
-  if (updated[0]) return NextResponse.json(await loadPartner(orgId, id));
+  if (updated[0]) return NextResponse.json(await loadPartner(orgId, id, true));
 
-  const existing = await loadPartner(orgId, id);
+  const existing = await loadPartner(orgId, id, true);
   if (!existing) return apiError(404, "Partner not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner" });
   return apiError(409, "Partner is not archived", API_ERROR_CODES.CONFLICT, { reason: "not_archived" });
 }

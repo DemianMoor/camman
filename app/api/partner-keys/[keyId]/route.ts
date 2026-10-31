@@ -6,6 +6,7 @@ import { partner_keys } from "@/db/schema";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { can } from "@/lib/permissions";
+import { applyPartnerKeyPatch } from "@/lib/partners/postbacks/config";
 import { partnerKeyUpdateSchema } from "@/lib/validators/partner-keys";
 
 function parseId(v: string) {
@@ -80,50 +81,9 @@ export async function PATCH(
     return apiError(400, "No fields to update", API_ERROR_CODES.VALIDATION);
   }
 
-  const existing = await db
-    .select()
-    .from(partner_keys)
-    .where(and(eq(partner_keys.id, keyId), eq(partner_keys.org_id, orgId)))
-    .limit(1);
-  if (!existing[0]) {
-    return apiError(404, "Partner key not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner_key" });
-  }
-
-  // ⚠️ Cross-field validation against the MERGED result, not the patch alone.
-  // Patching only interest_tag_mode='force' on a key whose stored tag is NULL
-  // would otherwise slip past the Zod refinement (which sees no interest_tag in
-  // the payload) and be caught by the DB CHECK as an opaque 500. Same class of
-  // bug as a PATCH literal that silently drops fields it does not list.
-  const mode = input.interest_tag_mode ?? existing[0].interest_tag_mode;
-  const tag = input.interest_tag !== undefined ? input.interest_tag : existing[0].interest_tag;
-  if (mode === "force" && !tag?.trim()) {
-    return apiError(
-      400,
-      "An interest tag is required when the mode is 'force'",
-      API_ERROR_CODES.VALIDATION,
-      { field: "interest_tag" },
-    );
-  }
-
-  const updated = await db
-    .update(partner_keys)
-    .set({
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.interest_tag_mode !== undefined ? { interest_tag_mode: input.interest_tag_mode } : {}),
-      ...(input.interest_tag !== undefined ? { interest_tag: input.interest_tag } : {}),
-      ...(input.field_mapping !== undefined ? { field_mapping: input.field_mapping } : {}),
-      ...(input.passthrough_fields !== undefined ? { passthrough_fields: input.passthrough_fields } : {}),
-      ...(input.sandbox !== undefined ? { sandbox: input.sandbox } : {}),
-      ...(input.rate_per_sec !== undefined ? { rate_per_sec: input.rate_per_sec } : {}),
-      ...(input.rate_per_day !== undefined ? { rate_per_day: input.rate_per_day } : {}),
-      ...(input.max_payload_bytes !== undefined ? { max_payload_bytes: input.max_payload_bytes } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      // report_show_revenue moved to the PARTNER (0200): PATCH /api/partners/[id].
-    })
-    .where(and(eq(partner_keys.id, keyId), eq(partner_keys.org_id, orgId)))
-    .returning();
-
-  return NextResponse.json({ ...updated[0], secret_hash: undefined, token: undefined });
+  const out = await applyPartnerKeyPatch(db, { orgId, keyId, input });
+  if (!out.ok) return apiError(out.status, out.error, out.code, out.details);
+  return NextResponse.json({ ...out.row, secret_hash: undefined, token: undefined });
 }
 
 // No DELETE. lead_inbox.partner_key_id is ON DELETE RESTRICT, so a key with any

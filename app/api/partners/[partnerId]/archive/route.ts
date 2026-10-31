@@ -36,10 +36,10 @@ export async function POST(
     .set({ status: "archived", archived_at: drizzleSql`now()` })
     .where(and(eq(partners.id, id), eq(partners.org_id, orgId), eq(partners.status, "active")))
     .returning({ id: partners.id });
-  if (updated[0]) return NextResponse.json(await loadPartner(orgId, id));
+  if (updated[0]) return NextResponse.json(await loadPartner(orgId, id, true));
 
   // Either the partner is not in this org or it was already archived.
-  const existing = await loadPartner(orgId, id);
+  const existing = await loadPartner(orgId, id, true);
   if (!existing) return apiError(404, "Partner not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner" });
   return apiError(409, "Partner is already archived", API_ERROR_CODES.CONFLICT, { reason: "already_archived" });
 }

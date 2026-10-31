@@ -59,9 +59,9 @@ export function isBlockedAddress(address: string): boolean {
   return BLOCKED.check(address, "ipv4");
 }
 
-class BlockedAddressError extends Error {}
+export class BlockedAddressError extends Error {}
 
-const safeLookup: LookupFunction = (hostname, options, callback) => {
+export const safeLookup: LookupFunction = (hostname, options, callback) => {
   dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
     if (err) return callback(err, "", 0);
     const list = addresses as { address: string; family: number }[];

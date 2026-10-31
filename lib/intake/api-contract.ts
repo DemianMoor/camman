@@ -1,4 +1,7 @@
+import { RETRY_DELAYS_MS } from "@/lib/partners/postbacks/constants";
+
 import { LEAD_FIELDS, MAX_LEADS_PER_CALL } from "./fields";
+import { PASSTHROUGH_LIMITS, SYSTEM_PLACEHOLDERS } from "./passthrough";
 
 // The partner-facing API contract — the parts that are NOT the field list.
 //
@@ -136,6 +139,83 @@ export const EXAMPLE_202_RESPONSE = {
 };
 
 /**
+ * Appended to the 202 example on both docs. The example's keys are unchanged
+ * (existing integrations parse that shape); `warnings` is additive and present
+ * on a lead entry only when something in that lead was dropped.
+ */
+export const WARNINGS_NOTE =
+  "A lead entry may also carry a `warnings` array of strings. It appears only when " +
+  "part of that lead was dropped (for example a passthrough field whose value was too " +
+  "long); the lead itself is still accepted.";
+
+/** The one sentence about unknown fields; rendered on the page, in the markdown, in PASSTHROUGH_DOC and the changelog. */
+export const UNKNOWN_FIELDS_NOTE =
+  "Unknown fields are ignored: we do not use them, but they are stored with the lead as received.";
+
+/** Human label for a retry delay; shared by both renderers. */
+export function formatDelay(ms: number): string {
+  return ms < 3_600_000 ? `${ms / 60_000} min` : `${ms / 3_600_000} h`;
+}
+
+/**
+ * Generic passthrough-field mechanism. The field NAMES are agreed per partner
+ * and are NOT listed here (they are shared with each partner directly).
+ */
+export const PASSTHROUGH_DOC = {
+  title: "Passthrough fields",
+  intro:
+    "Besides the fields above, we can agree a short list of extra field names with you. " +
+    "Values you send in those fields are stored with the lead and handed back to you in " +
+    "sales postbacks (see below). The agreed names are given to you directly.",
+  rules: [
+    "Field names are matched case-insensitively.",
+    UNKNOWN_FIELDS_NOTE,
+    `Up to ${PASSTHROUGH_LIMITS.maxFields} agreed fields; each name is at most ${PASSTHROUGH_LIMITS.maxNameLength} characters (lowercase letters, digits and underscore, starting with a letter).`,
+    `Each value is at most ${PASSTHROUGH_LIMITS.maxValueLength} characters, and all passthrough values together are at most ${PASSTHROUGH_LIMITS.maxTotalBytes} bytes.`,
+    "A field with a value that does not fit the limits is dropped and the lead is still accepted; the lead's entry in the 202 response then carries a `warnings` array.",
+  ],
+  example: { phone: "+12025550199", your_field: "abc-123", another_field: "xyz" },
+};
+
+const PLACEHOLDER_MEANING: Record<(typeof SYSTEM_PLACEHOLDERS)[number], string> = {
+  status: "Outcome of the sale. Always `approved`: postbacks are sent for approved sales only.",
+  event: "Event type of the sale.",
+  conversion_id: "Unique id of this sale. Use it to de-duplicate.",
+  occurred_at: "When the sale happened, UTC, ISO 8601.",
+  currency: "Currency code of the amount.",
+  payout: "Amount for the sale. Sent only if enabled for your account.",
+};
+
+/** One row per system placeholder; a compile error if one is added without a meaning. */
+export const POSTBACK_PLACEHOLDERS = SYSTEM_PLACEHOLDERS.map((name) => ({
+  name,
+  meaning: PLACEHOLDER_MEANING[name],
+}));
+
+/** Sales postbacks: our call to the partner's URL when a lead they sent buys. */
+export const POSTBACK_DOC = {
+  title: "Sales postbacks",
+  intro:
+    "If agreed, we notify a URL of yours when a lead you sent makes an approved purchase. " +
+    "We make an HTTP GET to your https URL (port 443). Depending on your agreement, a " +
+    "postback is sent for every approved purchase or only the first one per lead.",
+  placeholderIntro:
+    "Your URL is a template. Write any of these in curly braces and we fill them in, " +
+    "together with your agreed passthrough field names (for example `{your_field}`). " +
+    "Values are URL-encoded; a value we do not have renders empty.",
+  exampleUrl:
+    "https://example.com/postback?ref={your_field}&status={status}&conversion_id={conversion_id}",
+  retryIntro:
+    "Any 2xx response means delivered. A timeout, a 5xx, 408 or 429 is retried; other " +
+    "responses are not. Redirects are not followed. Retries happen after:",
+  retryDelaysMs: RETRY_DELAYS_MS,
+  retryOutro: "After the last retry we stop.",
+  rules: [
+    "Delivery is at least once: the same sale can reach you more than once. De-duplicate on `{conversion_id}`.",
+  ],
+};
+
+/**
  * Phone validation differs in sandbox. Stated once here and rendered by BOTH
  * partner-facing docs (the page and the generated markdown), so the two cannot
  * tell a partner different things about the same rule.
@@ -198,6 +278,13 @@ export interface ChangelogEntry {
  * at. See docs/07-conventions.md.
  */
 export const API_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: "2026-10-31",
+    changes: [
+      "Added passthrough fields: extra field names agreed per partner are stored with the lead. " + UNKNOWN_FIELDS_NOTE + " A value that does not fit the limits is dropped (the lead is kept) and reported in a `warnings` array on that lead's 202 entry.",
+      "Added sales postbacks: an HTTP GET to your https URL when a lead you sent makes an approved purchase, with retries. No change to existing request fields or response codes.",
+    ],
+  },
   {
     date: "2026-10-01",
     changes: [

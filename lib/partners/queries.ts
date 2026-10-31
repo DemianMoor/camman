@@ -3,6 +3,8 @@ import "server-only";
 import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { deliveryEnabled } from "@/lib/partners/postbacks/deliver";
+import { maskUrl } from "@/lib/partners/postbacks/template";
 import { PARTNER_CAN_HAVE_LINK } from "@/lib/reporting/partner-report-token";
 
 // The partner row and the key row as the Settings page sees them — ONE
@@ -13,6 +15,13 @@ import { PARTNER_CAN_HAVE_LINK } from "@/lib/reporting/partner-report-token";
 // The token is half a credential (shown once, then only on the key's own
 // detail response to an admin); the secret and the link are hashed at rest and
 // unrecoverable by design. "Is there a live link?" is all the UI needs.
+//
+// `postback_url_template` IS returned, because a manager (partner_keys.manage)
+// edits it, and a partner may put a secret in its query (`&token=…`). It leaves
+// the server RAW only to a caller with partner_keys.manage; every other caller
+// (view-only) gets `maskUrl(template)`. That decision is made in ONE place,
+// `normalizeKeyRows(rows, canManage)` — the parameter is required on purpose,
+// so a new read path cannot forget it.
 
 export interface PartnerKeyJson {
   id: number;
@@ -24,6 +33,16 @@ export interface PartnerKeyJson {
   field_mapping: Record<string, string>;
   /** Whitelisted extra per-lead field names kept verbatim (0228). */
   passthrough_fields: string[];
+  postback_enabled: boolean;
+  postback_url_template: string | null;
+  postback_include_payout: boolean;
+  postback_first_purchase_only: boolean;
+  postback_event_keys: string[];
+  postback_active_since: string | null;
+  /** NOT a key column: whether postback delivery is switched on for this environment
+   *  (PARTNER_POSTBACKS_DELIVERY_ENABLED, evaluated server-side). Same for every key;
+   *  the UI warns when a key is enabled but delivery is off (rows queue, nothing sends). */
+  postback_delivery_enabled: boolean;
   sandbox: boolean;
   rate_per_sec: number;
   rate_per_day: number;
@@ -60,7 +79,9 @@ export interface PartnerJson {
 /** Key rows with usage, as `FROM partner_keys k …`; the caller appends WHERE / ORDER BY. */
 export const KEY_LIST_SQL: SQL = sql`
     SELECT k.id, k.partner_id, k.partner_slug, k.name, k.interest_tag_mode, k.interest_tag,
-           k.field_mapping, k.passthrough_fields, k.sandbox, k.rate_per_sec, k.rate_per_day,
+           k.field_mapping, k.passthrough_fields, k.postback_enabled, k.postback_url_template,
+           k.postback_include_payout, k.postback_first_purchase_only, k.postback_event_keys,
+           k.postback_active_since, k.sandbox, k.rate_per_sec, k.rate_per_day,
            k.max_payload_bytes, k.status, k.created_at, k.rotated_at, k.last_seen_at,
            k.secret_last4,
            COALESCE(u.accepted_today, 0)::int AS accepted_today,
@@ -83,6 +104,24 @@ export const KEY_LIST_SQL: SQL = sql`
       SELECT count(*) AS total_leads FROM lead_inbox WHERE partner_key_id = k.id
     ) l ON true`;
 
+const KEY_DATE_FIELDS = ["created_at", "rotated_at", "last_seen_at", "postback_active_since"] as const;
+
+/** Raw db.execute rows carry Date objects for timestamptz; make the declared `string` true. */
+export function normalizeKeyRows(rows: unknown, canManage: boolean): PartnerKeyJson[] {
+  const postbackDeliveryEnabled = deliveryEnabled();
+  return (rows as Record<string, unknown>[]).map((r) => {
+    const out: Record<string, unknown> = { ...r, postback_delivery_enabled: postbackDeliveryEnabled };
+    if (!canManage && typeof out.postback_url_template === "string") {
+      out.postback_url_template = maskUrl(out.postback_url_template);
+    }
+    for (const f of KEY_DATE_FIELDS) {
+      const v = out[f];
+      if (v instanceof Date) out[f] = v.toISOString();
+    }
+    return out as unknown as PartnerKeyJson;
+  });
+}
+
 /** Partner rows without their keys, as `FROM partners p …`; the caller appends WHERE / ORDER BY. */
 export const PARTNER_ROW_SQL: SQL = sql`
     SELECT p.id, p.slug, p.name, p.status, p.archived_at, p.created_at,
@@ -94,24 +133,24 @@ export const PARTNER_ROW_SQL: SQL = sql`
 type PartnerRowSql = Omit<PartnerJson, "keys">;
 
 /** ONE partner with its keys, or null when it is not in this org. */
-export async function loadPartner(orgId: string, partnerId: number): Promise<PartnerJson | null> {
+export async function loadPartner(orgId: string, partnerId: number, canManage: boolean): Promise<PartnerJson | null> {
   const ps = (await db.execute(sql`${PARTNER_ROW_SQL}
     WHERE p.id = ${partnerId} AND p.org_id = ${orgId}::uuid`)) as unknown as PartnerRowSql[];
   if (!ps[0]) return null;
-  const ks = (await db.execute(sql`${KEY_LIST_SQL}
+  const ks = normalizeKeyRows(await db.execute(sql`${KEY_LIST_SQL}
     WHERE k.partner_id = ${partnerId} AND k.org_id = ${orgId}::uuid
-    ORDER BY (k.status = 'active') DESC, k.created_at`)) as unknown as PartnerKeyJson[];
+    ORDER BY (k.status = 'active') DESC, k.created_at`), canManage);
   return { ...ps[0], keys: ks };
 }
 
 /** Every partner in the org with its keys, plus keys that have no partner yet (the C2 window). */
-export async function listPartners(orgId: string): Promise<{ data: PartnerJson[]; unassigned_keys: PartnerKeyJson[] }> {
+export async function listPartners(orgId: string, canManage: boolean): Promise<{ data: PartnerJson[]; unassigned_keys: PartnerKeyJson[] }> {
   const ps = (await db.execute(sql`${PARTNER_ROW_SQL}
     WHERE p.org_id = ${orgId}::uuid
     ORDER BY (p.status = 'active') DESC, p.slug`)) as unknown as PartnerRowSql[];
-  const ks = (await db.execute(sql`${KEY_LIST_SQL}
+  const ks = normalizeKeyRows(await db.execute(sql`${KEY_LIST_SQL}
     WHERE k.org_id = ${orgId}::uuid
-    ORDER BY (k.status = 'active') DESC, k.created_at`)) as unknown as PartnerKeyJson[];
+    ORDER BY (k.status = 'active') DESC, k.created_at`), canManage);
   const byPartner = new Map<number, PartnerKeyJson[]>();
   const unassigned: PartnerKeyJson[] = [];
   for (const k of ks) {

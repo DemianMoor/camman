@@ -22,7 +22,7 @@ export async function GET() {
   if (!can(role, "partner_keys.view")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
   }
-  return NextResponse.json(await listPartners(orgId));
+  return NextResponse.json(await listPartners(orgId, can(role, "partner_keys.manage")));
 }
 
 export async function POST(req: NextRequest) {
@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
         created_by: user.id,
       })
       .returning({ id: partners.id });
-    return NextResponse.json(await loadPartner(orgId, row.id), { status: 201 });
+    return NextResponse.json(await loadPartner(orgId, row.id, true), { status: 201 });
   } catch (e) {
     if (isUniqueViolation(e)) {
       return apiError(409, "A partner with that slug already exists", API_ERROR_CODES.DUPLICATE, {

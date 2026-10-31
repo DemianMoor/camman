@@ -5,6 +5,8 @@ import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { requireApiMembership } from "@/lib/api/helpers";
 import { withCronLease } from "@/lib/cron/lease";
 import { runDripMonitors } from "@/lib/drip/monitors";
+import { anyPostbackKeyEnabled, deliveryEnabled } from "@/lib/partners/postbacks/deliver";
+import { shouldAlertPostbackHeartbeat } from "@/lib/partners/postbacks/heartbeat-gate";
 import { can } from "@/lib/permissions";
 import { checkHeartbeats, HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 
@@ -62,7 +64,32 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     } else {
       await clearAlert(db, { alertKey: "drip-daily-rollup-stale" });
     }
-    return { ...monitors, heartbeats: [...heartbeats, dailyRollup] };
+    // Partner postback delivery: also ALERTS, latched — but only once postbacks
+    // are live (kill switch on, or any key enabled), so a job that has never
+    // run before go-live pages nobody. Best-effort: by now the monitors' work is
+    // done, so a throw here (heartbeat read, key read) must not 500 the route.
+    const postbackHeartbeats: Awaited<ReturnType<typeof checkHeartbeats>> = [];
+    try {
+      const [postbacks] = await checkHeartbeats(db, [HEARTBEAT_JOBS.partnerPostbacks]);
+      const switchOn = deliveryEnabled();
+      // The key read is only needed when it can change the answer.
+      const anyKeyEnabled = postbacks.stale && !switchOn ? await anyPostbackKeyEnabled() : false;
+      if (shouldAlertPostbackHeartbeat({ stale: postbacks.stale, deliveryEnabled: switchOn, anyKeyEnabled })) {
+        await notifyOnTransition(db, {
+          alertKey: "partner-postbacks-stale",
+          text:
+            `⚠️ Partner postbacks: the delivery cron has not run for ` +
+            `${postbacks.age_hours == null ? "ever (no heartbeat)" : `${postbacks.age_hours} h`} ` +
+            `(limit ${postbacks.max_age_hours} h). Partner sales postbacks are not being sent. Check /api/cron/partner-postbacks in Vercel.`,
+        });
+      } else {
+        await clearAlert(db, { alertKey: "partner-postbacks-stale" });
+      }
+      postbackHeartbeats.push(postbacks);
+    } catch (err) {
+      console.error("[drip-monitors] postback heartbeat check failed (swallowed):", err instanceof Error ? err.message : err);
+    }
+    return { ...monitors, heartbeats: [...heartbeats, dailyRollup, ...postbackHeartbeats] };
   });
 
   if (!leased.ran) {

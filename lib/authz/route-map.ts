@@ -233,6 +233,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/drip-scheduler": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/lead-enrichment": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/lookup-worker": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/partner-postbacks": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/propagate-clickers": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-contact-engagement": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-audience-pools": null, // cron / webhook / import machinery -- no operator session reaches these
@@ -334,6 +335,8 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "partner-keys": null, // drip / partner intake -- hidden from the operator
   "partner-keys/[keyId]": null, // drip / partner intake -- hidden from the operator
   "partner-keys/[keyId]/rotate": null, // drip / partner intake -- hidden from the operator
+  "partner-keys/[keyId]/postback-test": null, // drip / partner intake -- hidden from the operator
+  "partner-keys/[keyId]/postbacks": null, // drip / partner intake -- hidden from the operator
   // ── partners (0200) ──────────────────────────────────────────────────────────
   "partners": null, // drip / partner intake -- hidden from the operator
   "partners/[partnerId]": null, // drip / partner intake -- hidden from the operator

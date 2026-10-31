@@ -39,8 +39,8 @@ A single lead object, or an array of up to **500** of them.
 ]
 ```
 
-Only `phone` is required. Send whatever else you have — **unknown fields are
-kept**, not discarded, so nothing is lost if you send more than the list below.
+Only `phone` is required. Unknown fields are ignored: we do not use them, but they are stored with the lead as received. See
+[Passthrough fields](#passthrough-fields) for extra fields agreed with you.
 
 ## Fields
 
@@ -63,6 +63,60 @@ kept**, not discarded, so nothing is lost if you send more than the list below.
 
 If your field names differ from ours, tell us and we map them on our side — you
 do not need to change your payload.
+
+## Passthrough fields
+
+Besides the fields above, we can agree a short list of extra field names with you. Values you send in those fields are stored with the lead and handed back to you in sales postbacks (see below). The agreed names are given to you directly.
+
+- Field names are matched case-insensitively.
+- Unknown fields are ignored: we do not use them, but they are stored with the lead as received.
+- Up to 10 agreed fields; each name is at most 40 characters (lowercase letters, digits and underscore, starting with a letter).
+- Each value is at most 256 characters, and all passthrough values together are at most 2048 bytes.
+- A field with a value that does not fit the limits is dropped and the lead is still accepted; the lead's entry in the 202 response then carries a `warnings` array.
+
+```json
+{
+  "phone": "+12025550199",
+  "your_field": "abc-123",
+  "another_field": "xyz"
+}
+```
+
+## Sales postbacks
+
+If agreed, we notify a URL of yours when a lead you sent makes an approved purchase. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a postback is sent for every approved purchase or only the first one per lead.
+
+Your URL is a template. Write any of these in curly braces and we fill them in, together with your agreed passthrough field names (for example `{your_field}`). Values are URL-encoded; a value we do not have renders empty.
+
+| Placeholder | Value |
+|---|---|
+| `{status}` | Outcome of the sale. Always `approved`: postbacks are sent for approved sales only. |
+| `{event}` | Event type of the sale. |
+| `{conversion_id}` | Unique id of this sale. Use it to de-duplicate. |
+| `{occurred_at}` | When the sale happened, UTC, ISO 8601. |
+| `{currency}` | Currency code of the amount. |
+| `{payout}` | Amount for the sale. Sent only if enabled for your account. |
+
+Example URL:
+
+```
+https://example.com/postback?ref={your_field}&status={status}&conversion_id={conversion_id}
+```
+
+### Delivery and retries
+
+Any 2xx response means delivered. A timeout, a 5xx, 408 or 429 is retried; other responses are not. Redirects are not followed. Retries happen after:
+
+1. 1 min
+2. 5 min
+3. 30 min
+4. 2 h
+5. 6 h
+6. 24 h
+
+After the last retry we stop.
+
+> **Note:** Delivery is at least once: the same sale can reach you more than once. De-duplicate on `{conversion_id}`.
 
 ## Responses
 
@@ -92,6 +146,7 @@ A `202` body looks like:
 ```
 
 `leads` is in the same order you sent them, so you can reconcile by index.
+A lead entry may also carry a `warnings` array of strings. It appears only when part of that lead was dropped (for example a passthrough field whose value was too long); the lead itself is still accepted.
 
 ### Duplicates are safe
 

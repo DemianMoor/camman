@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
-import { exampleLead } from "@/lib/intake/api-contract";
+import { exampleLead, UNKNOWN_FIELDS_NOTE } from "@/lib/intake/api-contract";
 import { PASSTHROUGH_LIMITS, passthroughNamesError } from "@/lib/intake/passthrough";
 
 // The "Passthrough fields" section of a partner key card: the whitelist of extra
@@ -21,14 +21,15 @@ import { PASSTHROUGH_LIMITS, passthroughNamesError } from "@/lib/intake/passthro
 function partnerInstructions(names: string[]): string {
   const example: Record<string, string> = { ...exampleLead() };
   for (const n of names) example[n] = "example";
-  const { maxValueLength, maxTotalBytes } = PASSTHROUGH_LIMITS;
+  const { maxFields, maxNameLength, maxValueLength, maxTotalBytes } = PASSTHROUGH_LIMITS;
   return [
     "Extra fields to send with each lead:",
     ...names.map((n) => `  - ${n}`),
     "",
+    `Send the values under the field names listed above (we agree at most ${maxFields} such fields; each name is lowercase letters, digits and underscores, up to ${maxNameLength} characters).`,
     `Each value is a string, number or boolean of at most ${maxValueLength} characters; all extra fields together must stay under ${maxTotalBytes} bytes.`,
     "Field names are matched case-insensitively. A value that is too long, or too many bytes, is dropped and the lead is still accepted (the response lists a warning).",
-    "Any other field you send is ignored.",
+    UNKNOWN_FIELDS_NOTE,
     "",
     "Example lead:",
     JSON.stringify(example, null, 2),

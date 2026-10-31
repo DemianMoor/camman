@@ -12,6 +12,8 @@ import { isPokeEnabled } from "./poke";
 import { runDripOptOutMonitor } from "./optout-monitor";
 import { sweepJourneyLifecycle } from "./lifecycle-sweep";
 import { enqueuePartnerPostbacks } from "@/lib/partners/postbacks/enqueue";
+import { anyPostbackKeyEnabled, deliveryEnabled } from "@/lib/partners/postbacks/deliver";
+import { postbacksLive } from "@/lib/partners/postbacks/heartbeat-gate";
 
 // Drip monitors (Drip Phase 3). Runs as a SEPARATE cron from the sweeper it
 // watches — a job that checks its own liveness reports nothing when it is the
@@ -156,10 +158,17 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
 
   // Partner sales postbacks, queued from the conversion_events ledger right
   // after the sweep. Best-effort: a failure must not stop the monitors below.
+  // But NOT silent: both heartbeats stay fresh while enqueue fails, so without
+  // this alert a permanently failing enqueue stops postbacks unseen (and a sale
+  // older than enqueue's 30-day window is then lost for good).
   const postbacksQueued = await enqueuePartnerPostbacks(db)
-    .then((r) => r.queued)
-    .catch((err) => {
+    .then(async (r) => {
+      await clearAlert(db, { alertKey: POSTBACK_ENQUEUE_ALERT_KEY });
+      return r.queued;
+    })
+    .catch(async (err) => {
       console.error("[drip-monitors] postback enqueue failed (swallowed):", err);
+      await alertPostbackEnqueueFailed(err);
       return 0;
     });
 
@@ -188,6 +197,36 @@ export async function runDripMonitors(): Promise<DripMonitorResult> {
     leadToSend,
     alerts,
   };
+}
+
+export const POSTBACK_ENQUEUE_ALERT_KEY = "partner-postbacks-enqueue-failed";
+
+/**
+ * Latched page for a failed postback enqueue — only once postbacks are live
+ * (same go-live predicate as the delivery heartbeat), so nothing pages before
+ * go-live. The text names the error class and a short first-line message only:
+ * a query failure can carry SQL text, so it is never forwarded whole.
+ */
+async function alertPostbackEnqueueFailed(err: unknown): Promise<void> {
+  try {
+    const switchOn = deliveryEnabled();
+    // The key read is only needed when it can change the answer.
+    const anyKeyEnabled = switchOn ? false : await anyPostbackKeyEnabled();
+    if (!postbacksLive({ deliveryEnabled: switchOn, anyKeyEnabled })) return;
+    // Drizzle wraps the driver error ("Failed query: <sql>…") — name the cause instead.
+    const e = err instanceof Error && err.cause instanceof Error ? err.cause : err;
+    const name = e instanceof Error ? e.name : typeof e;
+    const message = (e instanceof Error ? e.message : String(e)).split("\n")[0].slice(0, 160);
+    await notifyOnTransition(db, {
+      alertKey: POSTBACK_ENQUEUE_ALERT_KEY,
+      text:
+        `🔴 Partner postbacks: queueing sales postbacks failed (${name}: ${message}). ` +
+        `No new postbacks are being queued; sales older than 30 days are never queued. ` +
+        `Check the /api/cron/drip-monitors logs in Vercel.`,
+    });
+  } catch (alertErr) {
+    console.error("[drip-monitors] postback enqueue alert failed (swallowed):", alertErr instanceof Error ? alertErr.message : alertErr);
+  }
 }
 
 async function checkLeadToSend(alerts: string[]): Promise<DripMonitorResult["leadToSend"]> {

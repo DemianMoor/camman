@@ -202,7 +202,9 @@ export const POSTBACK_DOC = {
   placeholderIntro:
     "Your URL is a template. Write any of these in curly braces and we fill them in, " +
     "together with your agreed passthrough field names (for example `{your_field}`). " +
-    "Values are URL-encoded; a value we do not have renders empty.",
+    "Values are URL-encoded. A passthrough field your URL uses is required: if a lead " +
+    "arrived without it, or with it empty, no postback is sent for that lead. Any other " +
+    "value we do not have renders empty.",
   exampleUrl:
     "https://example.com/postback?ref={your_field}&status={status}&conversion_id={conversion_id}",
   retryIntro:
@@ -278,6 +280,12 @@ export interface ChangelogEntry {
  * at. See docs/07-conventions.md.
  */
 export const API_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: "2026-11-02",
+    changes: [
+      "Sales postbacks: a passthrough field your postback URL uses is now required. A lead that arrived without it, or with it empty, gets no postback. Intake is unchanged.",
+    ],
+  },
   {
     date: "2026-10-31",
     changes: [

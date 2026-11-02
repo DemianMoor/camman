@@ -66,6 +66,7 @@ check("T5 mask", maskUrl("https://h/pb?token=abc&rid=1&api_key=z&sig=q"), "https
 check("T5 untouched params byte-identical", maskUrl("https://h/pb?rid=a%20b&x=%zz"), "https://h/pb?rid=a%20b&x=%zz");
 check("T5 unparseable masks query", maskUrl("not a url?rid=1&z=2"), "not a url?***");
 
+check("T5 a param named exactly k is masked; kk / k2 / book are not", maskUrl("https://h/pb?b=x&k=SECRET&K=S2&kk=1&k2=2&book=3"), "https://h/pb?b=x&k=***&K=***&kk=1&k2=2&book=3");
 check("T5 repeated", maskUrl("https://h/pb?token=a&token=b"), "https://h/pb?token=***&token=***");
 check("T5 case-insensitive", maskUrl("https://h/pb?API_KEY=z"), "https://h/pb?API_KEY=***");
 

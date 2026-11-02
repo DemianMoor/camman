@@ -197,6 +197,7 @@ export function isTextSet(v: unknown): v is string[] {
 
 export const CAMPAIGN_USE_PERIODS = [
   { code: "1d", label: "1 day" },
+  { code: "2d", label: "2 days" },
   { code: "3d", label: "3 days" },
   { code: "1w", label: "1 week" },
   { code: "2w", label: "2 weeks" },

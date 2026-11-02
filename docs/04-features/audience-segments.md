@@ -1,6 +1,6 @@
 # Feature — Segments & Segment Rules
 
-_Last updated: 2026-10-05_
+_Last updated: 2026-11-02_
 
 ## 1. Purpose
 A **segment** is a named audience. Its effective membership is the **UNION** of manually-added contacts and contacts matching a chain of declarative **rules**. Segments feed campaign audiences. The rules engine compiles to SQL **set arithmetic** (not boolean predicates) so each branch can pick its own index plan against a >100K-row contacts table.
@@ -55,7 +55,7 @@ rule chain = rule[0] comb[1] rule[1] comb[2] rule[2] …   (left-associative; co
 | `contact_added_more_than_n_days_ago` | positive int | contact created > N days ago |
 | `joined_segment_in_last_n_days` | positive int | joined *this* segment ≤ N days ago |
 | `joined_segment_more_than_n_days_ago` | positive int | joined *this* segment > N days ago |
-| `in_use_in_campaign_last_period` | campaign-use period (`1d`/`3d`/`1w`/`2w`/`1m`/`3m`/`6m`/`1y`) | were in use in another campaign within the lookback window |
+| `in_use_in_campaign_last_period` | campaign-use period (`1d`/`2d`/`3d`/`1w`/`2w`/`1m`/`3m`/`6m`/`1y`) | were in use in another campaign within the lookback window |
 | `texted_in_last_period` | campaign-use period (same codes) | were actually **texted** within the window (Task 3, migration 0196) |
 | `in_use_in_offer` | offer id | were in use in a campaign for the chosen offer |
 | `member_of_segment` | segment id | are members of another segment |

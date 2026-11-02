@@ -2,6 +2,8 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-11-02 — Segment rules: added a "2 days" (`2d`) option to the campaign-use period picker (used by "In use in another campaign in the last…" and "Texted in the last…"). No migration — codes live in the rule value JSON. — docs/04-features/audience-segments.md
+
 2026-10-31 — **Partner postbacks PR 3: generic mechanism on the public /docs/partner-api page** (no migration). New Passthrough fields + Sales postbacks sections rendered from `PASSTHROUGH_DOC` / `POSTBACK_DOC` (`lib/intake/api-contract.ts`, built from `PASSTHROUGH_LIMITS`, `SYSTEM_PLACEHOLDERS`, `RETRY_DELAYS_MS`); 202 example gains a `warnings` note; `docs/partners/lead-intake.md` regenerated; drift test asserts placeholders, limits, retry schedule, no per-key names; API changelog entry 2026-10-31 — docs/partners/lead-intake.md, docs/CHANGELOG.md
 
 2026-10-30 — **Partner postbacks PR 1: passthrough fields** (migration 0228, inert). Partner keys can whitelist up to 10 extra lead fields stored in `lead_inbox.partner_data` / `lead_events.partner_data`; bad values are dropped with a 202 `warnings` entry; the key card gets a Passthrough fields section. 0228 also ships the postback columns and `partner_postbacks` table (unused until PR 2) — docs/03-data-model.md (+ ERD), docs/04-features/partner-lead-intake.md, docs/04-features/drip-lead-enrichment.md

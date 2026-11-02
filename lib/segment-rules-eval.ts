@@ -41,6 +41,7 @@ import type {
 // flattened day count) and DST/calendar math is Postgres's job.
 export const CAMPAIGN_USE_PERIOD_INTERVAL: Record<CampaignUsePeriod, SQL> = {
   "1d": drizzleSql`make_interval(days => 1)`,
+  "2d": drizzleSql`make_interval(days => 2)`,
   "3d": drizzleSql`make_interval(days => 3)`,
   "1w": drizzleSql`make_interval(weeks => 1)`,
   "2w": drizzleSql`make_interval(weeks => 2)`,

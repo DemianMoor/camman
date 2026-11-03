@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-11-03 (redirect appends zip / st for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-11-03 (redirect appends zip / st + sub_id7 / sub_id8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -106,10 +106,10 @@ sequenceDiagram
   and geo lookup (fail-open, ≤150 ms; 0229)
     R->>R: stage url_add_zip/state + contact_attributes zip/state
   end
-  R->>R: append &zip= / &st= when ticked + valid; 302 → destination
+  R->>R: append &zip= / &st= / &sub_id7= / &sub_id8= when ticked + valid; 302 → destination
   Score->>Score: */15 enrich (MaxMind ASN) + bot_score + classification
 ```
-> The redirect appends `&sub_id1=<send_token>` (= `stage_sends.id`) to the shared destination so a later Keitaro sale attributes back to this recipient (flow H). The operator's stage Full URL is never touched. A stage with **Add ZIP / State to URL** ticked (0229) also gets `&zip=` / `&st=` from the recipient's `contact_attributes`, looked up beside the clicks insert and dropped on error / timeout / missing value — see [stage-url-geo-params.md](04-features/stage-url-geo-params.md).
+> The redirect appends `&sub_id1=<send_token>` (= `stage_sends.id`) to the shared destination so a later Keitaro sale attributes back to this recipient (flow H). The operator's stage Full URL is never touched. A stage with **Add ZIP / State to URL** ticked (0229) also gets `&zip=` / `&st=` (and the same values as `&sub_id7=` / `&sub_id8=`) from the recipient's `contact_attributes`, looked up beside the clicks insert and dropped on error / timeout / missing value — see [stage-url-geo-params.md](04-features/stage-url-geo-params.md).
 
 > **Key resolution is number → account → key (migration 0110).** A stage with no `provider_phone_id` falls back to the legacy `(provider, brand)`/default lookup, but only while the provider has exactly ONE credential — once a provider has ≥2 accounts a numberless stage refuses (`no_credentials`) rather than guessing. The key is decrypted at this point only (AES-256-GCM `api_key_encrypted`, dual-read against legacy plaintext `api_key`) — never earlier, never returned by any list/GET response. See [07-conventions.md](07-conventions.md).
 

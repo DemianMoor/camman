@@ -1097,6 +1097,25 @@ export async function runStageDrain(
     );
   }
 
+  // The send-time lifecycle re-check (bought this offer / suppressed / freeze
+  // not due) FAILS OPEN — see its catch above: the batch went out unchecked
+  // rather than strand rows in 'sending'. Counting it was not enough; nobody
+  // read the count. One message per drain invocation, owner decision
+  // 2026-11-03 (card 869evxj0e): the batch still sends, the owner is told.
+  if (recheckFailedBatches > 0) {
+    await notifyTelegram(
+      `⚠️ Send-time re-check FAILED on ${recheckFailedBatches} batch(es) — sent WITHOUT the buyer / suppression / freeze check
+` +
+        `provider: ${stage.provider_name ?? stage.provider_key ?? String(providerId)}
+` +
+        `campaign: "${stage.campaign_name ?? String(stage.campaign_id)}" · stage ${stage.stage_number != null ? `#${stage.stage_number}` : `id ${opts.stageId}`}${stage.stage_label ? ` "${stage.stage_label}"` : ""}
+` +
+        `sent ${sent}, remaining ${remaining}
+` +
+        `Contacts who already bought this offer may have been messaged. Check the function logs for [lifecycle-recheck].`,
+    );
+  }
+
   return {
     ok: true,
     sent,

@@ -75,6 +75,7 @@ const stageBaseSchema = z.object({
   // Unchecked on every new stage; locks with the message format.
   url_add_zip: z.boolean().default(false),
   url_add_state: z.boolean().default(false),
+  allow_first_name_on_page: z.boolean().default(false),
   // 0216: the stage's message shape — a format id OR owner-only custom text
   // (exactly one is stored). Content and permission rules are decided by
   // lib/messages/stage-format.ts decideStageFormatChange, not here, so the
@@ -122,6 +123,7 @@ export const stageUpdateSchema = stageBaseSchema
     include_no_status: z.boolean().optional(),
     url_add_zip: z.boolean().optional(),
     url_add_state: z.boolean().optional(),
+    allow_first_name_on_page: z.boolean().optional(),
     // Changeable, never clearable: an explicit null is a 400, an omitted key
     // leaves the stored value (incl. a legacy NULL) untouched.
     sms_provider_id: z.number({ error: "Provider is required" }).int().positive().optional(),

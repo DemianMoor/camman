@@ -319,6 +319,7 @@ export async function performBehavioralSplit(
       // 0229: a lane keeps the source's zip / st URL flags (owner ruling 11-03).
       url_add_zip: source.url_add_zip,
       url_add_state: source.url_add_state,
+      allow_first_name_on_page: source.allow_first_name_on_page,
       utm_tag_ids: source.utm_tag_ids,
       stop_text: source.stop_text,
       ...format,

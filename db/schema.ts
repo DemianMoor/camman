@@ -2188,6 +2188,9 @@ export const campaign_stages = pgTable(
     // format (stageFormatLocked).
     url_add_zip: boolean("url_add_zip").notNull().default(false),
     url_add_state: boolean("url_add_state").notNull().default(false),
+    // 0230: lets the landing page fetch the recipient's first name via
+    // GET /api/public/first-name (lib/links/page-first-name.ts). Never in a URL.
+    allow_first_name_on_page: boolean("allow_first_name_on_page").notNull().default(false),
     // 0216: the stage's message shape — EXACTLY ONE of these is set (CHECK
     // campaign_stages_format_one_of). A BEFORE INSERT trigger fills the org
     // default format when both are NULL. custom_text is owner-only

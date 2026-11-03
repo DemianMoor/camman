@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-11-03 (landing page fetches first name by sub_id1, 0230); 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -108,6 +108,11 @@ sequenceDiagram
   end
   R->>R: append &zip= / &st= / &sub_id_7= / &sub_id_8= when ticked + valid; 302 → destination
   Score->>Score: */15 enrich (MaxMind ASN) + bot_score + classification
+  Note over Rec,R: landing page (brand site) — 0230, separate route, never on /r/
+  Rec->>R: GET /api/public/first-name?t=<sub_id1>
+  R->>R: rate limit (per IP, per instance)
+  R->>R: stage_sends sent ≤14d + stage allow_first_name_on_page + contact_attributes.first_name (fail-open, ≤1 s)
+  R-->>Rec: 200 {first_name: "Maria" | null}, no-store, CORS brand origins only
 ```
 > The redirect appends `&sub_id1=<send_token>` (= `stage_sends.id`) to the shared destination so a later Keitaro sale attributes back to this recipient (flow H). The operator's stage Full URL is never touched. A stage with **Add ZIP / State to URL** ticked (0229) also gets `&zip=` / `&st=` (and the same values as `&sub_id_7=` / `&sub_id_8=`) from the recipient's `contact_attributes`, looked up beside the clicks insert and dropped on error / timeout / missing value — see [stage-url-geo-params.md](04-features/stage-url-geo-params.md).
 

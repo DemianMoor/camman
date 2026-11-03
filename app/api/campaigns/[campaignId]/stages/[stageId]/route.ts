@@ -131,6 +131,7 @@ export async function GET(
       full_url: campaign_stages.full_url,
       url_add_zip: campaign_stages.url_add_zip,
       url_add_state: campaign_stages.url_add_state,
+      allow_first_name_on_page: campaign_stages.allow_first_name_on_page,
       landing_page_id: campaign_stages.landing_page_id,
       utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
@@ -408,6 +409,7 @@ export async function PATCH(
       custom_text: campaign_stages.custom_text,
       url_add_zip: campaign_stages.url_add_zip,
       url_add_state: campaign_stages.url_add_state,
+      allow_first_name_on_page: campaign_stages.allow_first_name_on_page,
       campaign_type: campaigns.type,
       // P4: a REGULAR stage's format locks once materialized (spec R4).
       materialized_at: campaign_stages.materialized_at,
@@ -459,11 +461,15 @@ export async function PATCH(
   const urlParamsChanging =
     (input.url_add_zip !== undefined && input.url_add_zip !== current.url_add_zip) ||
     (input.url_add_state !== undefined && input.url_add_state !== current.url_add_state);
+  // 0230: "Allow first name on page" locks with them.
+  const firstNameChanging =
+    input.allow_first_name_on_page !== undefined &&
+    input.allow_first_name_on_page !== current.allow_first_name_on_page;
   const isDrip = current.campaign_type === "drip";
   // Only a drip stage's locks read sent rows (format + creative); a regular
   // stage's format lock reads materialized_at (spec R4, P4).
   const hasSent =
-    isDrip && (wantsShape || creativeChanging || urlParamsChanging)
+    isDrip && (wantsShape || creativeChanging || urlParamsChanging || firstNameChanging)
       ? await stageHasSent(db, sid)
       : false;
   const formatLocked = stageFormatLocked({
@@ -511,6 +517,16 @@ export async function PATCH(
         : "ZIP / State URL params are locked once this stage's sends are materialized",
       API_ERROR_CODES.CONFLICT,
       { reason: "url_params_locked_after_send", field: "url_add_zip" },
+    );
+  }
+  if (firstNameChanging && formatLocked) {
+    return apiError(
+      409,
+      isDrip
+        ? "\"Allow first name on page\" is locked once this drip stage has sent — create a new stage instead"
+        : "\"Allow first name on page\" is locked once this stage's sends are materialized",
+      API_ERROR_CODES.CONFLICT,
+      { reason: "page_first_name_locked_after_send", field: "allow_first_name_on_page" },
     );
   }
 

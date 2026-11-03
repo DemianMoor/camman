@@ -126,6 +126,7 @@ export interface StageFormValues {
   // 0229: append the recipient's zip / st at redirect time (never minted).
   url_add_zip: boolean;
   url_add_state: boolean;
+  allow_first_name_on_page: boolean;
   stop_text: string;
   // 0216: the message shape. message_format_id null on a NEW stage = the org
   // default (the server trigger stamps it). custom_text (stages.custom_message) wins
@@ -383,7 +384,11 @@ export function buildStageCreateBody(
     full_url_auto: values.full_url_auto,
     // 0229. Flag OFF (default) ⇒ not sent: the stage keeps its stored flags.
     ...(stageUrlGeoParamsUiEnabled()
-      ? { url_add_zip: values.url_add_zip, url_add_state: values.url_add_state }
+      ? {
+          url_add_zip: values.url_add_zip,
+          url_add_state: values.url_add_state,
+          allow_first_name_on_page: values.allow_first_name_on_page,
+        }
       : {}),
     ...(opts.includeStopText === false ? {} : { stop_text: values.stop_text }),
     // 0216: custom text (owner) or a chosen format; neither ⇒ the server keeps
@@ -417,6 +422,7 @@ const DEFAULT_VALUES: StageFormValues = {
   full_url_auto: true,
   url_add_zip: false,
   url_add_state: false,
+  allow_first_name_on_page: false,
   stop_text: "Stop to END",
   message_format_id: null,
   custom_text: null,
@@ -678,6 +684,7 @@ export function StageForm({
   const watchedFullUrlAuto = form.watch("full_url_auto");
   const watchedUrlAddZip = form.watch("url_add_zip");
   const watchedUrlAddState = form.watch("url_add_state");
+  const watchedAllowFirstName = form.watch("allow_first_name_on_page");
   const watchedScheduledAt = form.watch("scheduled_at");
 
   // Backfill the selected creative if the offer-scoped list doesn't include it
@@ -1824,6 +1831,8 @@ export function StageForm({
                           [
                             ["url_add_zip", "Add ZIP to URL", watchedUrlAddZip],
                             ["url_add_state", "Add State to URL", watchedUrlAddState],
+                            // 0230: not a URL param — lets the page fetch the name by sub_id1.
+                            ["allow_first_name_on_page", "Allow first name on page", watchedAllowFirstName],
                           ] as const
                         ).map(([name, label, checked]) => (
                           <label
@@ -1867,6 +1876,11 @@ export function StageForm({
                             ) || "— set a destination first"}
                           </span>{" "}
                           (sample 75201 / TX; a missing or invalid value is left off for that recipient).
+                        </p>
+                      ) : null}
+                      {isTracked && watchedAllowFirstName ? (
+                        <p className="text-muted-foreground text-xs">
+                          The landing page may look up the recipient&apos;s first name by sub_id1 for 14 days after the send. The name is never added to the URL; a missing or invalid name returns nothing.
                         </p>
                       ) : null}
                     </div>

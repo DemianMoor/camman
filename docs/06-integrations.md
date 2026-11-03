@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-11-03 (NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED); 2026-10-31 (outbound partner postbacks, PARTNER_POSTBACKS_DELIVERY_ENABLED); 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
+_Last updated: 2026-11-03 (public first-name endpoint for brand landing pages, CORS brand origins — 0230); 2026-11-03 (NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED); 2026-10-31 (outbound partner postbacks, PARTNER_POSTBACKS_DELIVERY_ENABLED); 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -155,7 +155,7 @@ See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
 | `CLASSIFIER_TIMEOUT_MS` | server | classifier fetch timeout (default 10000) |
 | `MAXMIND_LICENSE_KEY` | server | GeoLite2 download key; unset ⇒ scoring runs on UA only (asn/country/datacenter NULL) |
 | `NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED` | public | message-formats UI flag (hotfix 2026-10-20). Unset / anything but `"true"` = OFF: stage form, creative picker and drip creative lock behave as before P2; sends still render T1 and stamp `message_format_id`. See [04-features/message-formats.md](04-features/message-formats.md) |
-| `NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED` | public | stage-form "Add ZIP / State to URL" checkboxes (0229). Unset / anything but `"true"` = OFF: no checkboxes, no flag in the stage payload. The `/r/` redirect is not gated — it follows the stage row. See [04-features/stage-url-geo-params.md](04-features/stage-url-geo-params.md) |
+| `NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED` | public | stage-form "Add ZIP / State to URL" and "Allow first name on page" (0230) checkboxes (0229). Unset / anything but `"true"` = OFF: no checkboxes, no flag in the stage payload. The `/r/` redirect is not gated — it follows the stage row. See [04-features/stage-url-geo-params.md](04-features/stage-url-geo-params.md) |
 | `CRON_SECRET` | server | shared secret for cron endpoints (Bearer). Also gates the send drain. Unset ⇒ click-scoring endpoint returns 503. The drip poke chain (0206) sends it to the app's own cron routes, at `NEXT_PUBLIC_SITE_URL` |
 | `VERCEL_AUTOMATION_BYPASS_SECRET` | server, optional (Vercel system var) | Set by Vercel when "Protection Bypass for Automation" is enabled. The drip poke chain sends it as `x-vercel-protection-bypass` so pokes reach a protected **preview** deployment. Unset in prod is fine (pokes go to the primary domain) |
 | `PROVIDER_CREDENTIALS_KEY` | server | 32-byte base64 master key for AES-256-GCM encryption of `provider_credentials.api_key_encrypted` (migration 0110). MUST be byte-identical between Vercel and any local `.env.local` that encrypts (the backfill script) or decrypts (dev drain/pollers) — a mismatch makes existing rows silently fail to decrypt, not error at write time. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. Never commit a value |

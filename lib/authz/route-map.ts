@@ -344,6 +344,9 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "partners/[partnerId]/restore": null, // drip / partner intake -- hidden from the operator
   "partners/[partnerId]/report-link": null, // drip / partner intake -- hidden from the operator
 
+  // ── public ─────────────────────────────────────────────────────────────
+  "public/first-name": null, // public landing-page lookup (0230) -- no session, keyed by sub_id1
+
   // ── provider-phones ─────────────────────────────────────────────────────────────
   // Needed to choose a sending number. Provider identity is redacted to a
   // route alias; the operator selects a Route, never an SSP name.

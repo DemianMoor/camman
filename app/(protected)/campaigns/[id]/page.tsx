@@ -247,6 +247,7 @@ type Stage = {
   full_url: string | null;
   url_add_zip: boolean;
   url_add_state: boolean;
+  allow_first_name_on_page: boolean;
   // 1b: WHICH PAGE the stage points at; the URL is built at mint time.
   landing_page_id: number | null;
   utm_tag_ids: number[] | null;

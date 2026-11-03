@@ -2181,6 +2181,13 @@ export const campaign_stages = pgTable(
     // the creative text and the stop text.
     short_url: text("short_url"),
     full_url: text("full_url"),
+    // 0229: append the recipient's `zip` / `st` (USPS code) to the destination
+    // AT REDIRECT TIME (lib/links/resolve-click.ts), never at mint — the stored
+    // link_destinations URL stays byte-identical. Missing/invalid value ⇒ that
+    // param is omitted, the recipient is never skipped. Locks with the message
+    // format (stageFormatLocked).
+    url_add_zip: boolean("url_add_zip").notNull().default(false),
+    url_add_state: boolean("url_add_state").notNull().default(false),
     // 0216: the stage's message shape — EXACTLY ONE of these is set (CHECK
     // campaign_stages_format_one_of). A BEFORE INSERT trigger fills the org
     // default format when both are NULL. custom_text is owner-only

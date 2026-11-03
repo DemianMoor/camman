@@ -194,6 +194,8 @@ export async function GET(
       sales_page_label: campaign_stages.sales_page_label,
       short_url: campaign_stages.short_url,
       full_url: campaign_stages.full_url,
+      url_add_zip: campaign_stages.url_add_zip,
+      url_add_state: campaign_stages.url_add_state,
       landing_page_id: campaign_stages.landing_page_id,
       utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
@@ -795,6 +797,8 @@ export async function POST(
     // once the real stage tracking ID is known; insert null as a
     // placeholder. Otherwise store the client's value verbatim.
     full_url: fullUrlAuto ? null : nullIfEmpty(input.full_url),
+    url_add_zip: input.url_add_zip,
+    url_add_state: input.url_add_state,
     utm_tag_ids: utmTagIds,
     stop_text: input.stop_text,
     include_clickers: input.include_clickers,

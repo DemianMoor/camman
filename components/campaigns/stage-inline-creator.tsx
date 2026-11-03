@@ -55,6 +55,8 @@ export interface EditableStage {
   landing_page_id: number | null;
   short_url: string | null;
   full_url: string | null;
+  url_add_zip: boolean;
+  url_add_state: boolean;
   utm_tag_ids: number[] | null;
   stop_text: string;
   // 0216: message shape + whether the stage has sent (locks format / drip creative).
@@ -263,6 +265,8 @@ export function StageInlineEditor({
         landing_page_id: stage.landing_page_id != null ? String(stage.landing_page_id) : "",
         short_url: stage.short_url ?? "",
         full_url: stage.full_url ?? "",
+        url_add_zip: stage.url_add_zip,
+        url_add_state: stage.url_add_state,
         utm_tag_ids: stage.utm_tag_ids ?? [],
         stop_text: stage.stop_text,
         message_format_id: stage.message_format_id,

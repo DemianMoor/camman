@@ -647,7 +647,7 @@ See [04-features/drip-campaigns-routing.md](04-features/drip-campaigns-routing.m
 
 ### Stage URL ZIP / State params (migration 0229)
 
-- **`campaign_stages.url_add_zip` / `url_add_state`** — `boolean NOT NULL DEFAULT false` (metadata-only add). When on, the `/r/` redirect appends the recipient's normalized `zip` / `st` after `sub_id1`, then the same values as `sub_id7` / `sub_id8`; the minted `link_destinations` URL is never changed. Lock with the message format; copied by every copy path. See [04-features/stage-url-geo-params.md](04-features/stage-url-geo-params.md).
+- **`campaign_stages.url_add_zip` / `url_add_state`** — `boolean NOT NULL DEFAULT false` (metadata-only add). When on, the `/r/` redirect appends the recipient's normalized `zip` / `st` after `sub_id1`, then the same values as `sub_id_7` / `sub_id_8`; the minted `link_destinations` URL is never changed. Lock with the message format; copied by every copy path. See [04-features/stage-url-geo-params.md](04-features/stage-url-geo-params.md).
 
 ### Message formats (migration 0216)
 

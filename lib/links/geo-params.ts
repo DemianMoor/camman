@@ -11,7 +11,7 @@ import { appendUrlParam } from "@/lib/stage-url";
 //
 // ⚠️ ONLY zip and state, ever (owner ruling 2026-11-03). Values pass through
 // the {zip}/{state} tag normalizers (each value goes out twice: zip/st and
-// sub_id7/sub_id8): a missing or invalid value OMITS that param
+// sub_id_7/sub_id_8): a missing or invalid value OMITS that param
 // for this recipient — it never blocks the redirect.
 
 // UI flag (dark launch). OFF ⇒ the stage form shows no checkboxes and sends no
@@ -32,8 +32,8 @@ export const SUB_ID1_PREVIEW_PLACEHOLDER = "<recipient id>";
 export const URL_ZIP_PARAM = "zip";
 export const URL_STATE_PARAM = "st";
 // Same values again under tracker sub-id slots (owner ruling 2026-11-03).
-export const URL_ZIP_SUBID_PARAM = "sub_id7";
-export const URL_STATE_SUBID_PARAM = "sub_id8";
+export const URL_ZIP_SUBID_PARAM = "sub_id_7";
+export const URL_STATE_SUBID_PARAM = "sub_id_8";
 
 /** Hard cap on how long the lookup may hold a redirect. Fail-open past it. */
 export const GEO_LOOKUP_BUDGET_MS = 150;
@@ -46,8 +46,8 @@ export interface GeoParams {
 export const NO_GEO: GeoParams = { zip: null, state: null };
 
 /**
- * Append normalized `zip` / `st`, then the same values as `sub_id7` / `sub_id8`
- * (order: zip, st, sub_id7, sub_id8). Each key is skipped when already present
+ * Append normalized `zip` / `st`, then the same values as `sub_id_7` / `sub_id_8`
+ * (order: zip, st, sub_id_7, sub_id_8). Each key is skipped when already present
  * (hand-edited URL).
  */
 export function appendGeoParams(url: string, geo: GeoParams): string {

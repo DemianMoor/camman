@@ -28,20 +28,24 @@ const TODAY = `${DEST}&sub_id1=777`; // what main's resolver returns for send_to
 
 function pure() {
   console.log("P — appendGeoParams / previewLandingUrl (pure)");
-  bar("P1 both ⇒ &zip=…&st=…&sub_id7=…&sub_id8=… after sub_id1", appendGeoParams(TODAY, { zip: "75201", state: "TX" }) === `${TODAY}&zip=75201&st=TX&sub_id7=75201&sub_id8=TX`);
+  bar("P1 both ⇒ &zip=…&st=…&sub_id_7=…&sub_id_8=… after sub_id1", appendGeoParams(TODAY, { zip: "75201", state: "TX" }) === `${TODAY}&zip=75201&st=TX&sub_id_7=75201&sub_id_8=TX`);
   bar("P2 none ⇒ byte-identical", appendGeoParams(TODAY, NO_GEO) === TODAY);
-  bar("P3 ZIP+4 ⇒ 5 digits", appendGeoParams(TODAY, { zip: "75201-1234", state: null }) === `${TODAY}&zip=75201&sub_id7=75201`);
-  bar("P4 invalid zip omitted, state kept", appendGeoParams(TODAY, { zip: "7520", state: "tx" }) === `${TODAY}&st=TX&sub_id8=TX`);
-  bar("P5 state name ⇒ USPS code", appendGeoParams(TODAY, { zip: null, state: "new york" }) === `${TODAY}&st=NY&sub_id8=NY`);
+  bar("P3 ZIP+4 ⇒ 5 digits", appendGeoParams(TODAY, { zip: "75201-1234", state: null }) === `${TODAY}&zip=75201&sub_id_7=75201`);
+  bar("P4 invalid zip omitted, state kept", appendGeoParams(TODAY, { zip: "7520", state: "tx" }) === `${TODAY}&st=TX&sub_id_8=TX`);
+  bar("P5 state name ⇒ USPS code", appendGeoParams(TODAY, { zip: null, state: "new york" }) === `${TODAY}&st=NY&sub_id_8=NY`);
   bar("P6 junk / non-US state omitted", appendGeoParams(TODAY, { zip: "n/a", state: "Ontario" }) === TODAY);
   const hand = `${DEST}&zip=10001&sub_id1=777`;
-  bar("P7 hand-edited URL already carrying zip ⇒ not appended twice", appendGeoParams(hand, { zip: "75201", state: "TX" }) === `${hand}&st=TX&sub_id7=75201&sub_id8=TX`);
-  const hand7 = `${DEST}&sub_id7=keep&sub_id1=777`;
-  bar("P7b hand-edited URL already carrying sub_id7 ⇒ kept, not appended twice", appendGeoParams(hand7, { zip: "75201", state: "TX" }) === `${hand7}&zip=75201&st=TX&sub_id8=TX`);
+  bar("P7 hand-edited URL already carrying zip ⇒ not appended twice", appendGeoParams(hand, { zip: "75201", state: "TX" }) === `${hand}&st=TX&sub_id_7=75201&sub_id_8=TX`);
+  const both = appendGeoParams(TODAY, { zip: "75201", state: "TX" });
+  bar("P1b no sub_id7 / sub_id8 without the underscore", !/[?&]sub_id[78]=/.test(both), both);
+  const legacy = `${DEST}&sub_id7=keep&sub_id1=777`;
+  bar("P7c a hand-edited sub_id7 (no underscore) does not block sub_id_7", appendGeoParams(legacy, { zip: "75201", state: null }) === `${legacy}&zip=75201&sub_id_7=75201`);
+  const hand7 = `${DEST}&sub_id_7=keep&sub_id1=777`;
+  bar("P7b hand-edited URL already carrying sub_id_7 ⇒ kept, not appended twice", appendGeoParams(hand7, { zip: "75201", state: "TX" }) === `${hand7}&zip=75201&st=TX&sub_id_8=TX`);
   bar("P8 preview shows the sub_id1 placeholder + samples",
-    previewLandingUrl(DEST, { zip: true, state: true }) === `${DEST}&sub_id1=<recipient id>&zip=75201&st=TX&sub_id7=75201&sub_id8=TX`,
+    previewLandingUrl(DEST, { zip: true, state: true }) === `${DEST}&sub_id1=<recipient id>&zip=75201&st=TX&sub_id_7=75201&sub_id_8=TX`,
     previewLandingUrl(DEST, { zip: true, state: true }));
-  bar("P9 preview, state only", previewLandingUrl(DEST, { zip: false, state: true }) === `${DEST}&sub_id1=<recipient id>&st=TX&sub_id8=TX`);
+  bar("P9 preview, state only", previewLandingUrl(DEST, { zip: false, state: true }) === `${DEST}&sub_id1=<recipient id>&st=TX&sub_id_8=TX`);
   bar("P10 preview, empty destination ⇒ empty", previewLandingUrl("  ", { zip: true, state: true }) === "");
 }
 
@@ -80,7 +84,7 @@ async function failOpen() {
   const empty = await resolveAndLogClick(fakeDb(), { code: "x" }, { lookupGeo: async () => NO_GEO });
   bar("F6 empty lookup ⇒ as today", empty?.destinationUrl === TODAY);
   const both = await resolveAndLogClick(fakeDb(), { code: "x" }, { lookupGeo: async () => ({ zip: "75201", state: "Texas" }) });
-  bar("F7 ticked + data ⇒ …&sub_id1=777&zip=75201&st=TX&sub_id7=75201&sub_id8=TX", both?.destinationUrl === `${TODAY}&zip=75201&st=TX&sub_id7=75201&sub_id8=TX`, both?.destinationUrl);
+  bar("F7 ticked + data ⇒ …&sub_id1=777&zip=75201&st=TX&sub_id_7=75201&sub_id_8=TX", both?.destinationUrl === `${TODAY}&zip=75201&st=TX&sub_id_7=75201&sub_id_8=TX`, both?.destinationUrl);
 }
 
 async function dbParts() {
@@ -108,7 +112,7 @@ async function dbParts() {
         ON CONFLICT (contact_id) DO UPDATE SET zip = EXCLUDED.zip, state = EXCLUDED.state
       `);
       const r1 = await resolveAndLogClick(tx, { code: l.code });
-      bar("D3 both ticked ⇒ …&sub_id1=…&zip=75201&st=TX&sub_id7=75201&sub_id8=TX", r1?.destinationUrl === `${today}&zip=75201&st=TX&sub_id7=75201&sub_id8=TX`, r1?.destinationUrl);
+      bar("D3 both ticked ⇒ …&sub_id1=…&zip=75201&st=TX&sub_id_7=75201&sub_id_8=TX", r1?.destinationUrl === `${today}&zip=75201&st=TX&sub_id_7=75201&sub_id_8=TX`, r1?.destinationUrl);
 
       await tx.execute(sql`UPDATE contact_attributes SET zip = NULL, state = 'XX' WHERE contact_id = ${l.contact_id}`);
       const r2 = await resolveAndLogClick(tx, { code: l.code });

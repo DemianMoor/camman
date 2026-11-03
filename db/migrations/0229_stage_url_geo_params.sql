@@ -1,4 +1,4 @@
-SET LOCAL lock_timeout = '5s';
+SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
 
 -- Migration 0229: per-stage "Add ZIP / State to URL" flags (schema only).
@@ -6,7 +6,7 @@ SET LOCAL lock_timeout = '5s';
 -- ADDITIVE and INERT: both default false, so every existing stage behaves
 -- exactly as today. ADD COLUMN ... NOT NULL DEFAULT <constant> is metadata-only
 -- on PG 11+ (no table rewrite). lock_timeout leads the batch because
--- campaign_stages is read by every send and click path — fail fast rather than
+-- campaign_stages is read by every send and click path — (3s, owner 11-03) fail fast rather than
 -- queue behind (and block) them.
 --
 -- The params are appended at REDIRECT time (lib/links/resolve-click.ts), so no

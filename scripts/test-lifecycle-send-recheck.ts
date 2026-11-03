@@ -372,6 +372,22 @@ async function main() {
       return { res: res!, after };
     };
 
+    // Capture Telegram alerts: sends are injected (okSender), so the only
+    // fetch the drain makes is notifyTelegram's. Dummy credentials make it try.
+    const telegram: string[] = [];
+    const realFetch = globalThis.fetch;
+    const savedTg = [process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_CHAT_ID];
+    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    process.env.TELEGRAM_CHAT_ID = "test-chat";
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("api.telegram.org")) {
+        telegram.push(String(JSON.parse(String(init?.body ?? "{}")).text ?? ""));
+        return new Response("{}", { status: 200 });
+      }
+      return realFetch(url, init);
+    }) as typeof fetch;
+    const recheckAlerts = () => telegram.filter((t) => t.includes("re-check FAILED"));
+
     const real = await drainOnce();
     // A refusal here means the fixture is wrong, not the gate — say which.
     if (!real.res.ok) {
@@ -416,9 +432,21 @@ async function main() {
     // Asserted on the RESULT (rows dispatched + the failure counted), not on
     // the absence of an exception — "it didn't throw" is also true of a check
     // that silently did nothing.
+    const alertsAfterHealthyRun = recheckAlerts().length;
     const broken = await drainOnce(async () => {
       throw new Error("injected recheck failure");
     });
+    globalThis.fetch = realFetch;
+    process.env.TELEGRAM_BOT_TOKEN = savedTg[0];
+    process.env.TELEGRAM_CHAT_ID = savedTg[1];
+    if (savedTg[0] === undefined) delete process.env.TELEGRAM_BOT_TOKEN;
+    if (savedTg[1] === undefined) delete process.env.TELEGRAM_CHAT_ID;
+    bar(
+      "J15 ⭐ a THROWING re-check sends ONE Telegram alert; a healthy run sends none",
+      alertsAfterHealthyRun === 0 && recheckAlerts().length === 1 &&
+        recheckAlerts()[0].includes("sent WITHOUT the buyer"),
+      `healthy run: ${alertsAfterHealthyRun}, after failure: ${recheckAlerts().length}`,
+    );
     bar(
       "J13 ⭐ a THROWING re-check still dispatches the batch, and is counted",
       broken.res.recheckFailedBatches > 0 &&

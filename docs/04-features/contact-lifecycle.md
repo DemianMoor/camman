@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-10-27 (offer limit default 5 → 2 for new campaigns); 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
+_Last updated: 2026-11-03 (Telegram alert when the send-time re-check fails open); 2026-10-27 (offer limit default 5 → 2 for new campaigns); 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -509,7 +509,11 @@ does: the cadence is a promise to the person holding the handset.
 contacts getting a message they would have been spared is recoverable; a stage
 halting mid-drain with rows stuck in `sending` is not, because `sending` rows
 are never re-claimed. The failure increments `recheckFailedBatches` and is
-logged, so a batch with no numbers reads as **missing**, not as zero.
+logged, so a batch with no numbers reads as **missing**, not as zero. Since
+2026-11-03 it also sends **one Telegram alert per drain invocation**
+("⚠️ Send-time re-check FAILED … sent WITHOUT the buyer / suppression / freeze
+check", with provider, campaign, stage and counts) — the batch still sends; the
+owner is told. Before this the count was returned and nobody read it.
 
 The module itself throws rather than swallowing — it cannot know whether its
 caller can proceed without it, so the drain owns that decision. The drain takes
@@ -1043,11 +1047,13 @@ The PR 4b bars:
   route's SOURCE, because the rest of the file exercises a reproduction of its
   decision and would pass after the gate was deleted.
 - [scripts/test-lifecycle-send-recheck.ts](../../scripts/test-lifecycle-send-recheck.ts)
-  -- 14 bars on the send-time re-check. Every freeze fixture has
+  -- 15 bars on the send-time re-check. Every freeze fixture has
   `last_sent_at` NULL, so J2/J4 go red if anyone "tidies" the check back into
   reading `contact_engagement`. J11-J13 run the REAL `runStageDrain` in a
   rolled-back transaction; J13 proves the fail-open path by injecting a
-  throwing re-check and asserting the batch still dispatched.
+  throwing re-check and asserting the batch still dispatched; J15 asserts that
+  failure sends exactly one Telegram alert and a healthy run sends none
+  (Telegram is captured by stubbing `fetch`; proven red with the alert removed).
 - [scripts/test-eligibility-layers-identical.ts](../../scripts/test-eligibility-layers-identical.ts)
   -- the byte-identical-SQL gate. It captures the SQL every real stage produces
   from `origin/main` and diffs it, so "legacy campaigns are untouched" is a

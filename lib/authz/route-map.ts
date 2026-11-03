@@ -300,6 +300,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "networks/[id]/mappings": { methods: ["GET"] }, // conversion mapping dialog, view-only; POST (add rule) stays denied
   "networks/[id]/mappings/[mappingId]": null, // edit rule -- registry write, not granted by the matrix
   "networks/[id]/mappings/[mappingId]/archive": null, // deactivate rule -- registry write, not granted by the matrix
+  "networks/[id]/postback-urls": null, // manager+ only: the URLs carry Keitaro's postback key
   "networks/[id]/restore": null, // not granted by the access matrix
   "networks/list": { methods: ["GET"], token: ["GET"] },
 

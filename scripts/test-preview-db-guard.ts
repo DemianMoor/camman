@@ -385,6 +385,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: 'read-only and server-enforced: every query runs inside begin("… read only")',
   },
   {
+    file: "standard-conversion-mapping-diff.ts",
+    why: "read-only production diff of conversion mapping rules: every statement runs inside SET TRANSACTION READ ONLY; the INSERT text it prints is review SQL for a hand-applied step, never executed",
+  },
+  {
     file: "verify-conversion-events.ts",
     viaLibrary: true,
     why: "read-only conversion verification against production; every statement is a SELECT, so it carries no write token (the entry is belt-and-braces)",

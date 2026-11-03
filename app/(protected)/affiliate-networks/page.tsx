@@ -12,6 +12,7 @@ import {
   Pencil,
   Plus,
   Workflow,
+  Link2,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { ColumnDef } from "@tanstack/react-table";
@@ -20,6 +21,7 @@ import {
   ConversionMappingDialog,
   type EventTypeOption,
 } from "@/components/networks/conversion-mapping";
+import { PostbackUrlsDialog } from "@/components/networks/postback-urls";
 import {
   NetworkForm,
   type NetworkFormValues,
@@ -229,6 +231,7 @@ export default function AffiliateNetworksPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<Network | null>(null);
   const [mappingFor, setMappingFor] = useState<Network | null>(null);
+  const [postbacksFor, setPostbacksFor] = useState<Network | null>(null);
   const [confirming, setConfirming] = useState<
     | { kind: "archive"; network: Network }
     | { kind: "restore"; network: Network }
@@ -409,6 +412,11 @@ export default function AffiliateNetworksPage() {
                     <Workflow className="size-4" aria-hidden /> Conversion
                     mapping
                   </DropdownMenuItem>
+                  {canUpdate ? (
+                    <DropdownMenuItem onSelect={() => setPostbacksFor(network)}>
+                      <Link2 className="size-4" aria-hidden /> Postback URLs
+                    </DropdownMenuItem>
+                  ) : null}
                   {showArchive ? (
                     <DropdownMenuItem
                       onSelect={() =>
@@ -607,6 +615,14 @@ export default function AffiliateNetworksPage() {
         canEdit={canUpdate}
         eventTypes={eventTypes}
         onChanged={refetch}
+      />
+
+      <PostbackUrlsDialog
+        network={postbacksFor}
+        onOpenChange={(open) => {
+          if (!open) setPostbacksFor(null);
+        }}
+        eventTypes={eventTypes}
       />
 
       {/* Edit dialog */}

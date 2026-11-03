@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-11-03 (public first-name endpoint for brand landing pages, CORS brand origins — 0230); 2026-11-03 (NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED); 2026-10-31 (outbound partner postbacks, PARTNER_POSTBACKS_DELIVERY_ENABLED); 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
+_Last updated: 2026-11-03 (KEITARO_POSTBACK_URL — per-network Postback URLs panel); 2026-11-03 (public first-name endpoint for brand landing pages, CORS brand origins — 0230); 2026-11-03 (NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED); 2026-10-31 (outbound partner postbacks, PARTNER_POSTBACKS_DELIVERY_ENABLED); 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -167,6 +167,7 @@ See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
 | `TELEGRAM_CHAT_ID` | server | numeric chat/group id for alerts + the performance report |
 | `TELEGRAM_SEND_TIMEOUT_MS` | server | optional per-attempt timeout (ms) for the performance report's send; default **20000**. A tight budget aborts a `sendMessage` Telegram may already have delivered — and that POST is not idempotent (see [crons.md](04-features/crons.md)) |
 | `KEITARO_API_URL` | server | Keitaro admin/API host (default `https://admin.gdkn.org`). Never a brand tracking domain |
+| `KEITARO_POSTBACK_URL` | server | Keitaro's postback endpoint incl. its postback key (`https://<tracker host>/<key>/postback`, no query string, https only). Feeds the per-network **Postback URLs** panel ([lib/conversions/postback-urls.ts](../lib/conversions/postback-urls.ts)); manager+ only, since the key lets anyone post conversions. Unset ⇒ the panel shows "not configured" |
 | `KEITARO_API_KEY` | server | Keitaro Admin API key (`Api-Key` header). Unset ⇒ poll returns `degraded:true` and writes nothing. **Rotate** the key shared in plaintext during setup |
 | `TELNYX_API_KEY` | server | Telnyx API v2 key (`Authorization: Bearer`). Unset ⇒ the lookup worker no-ops (queue rows stay pending). Account needs "Permitted NPAC User" for full LRN/portability data |
 | `ANTHROPIC_API_KEY` | server | Claude API key, read automatically by `@anthropic-ai/sdk`. Used ONLY by the carrier-triage cron (`lib/carrier/ai-triage.ts`) to bucket unresolved carrier strings. Unset ⇒ the triage cron no-ops; sends continue under the Unmapped policy |

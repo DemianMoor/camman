@@ -28,9 +28,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { isOverride, standardEventFor } from "@/lib/conversions/standard-model";
 import { toastApiError } from "@/lib/api/toast-error";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import {
+  allowsStatusOnly,
   CONVERSION_STATUSES,
   KEITARO_CONVERSION_TYPES,
   type ConversionMappingStatus,
@@ -41,13 +44,23 @@ import {
 // event type + status. Used by the create form (pre-filled defaults) and the
 // "Conversion mapping" dialog on the Affiliate Networks page.
 
-export type EventTypeOption = { id: number; key: string; label: string };
+export type EventTypeOption = {
+  id: number;
+  key: string;
+  label: string;
+  is_purchase: boolean;
+  counts_revenue: boolean;
+};
 
 export const STATUS_LABELS: Record<ConversionMappingStatus, string> = {
   approved: "Approved",
   pending: "Pending",
   rejected: "Rejected",
 };
+
+// The event-type picker's value for a status-only rule (event_type_id null).
+const KEEP_EXISTING = "keep";
+export const KEEP_EXISTING_LABEL = "(keeps existing type)";
 
 export const NO_RULES_COPY =
   "Every conversion from this network lands unmapped and counts as nothing in sales and revenue until a rule is added.";
@@ -68,8 +81,9 @@ export function RuleSelects({
   /** Omit to show the Keitaro type as fixed text. */
   onKeitaroTypeChange?: (t: KeitaroConversionType) => void;
   availableKeitaroTypes?: readonly KeitaroConversionType[];
-  eventTypeId: number | undefined;
-  onEventTypeChange: (id: number) => void;
+  /** null = status-only ("keeps existing type"), offered for reversal types only. */
+  eventTypeId: number | null | undefined;
+  onEventTypeChange: (id: number | null) => void;
   status: ConversionMappingStatus | undefined;
   onStatusChange: (s: ConversionMappingStatus) => void;
   eventTypes: EventTypeOption[];
@@ -101,14 +115,19 @@ export function RuleSelects({
         →
       </span>
       <Select
-        value={eventTypeId !== undefined ? String(eventTypeId) : ""}
-        onValueChange={(v) => onEventTypeChange(Number(v))}
+        value={
+          eventTypeId === null ? KEEP_EXISTING : eventTypeId !== undefined ? String(eventTypeId) : ""
+        }
+        onValueChange={(v) => onEventTypeChange(v === KEEP_EXISTING ? null : Number(v))}
         disabled={disabled}
       >
         <SelectTrigger size="sm" className="w-full" aria-label="Event type">
           <SelectValue placeholder="Event type" />
         </SelectTrigger>
         <SelectContent>
+          {keitaroType && allowsStatusOnly(keitaroType) ? (
+            <SelectItem value={KEEP_EXISTING}>{KEEP_EXISTING_LABEL}</SelectItem>
+          ) : null}
           {eventTypes.map((et) => (
             <SelectItem key={et.id} value={String(et.id)}>
               {et.label}
@@ -146,7 +165,7 @@ type Rule = {
 
 type Draft = {
   keitaro_type?: KeitaroConversionType;
-  event_type_id?: number;
+  event_type_id?: number | null;
   conversion_status?: ConversionMappingStatus;
 };
 
@@ -281,7 +300,7 @@ function MappingRulesBody({
 
   async function handleAdd() {
     if (!adding) return;
-    if (!adding.keitaro_type || !adding.event_type_id || !adding.conversion_status) {
+    if (!adding.keitaro_type || adding.event_type_id === undefined || !adding.conversion_status) {
       toast.error("Pick a Keitaro type, event type and status");
       return;
     }
@@ -300,7 +319,7 @@ function MappingRulesBody({
 
   function startSave(rule: Rule, draft: Draft) {
     const changed =
-      draft.event_type_id !== (rule.event_type_id ?? undefined) ||
+      draft.event_type_id !== rule.event_type_id ||
       draft.conversion_status !== rule.conversion_status;
     if (!changed) {
       setEditing(null);
@@ -369,10 +388,13 @@ function MappingRulesBody({
                       </span>
                       <span className="truncate">
                         {rule.event_type_label ?? (
-                          <span className="text-muted-foreground">(keeps existing type)</span>
+                          <span className="text-muted-foreground">{KEEP_EXISTING_LABEL}</span>
                         )}
                       </span>
-                      <span className="truncate">{STATUS_LABELS[rule.conversion_status]}</span>
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate">{STATUS_LABELS[rule.conversion_status]}</span>
+                        <OverrideBadge rule={rule} eventTypes={eventTypes} />
+                      </span>
                     </div>
                   )}
                 </div>
@@ -397,7 +419,7 @@ function MappingRulesBody({
                           setEditing({
                             id: rule.id,
                             draft: {
-                              event_type_id: rule.event_type_id ?? undefined,
+                              event_type_id: rule.event_type_id,
                               conversion_status: rule.conversion_status,
                             },
                           })
@@ -504,6 +526,29 @@ function MappingRulesBody({
   );
 }
 
+/** Labels a rule that differs from the standard event model. */
+function OverrideBadge({ rule, eventTypes }: { rule: Rule; eventTypes: EventTypeOption[] }) {
+  const ruleKey =
+    rule.event_type_id === null
+      ? null
+      : (eventTypes.find((e) => e.id === rule.event_type_id)?.key ?? `#${rule.event_type_id}`);
+  if (!isOverride(rule.keitaro_type, ruleKey, rule.conversion_status)) return null;
+  const std = standardEventFor(rule.keitaro_type)!;
+  const stdLabel =
+    std.eventTypeKey === null
+      ? KEEP_EXISTING_LABEL
+      : (eventTypes.find((e) => e.key === std.eventTypeKey)?.label ?? std.eventTypeKey);
+  return (
+    <Badge
+      variant="outline"
+      className="shrink-0 border-sky-300 text-sky-800 dark:border-sky-800 dark:text-sky-200"
+      title={`Differs from the standard model: ${rule.keitaro_type} → ${stdLabel} · ${STATUS_LABELS[std.conversionStatus]}`}
+    >
+      Override
+    </Badge>
+  );
+}
+
 // The 7-day rewrite effect. Ingest re-reads Keitaro's last 7 days on every
 // 5-minute poll: status takes the newest mapping, event type is locked once set
 // (a different one is recorded as a conflict and pages Telegram), and a type
@@ -548,8 +593,11 @@ function ConfirmBody({
 
   const { rule, draft } = confirming;
   const statusChanged = draft.conversion_status !== rule.conversion_status;
-  const typeChanged = draft.event_type_id !== (rule.event_type_id ?? undefined);
-  const newLabel = eventTypes.find((e) => e.id === draft.event_type_id)?.label ?? "the new type";
+  const typeChanged = draft.event_type_id !== rule.event_type_id;
+  const newLabel =
+    draft.event_type_id === null
+      ? null
+      : (eventTypes.find((e) => e.id === draft.event_type_id)?.label ?? "the new type");
   return (
     <>
       {intro}
@@ -561,7 +609,14 @@ function ConfirmBody({
             so sales, revenue and EPC for those days change.
           </li>
         ) : null}
-        {typeChanged ? (
+        {typeChanged && newLabel === null ? (
+          <li>
+            The rule <span className="font-medium">keeps each conversion&apos;s
+            existing event type</span> and only sets its status. A{" "}
+            <span className="font-mono">{type}</span> that arrives before any
+            other event for its transaction id lands unclassified (Telegram alert).
+          </li>
+        ) : typeChanged ? (
           <li>
             They <span className="font-medium">keep their current event type</span>{" "}
             (it is locked once set) and are flagged as event-type conflicts,

@@ -6,12 +6,13 @@ import type { Executor } from "@/lib/conversions/ingest";
 // True when every id is an ACTIVE event type of this org. event_types.id is a
 // global serial and the FK has no org_id, so an id from another org would pass
 // the FK — this is the check that keeps a rule inside its tenant (CLAUDE.md §3).
+// A null id (a status-only rule) names no event type, so there is nothing to check.
 export async function eventTypesBelongToOrg(
   ex: Executor,
   orgId: string,
-  ids: readonly number[],
+  ids: readonly (number | null)[],
 ): Promise<boolean> {
-  const unique = [...new Set(ids)];
+  const unique = [...new Set(ids.filter((id): id is number => id !== null))];
   if (unique.length === 0) return true;
   const found = await ex
     .select({ id: event_types.id })

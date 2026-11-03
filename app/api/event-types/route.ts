@@ -8,8 +8,8 @@ import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
 
 // The org's active event types, for the conversion-mapping pickers on the
-// Affiliate Networks page. Gated on networks.view because that page is its
-// only consumer.
+// Affiliate Networks page (and the Postback URLs panel's simulated test). Gated
+// on networks.view because that page is its only consumer.
 export async function GET() {
   const auth = await requireApiMembership({
     route: "event-types",
@@ -23,7 +23,14 @@ export async function GET() {
   }
 
   const rows = await db
-    .select({ id: event_types.id, key: event_types.key, label: event_types.label })
+    .select({
+      id: event_types.id,
+      key: event_types.key,
+      label: event_types.label,
+      // Read by the Postback URLs panel's simulated test.
+      is_purchase: event_types.is_purchase,
+      counts_revenue: event_types.counts_revenue,
+    })
     .from(event_types)
     .where(and(eq(event_types.org_id, orgId), eq(event_types.status, "active")))
     .orderBy(asc(event_types.display_order), asc(event_types.id));

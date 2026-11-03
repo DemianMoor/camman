@@ -7,7 +7,11 @@ import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { eventTypesBelongToOrg } from "@/lib/conversions/network-mappings";
 import { can } from "@/lib/permissions";
-import { mappingRuleUpdateSchema } from "@/lib/validators/conversion-mappings";
+import {
+  allowsStatusOnly,
+  mappingRuleUpdateSchema,
+  STATUS_ONLY_NOT_ALLOWED,
+} from "@/lib/validators/conversion-mappings";
 
 function parseId(idParam: string) {
   const n = Number(idParam);
@@ -50,6 +54,33 @@ export async function PATCH(
       parsed.error.issues[0]?.message ?? "Invalid input",
       API_ERROR_CODES.VALIDATION,
     );
+  }
+
+  // The update body carries no keitaro_type, so a status-only edit (null
+  // event type) is checked against the stored rule's type.
+  if (parsed.data.event_type_id === null) {
+    const [rule] = await db
+      .select({ keitaro_type: conversion_event_mappings.keitaro_type })
+      .from(conversion_event_mappings)
+      .where(
+        and(
+          eq(conversion_event_mappings.id, ruleId),
+          eq(conversion_event_mappings.org_id, orgId),
+          eq(conversion_event_mappings.affiliate_network_id, networkId),
+          eq(conversion_event_mappings.status, "active"),
+        ),
+      )
+      .limit(1);
+    if (!rule) {
+      return apiError(404, "Rule not found", API_ERROR_CODES.NOT_FOUND, {
+        entity: "conversion_mapping",
+      });
+    }
+    if (!allowsStatusOnly(rule.keitaro_type)) {
+      return apiError(400, STATUS_ONLY_NOT_ALLOWED, API_ERROR_CODES.VALIDATION, {
+        field: "event_type_id",
+      });
+    }
   }
 
   if (

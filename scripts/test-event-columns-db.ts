@@ -66,11 +66,11 @@ async function main() {
 
       const base = await loadEventTypes(tx, orgId);
       check("L1 the seeded registry loads for one org", base.length >= 2, base.map((t) => t.key).join(","));
-      // `upsell` (counts_revenue, NOT is_purchase, display_order 30) is in the
-      // middle class, so it sorts between the signal and the purchase.
+      // `lead` (25) and `upsell` (30) — counts_revenue, NOT is_purchase — are in
+      // the middle class, so they sort between the signal and the purchase.
       check(
-        "L2 ⭐ signals sort first, against the seeded display_order (10 vs 20); upsell is neither",
-        base.map((t) => t.key).join(",") === "registration,upsell,purchase",
+        "L2 ⭐ signals sort first, against the seeded display_order (10 vs 20); lead and upsell are neither",
+        base.map((t) => t.key).join(",") === "registration,lead,upsell,purchase",
         base.map((t) => `${t.key}:${t.display_order}`).join(","),
       );
       check("L3 the purchase type carries is_purchase AND counts_revenue", !!base.find((t) => t.key === "purchase" && t.is_purchase && t.counts_revenue));
@@ -90,6 +90,12 @@ async function main() {
       // expects exactly {purchase, upsell}. A THIRD revenue type — or losing one of
       // these — still turns it red, and that is the moment to revisit tier "b".
       //
+      // OWNER DECISION 2026-11-03 (standard conversion model): `lead` is the third
+      // revenue type — "not a sale, not the Registered lane, counts revenue when
+      // payout > 0, shown in its own Leads / Lead revenue column". Revenue is now
+      // Purchase + Upsell + Lead; Lead revenue is its own per-type column behind
+      // the Event-breakdown toggle, like the other two. R1 expects all three.
+      //
       // Cross-org (`orgId = null`) so a second org configuring one also trips it.
       // Scope limit, stated rather than assumed: this reads the PREVIEW database,
       // not production — the two registries come from the same 0181 seed and the
@@ -101,9 +107,9 @@ async function main() {
         .map((t) => `${t.key}${t.archived ? " (archived)" : ""}`)
         .sort();
       check(
-        "R1 ⭐ the counts_revenue types are exactly purchase + upsell — the set tier \"b\" was signed off for",
-        revenueKeys.join(",") === "purchase,upsell",
-        `counts_revenue types: ${revenueKeys.join(", ")} — RECONSIDER the hard-coded tier "b" on evt:<key>:revenue / :pending_revenue / :epc in buildEventColumns() (lib/reporting/event-columns.ts): these per-type columns are the ONLY decomposition of a Revenue/EPC aggregate that has no per-type filter, and the owner signed off on keeping them behind the Event-breakdown toggle for purchase + upsell only`,
+        "R1 ⭐ the counts_revenue types are exactly lead + purchase + upsell — the set tier \"b\" was signed off for",
+        revenueKeys.join(",") === "lead,purchase,upsell",
+        `counts_revenue types: ${revenueKeys.join(", ")} — RECONSIDER the hard-coded tier "b" on evt:<key>:revenue / :pending_revenue / :epc in buildEventColumns() (lib/reporting/event-columns.ts): these per-type columns are the ONLY decomposition of a Revenue/EPC aggregate that has no per-type filter, and the owner signed off on keeping them behind the Event-breakdown toggle for lead + purchase + upsell only`,
       );
 
       await tx.execute(sql`
@@ -118,7 +124,7 @@ async function main() {
       );
       check(
         "L7 ordering with a second purchase type is signals, then purchases by display_order",
-        three.map((t) => t.key).join(",") === "registration,upsell,purchase,deposit",
+        three.map((t) => t.key).join(",") === "registration,lead,upsell,purchase,deposit",
         three.map((t) => t.key).join(","),
       );
 

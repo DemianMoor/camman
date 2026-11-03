@@ -13,7 +13,7 @@
 //   6. PATCH edits status/event type; keitaro_type is ignored (not editable)
 //   7. another org's rule / wrong network in the path → 404
 //   8. archive → gone from GET, count drops, archiving again → 404
-//   9. OPERATOR: GETs 200, every write 403
+//   9. OPERATOR: GETs 200, every write 403, postback-urls 403
 //
 //   NEXT_PUBLIC_SUPABASE_ANON_KEY=<preview anon key> \
 //   BASE_URL=https://camman-<hash>-demian-moors-projects.vercel.app \
@@ -189,6 +189,21 @@ async function main() {
     check("6. empty PATCH → 400", emptyPatch.status === 400);
     const statusOnly = await call("PATCH", `/api/networks/${netId}/mappings/${lead.id}`, { event_type_id: null });
     check("6. PATCH event_type_id null (status-only) → 400", statusOnly.status === 400, String(statusOnly.status));
+    // A reversal rule MAY be status-only (owner decision 2026-11-03, standard model).
+    const rejRule = stored.find((s) => s.keitaro_type === "rejected")!;
+    const rejStatusOnly = await call("PATCH", `/api/networks/${netId}/mappings/${rejRule.id}`, { event_type_id: null });
+    check("6b. PATCH rejected rule to status-only → 200, event_type_id null", rejStatusOnly.status === 200 && rejStatusOnly.body?.event_type_id === null, JSON.stringify(rejStatusOnly.body));
+    const trashStatusOnly = await call("POST", `/api/networks/${bare.body?.id}/mappings`, { keitaro_type: "trash", event_type_id: null, conversion_status: "rejected" });
+    check("6b. add a status-only trash rule → 201", trashStatusOnly.status === 201 && trashStatusOnly.body?.event_type_id === null, JSON.stringify(trashStatusOnly.body));
+    const saleStatusOnly = await call("POST", `/api/networks/${bare.body?.id}/mappings`, { keitaro_type: "sale", event_type_id: null, conversion_status: "approved" });
+    check("6b. add a status-only sale rule → 400", saleStatusOnly.status === 400, String(saleStatusOnly.status));
+
+    const pb = await call("GET", `/api/networks/${netId}/postback-urls`);
+    check(
+      "6c. owner GET postback-urls → 200 (configured, or an explicit not-configured reason)",
+      pb.status === 200 && (pb.body?.configured === true ? pb.body.urls.length === 5 && typeof pb.body.spec === "string" : typeof pb.body?.reason === "string"),
+      JSON.stringify(pb.body).slice(0, 200),
+    );
 
     const crossOrg = await call("PATCH", `/api/networks/${netB}/mappings/${ruleB}`, { conversion_status: "rejected" });
     const crossOrgArchive = await call("POST", `/api/networks/${netB}/mappings/${ruleB}/archive`);
@@ -226,6 +241,8 @@ async function main() {
       await call("POST", "/api/networks", { name: "Op", network_id: "op", mappings: defaults }),
     ];
     check("9. operator writes → 403", opWrites.every((r) => r.status === 403), opWrites.map((r) => r.status).join(","));
+    const opPostbacks = await call("GET", `/api/networks/${netId}/postback-urls`);
+    check("9. operator GET postback-urls → 403 (manager+ only)", opPostbacks.status === 403, String(opPostbacks.status));
   } finally {
     for (const u of createdUsers) {
       if (u.orgId) {

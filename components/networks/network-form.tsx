@@ -34,16 +34,20 @@ const formSchema = networkCreateWithMappingsSchema;
 export type NetworkFormValues = z.infer<typeof formSchema>;
 type MappingRow = NonNullable<NetworkFormValues["mappings"]>[number];
 
-// The defaults, resolved to this org's event type ids. A default whose event
+// The defaults (the standard event model), resolved to this org's event type
+// ids. A null key is a status-only rule and needs no id. A default whose event
 // type the org doesn't have is left out rather than guessed.
 function defaultMappings(eventTypes: EventTypeOption[]): MappingRow[] {
   const rows: MappingRow[] = [];
   for (const d of DEFAULT_NETWORK_MAPPINGS) {
-    const et = eventTypes.find((e) => e.key === d.event_type_key);
-    if (et) {
+    const id =
+      d.event_type_key === null
+        ? null
+        : eventTypes.find((e) => e.key === d.event_type_key)?.id;
+    if (id !== undefined) {
       rows.push({
         keitaro_type: d.keitaro_type,
-        event_type_id: et.id,
+        event_type_id: id,
         conversion_status: d.conversion_status,
       });
     }
@@ -199,8 +203,8 @@ export function NetworkForm({
               <p className="text-sm font-medium">Conversion mapping</p>
               <p className="text-xs text-muted-foreground">
                 How each Keitaro conversion type from this network is counted.
-                The defaults fit most networks — change them only if this
-                network differs.
+                The defaults are the standard event model — change one only if
+                this network differs (it is then labelled an override).
               </p>
             </div>
             {mappings.fields.length === 0 ? (

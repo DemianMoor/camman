@@ -1,6 +1,11 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+
+
+## ⭐ A reversal postback reuses the ORIGINAL event's tid; every new event gets a new one (2026-11-03)
+
+The standard conversion model ([docs/04-features/conversion-events.md](04-features/conversion-events.md#the-standard-event-model-2026-11-03)) gives each event its own transaction id, so a registration, a sale and a deposit on one click are three ledger rows. A **reversal is the exception**: Keitaro only updates a conversion in place when the postback carries that conversion's tid. A `rejected` on a fresh tid is a separate $0 row — the sale it meant to reverse keeps its revenue. The reversal rule is therefore **status-only** ("keeps existing type"), so reversing an Upsell or a Purchase alike only moves the status and never raises an event-type conflict. Payout is per event, never a running total. The advertiser spec generated in the Postback URLs panel states all of this; don't hand-write a different one.
 
 ## ⭐ A migration number is reserved by rebasing on origin/main the moment the file is created (2026-10-23)
 

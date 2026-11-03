@@ -71,6 +71,7 @@ import {
 import { T1_TEMPLATE } from "@/lib/messages/format";
 import { renderWorstCase, type MessageShape } from "@/lib/messages/render";
 import { messageFormatsUiEnabled, stageFormatPayload } from "@/lib/messages/ui-flag";
+import { previewLandingUrl, stageUrlGeoParamsUiEnabled } from "@/lib/links/geo-params";
 import { SKIP_WARN_PCT, tagSkipShare } from "@/lib/messages/skip-share";
 import { CREATIVE_LOCKED_TEXT } from "@/lib/stages/lock-copy";
 import {
@@ -122,6 +123,9 @@ export interface StageFormValues {
   // tracking ID on save. Set false the moment the operator hand-edits the
   // field; flipped back on by "Reset to generated".
   full_url_auto: boolean;
+  // 0229: append the recipient's zip / st at redirect time (never minted).
+  url_add_zip: boolean;
+  url_add_state: boolean;
   stop_text: string;
   // 0216: the message shape. message_format_id null on a NEW stage = the org
   // default (the server trigger stamps it). custom_text (stages.custom_message) wins
@@ -377,6 +381,10 @@ export function buildStageCreateBody(
     full_url: values.full_url.trim() || undefined,
     utm_tag_ids: values.utm_tag_ids,
     full_url_auto: values.full_url_auto,
+    // 0229. Flag OFF (default) ⇒ not sent: the stage keeps its stored flags.
+    ...(stageUrlGeoParamsUiEnabled()
+      ? { url_add_zip: values.url_add_zip, url_add_state: values.url_add_state }
+      : {}),
     ...(opts.includeStopText === false ? {} : { stop_text: values.stop_text }),
     // 0216: custom text (owner) or a chosen format; neither ⇒ the server keeps
     // what is stored (edit) or stamps the org default (create).
@@ -407,6 +415,8 @@ const DEFAULT_VALUES: StageFormValues = {
   full_url: "",
   utm_tag_ids: [],
   full_url_auto: true,
+  url_add_zip: false,
+  url_add_state: false,
   stop_text: "Stop to END",
   message_format_id: null,
   custom_text: null,
@@ -666,6 +676,8 @@ export function StageForm({
 
   const watchedFullUrl = form.watch("full_url");
   const watchedFullUrlAuto = form.watch("full_url_auto");
+  const watchedUrlAddZip = form.watch("url_add_zip");
+  const watchedUrlAddState = form.watch("url_add_state");
   const watchedScheduledAt = form.watch("scheduled_at");
 
   // Backfill the selected creative if the offer-scoped list doesn't include it
@@ -1800,6 +1812,65 @@ export function StageForm({
                       disabled={isSubmitting}
                     />
                   </div>
+                  {/* 0229: zip / st are appended by the /r/ redirect, after
+                      sub_id1 — never minted, so the SMS length, the shape
+                      check and the landing-page report are unaffected. Manual
+                      stages never pass through /r/, so the boxes do nothing
+                      there and are disabled. Locks with the message format. */}
+                  {stageUrlGeoParamsUiEnabled() ? (
+                    <div className="grid gap-1">
+                      <div className="flex flex-wrap items-center gap-4 text-sm">
+                        {(
+                          [
+                            ["url_add_zip", "Add ZIP to URL", watchedUrlAddZip],
+                            ["url_add_state", "Add State to URL", watchedUrlAddState],
+                          ] as const
+                        ).map(([name, label, checked]) => (
+                          <label
+                            key={name}
+                            className={cn(
+                              "inline-flex items-center gap-2",
+                              (!isTracked || formatLocked || isSubmitting) &&
+                                "cursor-not-allowed opacity-60",
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              className="size-4"
+                              checked={checked}
+                              disabled={!isTracked || formatLocked || isSubmitting}
+                              onChange={(e) =>
+                                form.setValue(name, e.target.checked, { shouldDirty: true })
+                              }
+                            />
+                            {label}
+                          </label>
+                        ))}
+                      </div>
+                      {!isTracked ? (
+                        <p className="text-muted-foreground text-xs">
+                          Only for tracked links — this campaign sends a pasted short URL, which never passes through the redirect.
+                        </p>
+                      ) : formatLocked ? (
+                        <p className="text-muted-foreground text-xs">
+                          Locked — this stage has already sent. Create a new stage to change it.
+                        </p>
+                      ) : null}
+                      {isTracked && (watchedUrlAddZip || watchedUrlAddState) ? (
+                        <p className="text-muted-foreground break-all font-mono text-xs">
+                          Recipient lands on{" "}
+                          <span className="text-foreground">
+                            {previewLandingUrl(
+                              (watchedFullUrl ?? "").trim() ||
+                                (landingPreview?.ok ? landingPreview.url : ""),
+                              { zip: watchedUrlAddZip, state: watchedUrlAddState },
+                            ) || "— set a destination first"}
+                          </span>{" "}
+                          (sample 75201 / TX; a missing or invalid value is left off for that recipient).
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {/* ⚠️ THE TWO STATES BEHAVE DIFFERENTLY AT MINT TIME, and the
                       operator has to be told which one they are in. An UNEDITED
                       landing-page stage stores only the page id and the URL is

@@ -373,6 +373,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "read-only: the .unsafe( call is the ground-truth SELECT",
   },
   {
+    file: "verify-stage-url-geo-identical.ts",
+    why: "read-only prod proof (0229): the .unsafe( call runs lookupGeoParams's compiled SELECT inside withReadOnlyDb's BEGIN READ ONLY transaction",
+  },
+  {
     file: "verify-lp-report-grains.ts",
     why: "read-only: the .unsafe( call runs rendered SELECTs inside withReadOnlyDb's BEGIN READ ONLY transaction",
   },

@@ -129,6 +129,8 @@ export async function GET(
       sales_page_label: campaign_stages.sales_page_label,
       short_url: campaign_stages.short_url,
       full_url: campaign_stages.full_url,
+      url_add_zip: campaign_stages.url_add_zip,
+      url_add_state: campaign_stages.url_add_state,
       landing_page_id: campaign_stages.landing_page_id,
       utm_tag_ids: campaign_stages.utm_tag_ids,
       stop_text: campaign_stages.stop_text,
@@ -404,6 +406,8 @@ export async function PATCH(
       // drip-creative locks below.
       message_format_id: campaign_stages.message_format_id,
       custom_text: campaign_stages.custom_text,
+      url_add_zip: campaign_stages.url_add_zip,
+      url_add_state: campaign_stages.url_add_state,
       campaign_type: campaigns.type,
       // P4: a REGULAR stage's format locks once materialized (spec R4).
       materialized_at: campaign_stages.materialized_at,
@@ -450,11 +454,18 @@ export async function PATCH(
   const wantsShape = input.message_format_id != null || input.custom_text != null;
   const creativeChanging =
     input.creative_id !== undefined && input.creative_id !== current.creative_id;
+  // 0229: the zip / st URL flags lock exactly like the format (an echo of the
+  // stored value is never refused).
+  const urlParamsChanging =
+    (input.url_add_zip !== undefined && input.url_add_zip !== current.url_add_zip) ||
+    (input.url_add_state !== undefined && input.url_add_state !== current.url_add_state);
   const isDrip = current.campaign_type === "drip";
   // Only a drip stage's locks read sent rows (format + creative); a regular
   // stage's format lock reads materialized_at (spec R4, P4).
   const hasSent =
-    isDrip && (wantsShape || creativeChanging) ? await stageHasSent(db, sid) : false;
+    isDrip && (wantsShape || creativeChanging || urlParamsChanging)
+      ? await stageHasSent(db, sid)
+      : false;
   const formatLocked = stageFormatLocked({
     isDrip,
     materialized: current.materialized_at != null,
@@ -491,6 +502,16 @@ export async function PATCH(
       reason: creativeLock.reason,
       field: "creative_id",
     });
+  }
+  if (urlParamsChanging && formatLocked) {
+    return apiError(
+      409,
+      isDrip
+        ? "ZIP / State URL params are locked once this drip stage has sent — create a new stage instead"
+        : "ZIP / State URL params are locked once this stage's sends are materialized",
+      API_ERROR_CODES.CONFLICT,
+      { reason: "url_params_locked_after_send", field: "url_add_zip" },
+    );
   }
 
   // A stage may only be ARMED as a behavioural follow-up child at a tier that

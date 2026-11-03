@@ -237,6 +237,9 @@ export async function POST(
             sales_page_label: s.sales_page_label,
             short_url: s.short_url,
             full_url: s.full_url,
+            // 0229: a copy keeps the source's zip / st URL flags (owner ruling 11-03).
+            url_add_zip: s.url_add_zip,
+            url_add_state: s.url_add_state,
             stop_text: s.stop_text,
             ...formats[i],
             include_clickers: s.include_clickers,

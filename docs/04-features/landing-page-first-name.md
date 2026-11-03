@@ -33,7 +33,7 @@ Lets a brand landing page greet the recipient by first name **without the name e
 **Timing / edge cases.**
 - Every failure runs the same query (a malformed token is swapped for an id that matches nothing), so hit and miss take similar time; rate-limited calls answer without a query.
 - Server-side budget 1 s, then `null`. The page script should still treat a network error / non-200 / non-JSON as "no name" and render the nameless version.
-- Rate limit: 20 requests in a burst per IP, refilling 1 every 3 s, **per server instance** (in-memory; owner ruling — the token's randomness is the real defence).
+- Rate limit: 100 requests in a burst per IP, refilling 1 per second, **per server instance** (in-memory). Generous because mobile carriers share one IP across many users; the token's randomness is the real defence.
 - The window is 14 days from `stage_sends.sent_at`. Manual-mode stages (pasted short URL) have no `sub_id1`, so never return a name.
 - The name is not logged server-side. The page must mask it for session recorders (Clarity) — the brand-site script does this.
 

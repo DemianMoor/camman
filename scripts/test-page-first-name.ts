@@ -126,17 +126,24 @@ async function route() {
   const o = OPTIONS(req("", "https://lumzen.co"));
   bar("R8 OPTIONS ⇒ 204 with CORS for an allowed origin", o.status === 204 && o.headers.get("access-control-allow-origin") === "https://lumzen.co");
 
-  // Rate limit: the 21st request in a burst from one IP gets the same answer,
-  // and never reaches the DB (proved by timing: a limited call does no query).
+  // Rate limit (100 burst, 1/s refill): a burst from one IP is answered by the
+  // DB until the bucket is empty, then with the same body and no query. The
+  // refill during the burst means "empty" lands a little after request 100.
   const ip = "203.0.113.99";
   const bodies = new Set<string>();
-  for (let i = 0; i < 20; i++) bodies.add(await (await GET(req(randomUUID(), undefined, ip))).text());
-  const t0 = performance.now();
-  const limited = await GET(req(randomUUID(), undefined, ip));
-  const limitedMs = performance.now() - t0;
-  bodies.add(await limited.text());
-  bar("R9 over the limit ⇒ same 200 + null body", limited.status === 200 && bodies.size === 1, [...bodies].join(" | "));
-  bar("R10 over the limit ⇒ no DB round trip", limitedMs < 5, `${limitedMs.toFixed(2)}ms`);
+  let firstFast = -1;
+  let fastMs = 0;
+  let earlyFast = 0;
+  for (let i = 0; i < 400 && firstFast < 0; i++) {
+    const t0 = performance.now();
+    const res = await GET(req(randomUUID(), undefined, ip));
+    const ms = performance.now() - t0;
+    bodies.add(await res.text());
+    if (ms < 2 && i < 100) earlyFast++;
+    if (ms < 2 && i >= 100) { firstFast = i + 1; fastMs = ms; }
+  }
+  bar("R9 the first 100 in a burst are all answered by the DB (none refused early)", earlyFast === 0 && firstFast > 100, `${earlyFast} fast in the first 100; first refusal at #${firstFast}`);
+  bar("R10 over the limit ⇒ same 200 + null body, no DB round trip", bodies.size === 1 && fastMs < 2, `${[...bodies].join(" | ")} ${fastMs.toFixed(2)}ms`);
   const other = await GET(req(randomUUID(), undefined, "203.0.113.100"));
   bar("R11 another IP is unaffected (still queried)", other.status === 200);
 }

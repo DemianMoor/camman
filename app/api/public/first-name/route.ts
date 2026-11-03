@@ -17,10 +17,11 @@ import {
 // on a redirect or a send.
 export const dynamic = "force-dynamic";
 
-// Per-IP, per-instance (owner ruling 11-03, option a): a page asks once per
-// view, so 20 in a burst refilling 1 every 3 s leaves real visitors untouched.
-const RATE_CAPACITY = 20;
-const RATE_REFILL_PER_SECOND = 1 / 3;
+// Per-IP, per-instance (owner rulings 11-03): 100 in a burst, refilling 1 per
+// second. Generous on purpose: mobile carriers put many users behind one IP, and
+// the token's randomness, not this limit, is the real protection.
+const RATE_CAPACITY = 100;
+const RATE_REFILL_PER_SECOND = 1;
 
 function clientIp(req: NextRequest): string {
   const h = req.headers;

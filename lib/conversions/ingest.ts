@@ -221,9 +221,12 @@ const EVENT_TYPE_CONFLICT_AT = sql`CASE
 
 // Idempotent upsert keyed on Keitaro's event_id.
 //   - occurred_at is never updated (the original conversion time).
-//   - event_type_id is LOCKED once set, and attribution is sticky:
-//     COALESCE(existing, new), so a status-only mapping (NULL event type) can't
-//     erase the type, and a later mapping/offer link fills a NULL.
+//   - event_type_id is LOCKED once set, and stage_send/contact/campaign/stage
+//     attribution is sticky: COALESCE(existing, new), so a status-only mapping
+//     (NULL event type) can't erase the type, and a later link fills a NULL.
+//   - offer_id is the exception: COALESCE(new, existing). The offer follows the
+//     current Keitaro-offer mapping, so a re-ingest moves it; a NULL never erases
+//     one. The no-op comparison uses the same form, so an offer-only change writes.
 //   - a mapping that disagrees with the locked type is recorded in
 //     conflicting_event_type_id / event_type_conflict_at (see above).
 //   - status, revenue, version and the raw keitaro_status/keitaro_type take the
@@ -295,7 +298,9 @@ export async function upsertConversionEvents(
           contact_id: sql`COALESCE(conversion_events.contact_id, excluded.contact_id)`,
           campaign_id: sql`COALESCE(conversion_events.campaign_id, excluded.campaign_id)`,
           stage_id: sql`COALESCE(conversion_events.stage_id, excluded.stage_id)`,
-          offer_id: sql`COALESCE(conversion_events.offer_id, excluded.offer_id)`,
+          // Not sticky: the Keitaro-offer mapping can change, so the newly resolved offer wins.
+          // A NULL never erases one (no mapping and no campaign offer keeps the old value).
+          offer_id: sql`COALESCE(excluded.offer_id, conversion_events.offer_id)`,
           event_type_id: sql`COALESCE(conversion_events.event_type_id, excluded.event_type_id)`,
           conflicting_event_type_id: CONFLICTING_EVENT_TYPE,
           event_type_conflict_at: EVENT_TYPE_CONFLICT_AT,
@@ -320,7 +325,7 @@ export async function upsertConversionEvents(
           excluded.revenue,
           COALESCE(conversion_events.event_type_id, excluded.event_type_id),
           ${CONFLICTING_EVENT_TYPE},
-          COALESCE(conversion_events.offer_id, excluded.offer_id),
+          COALESCE(excluded.offer_id, conversion_events.offer_id),
           COALESCE(conversion_events.stage_id, excluded.stage_id),
           excluded.last_postback_at,
           COALESCE(conversion_events.stage_send_id, excluded.stage_send_id),

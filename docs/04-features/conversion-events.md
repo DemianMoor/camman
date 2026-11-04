@@ -202,17 +202,17 @@ A stage's link can point at a Keitaro offer that is not the campaign's offer. Th
 **Backfill for rows outside the live window** — [scripts/backfill-conversion-offer-attribution.ts](../../scripts/backfill-conversion-offer-attribution.ts):
 
 ```bash
-npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts [--org <uuid>] [--links "1:62,11:76"]           # dry run
-npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts [--org <uuid>] [--links "1:62,11:76"] --apply   # commit
+npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts [--org <uuid> [--links "1:62,11:76"]]           # dry run
+npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts [--org <uuid> [--links "1:62,11:76"]] --apply   # commit
 ```
 
 - Same rule as ingest, in SQL. Rows with no campaign keep their offer. Moves go both ways.
-- `--links "<keitaro offer id>:<offer id>,…"` sets `offers.keitaro_offer_id` first, only where it is NULL. A pair that updates 0 rows fails.
-- Everything runs in **one transaction** (`SET LOCAL lock_timeout = '5s'`, `statement_timeout = '120s'`): link, compute the moves, capture targeting, one `UPDATE conversion_events SET offer_id, updated_at = now()` (the bump makes the stage-day projection re-project those stages), capture again, assert. It is rolled back unless `--apply`; with `--apply` it commits only if every assertion passed. The dry run is the same code path as the apply.
+- `--links "<keitaro offer id>:<offer id>,…"` sets `offers.keitaro_offer_id` first, only where it is NULL and only in `--org` (required with `--links`). A pair that updates 0 rows fails, and so does a Keitaro id any offer (any org) already carries — linking it would make the id shared, and ingest ignores shared ids.
+- Everything runs in **one REPEATABLE READ transaction** (one snapshot, so a conversion ingested mid-run cannot make a before/after pair differ; a concurrent write to a row being moved aborts with a serialization error → rolled back, exit 1, re-run; `SET LOCAL lock_timeout = '5s'`, `statement_timeout = '120s'`): link, compute the moves, capture targeting, one `UPDATE conversion_events SET offer_id, updated_at = now()` (the bump makes the stage-day projection re-project those stages), capture again, assert. It is rolled back unless `--apply`; with `--apply` it commits only if every assertion passed. The dry run is the same code path as the apply.
 - Prints the moves grouped by (from offer → to offer, Keitaro offer id) with rows, sales and approved revenue, a per-offer before → after table, and, per affected offer and per active `made_purchase_for_offer` segment rule, the contact set before / after.
 - Exits 1 if a link fails, if the UPDATE count differs from the computed count, if any targeting set changes (size or hash), or if any campaign's rows / sales / approved revenue change.
 - **Production: attended only, after the owner's explicit go** (CLAUDE.md §14). It is excluded from the preview-DB guard for that reason (`scripts/test-preview-db-guard.ts`).
-- Test: `scripts/test-offer-attribution-backfill-db.ts` (camman-v2, rolled back): 1 row A→B, shared Keitaro id and campaign-less rows untouched, apply moves 1 then a dry run reports 0, unlink moves it back, `--links` works and a 0-row pair fails, the CLI exits 1 on a bad link.
+- Test: `scripts/test-offer-attribution-backfill-db.ts` (camman-v2, rolled back): 1 row A→B, shared Keitaro id and campaign-less rows untouched, apply moves 1 then a dry run reports 0, unlink moves it back, `--links` works and is refused without `--org`, for a 0-row pair and for an already-carried id; the core refuses READ COMMITTED; the CLI exits 1 on a bad link.
 
 ## Live ingest and alerts (Phase 2)
 

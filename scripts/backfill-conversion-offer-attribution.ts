@@ -14,10 +14,11 @@ import "./_env-preload";
 //   npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts [--org <uuid>] [--links "1:62,11:76"] [--apply]
 //
 // (--conditions=react-server: lib/segment-rules-eval imports "server-only".)
-// --links "<keitaro offer id>:<offer id>,…" links offers first
+// --links "<keitaro offer id>:<offer id>,…" (requires --org) links offers first,
+// refusing a Keitaro id any offer already carries
 // (UPDATE offers SET keitaro_offer_id = k WHERE id = offer AND keitaro_offer_id IS NULL).
 //
-// EVERYTHING runs in ONE transaction (SET LOCAL lock_timeout 5s, statement_timeout
+// EVERYTHING runs in ONE REPEATABLE READ transaction (one snapshot; SET LOCAL lock_timeout 5s, statement_timeout
 // 120s): link, compute the moves, capture targeting, move, re-capture, assert.
 // It is ROLLED BACK unless --apply, and with --apply COMMITTED only if every
 // assertion passed — so the dry run is the exact code path --apply runs.
@@ -71,6 +72,7 @@ export interface BackfillResult {
   targeting: TargetingCheck[];
   campaignsCompared: number;
   campaignTotalsIdentical: boolean;
+  isolation: string;
 }
 
 const MOVES = sql.raw("pg_temp.offer_backfill_moves");
@@ -80,7 +82,7 @@ export async function runOfferBackfill(ex: Tx, opts: BackfillOptions): Promise<B
   const rows = async <T>(q: SQL) => (await ex.execute(q)) as unknown as T[];
   const res: BackfillResult = {
     ok: false, failures: [], linked: 0, moveCount: 0, updated: 0, groups: [],
-    targeting: [], campaignsCompared: 0, campaignTotalsIdentical: false,
+    targeting: [], campaignsCompared: 0, campaignTotalsIdentical: false, isolation: "",
   };
   const orgFilter = (alias: string) =>
     opts.orgId ? sql`AND ${sql.raw(alias)}.org_id = ${opts.orgId}::uuid` : sql``;
@@ -88,16 +90,39 @@ export async function runOfferBackfill(ex: Tx, opts: BackfillOptions): Promise<B
   await ex.execute(sql`SET LOCAL lock_timeout = '5s'`);
   await ex.execute(sql`SET LOCAL statement_timeout = '120s'`);
 
+  // Every read must share ONE snapshot, or a conversion ingested mid-run (the
+  // */5 poll) changes a before/after pair and fails the run for nothing. Under
+  // REPEATABLE READ a concurrent write to a row we move surfaces as a
+  // serialization error (40001) instead, which rolls everything back.
+  res.isolation = (await rows<{ i: string }>(sql`SELECT current_setting('transaction_isolation') AS i`))[0].i;
+  if (res.isolation !== "repeatable read" && res.isolation !== "serializable") {
+    res.failures.push(`transaction isolation is ${res.isolation}; the backfill needs repeatable read`);
+    return res;
+  }
+
   // ── 1. links ──────────────────────────────────────────────────────────────
+  // Links are org-scoped: an offer id alone could name another org's offer.
+  if (opts.links.length > 0 && !opts.orgId) {
+    res.failures.push("--links requires --org");
+    return res;
+  }
   for (const l of opts.links) {
+    // A Keitaro id already carried by ANY offer (any org) would become shared,
+    // and ingest drops shared ids — the rows would silently stay on campaign offers.
+    const carriers = await rows<{ id: number }>(sql`
+      SELECT id FROM offers WHERE keitaro_offer_id = ${l.keitaroOfferId}`);
+    if (carriers.length > 0) {
+      res.failures.push(`link ${l.keitaroOfferId}:${l.offerId}: Keitaro offer ${l.keitaroOfferId} is already carried by offer(s) ${carriers.map((c) => c.id).join(", ")}`);
+      return res;
+    }
     const n = (
       await rows<{ id: number }>(sql`
         UPDATE offers o SET keitaro_offer_id = ${l.keitaroOfferId}
-        WHERE o.id = ${l.offerId} AND o.keitaro_offer_id IS NULL ${orgFilter("o")}
+        WHERE o.id = ${l.offerId} AND o.org_id = ${opts.orgId}::uuid AND o.keitaro_offer_id IS NULL
         RETURNING o.id`)
     ).length;
     if (n !== 1) {
-      res.failures.push(`link ${l.keitaroOfferId}:${l.offerId} updated ${n} rows (offer missing, out of --org scope, or already linked)`);
+      res.failures.push(`link ${l.keitaroOfferId}:${l.offerId} updated ${n} rows (offer missing, not in --org, or already linked)`);
       return res;
     }
     res.linked++;
@@ -120,7 +145,7 @@ export async function runOfferBackfill(ex: Tx, opts: BackfillOptions): Promise<B
     SELECT ce.id, ce.org_id, ce.keitaro_offer_id, ce.offer_id AS from_offer,
            CASE WHEN km.org_id = ce.org_id THEN km.offer_id ELSE ca.offer_id END AS to_offer
     FROM conversion_events ce
-    JOIN campaigns ca ON ca.id = ce.campaign_id
+    JOIN campaigns ca ON ca.id = ce.campaign_id AND ca.org_id = ce.org_id
     LEFT JOIN kmap km ON km.keitaro_offer_id = ce.keitaro_offer_id
     WHERE true ${orgFilter("ce")}`);
   await ex.execute(sql`DELETE FROM ${MOVES} WHERE to_offer IS NOT DISTINCT FROM from_offer`);
@@ -131,7 +156,7 @@ export async function runOfferBackfill(ex: Tx, opts: BackfillOptions): Promise<B
              count(*)::int AS rows,
              count(*) FILTER (WHERE ${purchasedClause("ce")})::int AS sales,
              coalesce(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")}), 0)::text AS revenue
-      FROM ${MOVES} m JOIN conversion_events ce ON ce.id = m.id
+      FROM ${MOVES} m JOIN conversion_events ce ON ce.id = m.id AND ce.org_id = m.org_id
       GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4`)
   ).map((r) => ({
     orgId: r.org_id, fromOffer: r.from_offer, toOffer: r.to_offer, keitaroOfferId: r.keitaro_offer_id,
@@ -142,8 +167,8 @@ export async function runOfferBackfill(ex: Tx, opts: BackfillOptions): Promise<B
   const offerNames = new Map(
     (
       await rows<{ id: number; name: string }>(sql`
-        SELECT id, name FROM offers WHERE id IN (
-          SELECT from_offer FROM ${MOVES} UNION SELECT to_offer FROM ${MOVES})`)
+        SELECT o.id, o.name FROM offers o WHERE (o.org_id, o.id) IN (
+          SELECT org_id, from_offer FROM ${MOVES} UNION SELECT org_id, to_offer FROM ${MOVES})`)
     ).map((r) => [r.id, r.name]),
   );
   const nm = (id: number | null) => (id === null ? "(none)" : `${id} ${offerNames.get(id) ?? "?"}`);
@@ -279,8 +304,22 @@ function parseArgs(argv: string[]) {
   return { orgId, links, apply: argv.includes("--apply") };
 }
 
+// postgres-js puts the SQLSTATE on the error; drizzle may wrap it in `cause`.
+function pgCode(e: unknown): string | undefined {
+  for (let x: unknown = e; x && typeof x === "object"; x = (x as { cause?: unknown }).cause) {
+    const code = (x as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return undefined;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.links.length > 0 && !args.orgId) {
+    console.log("FAIL: --links requires --org (an offer id alone could name another org's offer)");
+    console.log("ROLLED BACK — nothing written");
+    process.exit(1);
+  }
   console.log(args.apply ? "APPLY — commits only if every assertion passes" : "DRY RUN — everything is rolled back (pass --apply to commit)");
   console.log(`Scope: ${args.orgId ? `org ${args.orgId}` : "all orgs"}; links: ${args.links.length ? args.links.map((l) => `${l.keitaroOfferId}:${l.offerId}`).join(",") : "none"}`);
 
@@ -289,9 +328,17 @@ async function main() {
     await db.transaction(async (tx) => {
       result = await runOfferBackfill(tx, { orgId: args.orgId, links: args.links, log: (l) => console.log(l) });
       if (!args.apply || !result.ok) throw new Rollback();
-    });
+    }, { isolationLevel: "repeatable read" });
   } catch (e) {
-    if (!(e instanceof Rollback)) throw e;
+    if (e instanceof Rollback) {
+      // expected: dry run, or a failed assertion
+    } else if (pgCode(e) === "40001") {
+      console.log("FAIL: serialization failure — a row this run moves was changed concurrently (live ingest?)");
+      console.log("ROLLED BACK — nothing written; re-run");
+      process.exit(1);
+    } else {
+      throw e;
+    }
   }
   const r = result!;
   if (!r.ok) {

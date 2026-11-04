@@ -13,13 +13,17 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 //   B3 apply moves exactly 1; a second dry run reports 0
 //   B4 the reverse direction: unlinking B sends the row back to the campaign offer A
 //   B5 --links: a valid pair links + moves; a pair that updates 0 rows fails
-//   B6 the CLI exits 1 on a --links pair that updates 0 rows (no --apply: nothing kept)
+//   B6 the CLI: --links without --org, a 0-row pair → exit 1; a plain dry run → exit 0
+//   B7 isolation: the core refuses anything below REPEATABLE READ (the CLI runs RR — B6's exit 0)
+//   B8 source: the campaign join and the moves join are org-scoped
 //
 // Run (preview DB only):
 //   DATABASE_URL="$(grep '^DATABASE_URL=' .env.demo | cut -d= -f2- | tr -d '\r\"')" \
 //     npx tsx --conditions=react-server scripts/test-offer-attribution-backfill-db.ts
 
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { sql, type SQL } from "drizzle-orm";
 
@@ -51,12 +55,15 @@ async function main() {
       const one = async <T>(q: SQL): Promise<T> =>
         ((await tx.execute(q)) as unknown as T[])[0];
       // A dry run: the core inside a savepoint that is always rolled back.
-      const dry = async (opts: Omit<Parameters<typeof runOfferBackfill>[1], "orgId" | "log">, prep?: (sp: Tx) => Promise<void>) => {
+      const dry = async (
+        opts: Omit<Parameters<typeof runOfferBackfill>[1], "orgId" | "log"> & { orgId?: string | null },
+        prep?: (sp: Tx) => Promise<void>,
+      ) => {
         let res: Awaited<ReturnType<typeof runOfferBackfill>> | undefined;
         try {
           await tx.transaction(async (sp) => {
             if (prep) await prep(sp);
-            res = await runOfferBackfill(sp, { ...opts, orgId, log: quiet });
+            res = await runOfferBackfill(sp, { orgId, ...opts, log: quiet });
             throw new Rollback();
           });
         } catch (e) {
@@ -205,21 +212,55 @@ async function main() {
       bar("a pair on an already-linked offer fails", !r6.ok && r6.moveCount === 0, r6.failures.join("; "));
       const r7 = await dry({ links: [{ keitaroOfferId: kNone, offerId: -1 }] }); // no such offer
       bar("a pair on a missing offer fails", !r7.ok, r7.failures.join("; "));
+      const r8 = await dry({ links: [{ keitaroOfferId: kD, offerId: offerD }], orgId: null });
+      bar("--links without --org is refused, nothing linked", !r8.ok && r8.linked === 0 && /requires --org/.test(r8.failures.join()), r8.failures.join("; "));
+      const r9 = await dry({ links: [{ keitaroOfferId: kShared, offerId: offerD }] }); // carried by C and X
+      bar("a Keitaro id another offer already carries is refused, nothing linked", !r9.ok && r9.linked === 0 && /already carried/.test(r9.failures.join()), r9.failures.join("; "));
+      const r10 = await dry({ links: [{ keitaroOfferId: kD, offerId: offerD }, { keitaroOfferId: kD, offerId: offerC }] });
+      bar("the same Keitaro id twice in --links is refused", !r10.ok && r10.linked === 1, r10.failures.join("; "));
+
+      // ── B7 isolation (this transaction is REPEATABLE READ) ────────────────
+      console.log("\nB7 isolation");
+      bar("the core reports repeatable read", r1.isolation === "repeatable read", r1.isolation);
 
       throw new Rollback();
-    });
+    }, { isolationLevel: "repeatable read" });
   } catch (e) {
     if (!(e instanceof Rollback)) throw e;
   }
 
+  let rc: Awaited<ReturnType<typeof runOfferBackfill>> | undefined;
+  try {
+    await db.transaction(async (tx: Tx) => {
+      rc = await runOfferBackfill(tx, { orgId: randomUUID(), links: [], log: quiet });
+      throw new Rollback();
+    }); // default: READ COMMITTED
+  } catch (e) {
+    if (!(e instanceof Rollback)) throw e;
+  }
+  bar("the core refuses READ COMMITTED", !rc!.ok && /repeatable read/.test(rc!.failures.join()), rc!.failures.join("; "));
+
+  // ── B8 source: org-scoped joins (a cross-org campaign fixture is impractical) ─
+  console.log("\nB8 source");
+  const src = readFileSync("scripts/backfill-conversion-offer-attribution.ts", "utf8");
+  bar("campaign join is org-scoped", src.includes("JOIN campaigns ca ON ca.id = ce.campaign_id AND ca.org_id = ce.org_id"));
+  bar("moves → conversion_events joins are org-scoped", (src.match(/ce\.id = m\.id AND ce\.org_id = m\.org_id/g) ?? []).length === 2);
+  bar("the CLI transaction is repeatable read", /isolationLevel: "repeatable read"/.test(src));
+
   // ── B6 the CLI's exit code ────────────────────────────────────────────────
   console.log("\nB6 CLI");
   // Same DATABASE_URL (the preview DB this process was refused anything else for).
-  const cli = spawnSync("npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts --links 1:-1", {
-    encoding: "utf8",
-    env: process.env,
-    shell: true,
-  });
+  const runCli = (args: string) =>
+    spawnSync(`npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts ${args}`, {
+      encoding: "utf8",
+      env: process.env,
+      shell: true,
+    });
+  const noOrg = runCli("--links 999999999:-1");
+  bar("CLI: --links without --org exits 1, nothing written", noOrg.status === 1 && /requires --org/.test(noOrg.stdout) && /nothing written/.test(noOrg.stdout), `status=${noOrg.status}`);
+  const okDry = runCli("");
+  bar("CLI: a plain dry run exits 0 (so its transaction passed the RR check)", okDry.status === 0 && /DRY RUN — rolled back/.test(okDry.stdout), `status=${okDry.status} ${okDry.stderr.slice(0, 300)}`);
+  const cli = runCli("--org 00000000-0000-0000-0000-000000000000 --links 999999999:-1");
   bar("CLI exits 1 on a --links pair that updates 0 rows", cli.status === 1, `status=${cli.status}${cli.status === 1 ? "" : ` ${cli.stderr.slice(0, 300)}`}`);
   bar("…and says it rolled back", /rolled back/i.test(cli.stdout), cli.stdout.trim().split("\n").slice(-2).join(" | "));
 

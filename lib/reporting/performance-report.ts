@@ -407,8 +407,17 @@ export async function getStageDimensionReports(
       splitsByStage.set(sp.stage_id, list);
     }
   }
-  const slicesOf = (s: StageMetrics): OfferSlice[] =>
-    splitStageMetrics(s.offer_id, metricsOf(s), splitsByStage.get(s.stage_id) ?? []);
+  // Memoized per stage so a would_go_negative stage warns once per request,
+  // not once per grouper.
+  const sliceCache = new Map<number, OfferSlice[]>();
+  const slicesOf = (s: StageMetrics): OfferSlice[] => {
+    let v = sliceCache.get(s.stage_id);
+    if (!v) {
+      v = splitStageMetrics(s.offer_id, metricsOf(s), splitsByStage.get(s.stage_id) ?? []);
+      sliceCache.set(s.stage_id, v);
+    }
+    return v;
+  };
 
   // Under offer_id the report also carries the stages that split INTO the offer
   // (their secondary slice is the offer's), and the totals are that offer's slices.
@@ -443,8 +452,11 @@ export async function getStageDimensionReports(
         rows = await distributeToGroups(orgId, filtered, b, metricsOf);
       } else if (dimension === "creative") {
         rows = await groupByCreativeOffer(orgId, filtered, b, slicesOf);
+        // `filtered` also carries stages that split INTO the offer; their primary
+        // slices are other offers' rows. Under an offer filter return only its own.
+        if (b.offerId != null) rows = rows.filter((r) => r.offer_id === b.offerId);
       } else {
-        rows = await groupByStageDimension(filtered, dimension, metricsOf, slicesOf);
+        rows = await groupByStageDimension(orgId, filtered, dimension, metricsOf, slicesOf);
         // Replace the summed clicker counts with DISTINCT counts at the dimension's
         // own grain — the row grain the rule refers to. Revenue stays summed; it is
         // genuinely additive.
@@ -503,6 +515,7 @@ async function dedupeTotalClickers(
 
 // ---- number / offer / sequence: group the shared stage metrics -------------
 async function groupByStageDimension(
+  orgId: string,
   stages: StageMetrics[],
   dimension: "number" | "offer" | "sequence" | "format",
   metricsOf: (s: StageMetrics) => PerfMetrics,
@@ -541,7 +554,7 @@ async function groupByStageDimension(
   }
   if (dimension === "offer") {
     const ids = [...acc.keys()].filter((k) => k !== "none").map(Number);
-    const info = await offerInfo(ids);
+    const info = await offerInfo(orgId, ids);
     return [...acc.entries()]
       .map(([k, m]) => {
         const oi = k === "none" ? null : info.get(Number(k));
@@ -664,7 +677,7 @@ async function groupByCreativeOffer(
       orgId,
       entries.map(([, e]) => e.creativeId).filter((id): id is number => id != null),
     ),
-    offerInfo(entries.map(([, e]) => e.offerId).filter((id): id is number => id != null)),
+    offerInfo(orgId, entries.map(([, e]) => e.offerId).filter((id): id is number => id != null)),
   ]);
 
   return entries.map(([key, e]) => {
@@ -1377,11 +1390,11 @@ async function formatNames(ids: number[]) {
   return out;
 }
 
-async function offerInfo(ids: number[]) {
+async function offerInfo(orgId: string, ids: number[]) {
   const out = new Map<number, { code: string; name: string | null }>();
   if (ids.length === 0) return out;
   const rows = (await db.execute(sql`
-    SELECT id, offer_id AS code, name FROM offers WHERE id IN (${inList(ids)})
+    SELECT id, offer_id AS code, name FROM offers WHERE org_id = ${orgId}::uuid AND id IN (${inList(ids)})
   `)) as unknown as { id: number; code: string; name: string | null }[];
   for (const r of rows) out.set(Number(r.id), { code: r.code, name: r.name });
   return out;

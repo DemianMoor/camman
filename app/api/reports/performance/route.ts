@@ -5,6 +5,7 @@ import { requireApiMembership } from "@/lib/api/helpers";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { can } from "@/lib/permissions";
 import { readCreativeLifetime } from "@/lib/reporting/creative-lifetime";
+import { ownRevenue } from "@/lib/reporting/offer-split-display";
 import { loadEventTypes } from "@/lib/reporting/event-columns";
 import { hideBelowMinSent, rpmOf, sortCreativeRows } from "@/lib/reporting/creative-rows";
 import {
@@ -53,11 +54,11 @@ function creativeBody(
   sortBy: CreativeSortKey,
 ) {
   const inOffer = offerId == null ? rows : rows.filter((r) => r.offer_id === offerId);
-  const graded = inOffer.map((r) => ({ ...gradePerf(r), rpm: rpmOf(r.revenue, r.sent) }));
+  const graded = inOffer.map((r) => ({ ...gradePerf(r), rpm: rpmOf(ownRevenue(r), r.sent) }));
   const { rows: kept, hidden } = hideBelowMinSent(graded, minSent);
   return {
     data: sortCreativeRows(kept, sortBy),
-    totals: { ...gradePerf(totals), rpm: rpmOf(totals.revenue, totals.sent) },
+    totals: { ...gradePerf(totals), rpm: rpmOf(ownRevenue(totals), totals.sent) },
     hidden_rows: hidden,
   };
 }

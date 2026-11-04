@@ -290,6 +290,10 @@ export async function computeCreativeMetrics(
     ),
     -- A (stage, offer) split that moves nothing (only rejected rows) is dropped,
     -- so it cannot mint an all-zero offer row.
+    -- Deliberately narrower than isMovingSplit (lib/reporting/offer-splits.ts), which
+    -- also tests pending_n, ev_revenue and ev_pending_revenue: /creatives reads only
+    -- n, sales and payout from a split row, so a split moving nothing else is
+    -- invisible here. Widen it if a column starts reading those.
     split AS (
       SELECT stage_id, offer_id, sum(sales)::int AS sales, sum(revenue) AS revenue,
              sum(pending_revenue) AS pending_revenue

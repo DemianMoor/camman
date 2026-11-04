@@ -1,6 +1,6 @@
 # CamMan API — reference for your Claude
 
-_Last updated: 2026-09-23_
+_Last updated: 2026-11-04_
 
 This is the whole API surface a personal token can reach. Hand this file to
 Claude (or any tool) and it has everything it needs.
@@ -295,7 +295,7 @@ the registry here would be dropping it where it is least replaceable.
 | `creative_id`, `offer_id` | The row's creative and offer. `label` is `"{slug} — {offer name}"`. |
 | `first_sent_date`, `last_sent_date` | First and last ET day a stage of this row was sent inside the range (all time for `range=lifetime`). `null` when none was — the row then carries only later conversions. |
 | `distinct_send_days` | How many different ET days it was sent on in that window. |
-| `rpm` | Revenue per 1,000 messages sent, 2 decimals; `null` at 0 sent. Also on `totals`. |
+| `rpm` | Own-traffic revenue per 1,000 messages sent, 2 decimals; `null` at 0 sent. Also on `totals`. Revenue a stage's conversions moved to another offer is counted under the offer's own traffic, like EPC (per-offer split, 2026-11-04). |
 
 | Param (creative only) | Values |
 | --- | --- |
@@ -720,7 +720,7 @@ Both are counts only. There is no endpoint on this list that returns a contact.
 | `click_to_reach_pct` | `reached ÷ clicks_human × 100`. Can exceed 100: a recipient can reach the offer without a click the scorer called human. |
 | `reach_to_sale_pct` | `conversions ÷ reached × 100`. Conversions come from the tracker (`sales` on report rows, `keitaro_sales_count` on stages). |
 | `opt_rate` | `opt_outs ÷ sent × 100`. |
-| `rpm` | Revenue per 1,000 messages sent: `revenue ÷ sent × 1000`, 2 decimals. `dimension=creative` rows and totals only. |
+| `rpm` | Own-traffic revenue per 1,000 messages sent: `(revenue − split_in + split_out) ÷ sent × 1000`, 2 decimals (equals `revenue` when no conversion was split to another offer). `dimension=creative` rows and totals only. |
 
 - **Percent units**, 2 decimals: `3.04` means 3.04%.
 - **`null` means "cannot be computed", never zero** — a denominator of 0, or a row

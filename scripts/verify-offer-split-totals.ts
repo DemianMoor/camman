@@ -3,7 +3,7 @@ import "./_env-preload";
 import { sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
-import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
+import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { addEtDays } from "@/lib/reporting/delivery-rollup";
 import { ownRevenue } from "@/lib/reporting/offer-split-display";
 import { getOfferSplits, isMovingSplit, splitStageMetrics, type OfferSplit } from "@/lib/reporting/offer-splits";
@@ -223,7 +223,7 @@ async function main() {
       LEFT JOIN event_types et ON et.id = ce.event_type_id AND et.org_id = ce.org_id
       WHERE ce.org_id = ${orgId}::uuid
         AND ce.offer_id IS NOT NULL AND ce.offer_id IS DISTINCT FROM ca.offer_id
-        AND (ce.occurred_at AT TIME ZONE 'America/New_York')::date BETWEEN ${from}::date AND ${to}::date`;
+        AND (ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE})::date BETWEEN ${from}::date AND ${to}::date`;
     const direct = await q(sql`
       SELECT ce.offer_id::int AS offer_id,
              count(*) FILTER (WHERE ${purchasedClause()})::int AS sales,
@@ -264,7 +264,7 @@ async function main() {
     console.log("\nLedger rows behind the deltas, by conversion offer (stage campaign offer -> conversion offer)");
     const rows = await q(sql`
       SELECT ce.id, ce.stage_id, ca.offer_id AS campaign_offer, ce.offer_id AS ce_offer, ce.status, ce.revenue::text AS revenue,
-             to_char(ce.occurred_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD HH24:MI') AS occurred_et, et.key AS event_key
+             to_char(ce.occurred_at AT TIME ZONE ${CAMPAIGN_TIMEZONE}, 'YYYY-MM-DD HH24:MI') AS occurred_et, et.key AS event_key
       ${base}
       ORDER BY ce.offer_id, ce.stage_id, ce.id`);
     if (!rows.length) console.log("  (none)");

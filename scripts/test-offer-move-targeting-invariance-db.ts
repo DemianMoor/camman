@@ -252,6 +252,18 @@ async function main() {
         before.t1_A === JSON.stringify([c1]) && before.t1_B === "[]",
         `A=${before.t1_A} B=${before.t1_B}`,
       );
+      // T2/T4 compare before with after; without these they would pass with NO_LAYER
+      // or [] on both sides.
+      bar(
+        "control: T2 the bought_offer layer exists and selects [c1] for A",
+        before.t2_A !== "NO_LAYER" && before.t2_A === JSON.stringify([c1]),
+        `A=${before.t2_A}`,
+      );
+      bar(
+        "control: T4 made_purchase_for_offer selects [c1] for A",
+        before.t4_A === JSON.stringify([c1]),
+        `A=${before.t4_A}`,
+      );
       bar(
         "control: the recheck flags c1 as bought_offer for A and nobody for B",
         before.t3_A.includes(`${c1}=bought_offer`) &&

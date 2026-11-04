@@ -79,8 +79,8 @@ const MUTATIONS: Mutation[] = [
   {
     name: "base-no-subtract",
     what: "the footer adds the split to the target offer but never takes it off the campaign's offer",
-    apply: (t) => t.replace("SELECT s.org_id, s.campaign_offer_id, 0, -s.revenue, -s.sales, 0, 0, NULL::boolean",
-      "SELECT s.org_id, s.campaign_offer_id, 0, 0 * s.revenue, 0 * s.sales, 0, 0, NULL::boolean"),
+    apply: (t) => t.replace("SELECT s.org_id, s.campaign_offer_id, 0, -s.revenue, -s.sales, 0, 0, false",
+      "SELECT s.org_id, s.campaign_offer_id, 0, 0 * s.revenue, 0 * s.sales, 0, 0, false"),
     expectRed: ["footer-stage-conserved", "footer-split", "footer-halves-agree"],
   },
   {
@@ -115,11 +115,28 @@ const MUTATIONS: Mutation[] = [
     apply: (t) => t.replace("WHERE s.sales <> 0 OR s.revenue <> 0 OR s.pending_revenue <> 0;", "WHERE true;"),
     expectRed: ["no-zero-rows"],
   },
+  {
+    name: "split-unscoped",
+    what: "the footer applies splits from stages offer_report_campaign_econ never counted (review I1: prod stage 1108)",
+    apply: (t) => t.replace(
+      "    ON cs.id = s.stage_id AND cs.org_id = s.org_id AND cs.sent_at IS NOT NULL\n  JOIN (\n" +
+        "    SELECT DISTINCT campaign_id FROM public.campaign_stages WHERE sent_at IS NOT NULL\n" +
+        "  ) sent ON sent.campaign_id = cs.campaign_id\n",
+      "    ON cs.id = s.stage_id AND cs.org_id = s.org_id\n"),
+    expectRed: ["unsent-stage-moves-nothing"],
+  },
+  {
+    name: "attr-not-materialized",
+    what: "`attr` loses AS MATERIALIZED (Ruling R19) — the planner may inline the ~165 s pass",
+    apply: (t) => t.replace("attr AS MATERIALIZED (", "attr AS ("),
+    expectRed: ["attr-materialized"],
+  },
 ];
 
 // ── fixture ──────────────────────────────────────────────────────────────────
 interface Fx {
   orgId: string; offerA: number; offerB: number; offerC: number; offerD: number;
+  offerE: number; offerF: number; stageE: number;
   g1: number; g2: number; stageA: number; stageC: number;
 }
 
@@ -132,6 +149,7 @@ async function seed(tx: Tx): Promise<Fx> {
     INSERT INTO offers (org_id, offer_id, name, network_id)
     VALUES (${orgId}::uuid, ${`t8-${n}-${tag}`}, ${`T8 ${n} ${tag}`}, ${networkId}) RETURNING id`)).id;
   const offerA = await offer("a"), offerB = await offer("b"), offerC = await offer("c"), offerD = await offer("d");
+  const offerE = await offer("e"), offerF = await offer("f");
   const group = async (n: string) => (await one<{ id: number }>(sql`
     INSERT INTO contact_groups (org_id, contact_group_id, name, allow_voip, allow_unknown, allow_toll_free)
     VALUES (${orgId}::uuid, ${`t8-${n}-${tag}`}, ${`T8 ${n} ${tag}`}, true, true, true) RETURNING id`)).id;
@@ -187,7 +205,25 @@ async function seed(tx: Tx): Promise<Fx> {
     VALUES (${orgId}::uuid, ${c.campaignId}, ${c.stageId}, ${`t8-${tag}-${c.stageId}`}, current_date, ${sales}, ${revenue})`);
   await ksr(ca, 5, 170);
   await ksr(cc, 1, 30);
-  return { orgId, offerA, offerB, offerC, offerD, g1, g2, stageA: ca.stageId, stageC: cc.stageId };
+
+  // Review I1 — the prod stage-1108 shape: a MANUAL campaign of offer E whose
+  // only stage was never sent (sent_at NULL), carrying ledger rows on offer F.
+  // offer_report_campaign_econ never counts it, so the footer must move nothing.
+  const { id: ceId } = await one<{ id: number }>(sql`
+    INSERT INTO campaigns (org_id, slug, name, offer_id, link_mode, status, audience_contact_group_ids)
+    VALUES (${orgId}::uuid, ${`t8-ce-${tag}`}, ${`T8 ce ${tag}`}, ${offerE}, 'manual', 'active',
+            ${sql.raw(`ARRAY[${g1}]::int[]`)}) RETURNING id`);
+  const { id: stageE } = await one<{ id: number }>(sql`
+    INSERT INTO campaign_stages (org_id, campaign_id, stage_number, status, total_cost)
+    VALUES (${orgId}::uuid, ${ceId}, 1, 'draft', 0) RETURNING id`);
+  for (let i = 0; i < 3; i++) {
+    await ev({ orgId, campaignId: ceId, stageId: stageE, offerId: offerF, stageSendId: null, contactId: null,
+      eventKey: "purchase", status: "approved", revenue: 75 });
+  }
+  await tx.execute(sql`
+    INSERT INTO keitaro_stage_results (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, sales, revenue)
+    VALUES (${orgId}::uuid, ${ceId}, ${stageE}, ${`t8-${tag}-${stageE}`}, current_date, 3, 225)`);
+  return { orgId, offerA, offerB, offerC, offerD, offerE, offerF, stageE, g1, g2, stageA: ca.stageId, stageC: cc.stageId };
 }
 
 // ── run ──────────────────────────────────────────────────────────────────────
@@ -195,10 +231,13 @@ interface Run { passed: string[]; failed: string[]; lines: string[] }
 
 /** The body of a top-level CTE `name AS (` … in pg_get_viewdef output, up to the next top-level CTE. */
 function cteBody(def: string, name: string, next: string): string {
-  const a = def.indexOf(`${name} AS (`);
+  // `name AS (` or `name AS MATERIALIZED (` — the body is compared, not the keyword.
+  const m = new RegExp(`(?:^|[\\s,])${name} AS (?:MATERIALIZED )?\\(`).exec(def);
+  if (!m) return `<${name} not found>`;
+  const a = m.index + m[0].length;
   const b = def.indexOf(`), ${next} AS `, a);
-  if (a < 0 || b < 0) return `<${name} not found>`;
-  return def.slice(a + name.length, b).replace(/\s+/g, " ").trim();
+  if (b < 0) return `<${name} not found>`;
+  return def.slice(a, b).replace(/\s+/g, " ").trim();
 }
 
 async function runOnce(text: string, quiet: boolean): Promise<Run> {
@@ -226,7 +265,7 @@ async function runOnce(text: string, quiet: boolean): Promise<Run> {
       ]) await tx.execute(sql.raw(`REFRESH MATERIALIZED VIEW public.${mv}`));
 
       const q = async <T>(s: SQL) => (await tx.execute(s)) as unknown as T[];
-      const offers = [fx.offerA, fx.offerB, fx.offerC, fx.offerD];
+      const offers = [fx.offerA, fx.offerB, fx.offerC, fx.offerD, fx.offerE, fx.offerF];
       type Cell = { offer_id: number; group_id: number; sends: number; sales: number; revenue: number; pending: number; cost: number; clicks: number; optouts: number; fresh: number; s7: number };
       const cells = (mv: string) => q<Cell>(sql`
         SELECT offer_id, group_id, sends::int, sales::int, revenue::float8 AS revenue, pending_revenue::float8 AS pending,
@@ -315,6 +354,14 @@ async function runOnce(text: string, quiet: boolean): Promise<Run> {
       // ── a split that moves nothing (rejected, offer D) mints no row anywhere.
       check("no-zero-rows", !f(v2Foot, fx.offerD) && !v2Cells.some((r) => r.offer_id === fx.offerD),
         `offer D footer ${j(f(v2Foot, fx.offerD))}, cells ${v2Cells.filter((r) => r.offer_id === fx.offerD).length}`);
+      // ── review I1: a split on a stage offer_report_campaign_econ never counted
+      // (unsent stage of a never-sent manual campaign) moves nothing in the footer,
+      // although the split view (getOfferSplits' twin) does list it.
+      const [eRow] = await q<{ n: number }>(sql`
+        SELECT count(*)::int AS n FROM offer_split_amounts_v WHERE stage_id = ${fx.stageE} AND offer_id = ${fx.offerF}`);
+      check("unsent-stage-moves-nothing",
+        eRow.n === 1 && !f(v2Foot, fx.offerE) && !f(v2Foot, fx.offerF) && !f(oldFoot, fx.offerE),
+        `split view rows ${eRow.n}; footer E ${j(f(v2Foot, fx.offerE))} F ${j(f(v2Foot, fx.offerF))} (want none)`);
 
       // ── the stage_sends passes are the installed old views' text, node for node.
       const def = async (v: string) => (await q<{ d: string }>(sql`SELECT pg_get_viewdef(${`public.${v}`}::regclass, true) AS d`))[0].d;
@@ -325,10 +372,14 @@ async function runOnce(text: string, quiet: boolean): Promise<Run> {
         ["rate", cteBody(gOld, "rate", "conv"), cteBody(gV2, "rate", "conv")],
         ["attr", cteBody(gOld, "attr", "cell_clicks"), cteBody(gV2, "attr", "split_ce")],
         ["attributable", cteBody(tOld, "attributable", "offer_tracked"), cteBody(tV2, "attributable_own", "split_ce")],
+        ["cell_clicks", cteBody(gOld, "cell_clicks", "cell_optouts"), cteBody(gV2, "cell_clicks", "cell_optouts")],
+        ["cell_optouts", cteBody(gOld, "cell_optouts", "fresh"), cteBody(gV2, "cell_optouts", "fresh")],
       ];
       const bad = pairs.filter(([, a, b]) => a !== b || a.startsWith("<"));
       check("stage-sends-pass-identical", bad.length === 0,
         bad.length === 0 ? "rate, attr, attributable: pg_get_viewdef identical to the installed views" : `differs: ${bad.map((p) => p[0]).join(", ")}`);
+      check("attr-materialized", /\battr AS MATERIALIZED \(/.test(gV2),
+        "offer_group_report_v2_mv keeps `attr` materialized, as 0183's double reference did (R19)");
 
       // ── R3: offer_split_amounts_v vs lib/sale-attribution.ts's clauses over getOfferSplits' selection.
       const [par] = await q<{ v: string; t: string }>(sql`

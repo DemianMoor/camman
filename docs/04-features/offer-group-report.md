@@ -424,13 +424,22 @@ lifetime — Ruling R3). What moves and what stays:
 - **Footer:** the Keitaro-based Revenue / Sales subtract `offer_split_amounts_v`
   from the campaign's offer and add it to the conversion's offer; the
   ledger-based `attributable_*` move the same way at send grain. So the footer's
-  two halves agree, and A + B = the stage on both.
+  two halves agree, and A + B = the stage on both. Only splits on stages
+  `offer_report_campaign_econ` counts are moved (stage `sent_at` set, campaign
+  with a sent stage — the same scope the runtime By Offer tab reads): a split on
+  a never-sent stage moves nothing, since the footer never held that money
+  (prod: stage 1108 of manual campaign 323, $225 / 3 sales on offer 76 — fix
+  round 1 of the review). The group rows need no such filter: `moved` reaches
+  only sent `stage_sends` of tracked campaigns, the scope `attr` already reads.
 - **Not replicated:** the runtime's `would_go_negative` skip. 0 such stages on
   prod at 2026-11-04; `scripts/verify-offer-report-v2.ts` fails if one appears.
 
 **Refresh cost.** Each v2 definition keeps the old view's stage_sends pass
-byte-identical (`rate`, `attr`, `attributable` — `scripts/test-offer-report-split-db.ts`
-asserts it against `pg_get_viewdef` of the installed views); the added CTEs read
+byte-identical (`rate`, `attr`, `attributable`, `cell_clicks`, `cell_optouts` —
+`scripts/test-offer-report-split-db.ts` asserts it against `pg_get_viewdef` of
+the installed views), and `attr` is `AS MATERIALIZED` because 0183 referenced it
+twice (so Postgres materialized it) while v2 references it once — pinning it
+keeps 0183's plan shape (Ruling R19); the added CTEs read
 the ~3.5K-row ledger and reach `stage_sends` by primary key only. Measured on
 prod (read-only EXPLAIN ANALYZE of each new piece alone): split view 7–16 ms,
 own-offer `conv` 24–35 ms, `moved` 9–72 ms, `attributable_moved` 16 ms. The
@@ -445,9 +454,13 @@ old name.
 then refreshes the old ones, refusing UTC hours 04, 05, 19, 20 (the cron runs);
 `scripts/verify-offer-report-v2.ts` (read-only) compares v2 to old — untouched
 offers identical, touched offers differing by exactly the split amounts,
-Audience Stats identical, the split view equal to `getOfferSplits`; only then
-the code that reads and refreshes the v2 names deploys. Rollback = redeploy the
-previous code (the old views are still there, one cron run behind). The old
+Audience Stats identical, the split view equal to `getOfferSplits`' query over
+every sent stage; only then the code that reads and refreshes the v2 names
+deploys. **Stop bar (R19):** do not merge if the fill's v2 group plain REFRESH
+took more than the same fill's old-group CONCURRENTLY refresh + 5 s, or more
+than 200 s. Rollback = redeploy the previous code. Its old views were not
+refreshed after the switch, so they are stale since the switch until the first
+cron run after the redeploy (their own "data as of" stamp says so). The old
 views are dropped by a later migration once the owner has reviewed the numbers.
 
 ### 0226: a new view alongside, filled after the migration

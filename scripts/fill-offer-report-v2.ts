@@ -15,6 +15,10 @@ import "./_env-preload";
 //      not thrown — the v2 fill already happened).
 // Then run scripts/verify-offer-report-v2.ts. Expect ~7-8 minutes in total.
 //
+// ⛔ STOP BAR (Ruling R19), printed at the end: do not merge if the v2 group
+// plain REFRESH took more than the old group CONCURRENTLY refresh of the same
+// run + 5 s, or more than 200 s (the main cron run sits at ~280 of 300 s).
+//
 // ⛔ REFUSES TO RUN DURING THE REFRESH CRONS' HOURS: 04:00-05:59 and
 // 19:00-20:59 UTC (the runs fire at 05:00 / 05:30 / 20:00 / 20:30 UTC and the
 // group refresh alone takes ~3 minutes; a fill overlapping one would put two
@@ -78,6 +82,14 @@ async function main() {
   const r = await fillOfferReportV2((view, ms) => console.log(`  ${view}: ${(ms / 1000).toFixed(1)} s`));
   console.log("\nper view (ms):", JSON.stringify(r.steps));
   console.log("connection (settings read back on it):", JSON.stringify(r.connection));
+  // Stop bar (Ruling R19): the v2 group view must cost what the old one does.
+  const v2g = r.steps.find((s) => s.view === "offer_group_report_v2_mv")?.ms ?? NaN;
+  const oldg = r.steps.find((s) => s.view === "offer_group_report_mv" && s.ok)?.ms ?? NaN;
+  const stop = !(v2g <= 200_000) || !(v2g <= oldg + 5_000);
+  console.log(
+    `${stop ? "⛔ STOP — do not merge" : "✓ stop bar clear"}: v2 group ${(v2g / 1000).toFixed(1)} s vs old group ` +
+      `CONCURRENTLY ${(oldg / 1000).toFixed(1)} s (bar: v2 <= old + 5 s and v2 <= 200 s)`,
+  );
   const oldFailed = r.steps.filter((s) => !s.ok);
   if (oldFailed.length > 0) {
     console.log(`⚠️  old-view refresh failed: ${oldFailed.map((s) => `${s.view} (${s.error})`).join("; ")} — ` +

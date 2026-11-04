@@ -44,9 +44,10 @@
 --   from offer_report_campaign_econ): offer_split_amounts_v is subtracted from
 --   the campaign's offer and added to the conversion's offer — the SQL twin of
 --   splitStageMetrics. A target offer with no campaigns of its own still gets a
---   row (sends 0). Only splits whose campaign HAS an offer are applied: a
---   campaign without one has no `base` row to take them from, so applying the
---   add without the subtract would mint revenue (none on prod).
+--   row (sends 0). Only splits the econ actually counted are applied: the
+--   campaign has an offer, the stage has sent_at, the campaign has a sent stage
+--   (`split_sent`) — otherwise the subtract would take money the footer never
+--   held (prod: unsent stage 1108, $225 / 3 sales on offer 76).
 -- * Offer footer, ledger half (`attributable`): 0183's CTE verbatim over the
 --   own-offer `conv`, plus `attributable_moved` (split rows on a sent,
 --   group-targeted send — the same EXISTS membership test) with n = 0.
@@ -156,7 +157,11 @@ conv AS (
 -- ONE pass over the stage_sends x contact_contact_groups join: economics AND
 -- list pressure. Reproduced from 0183 VERBATIM (0231 changes only what `conv`
 -- holds) — this is the expensive part of the refresh and must not grow.
-attr AS (
+-- MATERIALIZED (Ruling R19): 0183 referenced `attr` twice (the SELECT and
+-- `fresh`), so Postgres materialized it; v2 references it once (in `cells`),
+-- which would let the planner inline it into the re-aggregation. Pinning it
+-- keeps 0183's plan shape for the ~165 s pass.
+attr AS MATERIALIZED (
   SELECT camp.org_id, camp.offer_id, ccg.contact_group_id AS group_id,
     COUNT(*)::bigint                                             AS sends,
     SUM(COALESCE(r.per_send, 0))::numeric(14,4)                  AS cost,
@@ -396,30 +401,51 @@ REVOKE ALL ON public.audience_report_group_totals_v2_mv FROM anon, authenticated
 CREATE MATERIALIZED VIEW IF NOT EXISTS public.offer_report_offer_totals_v2_mv AS
 -- 0231: the stage-grain half with the splits moved — subtracted from the
 -- campaign's offer, added to the conversion's offer (splitStageMetrics' twin).
+--
+-- `split_sent` scopes the splits EXACTLY like offer_report_campaign_econ scopes
+-- the money they are taken from (0128): a stage with sent_at set (stage_sales)
+-- of a campaign with >= 1 sent stage (the `sent` join). A split on a stage the
+-- econ never counted must move nothing — on prod, stage 1108 (campaign 323,
+-- manual, never sent) holds 3 x $75 purchases on offer 76, and moving them would
+-- take $225 / 3 sales off offer 62's footer that were never in it. The runtime
+-- By Offer tab only reads sent stages too (getStageMetricsInRange), so this is
+-- also the R3 parity scope. (The group view's `moved` needs no such filter: it
+-- reaches only sent stage_sends of offer_report_tracked_campaigns, which is
+-- exactly the scope `attr` reads — `attr` does not test cs.sent_at either.)
+--
 -- The UNION ALL is what gives a target offer with no campaigns of its own a
--- footer row; sends / cost / opt-outs are 0 on the split legs, so those columns
--- are 0183's numbers exactly.
-WITH base AS (
+-- footer row; sends / cost / opt-outs are 0 and has_manual_stages is false on
+-- the split legs, so those columns are 0183's numbers exactly (false never
+-- changes a bool_or, and a receiving-only offer reads false, not NULL).
+WITH split_sent AS (
+  SELECT s.org_id, s.campaign_offer_id, s.offer_id, s.sales, s.revenue
+  FROM public.offer_split_amounts_v s
+  JOIN public.campaign_stages cs
+    ON cs.id = s.stage_id AND cs.org_id = s.org_id AND cs.sent_at IS NOT NULL
+  JOIN (
+    SELECT DISTINCT campaign_id FROM public.campaign_stages WHERE sent_at IS NOT NULL
+  ) sent ON sent.campaign_id = cs.campaign_id
+  WHERE s.campaign_offer_id IS NOT NULL
+),
+base AS (
   SELECT u.org_id, u.offer_id,
-    SUM(u.sends)::bigint                        AS sends,
-    SUM(u.revenue)::numeric(14,4)               AS revenue,
-    SUM(u.sales)::bigint                        AS sales,
-    SUM(u.cost)::numeric(14,4)                  AS cost,
-    SUM(u.optouts)::bigint                      AS optouts,
-    COALESCE(bool_or(u.has_manual_stages), false) AS has_manual_stages
+    SUM(u.sends)::bigint          AS sends,
+    SUM(u.revenue)::numeric(14,4) AS revenue,
+    SUM(u.sales)::bigint          AS sales,
+    SUM(u.cost)::numeric(14,4)    AS cost,
+    SUM(u.optouts)::bigint        AS optouts,
+    bool_or(u.has_manual_stages)  AS has_manual_stages
   FROM (
     SELECT e.org_id, e.offer_id, e.sends, e.revenue, e.sales, e.cost, e.optouts,
            e.has_manual_stages
     FROM public.offer_report_campaign_econ e
     WHERE e.offer_id IS NOT NULL
     UNION ALL
-    SELECT s.org_id, s.campaign_offer_id, 0, -s.revenue, -s.sales, 0, 0, NULL::boolean
-    FROM public.offer_split_amounts_v s
-    WHERE s.campaign_offer_id IS NOT NULL
+    SELECT s.org_id, s.campaign_offer_id, 0, -s.revenue, -s.sales, 0, 0, false
+    FROM split_sent s
     UNION ALL
-    SELECT s.org_id, s.offer_id, 0, s.revenue, s.sales, 0, 0, NULL::boolean
-    FROM public.offer_split_amounts_v s
-    WHERE s.campaign_offer_id IS NOT NULL
+    SELECT s.org_id, s.offer_id, 0, s.revenue, s.sales, 0, 0, false
+    FROM split_sent s
   ) u
   GROUP BY u.org_id, u.offer_id
 ),

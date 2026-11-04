@@ -1,8 +1,8 @@
 import "./_env-preload";
 
 // VERIFY THE 0231 *_v2 REPORT VIEWS AGAINST THE OLD ONES — READ-ONLY (one
-// BEGIN READ ONLY transaction on its own connection, scripts/_readonly-db.ts;
-// getOfferSplits() is a plain SELECT through the app's pool).
+// BEGIN READ ONLY transaction on its own connection, scripts/_readonly-db.ts —
+// every read below, V6's included, comes from that one snapshot).
 //
 // Run after scripts/fill-offer-report-v2.ts --apply, which refreshes the old
 // views straight after the v2 ones, so both sides are snapshots minutes apart.
@@ -16,16 +16,21 @@ import "./_env-preload";
 //       moved ledger amounts, recomputed here from conversion_events directly.
 //   V3  Audience Stats (all offers of a group): identical old vs v2.
 //   V4  footer: sends/cost/clicks/opt-outs/manual/attributable_sends identical;
-//       revenue/sales differ by exactly offer_split_amounts_v (in - out);
+//       revenue/sales differ by exactly the splits offer_report_campaign_econ
+//       counted (stage sent_at set, campaign has a sent stage — re-derived here
+//       from campaign_stages, not read from the view) (in - out);
 //       attributable_* differ by exactly the moved ledger amounts at send grain;
 //       Σ over offers of revenue and sales unchanged.
 //   V5  footer halves agree: (stage-half delta) - (ledger-half delta) = the
 //       split money that has no sent, group-targeted send to sit on.
-//   V6  offer_split_amounts_v == getOfferSplits(lifetime) for every split stage
-//       (Ruling R3: the By Offer tab and the footer move the same money).
-//   V7  no stage's splits exceed its tracker totals (the runtime would leave
-//       such a stage unsplit — "would_go_negative" — and the matview does not
-//       replicate that skip), and no footer row goes negative.
+//   V6  offer_split_amounts_v == getOfferSplits' query (lifetime) over EVERY sent
+//       stage of the org, the stage set taken from campaign_stages/campaigns, not
+//       from the view, and the amounts computed with lib/sale-attribution.ts's
+//       clauses (rendered by Drizzle) inside the same snapshot (Ruling R3).
+//   V7  no econ-scoped stage's splits exceed what offer_report_campaign_econ
+//       holds for it (Keitaro revenue, GREATEST(Keitaro, manual) sales — the
+//       runtime would leave such a stage unsplit, "would_go_negative", and the
+//       matview does not replicate that skip), and no footer row goes negative.
 // sent_7d/30d/90d and fresh_pool slide with now() between the two refreshes,
 // so their differences are REPORTED, not failed. Exit 1 on any failed bar.
 //
@@ -64,8 +69,13 @@ async function main() {
     const v2Foot = await tx`SELECT org_id::text, offer_id, sends, revenue::float8 AS revenue, sales, clicks, cost::float8 AS cost,
       optouts, has_manual_stages, attributable_sends, attributable_revenue::float8 AS attributable_revenue,
       attributable_sales, attributable_pending_revenue::float8 AS attributable_pending_revenue, unattributed_sends FROM offer_report_offer_totals_v2_mv`;
-    const splits = await tx`SELECT org_id::text, stage_id, campaign_offer_id, offer_id, sales, revenue::float8 AS revenue,
-      pending_revenue::float8 AS pending_revenue FROM offer_split_amounts_v ORDER BY org_id, stage_id, offer_id`;
+    // econ_scoped: the stage is one offer_report_campaign_econ counts (0128's
+    // stage_sales + `sent` join), written out here rather than read from 0231.
+    const splits = await tx`SELECT s.org_id::text, s.stage_id, s.campaign_offer_id, s.offer_id, s.sales,
+      s.revenue::float8 AS revenue, s.pending_revenue::float8 AS pending_revenue,
+      EXISTS (SELECT 1 FROM campaign_stages cs WHERE cs.id = s.stage_id AND cs.org_id = s.org_id AND cs.sent_at IS NOT NULL
+                AND EXISTS (SELECT 1 FROM campaign_stages c2 WHERE c2.campaign_id = cs.campaign_id AND c2.sent_at IS NOT NULL)) AS econ_scoped
+      FROM offer_split_amounts_v s ORDER BY s.org_id, s.stage_id, s.offer_id`;
     // Independent of the view text: every split ledger row on a SENT send of a
     // tracked campaign, with the recipient's targeted groups (one row per group).
     const placed = await tx`
@@ -83,16 +93,44 @@ async function main() {
       JOIN contact_contact_groups ccg ON ccg.contact_id = ss.contact_id AND ccg.contact_group_id = ANY(camp.gids) AND ccg.org_id = camp.org_id
       WHERE ce.offer_id IS NOT NULL AND ce.offer_id IS DISTINCT FROM xc.offer_id`;
     const overdrawn = await tx`
-      WITH s AS (SELECT stage_id, sum(sales) AS sales, sum(revenue) AS revenue FROM offer_split_amounts_v GROUP BY stage_id),
+      WITH s AS (
+        SELECT v.stage_id, sum(v.sales) AS sales, sum(v.revenue) AS revenue
+        FROM offer_split_amounts_v v
+        JOIN campaign_stages cs ON cs.id = v.stage_id AND cs.org_id = v.org_id AND cs.sent_at IS NOT NULL
+        WHERE v.campaign_offer_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM campaign_stages c2 WHERE c2.campaign_id = cs.campaign_id AND c2.sent_at IS NOT NULL)
+        GROUP BY v.stage_id),
       k AS (SELECT stage_id, sum(sales) AS sales, sum(revenue) AS revenue FROM keitaro_stage_results GROUP BY stage_id),
       m AS (SELECT stage_id, sum(delta) AS sales FROM stage_manual_sales GROUP BY stage_id)
       SELECT s.stage_id, s.sales, s.revenue::float8, COALESCE(k.revenue, 0)::float8 AS k_revenue,
              GREATEST(COALESCE(k.sales, 0), COALESCE(m.sales, 0)) AS k_sales
       FROM s LEFT JOIN k ON k.stage_id = s.stage_id LEFT JOIN m ON m.stage_id = s.stage_id
       WHERE s.revenue > COALESCE(k.revenue, 0) + 1e-6 OR s.sales > GREATEST(COALESCE(k.sales, 0), COALESCE(m.sales, 0))`;
+    // V6's twin: getOfferSplits' query shape, with the clauses imported from
+    // lib/sale-attribution.ts (Drizzle renders them; run on THIS transaction so
+    // it reads the same snapshot), over every sent stage of every org.
+    const { sql } = await import("drizzle-orm");
+    const { PgDialect } = await import("drizzle-orm/pg-core");
+    const { approvedRevenueClause, pendingRevenueClause, purchasedClause } = await import("@/lib/sale-attribution");
+    const q6 = new PgDialect().sqlToQuery(sql`
+      SELECT ce.org_id::text AS org_id, ce.stage_id, ce.offer_id,
+             count(*) FILTER (WHERE ${purchasedClause()})::int AS sales,
+             coalesce(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)::float8 AS revenue,
+             coalesce(sum(ce.revenue) FILTER (WHERE ${pendingRevenueClause()}), 0)::float8 AS pending_revenue
+      FROM conversion_events ce
+      JOIN campaign_stages cs ON cs.id = ce.stage_id AND cs.org_id = ce.org_id
+      JOIN campaigns ca ON ca.id = cs.campaign_id AND ca.org_id = ce.org_id
+      WHERE cs.sent_at IS NOT NULL
+        AND ce.offer_id IS NOT NULL
+        AND ce.offer_id IS DISTINCT FROM ca.offer_id
+      GROUP BY ce.org_id, ce.stage_id, ce.offer_id
+    `);
+    if (q6.params.length !== 0) throw new Error("V6 twin unexpectedly carries bind parameters");
+    // A rendered SELECT on THIS read-only transaction (same snapshot as the views).
+    const twin = [...(await tx.unsafe(q6.sql))] as Row[];
     return { pop: [...pop], log: [...log], oldCells: [...oldCells], v2Cells: [...v2Cells], oldAud: [...oldAud],
       v2Aud: [...v2Aud], oldFoot: [...oldFoot], v2Foot: [...v2Foot], splits: [...splits], placed: [...placed],
-      overdrawn: [...overdrawn] } as Record<string, Row[]>;
+      overdrawn: [...overdrawn], twin } as Record<string, Row[]>;
   });
 
   let fail = 0;
@@ -177,7 +215,8 @@ async function main() {
   const v2F = new Map(d.v2Foot.map((r) => [fk(r), r]));
   const sd = new Map<string, { revenue: number; sales: number }>();
   for (const s of d.splits) {
-    if (s.campaign_offer_id == null) continue;
+    // Only what the econ counted can move (review I1: unsent stage 1108 must not).
+    if (s.campaign_offer_id == null || s.econ_scoped !== true) continue;
     for (const [o, sign] of [[s.offer_id, 1], [s.campaign_offer_id, -1]] as const) {
       const k = `${s.org_id}:${o}`;
       const e = sd.get(k) ?? { revenue: 0, sales: 0 };
@@ -224,23 +263,25 @@ async function main() {
     `revenue ${sum(d.oldFoot, "revenue").toFixed(4)} -> ${sum(d.v2Foot, "revenue").toFixed(4)}, sales ${sum(d.oldFoot, "sales")} -> ${sum(d.v2Foot, "sales")}`);
   bar("V5 footer halves agree (stage-half Δ - ledger-half Δ = split money with no group-targeted send)", v5Bad.length === 0, v5Bad.slice(0, 3).join(" | "));
 
-  // V6 — R3 parity with the By Offer tab's function.
-  const { getOfferSplits } = await import("@/lib/reporting/offer-splits");
+  // V6 — R3 parity: the view vs getOfferSplits' query, both over the sent
+  // stages, both in this snapshot. The twin's stage set is campaign_stages
+  // (sent_at set) joined to campaigns, never the view's own rows.
+  const moving = (r: Row) => n(r.sales) !== 0 || n(r.revenue) !== 0 || n(r.pending_revenue) !== 0;
+  const key6 = (r: Row) => `${r.org_id}:${r.stage_id}:${r.offer_id}`;
+  const tw = new Map(d.twin.filter(moving).map((r) => [key6(r), r]));
+  const vw = new Map(d.splits.filter((s) => s.econ_scoped === true).map((r) => [key6(r), r]));
   const v6Bad: string[] = [];
-  const byOrg = new Map<string, number[]>();
-  for (const s of d.splits) byOrg.set(String(s.org_id), [...new Set([...(byOrg.get(String(s.org_id)) ?? []), n(s.stage_id)])]);
-  for (const [org, stages] of byOrg) {
-    const ts = (await getOfferSplits(org, stages, null)).filter((x) => x.sales !== 0 || x.revenue !== 0 || x.pending_revenue !== 0);
-    const vs = d.splits.filter((s) => s.org_id === org);
-    if (ts.length !== vs.length) v6Bad.push(`org ${org}: ${ts.length} function rows vs ${vs.length} view rows`);
-    for (const t of ts) {
-      const v = vs.find((s) => n(s.stage_id) === t.stage_id && n(s.offer_id) === t.offer_id);
-      if (!v || !eq(v.sales, t.sales) || !eq(v.revenue, t.revenue) || !eq(v.pending_revenue, t.pending_revenue)) {
-        v6Bad.push(`stage ${t.stage_id} offer ${t.offer_id}: fn ${JSON.stringify(t)} view ${JSON.stringify(v ?? null)}`);
-      }
+  for (const k of new Set([...tw.keys(), ...vw.keys()])) {
+    const x = tw.get(k), v = vw.get(k);
+    if (!x || !v || !eq(x.sales, v.sales) || !eq(x.revenue, v.revenue) || !eq(x.pending_revenue, v.pending_revenue)) {
+      v6Bad.push(`${k}: twin ${JSON.stringify(x ?? null)} view ${JSON.stringify(v ?? null)}`);
     }
   }
-  bar("V6 offer_split_amounts_v == getOfferSplits(lifetime) (Ruling R3)", v6Bad.length === 0, v6Bad.slice(0, 3).join(" | "));
+  bar(`V6 offer_split_amounts_v == getOfferSplits' query over every sent stage (Ruling R3; ${tw.size} rows)`,
+    v6Bad.length === 0 && tw.size === vw.size, v6Bad.slice(0, 3).join(" | "));
+  const outOfScope = d.splits.filter((s) => s.econ_scoped !== true);
+  console.log(`  info: ${outOfScope.length} split row(s) on stages offer_report_campaign_econ does not count ` +
+    `(moved nowhere in the footer): ${JSON.stringify(outOfScope.slice(0, 5))}`);
 
   // V7
   const negative = d.v2Foot.filter((r) => n(r.revenue) < -1e-6 || n(r.sales) < 0);

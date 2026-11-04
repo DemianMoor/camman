@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-11-03_
+_Last updated: 2026-11-04_
 
 **Status (2026-09-21):** Phases 1–4 are LIVE on production and Phase 5 (per-event columns) ships with this change; migrations **0181** (applied 2026-09-18) and **0182–0185** (applied 2026-09-21 19:05–19:07 UTC, one transaction) are recorded on production, byte-identical to `db/migrations`. The history below is how the phases got there. The ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). (Until 2026-09-21 these readers were verified on camman-v2 and by read-only checks against prod; since the Gate 3 cutover they run on production.)
 
@@ -35,7 +35,7 @@ Flags, not keys, carry meaning. A future `deposit` is a new `event_types` row wi
 4. `resolveMapping` classifies it. No rule means NULL event type + status: stored, never a purchase.
 5. `upsertConversionEvents` upserts on `keitaro_event_id`:
    - `occurred_at` never updates
-   - event type is locked and attribution is sticky (`COALESCE`)
+   - event type is locked and recipient/campaign/stage attribution is sticky (`COALESCE(existing, new)`); `offer_id` is NOT sticky — it follows the current Keitaro-offer mapping (`COALESCE(new, existing)`), see [Offer attribution from the Keitaro offer](#offer-attribution-from-the-keitaro-offer-2026-11-04)
    - status/revenue and the raw Keitaro status/type take the newest values
    - no-op writes are skipped
    - `org_id` is fixed at insert. A row whose stored org differs from the org this run resolved is **not written** (its sticky fills would mix orgs): it is skipped and counted in `orgMismatch`, with up to 5 samples `event_id existing_org→new_org`. `setWhere` also requires the same org, so a row a concurrent run inserted under another org is left untouched
@@ -186,6 +186,33 @@ npx tsx scripts/verify-conversion-events.ts              # read-only
 Checks: `scripts/test-conversion-ledger-rows.ts` (pure, 38), `scripts/test-conversion-events-upsert.ts` (camman-v2 only, rolled back, 17), `scripts/test-conversion-lookups.ts` (camman-v2 only, rolled back, 7: `loadLookups` recipient chain, archived and other-org rules excluded, Keitaro offer id / tracking id in two orgs dropped).
 
 Migration 0181 starts with `SET LOCAL lock_timeout = '5s'` and takes the `offers` lock before any foreign-key lock: Drizzle applies every pending migration in one transaction, so a blocked lock fails the migration (retry) instead of queueing the drain behind it.
+
+## Offer attribution from the Keitaro offer (2026-11-04)
+
+A stage's link can point at a Keitaro offer that is not the campaign's offer. The ledger now stores such a conversion under the offer it was actually for.
+
+**The rule** (`resolveConversionOffer` in [lib/conversions/build-rows.ts](../../lib/conversions/build-rows.ts), lookups in [lib/conversions/ingest.ts](../../lib/conversions/ingest.ts)): a conversion with a stage is stored under the offer whose `offers.keitaro_offer_id` equals the conversion's Keitaro offer id, **only if** exactly one offer row in the whole table carries that id (an id shared by two offers anywhere is dropped) **and** that offer is in the stage's org. Otherwise it is stored under the campaign's offer.
+
+**Only the stored offer moves.** Classification does not: `resolveMapping` keeps using the campaign's offer and its network to pick the event type and status (owner condition 2026-11-04). The `affiliateNetworkId` that `resolveConversionOffer` returns is not used for classification.
+
+**Targeting never reads `conversion_events.offer_id`.** `purchasedOfferContacts` (the `made_purchase_for_offer` rule and the `bought_offer` send layer) and the send-time lifecycle re-check reach the offer through `ce.campaign_id → campaigns.offer_id`. So moving a row's offer changes reports, never who is excluded or segmented. Pinned by `scripts/test-offer-move-targeting-invariance-db.ts` (camman-v2, rolled back), whose T5 source guard fails if any file in `lib/` or `db/migrations` outside `lib/conversions/ingest.ts`, `lib/conversions/monitor.ts` and `lib/reporting/offer-splits.ts` reads a `conversion_events` alias's `.offer_id`.
+
+**`offer_id` is no longer sticky.** The upsert writes `COALESCE(excluded.offer_id, conversion_events.offer_id)`, so a re-ingest inside the 7-day live window moves a row when a mapping is added or removed (both directions). A NULL never erases an offer.
+
+**Backfill for rows outside the live window** — [scripts/backfill-conversion-offer-attribution.ts](../../scripts/backfill-conversion-offer-attribution.ts):
+
+```bash
+npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts [--org <uuid> [--links "1:62,11:76"]]           # dry run
+npx tsx --conditions=react-server scripts/backfill-conversion-offer-attribution.ts [--org <uuid> [--links "1:62,11:76"]] --apply   # commit
+```
+
+- Same rule as ingest, in SQL. Rows with no campaign keep their offer. Moves go both ways.
+- `--links "<keitaro offer id>:<offer id>,…"` sets `offers.keitaro_offer_id` first, only where it is NULL and only in `--org` (required with `--links`). A pair that updates 0 rows fails, and so does a Keitaro id any offer (any org) already carries — linking it would make the id shared, and ingest ignores shared ids.
+- Everything runs in **one REPEATABLE READ transaction** (one snapshot, so a conversion ingested mid-run cannot make a before/after pair differ; a concurrent write to a row being moved aborts with a serialization error → rolled back, exit 1, re-run; `SET LOCAL lock_timeout = '5s'`, `statement_timeout = '120s'`): link, compute the moves, capture targeting, one `UPDATE conversion_events SET offer_id, updated_at = now()` (the bump makes the stage-day projection re-project those stages), capture again, assert. It is rolled back unless `--apply`; with `--apply` it commits only if every assertion passed. The dry run is the same code path as the apply.
+- Prints the moves grouped by (from offer → to offer, Keitaro offer id) with rows, sales and approved revenue, a per-offer before → after table, and, per affected offer and per active `made_purchase_for_offer` segment rule, the contact set before / after.
+- Exits 1 if a link fails, if the UPDATE count differs from the computed count, if any targeting set changes (size or hash), or if any campaign's rows / sales / approved revenue change.
+- **Production: attended only, after the owner's explicit go** (CLAUDE.md §14). It is excluded from the preview-DB guard for that reason (`scripts/test-preview-db-guard.ts`).
+- Test: `scripts/test-offer-attribution-backfill-db.ts` (camman-v2, rolled back): 1 row A→B, shared Keitaro id and campaign-less rows untouched, apply moves 1 then a dry run reports 0, unlink moves it back, `--links` works and is refused without `--org`, for a 0-row pair and for an already-carried id; the core refuses READ COMMITTED; the CLI exits 1 on a bad link.
 
 ## Live ingest and alerts (Phase 2)
 

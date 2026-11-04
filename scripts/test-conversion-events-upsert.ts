@@ -180,7 +180,8 @@ async function main() {
         JSON.stringify({ r, o }),
       );
 
-      // Sticky attribution fill: a NULL offer is filled once, then never replaced.
+      // Offer attribution: a NULL offer is filled, and a later resolved offer REPLACES it
+      // (the Keitaro-offer mapping can change); a NULL never erases one.
       const offerIds = (
         (await tx.execute(sql`SELECT id FROM offers WHERE org_id = ${org.id}::uuid ORDER BY id LIMIT 2`)) as unknown as { id: number }[]
       ).map((x) => x.id);
@@ -191,12 +192,34 @@ async function main() {
       const r2 = await upsertConversionEvents(tx, [{ ...fill, offerId: offerIds[1] }]);
       const f2 = await rowOf(tx, fill.keitaroEventId);
       check(
-        "U16 NULL offer_id is filled by a later ingest (updated 1); a different offer id afterwards changes nothing (not counted)",
+        "U16 NULL offer_id is filled by a later ingest (updated 1); a different offer id afterwards replaces it (updated 1)",
         offerIds.length === 2 && r0.inserted === 1 &&
           r1.updated === 1 && f1?.offer_id === offerIds[0] &&
-          r2.updated === 0 && r2.inserted === 0 && f2?.offer_id === offerIds[0],
+          r2.updated === 1 && r2.inserted === 0 && f2?.offer_id === offerIds[1],
         JSON.stringify({ offerIds, r0, r1, f1: f1?.offer_id, r2, f2: f2?.offer_id }),
       );
+
+      // U17-U20: offer attribution is recomputed, not sticky.
+      const att = base({ keitaroEventId: `${RUN}-att`, offerId: offerIds[0] });
+      await upsertConversionEvents(tx, [att]);
+      await upsertConversionEvents(tx, [{ ...att, offerId: offerIds[1] }]);
+      const a1 = await rowOf(tx, att.keitaroEventId);
+      check("U17 existing row offer A, same event upserted with offer B → stored B", a1?.offer_id === offerIds[1], JSON.stringify(a1));
+
+      const rn = await upsertConversionEvents(tx, [{ ...att, offerId: null }]);
+      const a2 = await rowOf(tx, att.keitaroEventId);
+      check("U18 upsert with offer NULL → stays B, nothing written", a2?.offer_id === offerIds[1] && rn.updated === 0, JSON.stringify({ rn, a2 }));
+
+      // now() is frozen inside the transaction, so age updated_at by hand to prove the bump.
+      await tx.execute(sql`UPDATE conversion_events SET updated_at = '2000-01-01T00:00:00Z' WHERE keitaro_event_id = ${att.keitaroEventId}`);
+      const rb = await upsertConversionEvents(tx, [{ ...att, offerId: offerIds[0] }]);
+      const a3 = await rowOf(tx, att.keitaroEventId);
+      check("U19 upsert back to A (mapping removed) → stored A", rb.updated === 1 && a3?.offer_id === offerIds[0], JSON.stringify({ rb, a3 }));
+
+      const [ts] = (await tx.execute(
+        sql`SELECT (updated_at > '2000-01-01T00:00:00Z') AS bumped FROM conversion_events WHERE keitaro_event_id = ${att.keitaroEventId}`,
+      )) as unknown as { bumped: boolean }[];
+      check("U20 an offer-only change is written (counted updated) and bumps updated_at", rb.updated === 1 && ts?.bumped === true, JSON.stringify({ rb, ts }));
 
       throw new Rollback();
     });

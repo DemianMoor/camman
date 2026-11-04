@@ -7,6 +7,7 @@ import {
 } from "../lib/conversions/keitaro-row";
 import {
   buildConversionEventRows,
+  resolveConversionOffer,
   resolveMapping,
   type Lookups,
   type MappingRule,
@@ -181,6 +182,59 @@ const b7 = buildConversionEventRows(
   lookups,
 );
 check("B7 two conversions on one click → two rows", b7.rows.length === 2 && b7.rows[0].keitaroEventId !== b7.rows[1].keitaroEventId);
+
+// Per-offer attribution: the STORED offer follows the conversion's Keitaro offer
+// id; classification stays on the stage's campaign offer + its network (owner
+// condition 2026-11-04: who gets texted must not change).
+const OTHER_ORG = "00000000-0000-4000-8000-000000000002";
+const OTHER_TYPE = 3;
+const rLookups: Lookups = {
+  stageSends: new Map(),
+  stageIdByTrackingId: new Map([["r_stage", 30]]),
+  stages: new Map([[30, { orgId: ORG, campaignId: 300, offerId: 10, affiliateNetworkId: 1 }]]),
+  offersByKeitaroId: new Map([
+    [78, { orgId: ORG, offerId: 20, affiliateNetworkId: 2 }],
+    [79, { orgId: OTHER_ORG, offerId: 21, affiliateNetworkId: 2 }],
+    [80, { orgId: ORG, offerId: 10, affiliateNetworkId: 1 }],
+  ]),
+  rulesByOrg: new Map([
+    [
+      ORG,
+      [
+        { offerId: null, affiliateNetworkId: 1, keitaroType: "sale", eventTypeId: PURCHASE, conversionStatus: "approved" },
+        { offerId: null, affiliateNetworkId: 2, keitaroType: "sale", eventTypeId: OTHER_TYPE, conversionStatus: "pending" },
+      ] satisfies MappingRule[],
+    ],
+  ]),
+};
+const rRow = (keitaroOfferId: number | null) =>
+  buildConversionEventRows(
+    [src({ subId3: "r_stage", keitaroOfferId, keitaroType: "sale", keitaroStatus: "sale" })],
+    rLookups,
+  ).rows[0];
+
+const r1 = rRow(78);
+check(
+  "R1 Keitaro offer maps to another offer (same org) → stored offer 20, classified by the campaign offer's network 1",
+  r1?.offerId === 20 && r1.eventTypeId === PURCHASE && r1.status === "approved",
+  JSON.stringify(r1),
+);
+check("R2 Keitaro offer in another org is ignored → campaign offer 10", rRow(79)?.offerId === 10);
+check("R3 Keitaro offer not in the map → campaign offer 10", rRow(999)?.offerId === 10);
+check("R4 null Keitaro offer → campaign offer 10", rRow(null)?.offerId === 10);
+const stageForR = { orgId: ORG, offerId: 10, affiliateNetworkId: 1 };
+const r5 = resolveConversionOffer(stageForR, 80, rLookups);
+check(
+  "R5 Keitaro offer maps to the campaign offer itself → offer 10, source keitaro_offer",
+  r5.offerId === 10 && r5.source === "keitaro_offer" && rRow(80)?.offerId === 10,
+  JSON.stringify(r5),
+);
+const r6 = buildConversionEventRows([src({ subId3: "nope", keitaroOfferId: 78, keitaroType: "sale", keitaroStatus: "sale" })], rLookups).rows[0];
+check(
+  "R6 no stage, Keitaro offer mapped → offer-level row, mapped offer + its own network's rule (unchanged)",
+  r6?.stageId === null && r6.offerId === 20 && r6.eventTypeId === OTHER_TYPE && r6.status === "pending",
+  JSON.stringify(r6),
+);
 
 // Fetch guard (user requirement 2026-09-17): a page carrying fewer rows than
 // its own `total`, or a 200 that isn't JSON with a rows array + numeric total,

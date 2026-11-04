@@ -76,12 +76,36 @@ export interface ConversionEventInsert {
   rawParams: Record<string, unknown> | null;
 }
 
+// The offer a conversion is STORED under. When the conversion carries a Keitaro
+// offer id that maps unambiguously (offersByKeitaroId drops shared ids) to an
+// offer in the stage's own org, that offer wins over the stage's campaign offer,
+// so a link pointing at a different offer is credited to it. Otherwise the
+// campaign offer stands. Storage only: classification (resolveMapping) keeps
+// using the campaign offer and its network, so who is excluded from a later
+// send never changes with where a row is stored.
+export function resolveConversionOffer(
+  stage: { orgId: string; offerId: number | null; affiliateNetworkId: number | null },
+  keitaroOfferId: number | null,
+  lookups: Pick<Lookups, "offersByKeitaroId">,
+): { offerId: number | null; affiliateNetworkId: number | null; source: "keitaro_offer" | "campaign" } {
+  const mapped =
+    keitaroOfferId !== null ? lookups.offersByKeitaroId.get(keitaroOfferId) : undefined;
+  if (mapped && mapped.orgId === stage.orgId) {
+    // affiliateNetworkId is the mapped offer's network (nothing reads it today) —
+    // classification (resolveMapping) must NOT use it; it uses the campaign's.
+    return { offerId: mapped.offerId, affiliateNetworkId: mapped.affiliateNetworkId, source: "keitaro_offer" };
+  }
+  return { offerId: stage.offerId, affiliateNetworkId: stage.affiliateNetworkId, source: "campaign" };
+}
+
 // Attribution, strongest first:
 //   1. sub_id_1 = a stage_sends row  → recipient + that row's stage
 //   2. sub_id_3 = a stage tracking id → stage only
 //   3. Keitaro offer id = offers.keitaro_offer_id → offer only
 //   4. none → unresolved (no org to store it under; reported, not written)
-// Org, campaign, offer and network come from the stage when there is one.
+// Org and campaign come from the stage when there is one. The STORED offer is
+// resolveConversionOffer's (the mapped Keitaro offer, else the campaign's);
+// classification keeps the campaign's offer and network (mappingOfferId).
 export function buildConversionEventRows(
   sources: readonly LedgerSourceRow[],
   lookups: Lookups,
@@ -97,13 +121,15 @@ export function buildConversionEventRows(
 
     let orgId: string;
     let campaignId: number | null = null;
-    let offerId: number | null;
+    let offerId: number | null; // stored offer
+    let mappingOfferId: number | null; // classification offer
     let affiliateNetworkId: number | null;
     if (stage) {
       orgId = stage.orgId;
       campaignId = stage.campaignId;
-      offerId = stage.offerId;
+      mappingOfferId = stage.offerId;
       affiliateNetworkId = stage.affiliateNetworkId;
+      offerId = resolveConversionOffer(stage, s.keitaroOfferId, lookups).offerId;
     } else {
       const offer =
         s.keitaroOfferId !== null ? lookups.offersByKeitaroId.get(s.keitaroOfferId) : undefined;
@@ -113,11 +139,12 @@ export function buildConversionEventRows(
       }
       orgId = offer.orgId;
       offerId = offer.offerId;
+      mappingOfferId = offer.offerId;
       affiliateNetworkId = offer.affiliateNetworkId;
     }
 
     const mapping = resolveMapping(lookups.rulesByOrg.get(orgId) ?? [], {
-      offerId,
+      offerId: mappingOfferId,
       affiliateNetworkId,
       keitaroType: s.keitaroType,
     });

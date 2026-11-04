@@ -40,6 +40,8 @@ export interface Sums {
   sales: number;
   revenue: number;
   send_cost: number;
+  leads: number;
+  lead_revenue: number;
   hist: number[];
 }
 
@@ -62,6 +64,13 @@ export interface ResultRow {
   sales: number;
   /** sales ÷ clicks; null over 0 clicks. */
   conv_pct: number | null;
+  /**
+   * Lead + registration CONVERSIONS (advertiser postbacks, 0232) — not the
+   * partner leads of leads_admitted. Dated like sales.
+   */
+  leads: number;
+  /** Their approved revenue: a breakdown of `revenue`, already inside it. */
+  lead_revenue: number;
   send_cost: number;
   /** null where admissions cannot be attributed (stage rows). */
   lookup_cost: number | null;
@@ -113,7 +122,7 @@ export interface DripDailyResults {
 
 const zero = (): Sums => ({
   leads_admitted: 0, admitted: 0, admitted_carried: 0, first_sends: 0, followup_sends: 0, dlr_sent: 0,
-  delivered: 0, clicks: 0, opt_outs: 0, sales: 0, revenue: 0, send_cost: 0, hist: [],
+  delivered: 0, clicks: 0, opt_outs: 0, sales: 0, revenue: 0, send_cost: 0, leads: 0, lead_revenue: 0, hist: [],
 });
 
 function add(into: Sums, c: Record<string, unknown>): void {
@@ -129,6 +138,8 @@ function add(into: Sums, c: Record<string, unknown>): void {
   into.sales += Number(c.sales);
   into.revenue += Number(c.revenue);
   into.send_cost += Number(c.send_cost);
+  into.leads += Number(c.leads ?? 0);
+  into.lead_revenue += Number(c.lead_revenue ?? 0);
   if (c.latency_hist) into.hist = sumHistograms([into.hist.length ? into.hist : null, c.latency_hist as number[]]);
 }
 
@@ -159,6 +170,8 @@ export function rowFrom(s: Sums, lookupRate: number | null, basis: Basis): Resul
     opt_out_pct: ratio(s.opt_outs, sends),
     sales: s.sales,
     conv_pct: ratio(s.sales, s.clicks),
+    leads: s.leads,
+    lead_revenue: s.lead_revenue,
     send_cost: s.send_cost,
     lookup_cost: lookupRate == null ? null : m.lookup_cost_usd,
     revenue: s.revenue,
@@ -217,7 +230,8 @@ export async function getDripDailyResults(
     dbc.execute(sql`
       SELECT day_et::text AS day, stage_id, partner_key_id, leads_admitted, admitted, admitted_carried,
              first_sends, followup_sends, dlr_sent, delivered, clicks, opt_outs, sales,
-             revenue::float8 AS revenue, send_cost::float8 AS send_cost, latency_hist
+             revenue::float8 AS revenue, send_cost::float8 AS send_cost,
+             leads, lead_revenue::float8 AS lead_revenue, latency_hist
       FROM drip_daily_rollup
       WHERE org_id = ${orgId}::uuid AND campaign_id = ${campaignId} AND basis = ${basis}
         AND day_et BETWEEN ${from}::date AND ${to}::date`) as unknown as Promise<Record<string, unknown>[]>,

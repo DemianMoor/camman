@@ -75,6 +75,9 @@ export const LEAD_EVENT_TYPE = {
   is_purchase: false,
   counts_revenue: true,
   is_retarget_signal: false,
+  // Reports count a lead as a Registration (0232) — reports only; the Registered
+  // lane reads is_retarget_signal, which stays false.
+  counts_as_registration: true,
 } as const;
 
 /**

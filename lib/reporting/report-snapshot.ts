@@ -6,8 +6,11 @@ import { salesRevenueTotals } from "@/lib/reporting/attribution";
 import { dripCostByStageInRange } from "@/lib/reporting/stage-funnel";
 import {
   loadEventTypes,
+  countKeysFor,
+  registrationMerge,
   visibleEventTypesByCount,
   type EventCountMap,
+  type EventTypeSpec,
   type ReportEventMap,
 } from "@/lib/reporting/event-columns";
 
@@ -45,7 +48,12 @@ export interface ReportMetrics {
   // The registry, merged across orgs, in the order the lines are printed.
   // Carried rather than re-queried in the formatter so the formatter stays PURE
   // and its tests need no database.
-  eventTypes: { key: string; label: string }[];
+  //
+  // Registration merge (0232, reports only): the retarget-signal line's count
+  // includes its counts_as_registration members (countKeys), and a member gets
+  // a money-only line (moneyOnly) — the same rule as the report columns
+  // (registrationMerge, lib/reporting/event-columns.ts). Absent = own key only.
+  eventTypes: { key: string; label: string; countKeys?: string[]; moneyOnly?: boolean }[];
   // Conversions in the window that matched no mapping. They are under NO key of
   // `events` — but they are NOT in no other field: `sales` and `revenue` resolve
   // is_purchase / counts_revenue through NON-org-scoped id lists, so a stray
@@ -215,13 +223,25 @@ export async function computeReportMetrics(
     // still holds a non-zero number for it. Without this a retired type would
     // read "Old thing: 0" in the owner's report every hour for ever, and would
     // spend one of the six lines doing it.
-    eventTypes: visibleEventTypesByCount(
-      registry,
-      [collapseToCounts(events)],
-    ).map((t) => ({ key: t.key, label: t.label })),
+    eventTypes: telegramEventLines(
+      visibleEventTypesByCount(registry, [collapseToCounts(events)]),
+    ),
     unmapped,
     manualTopup,
   };
+}
+
+// The printed lines, registration merge applied: the host's count covers its
+// members, a member keeps a money-only line (registrationMerge).
+function telegramEventLines(
+  visible: EventTypeSpec[],
+): ReportMetrics["eventTypes"] {
+  const merge = registrationMerge(visible);
+  return visible.map((t) =>
+    merge.members.includes(t.key)
+      ? { key: t.key, label: t.label, moneyOnly: true }
+      : { key: t.key, label: t.label, countKeys: countKeysFor(t.key, merge) },
+  );
 }
 
 // "Is this key live in this window" — any of the three figures non-zero. The

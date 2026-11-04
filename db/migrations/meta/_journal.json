@@ -1597,6 +1597,13 @@
       "when": 1796601600000,
       "tag": "0231_offer_report_conversion_offer",
       "breakpoints": true
+    },
+    {
+      "idx": 228,
+      "version": "7",
+      "when": 1796688000000,
+      "tag": "0232_lead_counts_as_registration",
+      "breakpoints": true
     }
   ]
 }

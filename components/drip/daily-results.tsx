@@ -90,6 +90,8 @@ const COLUMNS: Column[] = [
   { key: "clk", label: "Clicks · per send", title: "Clean clicks (repeats count), and clicks per send. In Activity, clicks on this day can come from earlier sends, so it can exceed 100%.", cell: (r) => `${int(r.clicks)} · ${pct(r.ctr)}` },
   { key: "opt", label: "Opt-outs %", title: "STOP replies ÷ sends, dated by the reply.", cell: (r) => `${int(r.opt_outs)} · ${pct(r.opt_out_pct)}` },
   { key: "sal", label: "Sales · conv %", title: "Sales detected on this day; conversion = sales ÷ clicks.", cell: (r) => `${int(r.sales)} · ${pct(r.conv_pct)}` },
+  { key: "lds", label: "Leads", title: "Lead and registration conversions from the advertiser, detected on this day (dated like Sales). Not the partner leads in 'Leads arrived'.", cell: (r) => int(r.leads) },
+  { key: "ldr", label: "Lead revenue", title: "Approved revenue of those leads. Already inside Revenue — a breakdown, not an addition.", cell: (r) => usd(r.lead_revenue) },
   { key: "cost", label: "Send cost", title: "Each send at its recorded rate, plus each opt-out reply at the rate of the send it answered.", cell: (r) => usd(r.send_cost) },
   { key: "look", label: "Lookup cost", title: "Admitted leads × the calibrated lookup rate (the partner report's). Slightly overstates: a cache hit cost nothing. Not attributable to a stage — on the campaign total only.", cell: (r) => usd(r.lookup_cost) },
   { key: "rev", label: "Revenue", title: "Approved revenue, dated by detection.", cell: (r) => usd(r.revenue) },

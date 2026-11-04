@@ -6042,6 +6042,10 @@ export const drip_daily_rollup = pgTable(
     opt_outs: integer("opt_outs").notNull().default(0),
     sales: integer("sales").notNull().default(0),
     revenue: numeric("revenue", { precision: 12, scale: 4 }).notNull().default("0"),
+    // 0232: lead + registration conversions and their approved revenue (a
+    // breakdown of `revenue`, never added to it).
+    leads: integer("leads").notNull().default(0),
+    lead_revenue: numeric("lead_revenue", { precision: 12, scale: 4 }).notNull().default("0"),
     send_cost: numeric("send_cost", { precision: 12, scale: 4 }).notNull().default("0"),
     latency_hist: integer("latency_hist").array(),
     refreshed_at: timestamp("refreshed_at", { withTimezone: true })
@@ -6064,11 +6068,11 @@ export const drip_daily_rollup = pgTable(
     check("drip_daily_rollup_basis_check", sql`basis IN ('activity', 'cohort')`),
     check(
       "drip_daily_rollup_nonneg",
-      sql`leads_admitted >= 0 AND admitted >= 0 AND admitted_carried >= 0 AND admitted_carried <= admitted AND first_sends >= 0 AND followup_sends >= 0 AND dlr_sent >= 0 AND delivered >= 0 AND delivered <= dlr_sent AND clicks >= 0 AND opt_outs >= 0 AND sales >= 0`,
+      sql`leads_admitted >= 0 AND admitted >= 0 AND admitted_carried >= 0 AND admitted_carried <= admitted AND first_sends >= 0 AND followup_sends >= 0 AND dlr_sent >= 0 AND delivered >= 0 AND delivered <= dlr_sent AND clicks >= 0 AND opt_outs >= 0 AND sales >= 0 AND leads >= 0`,
     ),
     check(
       "drip_daily_rollup_row_kind",
-      sql`CASE WHEN stage_id IS NULL THEN first_sends = 0 AND followup_sends = 0 AND dlr_sent = 0 AND delivered = 0 AND clicks = 0 AND opt_outs = 0 AND sales = 0 AND revenue = 0 AND send_cost = 0 AND latency_hist IS NULL ELSE leads_admitted = 0 AND admitted = 0 AND admitted_carried = 0 END`,
+      sql`CASE WHEN stage_id IS NULL THEN first_sends = 0 AND followup_sends = 0 AND dlr_sent = 0 AND delivered = 0 AND clicks = 0 AND opt_outs = 0 AND sales = 0 AND revenue = 0 AND send_cost = 0 AND leads = 0 AND lead_revenue = 0 AND latency_hist IS NULL ELSE leads_admitted = 0 AND admitted = 0 AND admitted_carried = 0 END`,
     ),
   ],
 );
@@ -6478,6 +6482,9 @@ export const event_types = pgTable(
     is_purchase: boolean("is_purchase").notNull().default(false),
     counts_revenue: boolean("counts_revenue").notNull().default(false),
     is_retarget_signal: boolean("is_retarget_signal").notNull().default(false),
+    // Reports only (0232): counted inside the Registrations column. NEVER read by
+    // the lane / tier / lifecycle logic, which reads is_retarget_signal.
+    counts_as_registration: boolean("counts_as_registration").notNull().default(false),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })

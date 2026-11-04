@@ -14,6 +14,7 @@ import { denominatorFor } from "@/lib/reporting/counted-clickers";
 import {
   eventCellValue,
   eventColumnById,
+  resolveEventColumn,
   loadEventTypes,
 } from "@/lib/reporting/event-columns";
 import {
@@ -441,7 +442,9 @@ export async function GET(req: NextRequest) {
 
   // Resolved once, not per comparison: the parse is pure and the answer cannot
   // change inside a single sort.
-  const sortEventCol = eventSortColumn(sortBy);
+  // Resolved against the registry so a "Registrations" sort includes merged
+  // lead counts (resolveEventColumn); the shape check above stays id-only.
+  const sortEventCol = eventSortColumn(sortBy) ? resolveEventColumn(sortBy, eventTypes) : null;
   // The key order — clicked column (direction-flipped) → Clickers high-to-low
   // (never flipped) → campaign_id, stage_id (never flipped) — lives in
   // lib/reporting/report-sort.ts, the ONE place that owns it, shared with the

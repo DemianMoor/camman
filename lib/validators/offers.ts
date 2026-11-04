@@ -33,6 +33,16 @@ const baseOfferShape = {
       "offer_id may only contain letters, digits, hyphens, and underscores",
     ),
   postfix: z.string().trim().max(80).optional(),
+  // Keitaro's numeric offer id. Conversions are stored under the offer whose
+  // keitaro_offer_id matches theirs. Optional; null clears it. Manager+ only
+  // (the offers routes already require offers.create / offers.update).
+  keitaro_offer_id: z
+    .number({ message: "Keitaro offer ID must be a whole number" })
+    .int("Keitaro offer ID must be a whole number")
+    .positive("Keitaro offer ID must be greater than 0")
+    .max(2147483647, "Keitaro offer ID is too large")
+    .nullable()
+    .optional(),
   base_url: z.string().trim().max(500).optional(),
   network_id: z.number({ message: "Network is required" }).int().positive(),
   payout_model: payoutModelEnum,

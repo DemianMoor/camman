@@ -33,6 +33,13 @@ import {
   purchasedClause,
 } from "@/lib/sale-attribution";
 import {
+  getOfferSplits,
+  isMovingSplit,
+  splitStageMetrics,
+  type OfferSlice,
+  type OfferSplit,
+} from "@/lib/reporting/offer-splits";
+import {
   getStageMetricsInRange,
   type ClickerDenominators,
   type StageMetrics,
@@ -78,6 +85,16 @@ export interface PerfMetrics {
   // can see the denominator was 4.
   lifetime_clickers: number;
   lifetime_revenue: number;
+  // Per-offer split (lib/reporting/offer-splits.ts): approved revenue moved into /
+  // out of this row by conversions whose offer differs from the campaign's.
+  // Consumed by by-offer rendering; 0 everywhere else.
+  split_in_revenue: number;
+  split_out_revenue: number;
+  // The same split per event_types.key: split_out − split_in approved revenue,
+  // so the revenue key k's OWN traffic produced is events[k].revenue + this[k].
+  // The per-event EPC columns divide that (lib/reporting/offer-split-display.ts).
+  // Empty on every row the split did not touch.
+  event_split_delta: Record<string, number>;
   sales: number;
   revenue: number;
   // The per-event-type breakdown of sales / revenue / pending_revenue, keyed by
@@ -142,6 +159,9 @@ export const ZERO: PerfMetrics = {
   counted_clickers: 0,
   lifetime_clickers: 0,
   lifetime_revenue: 0,
+  split_in_revenue: 0,
+  split_out_revenue: 0,
+  event_split_delta: {},
   sales: 0,
   revenue: 0,
   // A FRESH object per accumulator — see zeroMetrics() and the freeze below.
@@ -162,11 +182,18 @@ export const ZERO: PerfMetrics = {
 // body. Freezing turns that whole class of mistake into a TypeError in strict
 // mode (all ES modules are strict) instead of silent cross-request corruption.
 Object.freeze(ZERO.events);
+Object.freeze(ZERO.event_split_delta);
 
 /** A fresh zero accumulator. Use this, not `{ ...ZERO }`, wherever the result is mutated. */
-export const zeroMetrics = (): PerfMetrics => ({ ...ZERO, events: {} });
+export const zeroMetrics = (): PerfMetrics => ({ ...ZERO, events: {}, event_split_delta: {} });
 
-function stageMetrics(
+const addNumMaps = (a: Record<string, number>, b: Record<string, number>, f = 1): Record<string, number> => {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) out[k] = (out[k] ?? 0) + v * f;
+  return out;
+};
+
+export function stageMetrics(
   s: StageMetrics,
   countedByStage: Map<number, number>,
   lifetimeByStage: Map<number, number>,
@@ -189,6 +216,9 @@ function stageMetrics(
       s.tally.visit_clicks_clean,
     ),
     lifetime_revenue: lifetimeRevenueByStage.get(s.stage_id) ?? 0,
+    split_in_revenue: 0,
+    split_out_revenue: 0,
+    event_split_delta: {},
     sales: s.tally.sales,
     revenue: s.tally.revenue,
     // The map is COPIED, not aliased: the caller's accumulators mutate what they
@@ -213,6 +243,9 @@ export function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     counted_clickers: a.counted_clickers + b.counted_clickers,
     lifetime_clickers: a.lifetime_clickers + b.lifetime_clickers,
     lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
+    split_in_revenue: a.split_in_revenue + b.split_in_revenue,
+    split_out_revenue: a.split_out_revenue + b.split_out_revenue,
+    event_split_delta: addNumMaps(a.event_split_delta, b.event_split_delta),
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
     events: addEventMaps(addEventMaps({}, a.events), b.events),
@@ -233,6 +266,9 @@ export function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     counted_clickers: m.counted_clickers * f,
     lifetime_clickers: m.lifetime_clickers * f,
     lifetime_revenue: m.lifetime_revenue * f,
+    split_in_revenue: m.split_in_revenue * f,
+    split_out_revenue: m.split_out_revenue * f,
+    event_split_delta: addNumMaps({}, m.event_split_delta, f),
     sales: m.sales * f,
     revenue: m.revenue * f,
     events: scaleEventMap(m.events, f),
@@ -343,13 +379,63 @@ export async function getStageDimensionReports(
   const lifeRevByStage = clickers.lifetimeRevenueByStage;
   const metricsOf = (s: StageMetrics) =>
     stageMetrics(s, countedByStage, lifeByStage, lifeRevByStage);
-  const filtered = stages.filter(
-    (s) =>
-      (b.providerPhoneId == null || s.provider_phone_id === b.providerPhoneId) &&
-      (b.offerId == null || s.offer_id === b.offerId),
+  const byNumber = stages.filter(
+    (s) => b.providerPhoneId == null || s.provider_phone_id === b.providerPhoneId,
   );
 
-  const totals = filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), zeroMetrics());
+  // THE OFFER SPLIT (lib/reporting/offer-splits.ts): conversions stored under an
+  // offer other than the stage's campaign offer move to that offer's slice. Only
+  // the offer-keyed groupers (offer, creative x offer, the offer_id filter) read
+  // slices, so every other dimension and every total is untouched: the split
+  // never runs for them. One ledger read for the whole stage set.
+  const offerKeyed =
+    b.offerId != null || dimensions.some((d) => d === "offer" || d === "creative");
+  const splitsByStage = new Map<number, OfferSplit[]>();
+  if (offerKeyed) {
+    const splits = await getOfferSplits(
+      orgId,
+      byNumber.map((s) => s.stage_id),
+      // send_date: a cohort stage reports everything to date, so its splits do too.
+      b.attribution === "send_date" ? null : { fromEt: b.from, toEt: b.to },
+    );
+    for (const sp of splits) {
+      // An all-zero split (e.g. only rejected conversions) moves nothing and
+      // would render an empty offer row.
+      if (!isMovingSplit(sp)) continue;
+      const list = splitsByStage.get(sp.stage_id) ?? [];
+      list.push(sp);
+      splitsByStage.set(sp.stage_id, list);
+    }
+  }
+  // Memoized per stage so a would_go_negative stage warns once per request,
+  // not once per grouper.
+  const sliceCache = new Map<number, OfferSlice[]>();
+  const slicesOf = (s: StageMetrics): OfferSlice[] => {
+    let v = sliceCache.get(s.stage_id);
+    if (!v) {
+      v = splitStageMetrics(s.offer_id, metricsOf(s), splitsByStage.get(s.stage_id) ?? []);
+      sliceCache.set(s.stage_id, v);
+    }
+    return v;
+  };
+
+  // Under offer_id the report also carries the stages that split INTO the offer
+  // (their secondary slice is the offer's), and the totals are that offer's slices.
+  const filtered =
+    b.offerId == null
+      ? byNumber
+      : byNumber.filter(
+          (s) =>
+            s.offer_id === b.offerId ||
+            (splitsByStage.get(s.stage_id) ?? []).some((sp) => sp.offer_id === b.offerId),
+        );
+  const totals =
+    b.offerId == null
+      ? filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), zeroMetrics())
+      : filtered
+          .flatMap(slicesOf)
+          .filter((sl) => sl.offer_id === b.offerId)
+          .reduce((acc, sl) => addMetrics(acc, sl.metrics), zeroMetrics());
   await dedupeTotalClickers(orgId, b, filtered, totals, clickers);
   const refreshedAt = await maxSyncedAt(orgId);
 
@@ -365,9 +451,12 @@ export async function getStageDimensionReports(
         // Labelled as such in the UI. See docs/04-features/epc-denominator.md.
         rows = await distributeToGroups(orgId, filtered, b, metricsOf);
       } else if (dimension === "creative") {
-        rows = await groupByCreativeOffer(orgId, filtered, b, metricsOf);
+        rows = await groupByCreativeOffer(orgId, filtered, b, slicesOf);
+        // `filtered` also carries stages that split INTO the offer; their primary
+        // slices are other offers' rows. Under an offer filter return only its own.
+        if (b.offerId != null) rows = rows.filter((r) => r.offer_id === b.offerId);
       } else {
-        rows = await groupByStageDimension(filtered, dimension, metricsOf);
+        rows = await groupByStageDimension(orgId, filtered, dimension, metricsOf, slicesOf);
         // Replace the summed clicker counts with DISTINCT counts at the dimension's
         // own grain — the row grain the rule refers to. Revenue stays summed; it is
         // genuinely additive.
@@ -394,13 +483,17 @@ async function dedupeTotalClickers(
     .reduce((a, s) => a + s.tally.visit_clicks_clean, 0);
   if (b.offerId != null) {
     // One offer's totals = that offer's row in dimension=offer: distinct clickers
-    // at the offer grain, over the same period scope.
+    // at the offer grain, over the same period scope. Only the offer's OWN stages
+    // add visits: a stage that merely split a conversion into it sent nothing for it.
+    const ownManualVisits = stages
+      .filter((s) => s.link_mode !== "tracked" && s.offer_id === b.offerId)
+      .reduce((a, s) => a + s.tally.visit_clicks_clean, 0);
     const [period, lifetime] = await Promise.all([
       getCountedClickersByDimension(db, orgId, "offer", periodBounds(b, stages)),
       getCountedClickersByDimension(db, orgId, "offer"),
     ]);
-    totals.counted_clickers = (period.get(b.offerId) ?? 0) + manualVisits;
-    totals.lifetime_clickers = (lifetime.get(b.offerId) ?? 0) + manualVisits;
+    totals.counted_clickers = (period.get(b.offerId) ?? 0) + ownManualVisits;
+    totals.lifetime_clickers = (lifetime.get(b.offerId) ?? 0) + ownManualVisits;
     return;
   }
   if (b.providerPhoneId == null) {
@@ -422,15 +515,22 @@ async function dedupeTotalClickers(
 
 // ---- number / offer / sequence: group the shared stage metrics -------------
 async function groupByStageDimension(
+  orgId: string,
   stages: StageMetrics[],
   dimension: "number" | "offer" | "sequence" | "format",
   metricsOf: (s: StageMetrics) => PerfMetrics,
+  slicesOf: (s: StageMetrics) => OfferSlice[],
 ): Promise<PerfRow[]> {
   const keyOf = (s: StageMetrics): string => stageDimensionKey(s, dimension);
   const acc = new Map<string, PerfMetrics>();
+  const add = (k: string, m: PerfMetrics) => acc.set(k, addMetrics(acc.get(k) ?? zeroMetrics(), m));
   for (const s of stages) {
-    const k = keyOf(s);
-    acc.set(k, addMetrics(acc.get(k) ?? zeroMetrics(), metricsOf(s)));
+    if (dimension === "offer") {
+      // Each slice under its own offer; the slices sum to the stage.
+      for (const sl of slicesOf(s)) add(sl.offer_id == null ? "none" : String(sl.offer_id), sl.metrics);
+    } else {
+      add(keyOf(s), metricsOf(s));
+    }
   }
 
   if (dimension === "number") {
@@ -454,7 +554,7 @@ async function groupByStageDimension(
   }
   if (dimension === "offer") {
     const ids = [...acc.keys()].filter((k) => k !== "none").map(Number);
-    const info = await offerInfo(ids);
+    const info = await offerInfo(orgId, ids);
     return [...acc.entries()]
       .map(([k, m]) => {
         const oi = k === "none" ? null : info.get(Number(k));
@@ -539,7 +639,7 @@ async function groupByCreativeOffer(
   orgId: string,
   stages: StageMetrics[],
   b: Bounds,
-  metricsOf: (s: StageMetrics) => PerfMetrics,
+  slicesOf: (s: StageMetrics) => OfferSlice[],
 ): Promise<PerfRow[]> {
   const { fromUtc, toExclusiveUtc } = etRangeUtc(b);
   const acc = new Map<
@@ -547,20 +647,26 @@ async function groupByCreativeOffer(
     { m: PerfMetrics; creativeId: number | null; offerId: number | null; days: string[]; manualVisits: number }
   >();
   for (const s of stages) {
-    const key = `${s.creative_id ?? DIMENSION_NONE_KEY}:${s.offer_id ?? DIMENSION_NONE_KEY}`;
-    const e = acc.get(key) ?? {
-      m: zeroMetrics(),
-      creativeId: s.creative_id,
-      offerId: s.offer_id,
-      days: [],
-      manualVisits: 0,
-    };
-    e.m = addMetrics(e.m, metricsOf(s));
-    if (s.sent_at && s.sent_at >= fromUtc && s.sent_at < toExclusiveUtc) {
-      e.days.push(formatInCampaignTimezone(s.sent_at, "yyyy-MM-dd"));
+    // One entry per offer slice of the stage. A secondary slice (conversions
+    // split to another offer) carries no sends, so no send day and no visits.
+    for (const sl of slicesOf(s)) {
+      const key = `${s.creative_id ?? DIMENSION_NONE_KEY}:${sl.offer_id ?? DIMENSION_NONE_KEY}`;
+      const e = acc.get(key) ?? {
+        m: zeroMetrics(),
+        creativeId: s.creative_id,
+        offerId: sl.offer_id,
+        days: [],
+        manualVisits: 0,
+      };
+      e.m = addMetrics(e.m, sl.metrics);
+      if (!sl.secondary) {
+        if (s.sent_at && s.sent_at >= fromUtc && s.sent_at < toExclusiveUtc) {
+          e.days.push(formatInCampaignTimezone(s.sent_at, "yyyy-MM-dd"));
+        }
+        if (s.link_mode !== "tracked") e.manualVisits += s.tally.visit_clicks_clean;
+      }
+      acc.set(key, e);
     }
-    if (s.link_mode !== "tracked") e.manualVisits += s.tally.visit_clicks_clean;
-    acc.set(key, e);
   }
 
   const entries = [...acc.entries()];
@@ -571,7 +677,7 @@ async function groupByCreativeOffer(
       orgId,
       entries.map(([, e]) => e.creativeId).filter((id): id is number => id != null),
     ),
-    offerInfo(entries.map(([, e]) => e.offerId).filter((id): id is number => id != null)),
+    offerInfo(orgId, entries.map(([, e]) => e.offerId).filter((id): id is number => id != null)),
   ]);
 
   return entries.map(([key, e]) => {
@@ -708,6 +814,9 @@ async function distributeToGroups(
       counted_clickers: round2(m.counted_clickers),
       lifetime_clickers: round2(m.lifetime_clickers),
       lifetime_revenue: round2(m.lifetime_revenue),
+      split_in_revenue: round2(m.split_in_revenue),
+      split_out_revenue: round2(m.split_out_revenue),
+      event_split_delta: Object.fromEntries(Object.entries(m.event_split_delta).map(([k, v]) => [k, round2(v)])),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
       events: roundEventMap(m.events),
@@ -1281,11 +1390,11 @@ async function formatNames(ids: number[]) {
   return out;
 }
 
-async function offerInfo(ids: number[]) {
+async function offerInfo(orgId: string, ids: number[]) {
   const out = new Map<number, { code: string; name: string | null }>();
   if (ids.length === 0) return out;
   const rows = (await db.execute(sql`
-    SELECT id, offer_id AS code, name FROM offers WHERE id IN (${inList(ids)})
+    SELECT id, offer_id AS code, name FROM offers WHERE org_id = ${orgId}::uuid AND id IN (${inList(ids)})
   `)) as unknown as { id: number; code: string; name: string | null }[];
   for (const r of rows) out.set(Number(r.id), { code: r.code, name: r.name });
   return out;

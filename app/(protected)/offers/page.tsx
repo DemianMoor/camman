@@ -71,6 +71,7 @@ type Offer = {
   name: string;
   postfix: string | null;
   base_url: string | null;
+  keitaro_offer_id: number | null;
   network_id: number | null;
   payout_model: "cpa" | "revshare";
   payout_cpa: string | null;
@@ -750,6 +751,7 @@ export default function OffersPage() {
         <OfferForm
           key="create"
           mode="create"
+          canEditKeitaroOfferId={canCreate}
           brands={brands}
           onSubmit={handleCreate}
           onCancel={() => setCreateOpen(false)}
@@ -774,12 +776,14 @@ export default function OffersPage() {
             key={`edit-${editing.id}`}
             mode="edit"
             offerId={editing.id}
+            canEditKeitaroOfferId={canUpdate}
             brands={brands}
             initialValues={{
               name: editing.name,
               offer_id: editing.offer_id,
               postfix: editing.postfix ?? "",
               base_url: editing.base_url ?? "",
+              keitaro_offer_id: editing.keitaro_offer_id,
               // Pre-migration rows may have null network_id; the form
               // treats undefined as "untouched" so the user is forced to
               // pick before save.

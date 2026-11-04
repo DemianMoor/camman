@@ -17,6 +17,11 @@ import {
 } from "@/lib/api/helpers";
 import { buildUpdates } from "@/lib/api/build-updates";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import {
+  isKeitaroIdViolation,
+  KEITARO_ID_DUPLICATE_MESSAGE,
+  keitaroOfferIdTaken,
+} from "@/lib/api/offer-keitaro-id";
 import { brandsBelongToOrg, replaceOfferBrands } from "@/lib/api/offer-brands";
 import { can } from "@/lib/permissions";
 import { nullIfEmpty, offerUpdateSchema } from "@/lib/validators/offers";
@@ -58,6 +63,7 @@ export async function GET(
       name: offers.name,
       postfix: offers.postfix,
       base_url: offers.base_url,
+      keitaro_offer_id: offers.keitaro_offer_id,
       network_id: offers.network_id,
       payout_model: offers.payout_model,
       payout_cpa: offers.payout_cpa,
@@ -256,8 +262,15 @@ export async function PATCH(
       : Number(oldCpa) !== Number(newCpa));
 
   try {
+    const keitaroId = updates.keitaro_offer_id;
     const updated = await db.transaction(async (tx) => {
       const offerWhere = and(eq(offers.id, offerId), eq(offers.org_id, orgId));
+      if (
+        typeof keitaroId === "number" &&
+        (await keitaroOfferIdTaken(tx, orgId, keitaroId, offerId))
+      ) {
+        return "duplicate" as const;
+      }
       // A brands-only PATCH has no column updates (Drizzle rejects an empty set).
       const [row] =
         Object.keys(updates).length > 0
@@ -295,6 +308,11 @@ export async function PATCH(
       return row;
     });
 
+    if (updated === "duplicate") {
+      return apiError(409, KEITARO_ID_DUPLICATE_MESSAGE, API_ERROR_CODES.DUPLICATE, {
+        field: "keitaro_offer_id",
+      });
+    }
     if (!updated) {
       return apiError(404, "Offer not found", API_ERROR_CODES.NOT_FOUND, {
         entity: "offer",
@@ -302,6 +320,11 @@ export async function PATCH(
     }
     return NextResponse.json(updated);
   } catch (err) {
+    if (isKeitaroIdViolation(err)) {
+      return apiError(409, KEITARO_ID_DUPLICATE_MESSAGE, API_ERROR_CODES.DUPLICATE, {
+        field: "keitaro_offer_id",
+      });
+    }
     if (isUniqueViolation(err)) {
       return apiError(
         409,

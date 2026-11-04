@@ -27,6 +27,7 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { REPORTS_EXTRA_COLUMN_IDS } from "@/lib/reporting/column-visibility";
 import type { EventColumn, EventTypeSpec } from "@/lib/reporting/event-columns";
+import { hasNoOwnSends, NO_OWN_SENDS_NOTE, ownEventMap, ownRevenue } from "@/lib/reporting/offer-split-display";
 import type {
   PerfMetrics,
   PerfRow,
@@ -102,6 +103,13 @@ const fmtNum = (n: number) =>
 const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
 const rate = (num: number, denom: number) => (denom > 0 ? num / denom : 0);
 
+// PER-OFFER SPLIT: every EPC and Profit use the row's OWN revenue, and a row with
+// no sends of its own renders "—" in these cells and in every per-event EPC cell
+// (lib/reporting/offer-split-display.ts).
+const NO_OWN_SENDS_COLS = new Set(["cost", "lifetime_epc", "epc", "profit"]);
+const isNoOwnSendsCell = (r: PerfRow, c: Col): boolean =>
+  hasNoOwnSends(r) && (c.event ? c.event.kind === "epc" : NO_OWN_SENDS_COLS.has(c.id));
+
 function derive(r: PerfRow): DerivedRow {
   return {
     ...r,
@@ -109,12 +117,13 @@ function derive(r: PerfRow): DerivedRow {
     click_rate: rate(r.clickers, r.sent),
     redirect_rate: rate(r.redirects, r.clickers),
     sales_cr: rate(r.sales, r.redirects),
-    epc: rate(r.revenue, r.counted_clickers),
+    epc: rate(ownRevenue(r), r.counted_clickers),
     // Lifetime ignores the date filter entirely and is the PRIMARY figure. It is
     // NOT derivable from the period numbers — counted clickers are deduplicated
-    // and so not additive over time.
+    // and so not additive over time. lifetime_revenue is never split (it is the
+    // stage's own all-time revenue), so it already is the own-traffic numerator.
     lifetime_epc: rate(r.lifetime_revenue, r.lifetime_clickers),
-    profit: r.revenue - r.cost,
+    profit: ownRevenue(r) - r.cost,
   };
 }
 
@@ -128,7 +137,7 @@ function StatCard({ label, value, hint }: { label: string; value: string; hint?:
   );
 }
 
-type Col = {
+export type Col = {
   // `string`, not `keyof DerivedRow`: a GENERATED id is not a row key.
   id: string;
   header: string;
@@ -268,10 +277,45 @@ function fmtCell(v: number, kind: Exclude<Col["kind"], "event">): string {
  * the sort comparator and the body cell go through here, so they cannot disagree
  * about what a column is worth.
  */
+// A per-event EPC divides that key's OWN-traffic revenue; every other generated
+// kind (counts, rates, held, revenue) reads the events as reported.
 const cellValue = (r: DerivedRow, c: Col): number | null =>
-  c.event
-    ? eventCellValue(c.event, r.events ?? {}, r.counted_clickers)
-    : (r[c.id as keyof DerivedRow] as number);
+  isNoOwnSendsCell(r, c)
+    ? null
+    : c.event
+      ? eventCellValue(
+          c.event,
+          c.event.kind === "epc" ? ownEventMap({ events: r.events ?? {}, event_split_delta: r.event_split_delta }) : (r.events ?? {}),
+          r.counted_clickers,
+        )
+      : (r[c.id as keyof DerivedRow] as number);
+
+/** One body cell. Exported for scripts/test-event-columns-view.ts (the "—" bar). */
+export function PerfValueCell({ row, col }: { row: PerfRow; col: Col }) {
+  const r = derive(row);
+  const v = cellValue(r, col);
+  const noOwn = isNoOwnSendsCell(r, col);
+  const cls =
+    col.kind === "profit" && !noOwn
+      ? (v ?? 0) >= 0
+        ? "text-emerald-600 dark:text-emerald-400"
+        : "text-destructive"
+      : col.muted || noOwn
+        ? "text-muted-foreground"
+        : "";
+  return (
+    <td
+      className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${cls}`}
+      title={noOwn ? NO_OWN_SENDS_NOTE : undefined}
+    >
+      {noOwn
+        ? "—"
+        : col.event
+          ? fmtEventCell(v, col.event.kind)
+          : fmtCell(v as number, col.kind as Exclude<Col["kind"], "event">)}
+    </td>
+  );
+}
 
 export function PerformanceReport({ dimension }: { dimension: ReportDimension }) {
   const isHourly = dimension === "hourly";
@@ -677,24 +721,9 @@ export function PerformanceReport({ dimension }: { dimension: ReportDimension })
                   >
                     {renderLabel(r)}
                   </td>
-                  {cols.map((c) => {
-                    const v = cellValue(r, c);
-                    const cls =
-                      c.kind === "profit"
-                        ? (v ?? 0) >= 0
-                          ? "text-emerald-600 dark:text-emerald-400"
-                          : "text-destructive"
-                        : c.muted
-                          ? "text-muted-foreground"
-                          : "";
-                    return (
-                      <td key={c.id} className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${cls}`}>
-                        {c.event
-                          ? fmtEventCell(v, c.event.kind)
-                          : fmtCell(v as number, c.kind as Exclude<Col["kind"], "event">)}
-                      </td>
-                    );
-                  })}
+                  {cols.map((c) => (
+                    <PerfValueCell key={c.id} row={r} col={c} />
+                  ))}
                 </tr>
               ))}
             </tbody>

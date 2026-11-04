@@ -385,6 +385,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "read-only: the .unsafe( call runs rendered SELECTs inside withReadOnlyDb's BEGIN READ ONLY transaction",
   },
   {
+    file: "verify-offer-split-totals.ts",
+    why: "read-only: app reads via the production report code (SELECTs only) plus .unsafe( SELECTs inside withReadOnlyDb's BEGIN READ ONLY transaction",
+  },
+  {
     file: "verify-audience-report.ts",
     why: 'read-only and server-enforced: every query runs inside begin("… read only")',
   },

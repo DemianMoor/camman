@@ -127,10 +127,31 @@ async function main() {
       GROUP BY 1, 2`)) {
       salesTruth.set(keyOf(r.creative_id, r.offer_id), Number(r.n));
     }
+    // Per-offer splits move a stage's conversions from its campaign-offer row to the
+    // offer they converted on, so a row on a split-touched key (either side) is not
+    // comparable to a by-campaign-offer recount. Those keys are excluded here; the
+    // sum over ALL rows still has to equal the tracker (the slices sum to the stage).
+    const touched = new Set<string>();
+    for (const r of await rowsOf<{ creative_id: number | null; c_offer: number | null; e_offer: number }>(sql`
+      SELECT DISTINCT cs.creative_id, c.offer_id AS c_offer, cev.offer_id AS e_offer
+      FROM conversion_events cev
+      JOIN campaign_stages cs ON cs.id = cev.stage_id AND cs.org_id = cev.org_id
+      JOIN campaigns c ON c.id = cs.campaign_id AND c.org_id = cev.org_id
+      WHERE cev.org_id = ${orgId}::uuid AND cev.offer_id IS NOT NULL
+        AND cev.offer_id IS DISTINCT FROM c.offer_id`)) {
+      touched.add(keyOf(r.creative_id, r.c_offer));
+      touched.add(keyOf(r.creative_id, r.e_offer));
+    }
+    const unsplit = rows.filter((r) => !touched.has(r.key));
+    check("control: some rows are unsplit", unsplit.length > 0, rows.length);
     check(
-      "every row's sales = tracker sales by conversion day",
-      rows.every((r) => r.sales === (salesTruth.get(r.key) ?? 0)),
-      mismatches(rows, (r) => salesTruth.get(r.key) ?? 0, (r) => r.sales),
+      "every unsplit row's sales = tracker sales by conversion day",
+      unsplit.every((r) => r.sales === (salesTruth.get(r.key) ?? 0)),
+      mismatches(unsplit, (r) => salesTruth.get(r.key) ?? 0, (r) => r.sales),
+    );
+    check(
+      "rows' sales (split-aware) = all tracker sales in range",
+      rows.reduce((a, r) => a + r.sales, 0) === [...salesTruth.values()].reduce((a, n) => a + n, 0),
     );
   }
 

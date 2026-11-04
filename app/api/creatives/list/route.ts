@@ -158,8 +158,8 @@ export async function GET(req: NextRequest) {
   const metricsAgg = drizzleSql`(
     SELECT * FROM jsonb_to_recordset(${JSON.stringify(metricsRows)}::jsonb)
       AS m(creative_id int, offer_id int, delivered int, checkouts int, sales int,
-           payout numeric, manual_clean int, tracked_clean int, visit_clickers int,
-           lifetime_payout numeric, lifetime_clean int, lifetime_sales int,
+           payout numeric, own_payout numeric, manual_clean int, tracked_clean int, visit_clickers int,
+           lifetime_payout numeric, lifetime_own_payout numeric, lifetime_clean int, lifetime_sales int,
            ctr_sent_7d int, ctr_clicks_7d int, ctr_sent_30d int, ctr_clicks_30d int,
            ctr_sent_lifetime int, ctr_clicks_lifetime int,
            events jsonb, unmapped int, manual_topup int)
@@ -177,7 +177,9 @@ export async function GET(req: NextRequest) {
     ctr: drizzleSql`CASE WHEN ${ctrSentExpr} > 0 THEN coalesce(metrics_agg.ctr_clicks_30d, 0)::numeric / ${ctrSentExpr} END`,
     checkout_rate: drizzleSql`CASE WHEN ${visitClickersExpr} > 0 THEN coalesce(metrics_agg.checkouts, 0)::numeric / ${visitClickersExpr} END`,
     sales_cr: drizzleSql`CASE WHEN ${visitClickersExpr} > 0 THEN coalesce(metrics_agg.sales, 0)::numeric / ${visitClickersExpr} END`,
-    epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.payout, 0)::numeric / ${cleanExpr} END`,
+    // OWN-traffic payout (per-offer split): under an offer filter, revenue another
+    // offer's stage converted on this offer is not this creative's EPC there.
+    epc: drizzleSql`CASE WHEN ${cleanExpr} > 0 THEN coalesce(metrics_agg.own_payout, 0)::numeric / ${cleanExpr} END`,
     // Not a ratio — the all-time sales count — but it sorts the same way: from the
     // cached metrics, so only when they are joined in.
     sales_lifetime: drizzleSql`coalesce(metrics_agg.lifetime_sales, 0)`,
@@ -280,10 +282,12 @@ export async function GET(req: NextRequest) {
           m_checkouts: drizzleSql<number>`metrics_agg.checkouts`.as("m_checkouts"),
           m_sales: drizzleSql<number>`metrics_agg.sales`.as("m_sales"),
           m_payout: drizzleSql<string>`metrics_agg.payout`.as("m_payout"),
+          m_own_payout: drizzleSql<string>`metrics_agg.own_payout`.as("m_own_payout"),
           m_manual_clean: drizzleSql<number>`metrics_agg.manual_clean`.as("m_manual_clean"),
           m_tracked_clean: drizzleSql<number>`metrics_agg.tracked_clean`.as("m_tracked_clean"),
           m_visit_clickers: drizzleSql<number>`metrics_agg.visit_clickers`.as("m_visit_clickers"),
           m_lifetime_payout: drizzleSql<number>`metrics_agg.lifetime_payout`.as("m_lifetime_payout"),
+          m_lifetime_own_payout: drizzleSql<number>`metrics_agg.lifetime_own_payout`.as("m_lifetime_own_payout"),
           m_lifetime_clean: drizzleSql<number>`metrics_agg.lifetime_clean`.as("m_lifetime_clean"),
           m_lifetime_sales: drizzleSql<number>`metrics_agg.lifetime_sales`.as("m_lifetime_sales"),
           m_ctr_sent_7d: drizzleSql<number>`metrics_agg.ctr_sent_7d`.as("m_ctr_sent_7d"),
@@ -426,10 +430,12 @@ export async function GET(req: NextRequest) {
             m_checkouts: number | null;
             m_sales: number | null;
             m_payout: string | null;
+            m_own_payout: string | null;
             m_manual_clean: number | null;
             m_tracked_clean: number | null;
             m_visit_clickers: number | null;
             m_lifetime_payout: number | null;
+            m_lifetime_own_payout: number | null;
             m_lifetime_clean: number | null;
             m_lifetime_sales: number | null;
             m_ctr_sent_7d: number | null;
@@ -446,6 +452,7 @@ export async function GET(req: NextRequest) {
           const checkouts = Number(row.m_checkouts ?? 0);
           const sales = Number(row.m_sales ?? 0);
           const payout = Number(row.m_payout ?? 0);
+          const ownPayout = Number(row.m_own_payout ?? 0);
           const cleanClicks =
             Number(row.m_manual_clean ?? 0) + Number(row.m_tracked_clean ?? 0);
           const clickers = Number(row.m_visit_clickers ?? 0);
@@ -466,6 +473,9 @@ export async function GET(req: NextRequest) {
               checkouts,
               sales,
               payout,
+              // The EPC numerator: payout this creative's own traffic produced
+              // (differs from `payout` only under an offer filter, per-offer split).
+              own_payout: ownPayout,
               // CTR = Overview-style clickers ÷ messages sent, from the hourly snapshot
               // (lib/creatives/ctr-rollup.ts): last 30 days, last 7 days, all time.
               sent,
@@ -479,7 +489,7 @@ export async function GET(req: NextRequest) {
               ctr_lifetime: sentLifetime > 0 ? ctrClickersLifetime / sentLifetime : null,
               checkout_rate: clickers > 0 ? checkouts / clickers : null,
               sales_cr: clickers > 0 ? sales / clickers : null,
-              epc: cleanClicks > 0 ? payout / cleanClicks : null,
+              epc: cleanClicks > 0 ? ownPayout / cleanClicks : null,
               // LIFETIME pair, shown ALONGSIDE the 30-day figure. The list and
               // picker still SORT by the 30-day EPC — recency is the better
               // predictor of what to send next (offers change, audiences
@@ -492,7 +502,7 @@ export async function GET(req: NextRequest) {
               clean_clicks_lifetime: Number(row.m_lifetime_clean ?? 0),
               epc_lifetime:
                 Number(row.m_lifetime_clean ?? 0) > 0
-                  ? Number(row.m_lifetime_payout ?? 0) / Number(row.m_lifetime_clean ?? 0)
+                  ? Number(row.m_lifetime_own_payout ?? 0) / Number(row.m_lifetime_clean ?? 0)
                   : null,
               // COUNTS ONLY, over the same 30 days as checkout_rate above, and
               // BOTH residuals beside them — the strays the registry could not

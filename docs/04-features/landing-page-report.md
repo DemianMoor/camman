@@ -1,6 +1,6 @@
 # Feature — Landing Page Results (`/reports/landing-pages`)
 
-_Last updated: 2026-10-26_
+_Last updated: 2026-11-04 (per-offer conversion split)_
 
 ## 1. Purpose
 
@@ -43,7 +43,7 @@ Every figure belongs to the **sends made in the window**. A sale, click or opt-o
 | In window | stage `sent_at` in range | `stage_sends.sent_at` in range |
 | Sends | `sentCountsByStage` (rollup by send day + today live) — the Overview's hybrid; manual = `sms_count` | count of sent rows |
 | Cost | `campaign_stages.total_cost` | `dripCostByStageInRange(…, { includeArchived: true })`, apportioned across a stage's pages by its sends' own cost |
-| Sales / Revenue | ledger by `stage_id`: `purchasedClause` / `approvedRevenueClause`, + manual top-up `max(0, manual − ledger)` | ledger by `stage_send_id` |
+| Sales / Revenue | ledger by `stage_id`: `purchasedClause` / `approvedRevenueClause`, + manual top-up `max(0, manual − ledger)` over ALL the stage's ledger sales, then minus the sales stored under another offer; revenue = the offer's own conversions (`conversion_events.offer_id` = this offer or NULL) | ledger by `stage_send_id`, the offer's own conversions only |
 | Opt-outs | `opt_out_attributions` by stage | by `stage_send_id` (the PR #25 breaker join) |
 | Visitors (human clicks) | `counted_clickers` of the stage | `counted_clickers` joined to the in-window send on (stage, contact) |
 | Reached | `stage_sends.offer_reached_at` per stage (bounded on the partial index) | per send |
@@ -56,6 +56,8 @@ Why regular stages can be read whole:
 **Archived stages are included.** Archiving does not unsend, and the Overview already counts an archived stage's sends and revenue (they reach it through their tracker rows). As of 2026-10-23 there are 4 such stages, all drip on offer 152, with 44,881 sends — excluding them hid half that offer.
 
 **Drip conversions without a `stage_send_id`** can't be placed on a page. They are counted in `unattributed_drip_conversions` and shown on the page, never silently dropped (0 as of 2026-10-23).
+
+**Per-offer split (2026-11-04).** A conversion counts for the offer it is stored under (`conversion_events.offer_id`, [conversion-events.md](conversion-events.md#offer-attribution-from-the-keitaro-offer-2026-11-04)). Conversions on this offer from stages of ANOTHER offer (regular: stage sent in range; drip: the converting send sent in range) add their sales and revenue to the row of the page they came through (the send's minted URL, else the stage's configured page). They add no sends, cost or clicks, so on a row made only of them EPC and RPM read "—". A stage whose split would exceed its tracker totals (would_go_negative, the rule By Offer applies, checked lifetime) is left whole on its campaign offer. A split-in drip conversion with no `stage_send_id` cannot be placed on a page and is counted in this offer's `unattributed_drip_conversions`. The offer picker also lists an offer whose only activity is such split-in conversions. Mixing on a page row (an own page that also receives split-in revenue, or loses split-out revenue) is reported at page grain as is — an open owner decision. Rules: [reports-rollup.md](reports-rollup.md#by-offer-per-offer-conversion-split-2026-11-04).
 
 ## 4. Columns
 

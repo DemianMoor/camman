@@ -38,11 +38,14 @@ const bar = (name: string, ok: boolean, detail = "") => {
 
 // ── T5: source guard ────────────────────────────────────────────────────────
 // Only these files may read conversion_events.offer_id: the ingest that writes
-// it, the monitor that groups alerts by it, and the offer-splits report.
+// it, the monitor that groups alerts by it, and the by-offer reports.
 const ALLOW = new Set([
   "lib/conversions/ingest.ts",
   "lib/conversions/monitor.ts",
   "lib/reporting/offer-splits.ts",
+  // Reporting only (per-offer split): landing-page rows per offer, creative × offer cache.
+  "lib/reporting/landing-page-report.ts",
+  "lib/creatives/metrics-cache.ts",
 ]);
 const KEYWORDS = new Set([
   "where", "on", "join", "left", "right", "inner", "outer", "cross", "full",
@@ -248,6 +251,18 @@ async function main() {
         "control: before the move, A's buyers = [c1], B's = []",
         before.t1_A === JSON.stringify([c1]) && before.t1_B === "[]",
         `A=${before.t1_A} B=${before.t1_B}`,
+      );
+      // T2/T4 compare before with after; without these they would pass with NO_LAYER
+      // or [] on both sides.
+      bar(
+        "control: T2 the bought_offer layer exists and selects [c1] for A",
+        before.t2_A !== "NO_LAYER" && before.t2_A === JSON.stringify([c1]),
+        `A=${before.t2_A}`,
+      );
+      bar(
+        "control: T4 made_purchase_for_offer selects [c1] for A",
+        before.t4_A === JSON.stringify([c1]),
+        `A=${before.t4_A}`,
       );
       bar(
         "control: the recheck flags c1 as bought_offer for A and nobody for B",

@@ -54,22 +54,30 @@ const ER = (t: T | undefined) => t?.revenue ?? -1;
 // forgot to in A1, which made A1 fail for ever — a headline coverage guard that
 // is permanently red is worse than no guard, because it trains people to ignore
 // the output.
+// `event_split_delta` (per-offer split) is a per-key number map, probed as { x: 7 }.
 const probe = Object.fromEntries(
-  Object.keys(ZERO).map((k) => [k, k === "events" ? { x: { ...one } } : k === "reached" ? 3 : 7]),
+  Object.keys(ZERO).map((k) => [
+    k,
+    k === "events" ? { x: { ...one } } : k === "event_split_delta" ? { x: 7 } : k === "reached" ? 3 : 7,
+  ]),
 ) as never;
 const expectAdd = (k: string) => (k === "reached" ? 6 : 14);
 const summed = addMetrics(probe, probe) as unknown as Record<string, unknown>;
 const missedAdd = Object.keys(ZERO).filter((k) =>
   k === "events"
     ? (summed.events as Record<string, typeof one>).x?.n !== 2
-    : summed[k] !== expectAdd(k),
+    : k === "event_split_delta"
+      ? (summed.event_split_delta as Record<string, number>).x !== 14
+      : summed[k] !== expectAdd(k),
 );
 check("A1 ⭐ addMetrics carries EVERY field of PerfMetrics", missedAdd.length === 0, missedAdd.join(","));
 const scaled = scaleMetrics(probe, 0.5) as unknown as Record<string, unknown>;
 const missedScale = Object.keys(ZERO).filter((k) =>
   k === "events"
     ? (scaled.events as Record<string, typeof one>).x?.n !== 0.5
-    : scaled[k] !== (k === "reached" ? 1.5 : 3.5),
+    : k === "event_split_delta"
+      ? (scaled.event_split_delta as Record<string, number>).x !== 3.5
+      : scaled[k] !== (k === "reached" ? 1.5 : 3.5),
 );
 check("A2 ⭐ scaleMetrics carries EVERY field of PerfMetrics", missedScale.length === 0, missedScale.join(","));
 

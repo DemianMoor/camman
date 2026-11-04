@@ -79,6 +79,7 @@ import { calculateSmsSegments } from "@/lib/creative-helpers";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { cn } from "@/lib/utils";
+import { NO_OWN_SENDS_NOTE } from "@/lib/reporting/offer-split-display";
 import {
   FUNNEL_STAGE_VALUES,
   QUALITY_VALUES,
@@ -129,6 +130,7 @@ type Creative = {
     checkouts: number;
     sales: number;
     payout: number;
+    own_payout: number;
     ctr: number | null;
     checkout_rate: number | null;
     sales_cr: number | null;
@@ -1065,7 +1067,12 @@ export default function CreativesPage() {
             <MetricCell
               value={m.epc}
               format={formatEpc}
-              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days)`}
+              title={
+                // A pure split-in offer row: its sales came through another offer's stages.
+                m.own_payout === 0 && m.payout > 0 && m.clean_clicks === 0
+                  ? NO_OWN_SENDS_NOTE
+                  : `$${m.own_payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days)`
+              }
             />
           );
         },

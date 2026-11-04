@@ -125,6 +125,10 @@ export function normaliseLifetimeRow<T extends PerfMetrics>(r: T): T {
     events: parseEventMap((r as { events?: unknown }).events),
     unmapped: r.unmapped ?? 0,
     manual_topup: r.manual_topup ?? 0,
+    // A blob written before the per-offer split has neither field; absent = no split.
+    split_in_revenue: r.split_in_revenue ?? 0,
+    split_out_revenue: r.split_out_revenue ?? 0,
+    event_split_delta: r.event_split_delta ?? {},
   };
 }
 

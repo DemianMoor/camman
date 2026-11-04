@@ -101,6 +101,14 @@ async function dbBars() {
       const purchase = await id(sql`
         INSERT INTO event_types (org_id, key, label, is_purchase, counts_revenue)
         VALUES (${org}::uuid, 'purchase', 'Purchase', true, true) RETURNING id`);
+      // 0232: a retarget signal and a counts_as_registration type — the drip
+      // "Leads" columns count both (reportedRegistrationClause).
+      const signal = await id(sql`
+        INSERT INTO event_types (org_id, key, label, is_retarget_signal)
+        VALUES (${org}::uuid, 'registration', 'Registration', true) RETURNING id`);
+      const leadType = await id(sql`
+        INSERT INTO event_types (org_id, key, label, counts_revenue, counts_as_registration)
+        VALUES (${org}::uuid, 'lead', 'Lead', true, true) RETURNING id`);
       const C = await id(sql`
         INSERT INTO campaigns (org_id, slug, name, status, type) VALUES (${org}::uuid, ${"ddr-" + sfx}, 'DDR', 'paused', 'drip') RETURNING id`);
       const A = await id(sql`
@@ -143,10 +151,10 @@ async function dbBars() {
       const receipt = (s: string, status: string, atZ: string) => tx.execute(sql`
         INSERT INTO textrequest_dlr_events (org_id, method, status, stage_send_id, matched_stage_send_id, received_at)
         VALUES (${org}::uuid, 'POST', ${status}, ${s}::uuid, ${s}::uuid, ${z(atZ)}::timestamptz)`);
-      const conversion = (s: string, c: string, stage: number, status: string, revenue: string, createdZ: string) => tx.execute(sql`
+      const conversion = (s: string, c: string, stage: number, status: string, revenue: string, createdZ: string, et: number = purchase) => tx.execute(sql`
         INSERT INTO conversion_events (keitaro_event_id, org_id, keitaro_status, keitaro_type, event_type_id, status, revenue,
                                        stage_send_id, contact_id, campaign_id, stage_id, occurred_at, created_at)
-        VALUES (${"ddr-" + sfx + "-" + ++n}, ${org}::uuid, 'sale', 'sale', ${purchase}, ${status}, ${revenue}::numeric,
+        VALUES (${"ddr-" + sfx + "-" + ++n}, ${org}::uuid, 'sale', 'sale', ${et}, ${status}, ${revenue}::numeric,
                 ${s}::uuid, ${c}::uuid, ${C}, ${stage}, ${z("13T20:00:00")}::timestamptz, ${z(createdZ)}::timestamptz)`);
 
       // ── the world (times UTC; ET = UTC−4) ───────────────────────────────
@@ -174,6 +182,12 @@ async function dbBars() {
       await conversion(S1.ss, L1.c, A, "approved", "30.0000", "14T06:00:00");
       await conversion(S1.ss, L1.c, A, "pending", "10.0000", "14T06:05:00");
       await conversion(S1.ss, L1.c, A, "rejected", "99.0000", "14T06:10:00"); // nothing
+      // Leads on S1, detected D2: an approved $5 lead + a pending $0 registration
+      // = 2 leads, $5 lead revenue (inside Revenue, not added again); a rejected
+      // lead counts nowhere. Sales are untouched.
+      await conversion(S1.ss, L1.c, A, "approved", "5.0000", "14T06:20:00", leadType);
+      await conversion(S1.ss, L1.c, A, "pending", "0.0000", "14T06:25:00", signal);
+      await conversion(S1.ss, L1.c, A, "rejected", "7.0000", "14T06:30:00", leadType);
 
       // L2 (K1): received D1, admitted D2 (carried 1). First send S4 D2, undelivered.
       const L2 = await lead("13T20:00:00");
@@ -202,13 +216,15 @@ async function dbBars() {
         (await tx.execute(sql`
           SELECT stage_id, partner_key_id, day_et::text AS d, leads_admitted, admitted, admitted_carried,
                  first_sends, followup_sends, dlr_sent, delivered, clicks, opt_outs, sales,
-                 revenue::text AS revenue, send_cost::text AS send_cost, latency_hist
+                 revenue::text AS revenue, send_cost::text AS send_cost,
+                 leads, lead_revenue::text AS lead_revenue, latency_hist
           FROM drip_daily_rollup WHERE campaign_id = ${C} AND basis = ${basis}`)) as unknown as Cell[];
       const L = "lead";
       const find = (rows: Cell[], stage: number | string, pk: number | null, d: string) =>
         rows.find((r) => (stage === L ? r.stage_id === null : r.stage_id === stage) && r.partner_key_id === pk && r.d === d);
       const zero = { leads_admitted: 0, admitted: 0, admitted_carried: 0, first_sends: 0, followup_sends: 0, dlr_sent: 0,
-        delivered: 0, clicks: 0, opt_outs: 0, sales: 0, revenue: "0.0000", send_cost: "0.0000" };
+        delivered: 0, clicks: 0, opt_outs: 0, sales: 0, revenue: "0.0000", send_cost: "0.0000",
+        leads: 0, lead_revenue: "0.0000" };
       const hist8 = (() => { const h = new Array(LATENCY_EDGES_SEC.length + 1).fill(0); h[8] = 1; return h; })();
       const expectCell = (rows: Cell[], label: string, stage: number | string, pk: number | null, d: string,
                           exp: Partial<typeof zero> & { latency_hist?: number[] | null }) => {
@@ -228,8 +244,8 @@ async function dbBars() {
       expectCell(act, "A3 lead sandbox D2 → NULL key", L, null, D2, { leads_admitted: 1, admitted: 1 });
       expectCell(act, "A4 A/K1/D1: S1 first+delivered, 1 human click, 60 s latency", A, K1, D1,
         { first_sends: 1, dlr_sent: 1, delivered: 1, clicks: 1, send_cost: "0.0100", latency_hist: hist8 });
-      expectCell(act, "A5 A/K1/D2: S4 first (undelivered, carried → no latency), click, 2 sales $30 on DETECTION day", A, K1, D2,
-        { first_sends: 1, dlr_sent: 1, clicks: 1, sales: 2, revenue: "30.0000", send_cost: "0.0100" });
+      expectCell(act, "A5 A/K1/D2: S4 first (undelivered, carried → no latency), click, 2 sales $30 + 2 leads $5 on DETECTION day (Revenue $35)", A, K1, D2,
+        { first_sends: 1, dlr_sent: 1, clicks: 1, sales: 2, revenue: "35.0000", send_cost: "0.0100", leads: 2, lead_revenue: "5.0000" });
       expectCell(act, "A6 A/∅/D1: journey-less S6 → follow-up, unattributed", A, null, D1,
         { followup_sends: 1, dlr_sent: 1, send_cost: "0.0100" });
       expectCell(act, "A7 A/∅/D2: sandbox S5 first send, no latency", A, null, D2,
@@ -242,8 +258,8 @@ async function dbBars() {
       const coh = await cells("cohort");
       bar("C0 cohort: exactly 7 cells", coh.length === 7, `${coh.length} (refresh said ${rc.cells})`);
       expectCell(coh, "C1 cohort D1 lead K1: J1", L, K1, D1, { admitted: 1 });
-      expectCell(coh, "C2 cohort D1 A/K1: S1 + BOTH human clicks + both sales (late, D2)", A, K1, D1,
-        { first_sends: 1, dlr_sent: 1, delivered: 1, clicks: 2, sales: 2, revenue: "30.0000", send_cost: "0.0100", latency_hist: hist8 });
+      expectCell(coh, "C2 cohort D1 A/K1: S1 + BOTH human clicks + both sales + both leads (late, D2)", A, K1, D1,
+        { first_sends: 1, dlr_sent: 1, delivered: 1, clicks: 2, sales: 2, revenue: "35.0000", send_cost: "0.0100", leads: 2, lead_revenue: "5.0000", latency_hist: hist8 });
       expectCell(coh, "C3 cohort D1 B/K1: S2 + S3 across midnight + the STOP", B, K1, D1,
         { followup_sends: 2, dlr_sent: 1, opt_outs: 1, send_cost: "0.0320" });
       expectCell(coh, "C4 cohort D2 lead K1: J2 carried", L, K1, D2, { admitted: 1, admitted_carried: 1 });
@@ -256,7 +272,8 @@ async function dbBars() {
       bar("F1 Σ sent: activity 6 = cohort 5 + the journey-less S6",
         tot(act, "first_sends") + tot(act, "followup_sends") === 6 && tot(coh, "first_sends") + tot(coh, "followup_sends") === 5);
       bar("F2 Σ revenue / sales / opt-outs equal across bases",
-        tot(act, "revenue") === tot(coh, "revenue") && tot(act, "sales") === tot(coh, "sales") && tot(act, "opt_outs") === tot(coh, "opt_outs"));
+        tot(act, "revenue") === tot(coh, "revenue") && tot(act, "sales") === tot(coh, "sales") && tot(act, "opt_outs") === tot(coh, "opt_outs") &&
+          tot(act, "leads") === tot(coh, "leads") && tot(act, "lead_revenue") === tot(coh, "lead_revenue"));
 
       // ── idempotence, change, vanish, range bound ──────────────────────────
       const again = await refreshDripDailyRollup(tx, org, "activity", range);

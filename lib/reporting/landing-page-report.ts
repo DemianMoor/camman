@@ -3,6 +3,9 @@ import { sql, type SQL } from "drizzle-orm";
 import { db } from "@/db/client";
 import { formatInCampaignTimezone } from "@/lib/campaign-timezone";
 import { lifetimeManualSalesByStage } from "@/lib/reporting/attribution";
+import { addEventMaps, parseEventMap, type EventMap } from "@/lib/reporting/event-columns";
+import { getOfferSplits, isMovingSplit, splitStageMetrics, type OfferSplit } from "@/lib/reporting/offer-splits";
+import { zeroMetrics } from "@/lib/reporting/performance-report";
 import { etDayBounds, sentCountsByStage } from "@/lib/reporting/delivery-rollup";
 import { dripCostByStageInRange } from "@/lib/reporting/stage-funnel";
 import { hasNoKeitaroVisits, stageIsMatureForGap } from "@/lib/reporting/tracking-gap-rules";
@@ -243,8 +246,10 @@ export async function getLandingPageReport(args: {
 
   const none = Promise.resolve([] as never[]);
   // A conversion is this offer's when it is stored under it, or under no offer
-  // (then the campaign's offer is the fallback).
-  const ownConversion = sql`(ce.offer_id IS NULL OR ce.offer_id = ${offerId})`;
+  // (then the campaign's offer is the fallback), or it sits on a stage the split
+  // leaves whole (would_go_negative — the rule By Offer applies).
+  const unsplit = idArray(await wouldGoNegativeStages(orgId, offerId, stages.map((s) => s.stage_id)));
+  const ownConversion = sql`(ce.offer_id IS NULL OR ce.offer_id = ${offerId} OR ce.stage_id = ANY(${unsplit}))`;
   const [regularSent, manualSales, regOptOuts, regLedger, regReached, regClickers, dripSends, dripClickers, dripReached, dripCost, unattributed, splitIn] =
     await Promise.all([
       sentCountsByStage(db, { orgId, stageIds: trackedRegularIds, fromEtDay: from, toEtDay: to, toExclusiveUtc }, now),
@@ -281,7 +286,7 @@ export async function getLandingPageReport(args: {
             WHERE org_id = ${orgId}::uuid AND stage_id = ANY(${idArray(cohortIds)})
           `) as unknown as Promise<{ stage_id: number; contact_id: string }[]>)
         : none,
-      dripIds.length ? dripSendGroups(orgId, offerId, dripIds, fromUtc, toExclusiveUtc) : none,
+      dripIds.length ? dripSendGroups(orgId, ownConversion, dripIds, fromUtc, toExclusiveUtc) : none,
       dripIds.length
         ? (db.execute(sql`
             SELECT DISTINCT ss.stage_id, d.url, cc.contact_id
@@ -305,14 +310,22 @@ export async function getLandingPageReport(args: {
           `) as unknown as Promise<{ stage_id: number; url: string | null; contact_id: string }[]>)
         : none,
       dripIds.length ? dripCostByStageInRange(orgId, fromUtc, toExclusiveUtc, { includeArchived: true }) : Promise.resolve(new Map<number, number>()),
-      dripIds.length
-        ? (db.execute(sql`
-            SELECT count(*)::int AS n FROM conversion_events ce
-            WHERE ce.org_id = ${orgId}::uuid AND ce.stage_id = ANY(${idArray(dripIds)}) AND ce.stage_send_id IS NULL
-              AND ${purchasedClause("ce")} AND ${ownConversion}
-          `) as unknown as Promise<{ n: number }[]>)
-        : none,
-      splitInGroups(orgId, offerId, fromUtc, toExclusiveUtc),
+      // Every drip purchase of this offer that has no send to place it on a page:
+      // on the offer's own drip stages AND on other offers' drip stages that split
+      // a conversion into it (splitInGroups cannot place those either). All time,
+      // as before. The offer a conversion counts for: its stored offer, else the
+      // campaign's — the campaign's when the stage is left unsplit.
+      db.execute(sql`
+        SELECT count(*)::int AS n FROM conversion_events ce
+        JOIN campaign_stages cs ON cs.id = ce.stage_id AND cs.org_id = ce.org_id
+        JOIN campaigns c ON c.id = cs.campaign_id AND c.org_id = ce.org_id
+        WHERE ce.org_id = ${orgId}::uuid AND ce.stage_send_id IS NULL
+          AND c.type = 'drip' AND cs.sent_at IS NOT NULL
+          AND ${purchasedClause("ce")}
+          AND (CASE WHEN ce.stage_id = ANY(${unsplit}) THEN c.offer_id
+                    ELSE coalesce(ce.offer_id, c.offer_id) END) = ${offerId}
+      `) as unknown as Promise<{ n: number }[]>,
+      splitInGroups(orgId, offerId, unsplit, fromUtc, toExclusiveUtc),
     ]);
 
   const rowsByKey = new Map<string, LandingPageRow>();
@@ -551,7 +564,7 @@ export async function getLandingPageReport(args: {
 // send-keyed facts riding the same rows: reach, the send's own cost (the
 // apportioning weight), and the conversions and opt-outs attributed to those
 // exact sends. Materialized once so the three joins read it, not stage_sends.
-async function dripSendGroups(orgId: string, offerId: number, dripIds: number[], fromUtc: Date, toExclusiveUtc: Date) {
+async function dripSendGroups(orgId: string, ownConversion: SQL, dripIds: number[], fromUtc: Date, toExclusiveUtc: Date) {
   return (await db.execute(sql`
     WITH ds AS MATERIALIZED (
       SELECT ss.id, ss.stage_id, d.url, (ss.offer_reached_at IS NOT NULL) AS reached,
@@ -568,7 +581,7 @@ async function dripSendGroups(orgId: string, offerId: number, dripIds: number[],
              count(*) FILTER (WHERE ${purchasedClause("ce")})::int AS sales,
              COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")}), 0) AS revenue
       FROM conversion_events ce JOIN ds ON ds.id = ce.stage_send_id
-      WHERE ce.org_id = ${orgId}::uuid AND (ce.offer_id IS NULL OR ce.offer_id = ${offerId})
+      WHERE ce.org_id = ${orgId}::uuid AND ${ownConversion}
       GROUP BY 1, 2
     ),
     oo AS (
@@ -596,7 +609,7 @@ async function dripSendGroups(orgId: string, offerId: number, dripIds: number[],
 // stage and the converting send's minted destination (the page it came through).
 // Regular stages are a send-date cohort (stage sent in range, every conversion);
 // drip stages count the conversions of sends sent in range.
-async function splitInGroups(orgId: string, offerId: number, fromUtc: Date, toExclusiveUtc: Date) {
+async function splitInGroups(orgId: string, offerId: number, unsplit: SQL, fromUtc: Date, toExclusiveUtc: Date) {
   const from = fromUtc.toISOString();
   const to = toExclusiveUtc.toISOString();
   return (await db.execute(sql`
@@ -616,6 +629,7 @@ async function splitInGroups(orgId: string, offerId: number, fromUtc: Date, toEx
     LEFT JOIN link_destinations d ON d.id = l.destination_id
     WHERE ce.org_id = ${orgId}::uuid AND ce.offer_id = ${offerId}
       AND c.offer_id IS DISTINCT FROM ${offerId}
+      AND NOT (ce.stage_id = ANY(${unsplit}))
       AND cs.sent_at IS NOT NULL
       AND CASE WHEN c.type = 'drip'
                THEN ss.sent_at >= ${from}::timestamptz AND ss.sent_at < ${to}::timestamptz
@@ -627,4 +641,53 @@ async function splitInGroups(orgId: string, offerId: number, fromUtc: Date, toEx
     stage_id: number; type: "regular" | "drip"; brand_id: number | null; brand_name: string | null;
     cfg_slug: string | null; cfg_url: string | null; url: string | null; sales: number; revenue: number;
   }[];
+}
+
+/**
+ * Stages the split leaves WHOLE on their campaign offer: splitStageMetrics'
+ * would_go_negative rule (the one By Offer applies), checked against each
+ * stage's lifetime tracker totals plus its manual tally — this report reads a
+ * stage's conversions lifetime (send-date cohort). Candidates are the offer's own
+ * stages and every other offer's stage that split a conversion into it.
+ */
+async function wouldGoNegativeStages(orgId: string, offerId: number, ownStageIds: number[]): Promise<number[]> {
+  const into = (await db.execute(sql`
+    SELECT DISTINCT ce.stage_id FROM conversion_events ce
+    JOIN campaign_stages cs ON cs.id = ce.stage_id AND cs.org_id = ce.org_id
+    JOIN campaigns c ON c.id = cs.campaign_id AND c.org_id = ce.org_id
+    WHERE ce.org_id = ${orgId}::uuid AND ce.offer_id = ${offerId} AND c.offer_id IS DISTINCT FROM ${offerId}
+  `)) as unknown as { stage_id: number }[];
+  const ids = [...new Set([...ownStageIds, ...into.map((r) => Number(r.stage_id))])];
+  if (ids.length === 0) return [];
+  const [splits, ksr, manual] = await Promise.all([
+    getOfferSplits(orgId, ids, null),
+    db.execute(sql`
+      SELECT stage_id, sales, revenue::float8 AS revenue, pending_revenue::float8 AS pending_revenue, events
+      FROM keitaro_stage_results WHERE org_id = ${orgId}::uuid AND stage_id = ANY(${idArray(ids)})
+    `) as unknown as Promise<{ stage_id: number; sales: number; revenue: number; pending_revenue: number; events: unknown }[]>,
+    lifetimeManualSalesByStage({ orgId, stageIds: ids }),
+  ]);
+  const byStage = new Map<number, OfferSplit[]>();
+  for (const sp of splits) {
+    if (!isMovingSplit(sp)) continue;
+    byStage.set(sp.stage_id, [...(byStage.get(sp.stage_id) ?? []), sp]);
+  }
+  if (byStage.size === 0) return [];
+  const tracker = new Map<number, { sales: number; revenue: number; pending_revenue: number; events: EventMap }>();
+  for (const r of ksr) {
+    const id = Number(r.stage_id);
+    const t = tracker.get(id) ?? { sales: 0, revenue: 0, pending_revenue: 0, events: {} };
+    t.sales += Number(r.sales);
+    t.revenue += Number(r.revenue);
+    t.pending_revenue += Number(r.pending_revenue);
+    addEventMaps(t.events, parseEventMap(r.events));
+    tracker.set(id, t);
+  }
+  const out: number[] = [];
+  for (const [stageId, list] of byStage) {
+    const t = tracker.get(stageId) ?? { sales: 0, revenue: 0, pending_revenue: 0, events: {} };
+    const m = { ...zeroMetrics(), ...t, sales: Math.max(t.sales, manual.get(stageId) ?? 0) };
+    if (splitStageMetrics(null, m, list)[0].skipped === "would_go_negative") out.push(stageId);
+  }
+  return out;
 }

@@ -104,6 +104,15 @@ export async function getOfferSplits(
   return [...out.values()].sort((a, b) => a.stage_id - b.stage_id || a.offer_id - b.offer_id);
 }
 
+/**
+ * A split that moves something. getOfferSplits already omits event keys that are
+ * zero on every field, so an empty `events` plus zero amounts moves nothing (e.g.
+ * only rejected conversions) — and would mint an all-zero offer row.
+ */
+export function isMovingSplit(sp: OfferSplit): boolean {
+  return sp.sales !== 0 || sp.revenue !== 0 || sp.pending_revenue !== 0 || Object.keys(sp.events).length > 0;
+}
+
 export interface OfferSlice {
   offer_id: number | null;
   metrics: PerfMetrics;
@@ -169,7 +178,13 @@ export function splitStageMetrics(
     pending_revenue: m.pending_revenue - total.pending_revenue,
     events,
     split_out_revenue: m.split_out_revenue + total.revenue,
+    event_split_delta: Object.fromEntries(
+      Object.entries(evTotal).map(([k, t]) => [k, (m.event_split_delta[k] ?? 0) + t.revenue]),
+    ),
   };
+  for (const [k, v] of Object.entries(m.event_split_delta)) {
+    if (!(k in primary.event_split_delta)) primary.event_split_delta[k] = v;
+  }
   const secondaries: OfferSlice[] = splits.map((s) => ({
     offer_id: s.offer_id,
     secondary: true,
@@ -180,6 +195,7 @@ export function splitStageMetrics(
       pending_revenue: s.pending_revenue,
       events: addEventMaps({}, s.events),
       split_in_revenue: s.revenue,
+      event_split_delta: Object.fromEntries(Object.entries(s.events).map(([k, t]) => [k, -t.revenue])),
     },
   }));
   return [{ offer_id: campaignOfferId, metrics: primary, secondary: false }, ...secondaries];

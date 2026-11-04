@@ -63,6 +63,12 @@ export interface CreativeMetricsRow {
   // creative's full history is visible when choosing one, WITHOUT changing the
   // picker's sort (which stays on the 30-day number — see the header note).
   lifetime_payout: number;
+  // Own-traffic payout pair: payout minus what was split in from other offers'
+  // stages plus what this offer's stages split out (per-offer split). The EPC
+  // numerator — the owner's own-traffic rule. Equal to the payout pair on the
+  // all-offers row and on any row the split did not touch.
+  own_payout: number;
+  lifetime_own_payout: number;
   lifetime_clean: number;
   // All-time sales: per stage max(manual sales_count, Keitaro conversions).
   lifetime_sales: number;
@@ -124,10 +130,12 @@ const noActivity = (
   checkouts: 0,
   sales: 0,
   payout: 0,
+  own_payout: 0,
   manual_clean: 0,
   visit_clickers: 0,
   tracked_clean: 0,
   lifetime_payout: 0,
+  lifetime_own_payout: 0,
   lifetime_clean: 0,
   lifetime_sales: 0,
   ctr_sent_7d: 0,
@@ -202,6 +210,8 @@ export async function computeCreativeMetrics(
       SELECT stage_id,
              sum(sales)::int   AS sales,
              sum(revenue)      AS revenue,
+             -- Read only by the split's would_go_negative check below.
+             sum(pending_revenue) AS pending_revenue,
              -- The conversions the org-scoped event_types join could not place.
              -- It rides k_stage rather than a CTE of its own so it is bounded by
              -- whichever window the consuming CTE applies — the residual can
@@ -242,7 +252,11 @@ export async function computeCreativeMetrics(
     -- same shapes on the JS and SQL sides. A malformed row or value contributes
     -- nothing rather than taking the page with it.
     k_stage_ev AS (
-      SELECT ksr.stage_id, e.key AS event_key, sum(${eventNum(sql`e.value`, "n")})::int AS n
+      SELECT ksr.stage_id, e.key AS event_key, sum(${eventNum(sql`e.value`, "n")})::int AS n,
+             -- These three are read only by the split's would_go_negative check.
+             sum(${eventNum(sql`e.value`, "pending_n")}) AS pending_n,
+             sum(${eventNum(sql`e.value`, "revenue")}) AS revenue,
+             sum(${eventNum(sql`e.value`, "pending_revenue")}) AS pending_revenue
         FROM keitaro_stage_results ksr
         CROSS JOIN LATERAL jsonb_each(ksr.events) AS e(key, value)
        WHERE ksr.org_id = ${orgId}
@@ -259,7 +273,11 @@ export async function computeCreativeMetrics(
              count(*) FILTER (WHERE ${purchasedClause("cev")})::int AS sales,
              coalesce(sum(cev.revenue) FILTER (WHERE ${approvedRevenueClause("cev")}), 0)::numeric AS revenue,
              coalesce(sum(cev.revenue) FILTER (WHERE ${pendingRevenueClause("cev")}), 0)::numeric AS pending_revenue,
-             count(*) FILTER (WHERE ${countedClause("cev")})::int AS n
+             count(*) FILTER (WHERE ${countedClause("cev")})::int AS n,
+             -- The per-event fields exactly as getOfferSplits builds them.
+             count(*) FILTER (WHERE cev.status = 'pending')::int AS pending_n,
+             coalesce(sum(cev.revenue) FILTER (WHERE et.counts_revenue AND cev.status = 'approved'), 0)::numeric AS ev_revenue,
+             coalesce(sum(cev.revenue) FILTER (WHERE et.counts_revenue AND cev.status = 'pending'), 0)::numeric AS ev_pending_revenue
         FROM conversion_events cev
         JOIN campaign_stages cs ON cs.id = cev.stage_id AND cs.org_id = cev.org_id
         JOIN campaigns c ON c.id = cs.campaign_id AND c.org_id = cev.org_id
@@ -273,34 +291,44 @@ export async function computeCreativeMetrics(
     -- A (stage, offer) split that moves nothing (only rejected rows) is dropped,
     -- so it cannot mint an all-zero offer row.
     split AS (
-      SELECT stage_id, offer_id, sum(sales)::int AS sales, sum(revenue) AS revenue
+      SELECT stage_id, offer_id, sum(sales)::int AS sales, sum(revenue) AS revenue,
+             sum(pending_revenue) AS pending_revenue
         FROM split_ev
        GROUP BY 1, 2
       HAVING sum(sales) <> 0 OR sum(revenue) <> 0 OR sum(pending_revenue) <> 0
           OR coalesce(sum(n) FILTER (WHERE event_key IS NOT NULL), 0) <> 0
     ),
     split_key_n AS (
-      SELECT e.stage_id, e.event_key, sum(e.n)::int AS n
+      SELECT e.stage_id, e.event_key, sum(e.n)::int AS n, sum(e.pending_n) AS pending_n,
+             sum(e.ev_revenue) AS revenue, sum(e.ev_pending_revenue) AS pending_revenue
         FROM split_ev e
         JOIN split s ON s.stage_id = e.stage_id AND s.offer_id = e.offer_id
        WHERE e.event_key IS NOT NULL
        GROUP BY 1, 2
     ),
-    -- The would_go_negative rule: a stage whose splits exceed what its tracker
-    -- totals hold stays unsplit (never clamped).
+    -- The would_go_negative rule, field for field the JS one (splitStageMetrics):
+    -- a stage whose splits exceed what its tracker totals hold — sales (with the
+    -- manual tally), revenue, pending revenue, or any event key's n / pending_n /
+    -- revenue / pending revenue — stays unsplit (never clamped).
     split_neg AS (
       SELECT DISTINCT kn.stage_id
         FROM split_key_n kn
         LEFT JOIN k_stage_ev ke ON ke.stage_id = kn.stage_id AND ke.event_key = kn.event_key
        WHERE coalesce(ke.n, 0) < kn.n
+          OR coalesce(ke.pending_n, 0) < kn.pending_n
+          OR coalesce(ke.revenue, 0) < kn.revenue
+          OR coalesce(ke.pending_revenue, 0) < kn.pending_revenue
     ),
     split_stage AS (
       SELECT t.stage_id, t.sales, t.revenue
-        FROM (SELECT stage_id, sum(sales)::int AS sales, sum(revenue) AS revenue FROM split GROUP BY 1) t
+        FROM (SELECT stage_id, sum(sales)::int AS sales, sum(revenue) AS revenue,
+                     sum(pending_revenue) AS pending_revenue
+                FROM split GROUP BY 1) t
         JOIN campaign_stages cs ON cs.id = t.stage_id
         LEFT JOIN k_stage ks ON ks.stage_id = t.stage_id
        WHERE greatest(cs.sales_count, coalesce(ks.sales, 0)) >= t.sales
          AND coalesce(ks.revenue, 0) >= t.revenue
+         AND coalesce(ks.pending_revenue, 0) >= t.pending_revenue
          AND t.stage_id NOT IN (SELECT stage_id FROM split_neg)
     ),
     -- Every creative stage's offer slices: the campaign-offer slice (is_primary,
@@ -379,6 +407,9 @@ export async function computeCreativeMetrics(
                           + sl.d_sales), 0)::int AS sales,
              coalesce(sum(CASE WHEN sl.is_primary THEN coalesce(ks.revenue, 0) ELSE 0 END
                           + sl.d_payout), 0)::numeric AS payout,
+             -- The EPC numerator: what this offer's OWN traffic paid (the whole
+             -- stage's payout on its campaign-offer slice, nothing on a split one).
+             coalesce(sum(coalesce(ks.revenue, 0)) FILTER (WHERE sl.is_primary), 0)::numeric AS own_payout,
              -- Same CTE, same window, same rows as checkouts above: BOTH
              -- residuals are bounded by the very aggregate they qualify.
              coalesce(sum(ks.unmapped) FILTER (WHERE sl.is_primary), 0)::int AS unmapped,
@@ -419,6 +450,7 @@ export async function computeCreativeMetrics(
       SELECT cs.creative_id, ${okSelect("sl.slice_offer")},
              coalesce(sum(CASE WHEN sl.is_primary THEN coalesce(ks.revenue, 0) ELSE 0 END
                           + sl.d_payout), 0)::numeric AS lifetime_payout,
+             coalesce(sum(coalesce(ks.revenue, 0)) FILTER (WHERE sl.is_primary), 0)::numeric AS lifetime_own_payout,
              coalesce(sum(CASE WHEN sl.is_primary THEN greatest(cs.sales_count, coalesce(ks.sales, 0)) ELSE 0 END
                           + sl.d_sales), 0)::int AS lifetime_sales,
              coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual' AND sl.is_primary), 0)::int AS lifetime_manual
@@ -457,10 +489,12 @@ export async function computeCreativeMetrics(
            coalesce(s.checkouts, 0)      AS checkouts,
            coalesce(s.sales, 0)          AS sales,
            coalesce(s.payout, 0)         AS payout,
+           coalesce(s.own_payout, 0)     AS own_payout,
            coalesce(s.manual_clean, 0)   AS manual_clean,
            coalesce(s.visit_clickers, 0) AS visit_clickers,
            coalesce(k.tracked_clean, 0)  AS tracked_clean,
            coalesce(sl.lifetime_payout, 0) AS lifetime_payout,
+           coalesce(sl.lifetime_own_payout, 0) AS lifetime_own_payout,
            (coalesce(sl.lifetime_manual, 0) + coalesce(kl.lifetime_tracked, 0)) AS lifetime_clean,
            coalesce(sl.lifetime_sales, 0) AS lifetime_sales,
            coalesce(s.unmapped, 0)       AS unmapped,
@@ -494,10 +528,12 @@ export async function computeCreativeMetrics(
       checkouts: Number(r.checkouts ?? 0),
       sales: Number(r.sales ?? 0),
       payout: Number(r.payout ?? 0),
+      own_payout: Number(r.own_payout ?? 0),
       manual_clean: Number(r.manual_clean ?? 0),
       visit_clickers: Number(r.visit_clickers ?? 0),
       tracked_clean: Number(r.tracked_clean ?? 0),
       lifetime_payout: Number(r.lifetime_payout ?? 0),
+      lifetime_own_payout: Number(r.lifetime_own_payout ?? 0),
       lifetime_clean: Number(r.lifetime_clean ?? 0),
       lifetime_sales: Number(r.lifetime_sales ?? 0),
       events: toCountMap(r.events),

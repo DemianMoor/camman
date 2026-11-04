@@ -34,6 +34,7 @@ import {
 } from "@/lib/sale-attribution";
 import {
   getOfferSplits,
+  isMovingSplit,
   splitStageMetrics,
   type OfferSlice,
   type OfferSplit,
@@ -89,6 +90,11 @@ export interface PerfMetrics {
   // Consumed by by-offer rendering; 0 everywhere else.
   split_in_revenue: number;
   split_out_revenue: number;
+  // The same split per event_types.key: split_out − split_in approved revenue,
+  // so the revenue key k's OWN traffic produced is events[k].revenue + this[k].
+  // The per-event EPC columns divide that (lib/reporting/offer-split-display.ts).
+  // Empty on every row the split did not touch.
+  event_split_delta: Record<string, number>;
   sales: number;
   revenue: number;
   // The per-event-type breakdown of sales / revenue / pending_revenue, keyed by
@@ -155,6 +161,7 @@ export const ZERO: PerfMetrics = {
   lifetime_revenue: 0,
   split_in_revenue: 0,
   split_out_revenue: 0,
+  event_split_delta: {},
   sales: 0,
   revenue: 0,
   // A FRESH object per accumulator — see zeroMetrics() and the freeze below.
@@ -175,9 +182,16 @@ export const ZERO: PerfMetrics = {
 // body. Freezing turns that whole class of mistake into a TypeError in strict
 // mode (all ES modules are strict) instead of silent cross-request corruption.
 Object.freeze(ZERO.events);
+Object.freeze(ZERO.event_split_delta);
 
 /** A fresh zero accumulator. Use this, not `{ ...ZERO }`, wherever the result is mutated. */
-export const zeroMetrics = (): PerfMetrics => ({ ...ZERO, events: {} });
+export const zeroMetrics = (): PerfMetrics => ({ ...ZERO, events: {}, event_split_delta: {} });
+
+const addNumMaps = (a: Record<string, number>, b: Record<string, number>, f = 1): Record<string, number> => {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) out[k] = (out[k] ?? 0) + v * f;
+  return out;
+};
 
 function stageMetrics(
   s: StageMetrics,
@@ -204,6 +218,7 @@ function stageMetrics(
     lifetime_revenue: lifetimeRevenueByStage.get(s.stage_id) ?? 0,
     split_in_revenue: 0,
     split_out_revenue: 0,
+    event_split_delta: {},
     sales: s.tally.sales,
     revenue: s.tally.revenue,
     // The map is COPIED, not aliased: the caller's accumulators mutate what they
@@ -230,6 +245,7 @@ export function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
     split_in_revenue: a.split_in_revenue + b.split_in_revenue,
     split_out_revenue: a.split_out_revenue + b.split_out_revenue,
+    event_split_delta: addNumMaps(a.event_split_delta, b.event_split_delta),
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
     events: addEventMaps(addEventMaps({}, a.events), b.events),
@@ -252,6 +268,7 @@ export function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     lifetime_revenue: m.lifetime_revenue * f,
     split_in_revenue: m.split_in_revenue * f,
     split_out_revenue: m.split_out_revenue * f,
+    event_split_delta: addNumMaps({}, m.event_split_delta, f),
     sales: m.sales * f,
     revenue: m.revenue * f,
     events: scaleEventMap(m.events, f),
@@ -482,12 +499,6 @@ async function dedupeTotalClickers(
   ]);
   totals.counted_clickers = period + manualVisits;
   totals.lifetime_clickers = lifetime + manualVisits;
-}
-
-// A split that moves something. getOfferSplits already omits event keys that are
-// zero on every field, so an empty `events` plus zero amounts moves nothing.
-function isMovingSplit(sp: OfferSplit): boolean {
-  return sp.sales !== 0 || sp.revenue !== 0 || sp.pending_revenue !== 0 || Object.keys(sp.events).length > 0;
 }
 
 // ---- number / offer / sequence: group the shared stage metrics -------------
@@ -792,6 +803,7 @@ async function distributeToGroups(
       lifetime_revenue: round2(m.lifetime_revenue),
       split_in_revenue: round2(m.split_in_revenue),
       split_out_revenue: round2(m.split_out_revenue),
+      event_split_delta: Object.fromEntries(Object.entries(m.event_split_delta).map(([k, v]) => [k, round2(v)])),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
       events: roundEventMap(m.events),

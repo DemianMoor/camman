@@ -137,7 +137,12 @@ async function main() {
       assert(r.total.sends === sumRows((x) => x.sends) && near(r.total.cost, sumRows((x) => x.cost)),
         `(a) Sends and Cost foot to the rows`);
 
-      // ---- (a) Sales + Revenue, regular: keitaro_stage_results + manual top-up per cohort stage
+      // ---- (a) Sales + Revenue, regular: keitaro_stage_results + manual top-up per cohort stage,
+      // then the per-offer split from the ledger (docs/04-features/reports-rollup.md):
+      // minus the conversions stored under ANOTHER offer, plus other offers' cohort
+      // stages' conversions stored under this one. (The would_go_negative skip is
+      // not modelled: it fires only when the tracker lags the ledger, which this
+      // tracker-vs-ledger recount would already flag.)
       const [reg] = await q(sql`
         WITH st AS (
           SELECT cs.id FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
@@ -149,17 +154,32 @@ async function main() {
         SELECT COALESCE(sum(COALESCE(k.s, 0) + GREATEST(0, COALESCE(m.s, 0) - COALESCE(k.s, 0))), 0)::int AS sales,
                COALESCE(sum(k.rev), 0)::float8 AS revenue
         FROM st LEFT JOIN k ON k.stage_id = st.id LEFT JOIN m ON m.stage_id = st.id`);
+      const [mv] = await q(sql`
+        SELECT count(*) FILTER (WHERE ${purchasedClause("ce")} AND c.offer_id = ${offerId})::int AS out_sales,
+               COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")} AND c.offer_id = ${offerId}), 0)::float8 AS out_rev,
+               count(*) FILTER (WHERE ${purchasedClause("ce")} AND ce.offer_id = ${offerId})::int AS in_sales,
+               COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")} AND ce.offer_id = ${offerId}), 0)::float8 AS in_rev
+        FROM conversion_events ce
+        JOIN campaign_stages cs ON cs.id = ce.stage_id JOIN campaigns c ON c.id = cs.campaign_id
+        WHERE c.org_id = ${orgId}::uuid AND ce.org_id = c.org_id AND c.type <> 'drip'
+          AND ce.offer_id IS NOT NULL AND ce.offer_id IS DISTINCT FROM c.offer_id
+          AND (c.offer_id = ${offerId} OR ce.offer_id = ${offerId})
+          AND cs.sent_at >= ${fromUtc.toISOString()}::timestamptz
+          AND cs.sent_at < ${toExclusiveUtc.toISOString()}::timestamptz`);
+      reg.sales = n(reg.sales) - n(mv.out_sales) + n(mv.in_sales);
+      reg.revenue = n(reg.revenue) - n(mv.out_rev) + n(mv.in_rev);
       assert(r.subtotals.regular.sales === n(reg.sales), `(a) regular Sales ${r.subtotals.regular.sales} = tracker tally + manual top-up ${n(reg.sales)}`);
       assert(near(r.subtotals.regular.revenue, n(reg.revenue)), `(a) regular Revenue ${r.subtotals.regular.revenue.toFixed(2)} = tracker tally ${n(reg.revenue).toFixed(2)}`);
 
-      // ---- (a) Sales + Revenue, drip: per-send ledger recount by stage_sends.sent_at
+      // ---- (a) Sales + Revenue, drip: per-send ledger recount by stage_sends.sent_at,
+      // counted for the offer each conversion is stored under (else its campaign's).
       const [dr] = await q(sql`
         SELECT count(*) FILTER (WHERE ${purchasedClause("ce")})::int AS sales,
                COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")}), 0)::float8 AS revenue
         FROM conversion_events ce
         JOIN stage_sends ss ON ss.id = ce.stage_send_id
         JOIN campaign_stages cs ON cs.id = ss.stage_id JOIN campaigns c ON c.id = cs.campaign_id
-        WHERE c.org_id = ${orgId}::uuid AND c.offer_id = ${offerId} AND c.type = 'drip'
+        WHERE c.org_id = ${orgId}::uuid AND COALESCE(ce.offer_id, c.offer_id) = ${offerId} AND c.type = 'drip'
           AND ss.status = 'sent' AND ss.sent_at >= ${fromUtc.toISOString()}::timestamptz
           AND ss.sent_at < ${toExclusiveUtc.toISOString()}::timestamptz`);
       assert(r.subtotals.drip.sales === n(dr.sales), `(a) drip Sales ${r.subtotals.drip.sales} = per-send ledger ${n(dr.sales)}`);

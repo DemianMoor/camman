@@ -27,7 +27,7 @@ import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
 import { REPORTS_EXTRA_COLUMN_IDS } from "@/lib/reporting/column-visibility";
 import type { EventColumn, EventTypeSpec } from "@/lib/reporting/event-columns";
-import { hasNoOwnSends, NO_OWN_SENDS_NOTE, ownRevenue } from "@/lib/reporting/offer-split-display";
+import { hasNoOwnSends, NO_OWN_SENDS_NOTE, ownEventMap, ownRevenue } from "@/lib/reporting/offer-split-display";
 import type {
   PerfMetrics,
   PerfRow,
@@ -103,9 +103,12 @@ const fmtNum = (n: number) =>
 const fmtPct = (n: number) => `${(n * 100).toFixed(1)}%`;
 const rate = (num: number, denom: number) => (denom > 0 ? num / denom : 0);
 
-// PER-OFFER SPLIT: EPC and Profit use the row's OWN revenue, and a row with no
-// sends of its own renders "—" in these cells (lib/reporting/offer-split-display.ts).
+// PER-OFFER SPLIT: every EPC and Profit use the row's OWN revenue, and a row with
+// no sends of its own renders "—" in these cells and in every per-event EPC cell
+// (lib/reporting/offer-split-display.ts).
 const NO_OWN_SENDS_COLS = new Set(["cost", "lifetime_epc", "epc", "profit"]);
+const isNoOwnSendsCell = (r: PerfRow, c: Col): boolean =>
+  hasNoOwnSends(r) && (c.event ? c.event.kind === "epc" : NO_OWN_SENDS_COLS.has(c.id));
 
 function derive(r: PerfRow): DerivedRow {
   return {
@@ -274,18 +277,24 @@ function fmtCell(v: number, kind: Exclude<Col["kind"], "event">): string {
  * the sort comparator and the body cell go through here, so they cannot disagree
  * about what a column is worth.
  */
+// A per-event EPC divides that key's OWN-traffic revenue; every other generated
+// kind (counts, rates, held, revenue) reads the events as reported.
 const cellValue = (r: DerivedRow, c: Col): number | null =>
-  c.event
-    ? eventCellValue(c.event, r.events ?? {}, r.counted_clickers)
-    : hasNoOwnSends(r) && NO_OWN_SENDS_COLS.has(c.id)
-      ? null
+  isNoOwnSendsCell(r, c)
+    ? null
+    : c.event
+      ? eventCellValue(
+          c.event,
+          c.event.kind === "epc" ? ownEventMap({ events: r.events ?? {}, event_split_delta: r.event_split_delta }) : (r.events ?? {}),
+          r.counted_clickers,
+        )
       : (r[c.id as keyof DerivedRow] as number);
 
 /** One body cell. Exported for scripts/test-event-columns-view.ts (the "—" bar). */
 export function PerfValueCell({ row, col }: { row: PerfRow; col: Col }) {
   const r = derive(row);
   const v = cellValue(r, col);
-  const noOwn = !col.event && v == null;
+  const noOwn = isNoOwnSendsCell(r, col);
   const cls =
     col.kind === "profit" && !noOwn
       ? (v ?? 0) >= 0
@@ -299,10 +308,10 @@ export function PerfValueCell({ row, col }: { row: PerfRow; col: Col }) {
       className={`whitespace-nowrap px-3 py-2 text-right tabular-nums ${cls}`}
       title={noOwn ? NO_OWN_SENDS_NOTE : undefined}
     >
-      {col.event
-        ? fmtEventCell(v, col.event.kind)
-        : noOwn
-          ? "—"
+      {noOwn
+        ? "—"
+        : col.event
+          ? fmtEventCell(v, col.event.kind)
           : fmtCell(v as number, col.kind as Exclude<Col["kind"], "event">)}
     </td>
   );

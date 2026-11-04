@@ -5,13 +5,19 @@
 //             Ledger: 2 sales on A ($100), 1 on B ($50), 1 on C ($30)  => splits B and C.
 //             Plus a rejected conversion on D: an all-zero split that must mint no row.
 //   stage Y — campaign offer B: 500 sent, $5 cost, 40 visits, tracker 1 sale / $20 (ledger: B).
+//   stage Z — campaign offer A: nothing sent, NO tracker row, ledger 1 sale on C ($5)
+//             => would_go_negative: every reader leaves Z whole on A.
+//   stage W — DRIP, campaign offer A, sent 2026-09-01 (outside the day), tracker 1 sale / $7,
+//             ledger 1 sale on C ($7) with no stage_send_id => C's unattributed drip conversion.
 //
 //   P1 By Offer: rows A, B, C; Σ sales / revenue = the stages'; A keeps X's sent / cost; totals unchanged
 //   P2 C is pure secondary: sent 0, cost 0, hasNoOwnSends => EPC / Profit / Cost render "—"
 //   P3 B is mixed: EPC = B's own revenue / B's counted clickers = $20 / 40
 //   P4 Overview (stage funnel), By Number, By Sequence, Hourly, By Offer totals identical with and without the split
 //   P5 landing-page report: C shows X's $30, B shows $50 + $20, A loses both; C is in the offer picker
-//   P6 /creatives offer filter (computeCreativeMetrics) = By Offer for K; creative × offer under offer_id=C
+//   P6 /creatives offer filter (computeCreativeMetrics) = By Offer for K; creative × offer under offer_id=C;
+//      own-payout EPC numerator (fix round 1)
+//   P7 per-event EPC numerator = own event revenue; would_go_negative skip; drip unattributed (fix round 1)
 //
 // The readers use the shared db client, so fixtures are COMMITTED and removed by org in `finally`.
 //
@@ -40,7 +46,7 @@ async function main() {
   const { getStageMetricsInRange } = await import("@/lib/reporting/stage-funnel");
   const { getLandingPageReport, offersWithSends } = await import("@/lib/reporting/landing-page-report");
   const { computeCreativeMetrics } = await import("@/lib/creatives/metrics-cache");
-  const { hasNoOwnSends, ownRevenue } = await import("@/lib/reporting/offer-split-display");
+  const { hasNoOwnSends, ownEventMap, ownRevenue } = await import("@/lib/reporting/offer-split-display");
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const one = async <T>(q: SQL): Promise<T> => ((await db.execute(q)) as unknown as T[])[0];
@@ -70,40 +76,49 @@ async function main() {
         INSERT INTO creatives (org_id, slug, text, status) VALUES (${org}::uuid, ${`k-${tag}`}, 'fixture', 'active') RETURNING id`)
     ).id;
 
-    const mkStage = async (offer: number, s: string, sms: number, cost: number, visits: number, kSales: number, kRev: number) => {
+    const mkStage = async (
+      offer: number, s: string, sms: number, cost: number, visits: number, kSales: number, kRev: number,
+      o: { type?: string; day?: string; creative?: number | null; tracker?: boolean } = {},
+    ) => {
+      const day = o.day ?? DAY;
       const camp = await one<{ id: number }>(sql`
-        INSERT INTO campaigns (org_id, slug, name, status, link_mode, offer_id)
-        VALUES (${org}::uuid, ${`c${s}-${tag}`}, ${`C${s} ${tag}`}, 'active', 'manual', ${offer}) RETURNING id`);
+        INSERT INTO campaigns (org_id, slug, name, status, link_mode, offer_id, type)
+        VALUES (${org}::uuid, ${`c${s}-${tag}`}, ${`C${s} ${tag}`}, 'active', 'manual', ${offer}, ${o.type ?? "regular"}) RETURNING id`);
       const stage = await one<{ id: number }>(sql`
         INSERT INTO campaign_stages (org_id, campaign_id, stage_number, stop_text, creative_id, sent_at, sms_count, total_cost)
-        VALUES (${org}::uuid, ${camp.id}, 1, 'STOP', ${K}, ${`${DAY}T15:00:00Z`}::timestamptz, ${sms}, ${String(cost)}::numeric)
+        VALUES (${org}::uuid, ${camp.id}, 1, 'STOP', ${o.creative === undefined ? K : o.creative}, ${`${day}T15:00:00Z`}::timestamptz, ${sms}, ${String(cost)}::numeric)
         RETURNING id`);
+      if (o.tracker === false) return { camp: camp.id, stage: stage.id };
       await db.execute(sql`
         INSERT INTO keitaro_stage_results
           (org_id, campaign_id, stage_id, stage_tracking_id, stat_date, sales, revenue, events,
            visit_clicks_raw, visit_clicks_clean)
-        VALUES (${org}::uuid, ${camp.id}, ${stage.id}, ${`${tag}-s${stage.id}`}, ${DAY}::date, ${kSales}, ${String(kRev)}::numeric,
+        VALUES (${org}::uuid, ${camp.id}, ${stage.id}, ${`${tag}-s${stage.id}`}, ${day}::date, ${kSales}, ${String(kRev)}::numeric,
                 ${JSON.stringify({ sale: { n: kSales, pending_n: 0, revenue: kRev, pending_revenue: 0 } })}::jsonb,
                 ${visits}, ${visits})`);
       return { camp: camp.id, stage: stage.id };
     };
     const X = await mkStage(A, "x", 1000, 10, 100, 4, 180);
     const Y = await mkStage(B, "y", 500, 5, 40, 1, 20);
+    const Z = await mkStage(A, "z", 0, 0, 0, 0, 0, { tracker: false });
+    const W = await mkStage(A, "w", 0, 0, 0, 1, 7, { type: "drip", day: "2026-09-01", creative: null });
 
     let seq = 0;
-    const ce = async (s: { camp: number; stage: number }, offer: number, status: string, revenue: number) =>
+    const ce = async (s: { camp: number; stage: number }, offer: number, status: string, revenue: number, at = `${DAY}T16:00:00Z`) =>
       db.execute(sql`
         INSERT INTO conversion_events
           (org_id, keitaro_event_id, keitaro_status, keitaro_type, campaign_id, stage_id, offer_id,
            event_type_id, status, revenue, occurred_at)
         VALUES (${org}::uuid, ${`${tag}-${++seq}`}, 'sale', 'sale', ${s.camp}, ${s.stage}, ${offer},
-                ${etSale}, ${status}, ${String(revenue)}::numeric, ${`${DAY}T16:00:00Z`}::timestamptz)`);
+                ${etSale}, ${status}, ${String(revenue)}::numeric, ${at}::timestamptz)`);
     await ce(X, A, "approved", 50);
     await ce(X, A, "approved", 50);
     await ce(X, B, "approved", 50);
     await ce(X, C, "approved", 30);
     await ce(X, D, "rejected", 99); // moves nothing: no D row anywhere
     await ce(Y, B, "approved", 20);
+    await ce(Z, C, "approved", 5); // more than Z's tracker holds => Z stays whole on A
+    await ce(W, C, "approved", 7, "2026-09-01T16:00:00Z"); // drip, no stage_send_id
 
     const b = { from: DAY, to: DAY, providerPhoneId: null };
     const offerRep = await getPerformanceReport(org, "offer", b);
@@ -139,6 +154,12 @@ async function main() {
       !!rB && near(ownRevenue(rB) / rB.counted_clickers, 0.5) && !!rA && near(ownRevenue(rA) / rA.counted_clickers, 1.8),
       `${rB && ownRevenue(rB)} ${rA && ownRevenue(rA)}`);
 
+    console.log("\nP7 per-event EPC numerator");
+    bar("B's own sale revenue $20 (70 − 50 split in); A's $180 (100 + 80 split out); C's own $0",
+      !!rB && !!rA && !!rC && near(ownEventMap(rB).sale.revenue, 20) && near(ownEventMap(rA).sale.revenue, 180) &&
+        near(ownEventMap(rC).sale.revenue, 0),
+      JSON.stringify([rA?.event_split_delta, rB?.event_split_delta, rC?.event_split_delta]));
+
     // P5 / P6 read the split state; P4 then compares against the unsplit state.
     console.log("\nP5 landing-page report");
     const lp = async (o: number) =>
@@ -148,8 +169,12 @@ async function main() {
       lpC.total.sends === 0 && lpC.total.cost === 0, JSON.stringify(lpC.total));
     bar("B: sales 2, revenue $70 (own $20 + X's $50), sends 500", lpB.total.sales === 2 && near(lpB.total.revenue, 70) &&
       lpB.total.sends === 500, JSON.stringify(lpB.total));
-    bar("A: sales 2, revenue $100, sends 1000", lpA.total.sales === 2 && near(lpA.total.revenue, 100) &&
-      lpA.total.sends === 1000, JSON.stringify(lpA.total));
+    bar("A: sales 3, revenue $105 (X's own 2 / $100 + Z's $5 — Z is left whole), sends 1000",
+      lpA.total.sales === 3 && near(lpA.total.revenue, 105) && lpA.total.sends === 1000, JSON.stringify(lpA.total));
+    bar("C excludes Z's $5 (would_go_negative, the rule By Offer applies)", near(lpC.total.revenue, 30));
+    bar("drip split-in with no send: counted as C's unattributed drip conversion, not A's",
+      lpC.unattributed_drip_conversions === 1 && lpA.unattributed_drip_conversions === 0,
+      `${lpC.unattributed_drip_conversions} ${lpA.unattributed_drip_conversions}`);
     const picker = (await offersWithSends(org)).map((o) => Number(o.id));
     bar("offer picker lists A, B and C (not D)", [A, B, C].every((o) => picker.includes(o)) && !picker.includes(D), picker.join(","));
 
@@ -168,6 +193,12 @@ async function main() {
     bar("C's event count: sale 1; A's: sale 2", cmRow(C)?.events.sale === 1 && cmRow(A)?.events.sale === 2,
       JSON.stringify([cmRow(C)?.events, cmRow(A)?.events]));
     bar("C has no deliveries / clicks of its own", cmRow(C)?.visit_clickers === 0 && cmRow(C)?.manual_clean === 0);
+    bar("own payout (EPC numerator): A $180, B $20, C $0, all offers $200 — 30-day and lifetime",
+      [[A, 180], [B, 20], [C, 0], [null, 200]].every(([o, v]) => {
+        const c = cmRow(o as number | null);
+        return !!c && near(c.own_payout, v as number) && near(c.lifetime_own_payout, v as number);
+      }),
+      JSON.stringify([A, B, C, null].map((o) => [cmRow(o)?.own_payout, cmRow(o)?.lifetime_own_payout])));
     const crC = await getPerformanceReport(org, "creative", { ...b, offerId: C });
     const crRowC = crC.rows.find((r) => r.offer_id === C);
     bar("dimension=creative offer_id=C: totals = C's By Offer row (sales 1, $30, sent 0)",

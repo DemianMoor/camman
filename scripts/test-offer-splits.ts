@@ -70,6 +70,10 @@ function invariant(m: PerfMetrics, slices: ReturnType<typeof splitStageMetrics>)
   const sin = slices.reduce((a, s) => a + s.metrics.split_in_revenue, 0);
   const sout = slices.reduce((a, s) => a + s.metrics.split_out_revenue, 0);
   if (Math.abs(sin - sout) > 1e-9) bad.push("split_in != split_out");
+  // Per-key split deltas cancel across the slices (out on the primary, in on each split).
+  for (const [key, v] of Object.entries(sum.event_split_delta)) {
+    if (Math.abs(v - (m.event_split_delta[key] ?? 0)) > 1e-9) bad.push(`event_split_delta.${key}`);
+  }
   return bad.join(",");
 }
 
@@ -123,6 +127,11 @@ function invariant(m: PerfMetrics, slices: ReturnType<typeof splitStageMetrics>)
       r[0].metrics.events.purchase.n === 9 && r[1].metrics.events.lead.n === 2 && r[1].metrics.events.purchase.revenue === 20,
   );
   check("S4 invariant", invariant(m, r) === "", invariant(m, r));
+  check(
+    "S4 per-key own-revenue delta: +20 purchase on the campaign slice, -20 on the split",
+    r[0].metrics.event_split_delta.purchase === 20 && r[1].metrics.event_split_delta.purchase === -20,
+    JSON.stringify([r[0].metrics.event_split_delta, r[1].metrics.event_split_delta]),
+  );
 }
 // S5
 {

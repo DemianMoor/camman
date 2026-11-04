@@ -129,6 +129,7 @@ type Creative = {
     checkouts: number;
     sales: number;
     payout: number;
+    own_payout: number;
     ctr: number | null;
     checkout_rate: number | null;
     sales_cr: number | null;
@@ -1065,7 +1066,7 @@ export default function CreativesPage() {
             <MetricCell
               value={m.epc}
               format={formatEpc}
-              title={`$${m.payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days)`}
+              title={`$${m.own_payout.toFixed(2)} payout / ${numberFmt.format(m.clean_clicks)} clean clicks (last 30 days)`}
             />
           );
         },

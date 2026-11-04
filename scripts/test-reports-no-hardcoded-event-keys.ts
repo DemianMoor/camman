@@ -74,6 +74,8 @@ const FILES = [
   "lib/creatives/metrics-cache.ts",
   // The per-offer split moves per-event maps between offer slices.
   "lib/reporting/offer-splits.ts",
+  "lib/reporting/offer-split-display.ts",
+  "lib/reporting/landing-page-report.ts",
   "app/api/reports/performance/route.ts",
   "app/api/keitaro/reports/route.ts",
   "app/api/campaigns/[campaignId]/stages/route.ts",

@@ -1945,7 +1945,7 @@ check(
   const perfRow = (f: Partial<PerfRow>): PerfRow => ({
     key: "k", label: "l", sent: 0, opt_outs: 0, clickers: 0, redirects: 0, reached: null,
     counted_clickers: 0, lifetime_clickers: 0, lifetime_revenue: 0, split_in_revenue: 0,
-    split_out_revenue: 0, sales: 0, revenue: 0, events: {}, unmapped: 0, manual_topup: 0,
+    split_out_revenue: 0, event_split_delta: {}, sales: 0, revenue: 0, events: {}, unmapped: 0, manual_topup: 0,
     pending_revenue: 0, cost: 0, ...f,
   });
   const col = (id: string, kind: Col["kind"]): Col => ({ id, header: id, kind });
@@ -1978,6 +1978,29 @@ check(
   check("PS5 ⭐ a row the split did not touch — even one with sent 0 — renders numbers, never — or the tooltip",
     plainCells.every((h) => !h.includes("—") && !h.includes("title=")) && plainCells[1].includes(">$2.00</td>"),
     plainCells.join(" | "));
+
+  // Per-event columns (fix round 1, R11): the per-event EPC divides that key's OWN
+  // revenue; counts and count-based rates stay as reported, like Sales.
+  const ev = (kind: "epc" | "count" | "rate"): Col => ({
+    id: `evt:sale:${kind}`, header: kind, kind: "event",
+    event: { id: `evt:sale:${kind}`, header: kind, kind, tier: "a", eventKey: "sale", muted: false },
+  });
+  const sale = (n: number, revenue: number) => ({ sale: { n, pending_n: 0, revenue, pending_revenue: 0 } });
+  const mixedEv = { ...mixed, sales: 2, events: sale(2, 70), event_split_delta: { sale: -50 } };
+  check("PS6 ⭐ a mixed row's per-event EPC divides its OWN event revenue ($20 / 40 = $0.50), matching its EPC",
+    cell(mixedEv, ev("epc")).includes(">$0.50</td>"), cell(mixedEv, ev("epc")));
+  const primaryEv = { ...primary, sales: 2, events: sale(2, 100), event_split_delta: { sale: 80 } };
+  check("PS7 a row that split event revenue OUT earns it in the per-event EPC ($180 / 100 = $1.80)",
+    cell(primaryEv, ev("epc")).includes(">$1.80</td>"), cell(primaryEv, ev("epc")));
+  check("PS8 per-event counts and rates stay as reported under the conversion's offer (2, 2/40 = 5.0%)",
+    cell(mixedEv, ev("count")).includes(">2</td>") && cell(mixedEv, ev("rate")).includes(">5.0%</td>"),
+    `${cell(mixedEv, ev("count"))} ${cell(mixedEv, ev("rate"))}`);
+  const secondaryEv = { ...secondary, events: sale(1, 30), event_split_delta: { sale: -30 } };
+  const secEpc = cell(secondaryEv, ev("epc"));
+  const secCount = cell(secondaryEv, ev("count"));
+  check("PS9 ⭐ a no-own-sends row's per-event EPC is — with the same tooltip; its per-event count still shows",
+    secEpc.includes(">—</td>") && secEpc.includes(title) && secCount.includes(">1</td>") && !secCount.includes("title="),
+    `${secEpc} ${secCount}`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

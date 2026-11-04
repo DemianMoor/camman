@@ -305,12 +305,10 @@ export type RefreshOutcome = {
 };
 
 export type RefreshDurations = {
-  totalsMs: number;
-  summaryMs: number;
   groupMs: number;
   audienceTotalsMs: number;
   totalMs: number;
-  /** All four views, in order, with per-view success and duration. */
+  /** Both views of the main run, in order, with per-view success and duration. */
   outcomes: RefreshOutcome[];
   /** Names of the views that failed this run. Empty on a clean run. */
   failed: string[];
@@ -322,38 +320,52 @@ export type RefreshDurations = {
   connection: RefreshConnection;
 };
 
-// The four matviews of the main run, in refresh order. Ordering still matters
-// even though a failure no longer stops the run:
+// The main run (05:00 / 20:00 UTC): the group view and the one view that SUMS
+// it. audience_report_group_totals_mv must refresh after offer_group_report_mv
+// to pick up the same snapshot. If the group refresh FAILS, it still runs and
+// sums the previous group snapshot — stale, but internally consistent and
+// visibly stale via its own log stamp.
 //
-//   * audience_report_group_totals_mv SUMS offer_group_report_mv, so it must
-//     refresh after it to pick up the same snapshot. If the group refresh
-//     FAILS, this one still runs and sums the previous group snapshot — stale,
-//     but internally consistent and visibly stale via its own log stamp, which
-//     beats freezing it too.
-//   * The two 0093 matviews lead, so a code-before-migration deploy (CLAUDE.md
-//     §14) breaks on the newer views rather than the older ones.
+// ── WHY ONLY TWO VIEWS HERE (2026-11-04) ─────────────────────────────────────
+// The group view outgrew the 180 s per-statement timeout: 107.5 s on 09-21,
+// ~165 s on its last success (11-02 20:01→20:03:47 UTC), then cancelled at
+// exactly 180.0 s on 11-03 05:00, 11-03 20:00 and 11-04 05:00 (Postgres log
+// `canceling statement due to statement timeout`). The timeout is raised to
+// 240 s in ./refresh-session, but four views in one 300 s invocation could not
+// afford that: measured from the Postgres log, the first refresh starts ~47 s
+// after the cron fires, then summary ~15 s, offer-totals ~36 s, audience ~3 s —
+// 47 + 15 + 240 + 36 + 3 = 341 s, past maxDuration, where Vercel would kill the
+// invocation with no catch and no alert. So offer_report_org_summary_mv and
+// offer_report_offer_totals_mv (neither reads any matview — checked against
+// pg_matviews on prod) moved to the lifecycle run 30 min later. This run's
+// worst case is now 47 + 240 + 3 = 290 s.
 //
-// The LIFECYCLE views are not here. Since 0227 they are
-// LIFECYCLE_REFRESH_SEQUENCE, refreshed by their own cron run 30 minutes later
-// (owner, 2026-10-27): with the exposure view added, one run of all six would
-// sit at or past the 300 s route limit — the group view alone peaked at 175.9 s.
+// This is a stopgap, not a fix: the group view's cost grows with send volume.
+// The real fix (making the refresh cheaper) is planned in
+// docs/superpowers/plans/2026-11-04-offer-group-report-refresh-cost.md.
 const REFRESH_SEQUENCE = [
-  { view: "offer_report_org_summary_mv", durationKey: "summaryMs" },
   { view: "offer_group_report_mv", durationKey: "groupMs" },
-  { view: "offer_report_offer_totals_mv", durationKey: "totalsMs" },
   { view: "audience_report_group_totals_mv", durationKey: "audienceTotalsMs" },
 ] as const satisfies ReadonlyArray<{
   view: string;
-  durationKey: "summaryMs" | "groupMs" | "totalsMs" | "audienceTotalsMs";
+  durationKey: "groupMs" | "audienceTotalsMs";
 }>;
 
-// The lifecycle run (/api/cron/refresh-offer-group-lifecycle, 05:30 / 20:30 UTC).
-// Neither view reads another matview, so the order only puts the view the
-// screen has read longest first.
+// The lifecycle run (/api/cron/refresh-offer-group-lifecycle, 05:30 / 20:30 UTC):
+// the two lifecycle views plus, since 2026-11-04, the two offer-report views
+// that moved out of the main run (see above). None of the four reads another
+// matview, so the order only puts the views the screens have read longest
+// first. Measured budget: ~7 s to first refresh + lifecycle ~30 s + exposure
+// ~32 s + summary ~15 s + offer-totals ~36 s ≈ 120 s of 300 s.
 const LIFECYCLE_REFRESH_SEQUENCE = [
   { view: "offer_group_lifecycle_v2_mv", durationKey: "lifecycleMs" },
   { view: "offer_group_exposure_mv", durationKey: "exposureMs" },
-] as const satisfies ReadonlyArray<{ view: string; durationKey: "lifecycleMs" | "exposureMs" }>;
+  { view: "offer_report_org_summary_mv", durationKey: "summaryMs" },
+  { view: "offer_report_offer_totals_mv", durationKey: "totalsMs" },
+] as const satisfies ReadonlyArray<{
+  view: string;
+  durationKey: "lifecycleMs" | "exposureMs" | "summaryMs" | "totalsMs";
+}>;
 
 type SessionDb = Parameters<Parameters<typeof withRefreshSession>[0]>[0];
 
@@ -400,7 +412,7 @@ async function refreshSequence<K extends string>(
   return { outcomes, durations };
 }
 
-// Rebuild the four main matviews (CONCURRENTLY -- non-blocking) and stamp the
+// Rebuild the main run's matviews (CONCURRENTLY -- non-blocking) and stamp the
 // refresh log. Called by the twice-daily cron. CONCURRENTLY must run outside a
 // transaction, so each statement is its own execute() call.
 //
@@ -454,15 +466,18 @@ export async function refreshOfferGroupReport(): Promise<RefreshDurations> {
 export type LifecycleRefreshDurations = {
   lifecycleMs: number;
   exposureMs: number;
+  summaryMs: number;
+  totalsMs: number;
   totalMs: number;
-  /** Both lifecycle views, in order, with per-view success and duration. */
+  /** All four views of this run, in order, with per-view success and duration. */
   outcomes: RefreshOutcome[];
   failed: string[];
   connection: RefreshConnection;
 };
 
-// The lifecycle run: offer_group_lifecycle_v2_mv (0226) and
-// offer_group_exposure_mv (0227), with the same session connection, per-view
+// The lifecycle run: offer_group_lifecycle_v2_mv (0226),
+// offer_group_exposure_mv (0227) and, since 2026-11-04, the org-summary and
+// offer-totals views, with the same session connection, per-view
 // isolation and stamping as the main run. Called by
 // /api/cron/refresh-offer-group-lifecycle.
 export async function refreshOfferGroupLifecycle(): Promise<LifecycleRefreshDurations> {

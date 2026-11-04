@@ -49,15 +49,18 @@ function check(name: string, cond: boolean, detail?: string) {
 }
 
 const REPO = path.resolve(__dirname, "..");
-const VIEWS = [
-  "offer_report_org_summary_mv",
-  "offer_group_report_mv",
-  "offer_report_offer_totals_mv",
-  "audience_report_group_totals_mv",
-];
+// Since 2026-11-04 the main run is the group view + the view that sums it; the
+// org-summary and offer-totals views moved to the lifecycle run so the group
+// view can have a 230s timeout inside the 300s invocation.
+const VIEWS = ["offer_group_report_mv", "audience_report_group_totals_mv"];
 // Since 0227 the lifecycle views are their OWN run (refreshOfferGroupLifecycle,
 // /api/cron/refresh-offer-group-lifecycle) — never part of the main one.
-const LIFECYCLE_VIEWS = ["offer_group_lifecycle_v2_mv", "offer_group_exposure_mv"];
+const LIFECYCLE_VIEWS = [
+  "offer_group_lifecycle_v2_mv",
+  "offer_group_exposure_mv",
+  "offer_report_org_summary_mv",
+  "offer_report_offer_totals_mv",
+];
 
 // ── source-scan bar ──────────────────────────────────────────────────────────
 // Line endings are normalized before matching so the bar behaves identically on
@@ -124,13 +127,13 @@ async function main() {
     `read back ${readings.first.wm}kB`,
   );
   check(
-    `statement_timeout applied on the refresh session (${REFRESH_STATEMENT_TIMEOUT} = 180000ms)`,
-    Number(readings.first.st) === 180000,
+    `statement_timeout applied on the refresh session (${REFRESH_STATEMENT_TIMEOUT} = 230000ms)`,
+    Number(readings.first.st) === 230000,
     `read back ${readings.first.st}ms`,
   );
   check(
     "both settings still hold on a LATER statement (session mode, not per-transaction)",
-    Number(readings.second.wm) === 393216 && Number(readings.second.st) === 180000,
+    Number(readings.second.wm) === 393216 && Number(readings.second.st) === 230000,
     `second read: work_mem=${readings.second.wm}kB statement_timeout=${readings.second.st}ms`,
   );
 
@@ -177,7 +180,7 @@ async function main() {
   );
   check(
     "the session path reports the RAISED settings as effective",
-    sessionConn.workMemKb === 393216 && sessionConn.statementTimeoutMs === 180000,
+    sessionConn.workMemKb === 393216 && sessionConn.statementTimeoutMs === 230000,
     `work_mem=${sessionConn.workMemKb}kB statement_timeout=${sessionConn.statementTimeoutMs}ms`,
   );
   check("the session path carries no fallbackReason", sessionConn.fallbackReason === undefined);
@@ -226,7 +229,7 @@ async function main() {
   );
   check(
     "the fallback reports the UNRAISED settings actually in force",
-    fallbackConn.workMemKb !== 393216 && fallbackConn.statementTimeoutMs !== 180000,
+    fallbackConn.workMemKb !== 393216 && fallbackConn.statementTimeoutMs !== 230000,
     `work_mem=${fallbackConn.workMemKb}kB statement_timeout=${fallbackConn.statementTimeoutMs}ms`,
   );
   // ⭐ The fallback hands `fn` the SHARED application pool. Closing that in a
@@ -262,7 +265,7 @@ async function main() {
     sent[0],
   );
 
-  // ── 8. A clean run refreshes all four and stamps all four ──────────────────
+  // ── 8. A clean run refreshes every main view and stamps each ──────────────────
   const probe = postgres(process.env.DATABASE_URL!, { prepare: false, max: 1 });
   const stampsBefore = await readStamps(probe);
 
@@ -276,7 +279,7 @@ async function main() {
   );
   const stampsAfter = await readStamps(probe);
   check(
-    "clean run advances all four report_refresh_log stamps",
+    "clean run advances every main-run report_refresh_log stamp",
     VIEWS.every((v) => stampsAfter[v] > stampsBefore[v]),
     VIEWS.map((v) => `${v}:${stampsAfter[v] > stampsBefore[v]}`).join(" "),
   );
@@ -287,28 +290,28 @@ async function main() {
     LIFECYCLE_VIEWS.map((v) => `${v}:${stampsAfter[v] === stampsBefore[v] ? "untouched" : "STAMPED"}`).join(" "),
   );
 
-  // ── 8b. The lifecycle run refreshes both lifecycle views, and only them ───
+  // ── 8b. The lifecycle run refreshes its four views, and only them ───
   const lcBefore = await readStamps(probe);
   const lc = await refreshOfferGroupLifecycle();
   const lcAfter = await readStamps(probe);
   check("lifecycle run: no failures", lc.failed.length === 0, lc.failed.join(", "));
   check(
-    "lifecycle run: exactly the two lifecycle views, in order",
+    "lifecycle run: exactly its four views, in order",
     lc.outcomes.map((o) => o.view).join(",") === LIFECYCLE_VIEWS.join(","),
     lc.outcomes.map((o) => o.view).join(","),
   );
   check(
-    "lifecycle run: both views stamp their own success",
+    "lifecycle run: every view stamps its own success",
     LIFECYCLE_VIEWS.every((v) => lcAfter[v] > lcBefore[v]),
     LIFECYCLE_VIEWS.map((v) => `${v}:${lcAfter[v] > lcBefore[v]}`).join(" "),
   );
   check(
-    "lifecycle run: the four main views are untouched",
+    "lifecycle run: the main-run views are untouched",
     VIEWS.every((v) => lcAfter[v] === lcBefore[v]),
   );
   check(
     "lifecycle run: on the session connection with the raised settings",
-    lc.connection.mode === "session" && lc.connection.statementTimeoutMs === 180000,
+    lc.connection.mode === "session" && lc.connection.statementTimeoutMs === 230000,
     JSON.stringify(lc.connection),
   );
 
@@ -370,8 +373,8 @@ async function main() {
     for (const name of [
       "the failing view is reported in `failed`",
       "the failure carries an error message (reported, not swallowed)",
-      "the OTHER THREE views still refreshed — including the two queued behind it",
-      "the other three stamped their own success in report_refresh_log",
+      "the OTHER view still refreshed — the one queued behind it",
+      "the other view stamped its own success in report_refresh_log",
       "the failed view did NOT stamp a success (its staleness stays visible)",
     ]) {
       check(name, false, "refreshOfferGroupReport threw — the run aborted");
@@ -388,12 +391,12 @@ async function main() {
   );
   const others = VIEWS.filter((v) => v !== "offer_group_report_mv");
   check(
-    "the OTHER THREE views still refreshed — including the two queued behind it",
+    "the OTHER view still refreshed — the one queued behind it",
     others.every((v) => partial!.outcomes.find((o) => o.view === v)?.ok === true),
     others.map((v) => `${v}=${partial!.outcomes.find((o) => o.view === v)?.ok}`).join(" "),
   );
   check(
-    "the other three stamped their own success in report_refresh_log",
+    "the other view stamped its own success in report_refresh_log",
     others.every((v) => after[v] > before[v]),
     others.map((v) => `${v}:${after[v] > before[v]}`).join(" "),
   );

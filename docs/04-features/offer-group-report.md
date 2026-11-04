@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-10-27 (offer exposure per cohort — 0x / 1x / 2x+ / Eligible now, migration 0227, offer_group_exposure_mv; lifecycle views in their own 05:30 / 20:30 UTC cron run); 2026-10-26 (lifecycle columns: Hot and Warm separate — migration 0226, offer_group_lifecycle_v2_mv)_
+_Last updated: 2026-11-04 (group view outgrew the 180 s timeout — raised to 230 s, org-summary + offer-totals moved to the 05:30 / 20:30 run; see "2026-11-04 — refresh headroom" below); 2026-10-27 (offer exposure per cohort — 0x / 1x / 2x+ / Eligible now, migration 0227, offer_group_exposure_mv; lifecycle views in their own 05:30 / 20:30 UTC cron run); 2026-10-26 (lifecycle columns: Hot and Warm separate — migration 0226, offer_group_lifecycle_v2_mv)_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -343,18 +343,47 @@ per run as `audienceTotalsMs`.
 
 ### The lifecycle views: their own run (0227)
 
+### 2026-11-04 — refresh headroom (stopgap)
+
+`offer_group_report_mv` outgrew the 180 s statement timeout: ~165 s on its last
+success (2026-11-02 20:00 UTC run), then cancelled at exactly 180.0 s on three
+consecutive runs (11-03 05:00, 11-03 20:00, 11-04 05:00 UTC — Postgres log
+`canceling statement due to statement timeout`). Audience Stats and Offers x
+Group showed 2026-11-02 data with the red "two refreshes missed" banner.
+
+The timeout is now **230 s**. That only fits the 300 s invocation because the
+main run was cut to **`offer_group_report_mv` → `audience_report_group_totals_mv`**
+and `offer_report_org_summary_mv` + `offer_report_offer_totals_mv` moved into the
+lifecycle run (neither reads any matview — checked in `pg_matviews` on prod).
+Measured budget, from Postgres log timestamps:
+
+| Run | Start → first refresh | Views | Worst case |
+|---|---|---|---|
+| main (05:00 / 20:00) | ~47 s (cause unconfirmed; likely Vercel dispatch / cold start on the :00 slot) | group ≤230 s + audience ~3 s | ~280 s |
+| lifecycle (05:30 / 20:30) | ~7 s | v2 ~30 s + exposure ~32 s + summary ~15 s + offer-totals ~36 s | ~120 s |
+
+A plain bump to 240 s with four views in one run would be 47 + 15 + 240 + 36 + 3
+= 341 s — Vercel would kill the invocation with no catch and no alert. The
+group view has grown ~1.4 s/day (107.5 s on 09-21 → ~165 s on 11-02), so 230 s
+buys roughly five to six weeks. The real fix is planned in
+[docs/superpowers/plans/2026-11-04-offer-group-report-refresh-cost.md](../superpowers/plans/2026-11-04-offer-group-report-refresh-cost.md).
+Side effect: the By Offer totals and org-summary are stamped ~30 min after the
+group view instead of ~2 min, so a reconciling read across them can differ by
+the sends of that half hour.
+
 Since 0227 the two lifecycle views — `offer_group_lifecycle_v2_mv` and
-`offer_group_exposure_mv` — are **not** refreshed by this run. They have their
+`offer_group_exposure_mv` — are **not** refreshed by this run (and since
+2026-11-04 neither are the org-summary and offer-totals views — see above). They have their
 own: `GET/POST /api/cron/refresh-offer-group-lifecycle`
 ([route](../../app/api/cron/refresh-offer-group-lifecycle/route.ts)), schedule
 **`30 5,20 * * *`**, `refreshOfferGroupLifecycle()` in
 `lib/reporting/offer-group-report.ts`. Owner, 2026-10-27: the whole six-view run
 would sit at or past the 300 s route limit (the group view alone peaked at
 175.9 s). Same machinery as this run — the shared `refreshSequence` helper on
-the report's session connection (180 s / 384 MB), each view `CONCURRENTLY`,
+the report's session connection (230 s / 384 MB since 2026-11-04, was 180 s), each view `CONCURRENTLY`,
 caught on its own and stamped on its own success; a failure is a Tier-1
 Telegram alert and a 500 naming the view. Its log line reports `lifecycleMs`
-(v2) and `exposureMs`. It stamps its **own heartbeat**,
+(v2), `exposureMs`, `summaryMs` and `totalsMs`. It stamps its **own heartbeat**,
 `offer-group-lifecycle-refresh` in `cron_locks` (`HEARTBEAT_JOBS.offerLifecycleRefresh`,
 26 h, 30 h first-run grace), watched by the daily counted-clickers rebuild
 alongside `offer-group-report-refresh`. The 30 minutes between the runs are
@@ -504,7 +533,7 @@ statements:
 | setting | value | why |
 | --- | --- | --- |
 | `work_mem` | **384MB** | The spilling sort needs ~236–256MB resident and runs in the leader **and** one parallel worker (`max_parallel_workers_per_gather = 1`). `work_mem` is a per-node ceiling, so the worst case for this plan is 384 × 2 = **768MB**; on this instance (`shared_buffers` 512MB, `effective_cache_size` 1.5GB ⇒ ~2GB RAM) that is survivable, whereas 512MB × 2 = 1GB would not be. Exposure lasts only as long as the job — ~2 minutes, twice a day — and no other connection sees it. |
-| `statement_timeout` | **180s** | ~1.7–2× the 87.7–103.8s the SELECT measured under the new `work_mem` on a quiet cluster. Not theoretical room: in a paired A/B one pair landed while production was busy (1 and 4 other active backends) and the same query took **269.1s** at the current `work_mem` and **163.1s** at 384MB — this statement can already exceed 120s under load, so today's 12.5s of headroom only holds when the cluster is idle. Deliberately **below** `maxDuration = 300` so the *database* cancels first: a 57014 throws and this route alerts on it, whereas a Vercel timeout kills the invocation with no catch and no alert. Not 240s, because the four views share one 300s invocation and the other three stretch under load too (180 + ~90 + ~20 + ~3 ≈ 293s fits; 240 does not). And if 180s is exceeded anyway, the per-view catch means group alone freezes. |
+| `statement_timeout` | **230s since 2026-11-04** (was 180s — see "2026-11-04 — refresh headroom"; the rest of this cell is the original 180s rationale) | ~1.7–2× the 87.7–103.8s the SELECT measured under the new `work_mem` on a quiet cluster. Not theoretical room: in a paired A/B one pair landed while production was busy (1 and 4 other active backends) and the same query took **269.1s** at the current `work_mem` and **163.1s** at 384MB — this statement can already exceed 120s under load, so today's 12.5s of headroom only holds when the cluster is idle. Deliberately **below** `maxDuration = 300` so the *database* cancels first: a 57014 throws and this route alerts on it, whereas a Vercel timeout kills the invocation with no catch and no alert. Not 240s, because the four views share one 300s invocation and the other three stretch under load too (180 + ~90 + ~20 + ~3 ≈ 293s fits; 240 does not). And if 180s is exceeded anyway, the per-view catch means group alone freezes. |
 
 `withRefreshSession()` **reads both settings back out of `pg_settings` in a
 separate statement** and refuses the session connection if either did not
@@ -545,29 +574,30 @@ Both the JSON response and the log line carry it, so a manual trigger answers
 
 ```jsonc
 { "ok": true,
-  "connection": { "mode": "session", "workMemKb": 393216, "statementTimeoutMs": 180000 },
-  "refreshed": ["offer_report_org_summary_mv", "..."], "failed": [], "durations": { ... } }
+  "connection": { "mode": "session", "workMemKb": 393216, "statementTimeoutMs": 230000 },
+  "refreshed": ["offer_group_report_mv", "audience_report_group_totals_mv"], "failed": [], "durations": { ... } }
 ```
 
 ```
 [refresh-offer-group-report] ok connection=session effectiveWorkMemKb=393216 \
-  effectiveStatementTimeoutMs=180000 totalsMs=… summaryMs=… groupMs=… \
-  audienceTotalsMs=… totalMs=… refreshed=4/4
+  effectiveStatementTimeoutMs=230000 groupMs=… \
+  audienceTotalsMs=… totalMs=… refreshed=2/2
 ```
 
 `workMemKb` / `statementTimeoutMs` are **read out of `pg_settings` on the
 connection that ran the refreshes**, not the constants this module intended — so
 they are evidence, not an echo. A healthy run reads `mode: "session"`,
-`393216` and `180000`. A fallback reads `mode: "pooled"`, a `fallbackReason`,
+`393216` and `230000`. A fallback reads `mode: "pooled"`, a `fallbackReason`,
 and the cluster defaults (`5120` / `120000`) — which is precisely the statement
 that the fix was not in force.
 
 ### Checking a run
 
-Read all four rows of **`report_refresh_log` (`view_name`, `refreshed_at`)**.
+Read the rows of **`report_refresh_log` (`view_name`, `refreshed_at`)**.
 Each view stamps its own row only when its own refresh succeeded, so a healthy
-run leaves **all four `refreshed_at` values within a few minutes of the 05:00
-or 20:00 UTC slot**. Any row still showing the previous slot is precisely the
+day leaves the group + audience-totals rows within a few minutes of the 05:00
+or 20:00 UTC slot, and the org-summary, offer-totals and lifecycle rows within
+a few minutes of 05:30 / 20:30 (since 2026-11-04). Any row still showing the previous slot is precisely the
 view that failed — and, unlike before, its neighbours will have refreshed
 anyway. The route's JSON response carries the same split as `refreshed[]` /
 `failed[]`, and a partial run fires a Tier-1 Telegram alert and returns 500.
@@ -716,7 +746,7 @@ registration as a sale, and nothing here is waiting for a backfill.
   `offer_group_lifecycle_mv`, the lifecycle-cohort columns.
 - `lib/reporting/offer-group-report.ts` — read + refresh helper.
 - `lib/reporting/refresh-session.ts` — the session-mode connection the refresh
-  runs on, with this job's `statement_timeout` (180s) and `work_mem` (384MB)
+  runs on, with this job's `statement_timeout` (230s since 2026-11-04) and `work_mem` (384MB)
   and the read-back that proves they applied. One caller only.
 - `app/api/offers/[id]/report/route.ts` — the API route.
 - `app/api/cron/refresh-offer-group-report/route.ts` — the twice-daily refresh cron.

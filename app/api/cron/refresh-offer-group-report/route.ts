@@ -13,7 +13,14 @@ export const dynamic = "force-dynamic";
 // number, or splitting the four views into four crons, cannot make one REFRESH
 // shorter. The fix is on the connection instead: lib/reporting/refresh-session.ts
 // gives this job a session-mode connection with its own statement_timeout
-// (180s) and work_mem (384MB).
+// (230s since 2026-11-04, was 180s) and work_mem (384MB).
+//
+// ⚠️ SINCE 2026-11-04 THIS RUN REFRESHES TWO VIEWS, not four: the group view
+// outgrew 180s, and to afford 230s inside 300s the org-summary and offer-totals
+// views moved to /api/cron/refresh-offer-group-lifecycle (05:30/20:30). The
+// measured budget is in lib/reporting/refresh-session.ts and REFRESH_SEQUENCE
+// in lib/reporting/offer-group-report.ts. The history below is kept as
+// recorded.
 //
 // Measured 2026-09-21 by reading back consecutive report_refresh_log stamps
 // from the real 05:00 UTC run: group 107.5s, offer-totals 36.7s,
@@ -92,7 +99,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const failures = durations.outcomes.filter((o) => !o.ok);
     const { connection } = durations;
 
-    // Log runtime every run so we can watch it against the 180s per-statement
+    // Log runtime every run so we can watch it against the 230s per-statement
     // timeout and the 300s ceiling — and log WHICH CONNECTION did the work plus
     // the settings ACTUALLY in force on it, never the values we intended. After
     // a manual trigger this one line answers "did the fix apply?" on its own.
@@ -102,7 +109,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         `effectiveWorkMemKb=${connection.workMemKb} ` +
         `effectiveStatementTimeoutMs=${connection.statementTimeoutMs}` +
         (connection.fallbackReason ? ` fallbackReason=${connection.fallbackReason}` : "") +
-        ` totalsMs=${durations.totalsMs} summaryMs=${durations.summaryMs} groupMs=${durations.groupMs} ` +
+        ` groupMs=${durations.groupMs} ` +
         `audienceTotalsMs=${durations.audienceTotalsMs} totalMs=${durations.totalMs} ` +
         `refreshed=${refreshed.length}/${durations.outcomes.length}`,
     );
@@ -137,7 +144,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Stamped only when ALL FOUR refreshes succeeded — the heartbeat must mean
+    // Stamped only when EVERY refresh of this run succeeded — the heartbeat must mean
     // "every report is fresh", not "the route was reached" and not "some of it
     // worked". Per-view freshness lives in report_refresh_log, which each view
     // stamps for itself.

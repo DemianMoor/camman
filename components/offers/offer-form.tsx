@@ -40,6 +40,8 @@ export interface OfferFormProps {
   mode: "create" | "edit";
   /** Edit mode: the offer's id, used to load per-brand active campaign counts. */
   offerId?: number;
+  /** Manager+ may set the Keitaro offer id; otherwise the field is disabled. */
+  canEditKeitaroOfferId: boolean;
   /** The org's brands — the "Brands" checkbox list. */
   brands: OfferFormBrand[];
   initialValues?: Partial<OfferFormValues>;
@@ -67,6 +69,7 @@ type OfferDetailResponse = {
 export function OfferForm({
   mode,
   offerId,
+  canEditKeitaroOfferId,
   brands,
   initialValues,
   onSubmit,
@@ -82,6 +85,7 @@ export function OfferForm({
       offer_id: initialValues?.offer_id ?? "",
       postfix: initialValues?.postfix ?? "",
       base_url: initialValues?.base_url ?? "",
+      keitaro_offer_id: initialValues?.keitaro_offer_id ?? null,
       // RHF treats undefined as "untouched" — the Select renders its
       // placeholder until the user picks a network. zodResolver will then
       // produce the "Network is required" error on submit.
@@ -246,6 +250,39 @@ export function OfferForm({
                 </FormControl>
                 <FormDescription>
                   URL parameter name for tracking.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="keitaro_offer_id"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Keitaro offer ID</FormLabel>
+                <FormControl>
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="62"
+                    disabled={isSubmitting || !canEditKeitaroOfferId}
+                    name={field.name}
+                    ref={field.ref}
+                    onBlur={field.onBlur}
+                    value={field.value ?? ""}
+                    onChange={(e) =>
+                      field.onChange(
+                        e.target.value === "" ? null : Number(e.target.value),
+                      )
+                    }
+                  />
+                </FormControl>
+                <FormDescription>
+                  Conversions whose Keitaro offer id matches are reported
+                  under this offer. Must be unique within the organization.
                 </FormDescription>
                 <FormMessage />
               </FormItem>

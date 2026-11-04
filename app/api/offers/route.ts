@@ -10,6 +10,11 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import {
+  isKeitaroIdViolation,
+  KEITARO_ID_DUPLICATE_MESSAGE,
+  keitaroOfferIdTaken,
+} from "@/lib/api/offer-keitaro-id";
 import { brandsBelongToOrg, replaceOfferBrands } from "@/lib/api/offer-brands";
 import { can } from "@/lib/permissions";
 import { nullIfEmpty, offerCreateSchema } from "@/lib/validators/offers";
@@ -71,6 +76,12 @@ export async function POST(req: NextRequest) {
 
   try {
     const created = await db.transaction(async (tx) => {
+      if (
+        data.keitaro_offer_id != null &&
+        (await keitaroOfferIdTaken(tx, orgId, data.keitaro_offer_id))
+      ) {
+        return null;
+      }
       const [row] = await tx
         .insert(offers)
         .values({
@@ -79,6 +90,7 @@ export async function POST(req: NextRequest) {
           name: data.name,
           postfix: nullIfEmpty(data.postfix),
           base_url: nullIfEmpty(data.base_url),
+          keitaro_offer_id: data.keitaro_offer_id ?? null,
           network_id: data.network_id,
           payout_model: data.payout_model,
           payout_cpa:
@@ -109,8 +121,18 @@ export async function POST(req: NextRequest) {
       await replaceOfferBrands(tx, orgId, row.id, data.brand_ids);
       return row;
     });
+    if (!created) {
+      return apiError(409, KEITARO_ID_DUPLICATE_MESSAGE, API_ERROR_CODES.DUPLICATE, {
+        field: "keitaro_offer_id",
+      });
+    }
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
+    if (isKeitaroIdViolation(err)) {
+      return apiError(409, KEITARO_ID_DUPLICATE_MESSAGE, API_ERROR_CODES.DUPLICATE, {
+        field: "keitaro_offer_id",
+      });
+    }
     if (isUniqueViolation(err)) {
       return apiError(
         409,

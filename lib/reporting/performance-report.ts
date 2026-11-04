@@ -78,6 +78,11 @@ export interface PerfMetrics {
   // can see the denominator was 4.
   lifetime_clickers: number;
   lifetime_revenue: number;
+  // Per-offer split (lib/reporting/offer-splits.ts): approved revenue moved into /
+  // out of this row by conversions whose offer differs from the campaign's.
+  // Consumed by by-offer rendering; 0 everywhere else.
+  split_in_revenue: number;
+  split_out_revenue: number;
   sales: number;
   revenue: number;
   // The per-event-type breakdown of sales / revenue / pending_revenue, keyed by
@@ -142,6 +147,8 @@ export const ZERO: PerfMetrics = {
   counted_clickers: 0,
   lifetime_clickers: 0,
   lifetime_revenue: 0,
+  split_in_revenue: 0,
+  split_out_revenue: 0,
   sales: 0,
   revenue: 0,
   // A FRESH object per accumulator — see zeroMetrics() and the freeze below.
@@ -189,6 +196,8 @@ function stageMetrics(
       s.tally.visit_clicks_clean,
     ),
     lifetime_revenue: lifetimeRevenueByStage.get(s.stage_id) ?? 0,
+    split_in_revenue: 0,
+    split_out_revenue: 0,
     sales: s.tally.sales,
     revenue: s.tally.revenue,
     // The map is COPIED, not aliased: the caller's accumulators mutate what they
@@ -213,6 +222,8 @@ export function addMetrics(a: PerfMetrics, b: PerfMetrics): PerfMetrics {
     counted_clickers: a.counted_clickers + b.counted_clickers,
     lifetime_clickers: a.lifetime_clickers + b.lifetime_clickers,
     lifetime_revenue: a.lifetime_revenue + b.lifetime_revenue,
+    split_in_revenue: a.split_in_revenue + b.split_in_revenue,
+    split_out_revenue: a.split_out_revenue + b.split_out_revenue,
     sales: a.sales + b.sales,
     revenue: a.revenue + b.revenue,
     events: addEventMaps(addEventMaps({}, a.events), b.events),
@@ -233,6 +244,8 @@ export function scaleMetrics(m: PerfMetrics, f: number): PerfMetrics {
     counted_clickers: m.counted_clickers * f,
     lifetime_clickers: m.lifetime_clickers * f,
     lifetime_revenue: m.lifetime_revenue * f,
+    split_in_revenue: m.split_in_revenue * f,
+    split_out_revenue: m.split_out_revenue * f,
     sales: m.sales * f,
     revenue: m.revenue * f,
     events: scaleEventMap(m.events, f),
@@ -708,6 +721,8 @@ async function distributeToGroups(
       counted_clickers: round2(m.counted_clickers),
       lifetime_clickers: round2(m.lifetime_clickers),
       lifetime_revenue: round2(m.lifetime_revenue),
+      split_in_revenue: round2(m.split_in_revenue),
+      split_out_revenue: round2(m.split_out_revenue),
       sales: round2(m.sales),
       revenue: round2(m.revenue),
       events: roundEventMap(m.events),

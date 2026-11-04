@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ A reversal postback reuses the ORIGINAL event's tid; every new event gets a new one (2026-11-03)
@@ -3858,6 +3858,12 @@ The generalisation: **any job that derives a table from another and deletes _or 
 Sweeply's postback template hardcodes `status=lead` for **paid** conversions. Keitaro's Affise template maps Affise pending/hold (2, 5) to `lead`. The same word means approved on one network and on-hold on another, so a global "lead = X" rule is wrong for somebody.
 
 `conversion_event_mappings` classifies per network or offer, keyed on Keitaro's canonical conversion **type** (many raw statuses — `approved`, `confirmed`, `paid` — resolve to the one `Sale` type). An unknown network/type is stored with NULL event type and status and is never counted as a purchase. Guessing "it's probably a sale" is exactly how a $0 registration would have become a buyer.
+
+## `conversion_events.offer_id` is reporting-only; targeting reaches the offer via the campaign (2026-11-04)
+
+`conversion_events.offer_id` is the offer a conversion is credited to in reports. It can differ from the campaign's offer (the Keitaro offer the link pointed at) and it moves when a mapping changes. Anything that decides **who is selected or excluded** (segment rules, send exclusions, the lifecycle re-check) must reach the offer through `ce.campaign_id → campaigns.offer_id`, as `purchasedOfferContacts` in [lib/sale-attribution.ts](../lib/sale-attribution.ts) does. Classification (event type / status) also stays on the campaign's offer and network.
+
+Source guard: T5 in `scripts/test-offer-move-targeting-invariance-db.ts` fails on any `conversion_events` alias `.offer_id` in `lib/` or `db/migrations` outside `lib/conversions/ingest.ts`, `lib/conversions/monitor.ts` and `lib/reporting/offer-splits.ts`. A new reader that needs the stored offer for a report goes on that allow-list deliberately. See [04-features/conversion-events.md](04-features/conversion-events.md#offer-attribution-from-the-keitaro-offer-2026-11-04).
 
 ## A "keep the existing value" rule has nothing to keep on a first sighting (2026-09-18)
 

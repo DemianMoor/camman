@@ -91,6 +91,8 @@ export function resolveConversionOffer(
   const mapped =
     keitaroOfferId !== null ? lookups.offersByKeitaroId.get(keitaroOfferId) : undefined;
   if (mapped && mapped.orgId === stage.orgId) {
+    // affiliateNetworkId is the mapped offer's network (nothing reads it today) —
+    // classification (resolveMapping) must NOT use it; it uses the campaign's.
     return { offerId: mapped.offerId, affiliateNetworkId: mapped.affiliateNetworkId, source: "keitaro_offer" };
   }
   return { offerId: stage.offerId, affiliateNetworkId: stage.affiliateNetworkId, source: "campaign" };
@@ -101,7 +103,9 @@ export function resolveConversionOffer(
 //   2. sub_id_3 = a stage tracking id → stage only
 //   3. Keitaro offer id = offers.keitaro_offer_id → offer only
 //   4. none → unresolved (no org to store it under; reported, not written)
-// Org, campaign, offer and network come from the stage when there is one.
+// Org and campaign come from the stage when there is one. The STORED offer is
+// resolveConversionOffer's (the mapped Keitaro offer, else the campaign's);
+// classification keeps the campaign's offer and network (mappingOfferId).
 export function buildConversionEventRows(
   sources: readonly LedgerSourceRow[],
   lookups: Lookups,

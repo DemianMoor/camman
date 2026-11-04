@@ -97,7 +97,8 @@ async function main() {
   }
   console.log("after:", JSON.stringify(await state(), null, 1));
   console.log(`finished ${new Date().toISOString()} — now run scripts/verify-offer-report-v2.ts`);
-  process.exit(0);
+  // Exit 2 on the stop bar so the runbook can't proceed on a line nobody read.
+  process.exit(stop ? 2 : 0);
 }
 
 main().catch((e) => {

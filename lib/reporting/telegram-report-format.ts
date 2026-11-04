@@ -91,7 +91,8 @@ function eventBlock(m: ReportMetrics): {
     if (t.moneyOnly) {
       if (!(e.revenue > 0 || e.pending_revenue > 0)) return [];
       const heldOnly = e.pending_revenue > 0 ? ` (${money(e.pending_revenue)} pending)` : "";
-      return [`${escapeHtml(t.label.replace(/\s+/g, " ").trim() || t.key)} $: ${money(e.revenue)}${heldOnly}`];
+      // Through eventLabel() like every registry label (bar T22): "Leads $: …".
+      return [`${eventLabel(t)} $: ${money(e.revenue)}${heldOnly}`];
     }
     // The host's count covers its members' events (countKeys).
     let n = 0;

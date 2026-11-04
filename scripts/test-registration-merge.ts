@@ -123,7 +123,7 @@ const lines = eventLines({
   manualTopup: 0,
 } as unknown as Parameters<typeof eventLines>[0]);
 check("T1 the host line counts the member (Signups: 8)", lines.some((l) => l.startsWith("Signups: 8")), lines.join(" | "));
-check("T2 the member prints money only (Form $: $62.00)", lines.some((l) => l === "Form $: $62.00"), lines.join(" | "));
+check("T2 the member prints money only (Forms $: $62.00)", lines.some((l) => l === "Forms $: $62.00"), lines.join(" | "));
 check("T3 no member COUNT line", !lines.some((l) => l.startsWith("Forms:")));
 const quiet = eventLines({
   events: { signup: { n: 3, revenue: 0, pending_revenue: 0 } },

@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ A reversal postback reuses the ORIGINAL event's tid; every new event gets a new one (2026-11-03)
@@ -4997,3 +4997,16 @@ See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
 - **Do not trigger on journey state, and never backfill** (owner decisions 2026-10-30): a postback fires for an approved purchase whatever the journey ended as, and only for ledger rows created at/after `postback_active_since`.
 - **The payload is a snapshot; the ledger is re-checked at send time.** `{status}` is frozen at enqueue, so the delivery claim re-reads the linked `conversion_events.status` (org-matched) for every live row and cancels it unsent (`last_error = 'no_longer_approved'`) if the sale is no longer `'approved'`. Anything else stored in the payload that the owner rules must hold at SEND time needs the same re-check — do not trust the snapshot for it. Covered by D13 in `scripts/test-postback-deliver-db.ts`.
 - **Best-effort is not silent.** A partner-postbacks step that swallows its error (enqueue in drip-monitors) must still raise a latched alert, gated on `postbacksLive()` so nothing pages before go-live — a fresh heartbeat around a swallowed failure is invisible otherwise.
+
+## Report-only registration flag vs the lane flag (0232, 2026-11-04)
+
+`event_types.counts_as_registration` decides what a **report** counts as a
+Registration (Lead today). `event_types.is_retarget_signal` decides who is in the
+**Registered lane**, which decides who gets texted. They are two flags on purpose,
+with two SQL sets in [lib/sale-attribution.ts](../lib/sale-attribution.ts):
+`REPORT_REGISTRATION_EVENT_TYPE_IDS` (reports) and `RETARGET_EVENT_TYPE_IDS`
+(lanes, tiers, drip lifecycle). Never use the report set,
+`reportedRegistrationClause()` or `registrationMerge()` in lane, send, audience or
+segment code. `scripts/test-lead-not-registered-lane.ts` scans for it (allowlist)
+and proves the behaviour on a rolled-back preview fixture. Making leads count
+toward the lane needs an explicit owner decision.

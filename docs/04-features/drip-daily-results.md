@@ -1,6 +1,6 @@
 # Drip — Daily results
 
-_Last updated: 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-11-04 (0232: Leads + Lead revenue columns, Leads chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
@@ -106,6 +106,21 @@ None of these are stored. The rate moves and the partner report reprices with it
 
 The tab shows **"older days updated nightly"**, plus "as of HH:MM ET" for today and yesterday.
 
+## 4b-2. Leads (0232, 2026-11-04)
+
+Two stage counters, `leads` and `lead_revenue`, dated exactly like `sales` and
+`revenue` (detection day in Activity, admission day in Cohort):
+
+- **Leads** = lead **and** registration conversions (`reportedRegistrationClause()`:
+  a retarget-signal or `counts_as_registration` type, pending + approved). Owner
+  ruling 4: one merged number, labelled "Leads".
+- **Lead revenue** = their approved revenue. It is a **breakdown of Revenue**,
+  which already contains it (`counts_revenue`), never added again.
+
+⚠️ Not the same thing as **Leads arrived** (partner leads admitted); the column
+tooltip says so. Rows written before the 0232 refill read 0. Reports only, no
+lane effect ([conversion-events.md](conversion-events.md)).
+
 ## 4c. The tab (PR 4)
 
 | piece | where |
@@ -148,7 +163,7 @@ imports it.
 | element | rule |
 |---|---|
 | Bars | Profit per ET day on the **left axis**. With no breakdown, blue = profit and red = loss. Under **By stage** or **By partner** the bar is stacked by group in a **fixed colour order**: the group's stable order (stage number with lanes under their parent, or partner name, Unattributed last), never its rank. Groups past 4 fold into **Other**. Under **By stage** a gray **Lookup cost** segment makes each stack add up to the day's profit. `stackOffset="sign"`, so losses and lookup cost stack **down** from zero |
-| Line | ONE metric on the **right axis**, picked from ROI / Clicks per send / Conv % / Opt-out % / Sends. Straight segments between days (`linear`, not a smoothed curve). ROI uses `displayedRoi()`, so the line has a **gap** wherever send cost is under $1, the same rule as the table |
+| Line | ONE metric on the **right axis**, picked from ROI / Clicks per send / Conv % / Opt-out % / Sends / Leads. Straight segments between days (`linear`, not a smoothed curve). ROI uses `displayedRoi()`, so the line has a **gap** wherever send cost is under $1, the same rule as the table |
 | Change markers | A dashed vertical line with ⚑ on each day that had a change. The tooltip lists every change for that day in ET |
 | Maturing | Cohort bars still maturing are drawn faded (45%) |
 | Legend / text | A custom legend: the swatch carries the colour, and the text stays in ink |

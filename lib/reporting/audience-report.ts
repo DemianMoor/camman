@@ -9,7 +9,8 @@ import {
 
 // Read side of the Audience Stats report (/reports/audience, ClickUp
 // 869eydqn0): one contact group, one row per offer. The inverse view of
-// offer-group-report.ts over the same matview, offer_group_report_mv.
+// offer-group-report.ts over the same matview, offer_group_report_v2_mv
+// (migration 0231: each conversion under the offer it converted on).
 //
 // No `"server-only"` import, for the same reason as offer-group-report.ts:
 // scripts/verify-audience-report.ts calls these directly under tsx.
@@ -26,7 +27,7 @@ export type AudienceOfferRow = RawMetrics &
     fresh_pool: number;
   };
 
-// "This group · all offers". Read from audience_report_group_totals_mv, never
+// "This group · all offers". Read from audience_report_group_totals_v2_mv, never
 // summed from the offer rows: clicks and opt-outs there are deduplicated at
 // GROUP grain (a contact who clicked two offers is one clicker), so they are
 // lower than the rows added up, by design.
@@ -47,7 +48,7 @@ const n = (v: unknown) => Number(v ?? 0);
 export async function getAudienceGroups(orgId: string): Promise<AudienceGroupOption[]> {
   const rows = (await db.execute(sql`
     select g.id, g.name, g.status
-    from audience_report_group_totals_mv t
+    from audience_report_group_totals_v2_mv t
     join contact_groups g on g.id = t.group_id and g.org_id = t.org_id
     where t.org_id = ${orgId}::uuid
     order by (g.status = 'archived'), lower(g.name), g.id
@@ -69,14 +70,14 @@ export async function getAudienceReport(orgId: string, groupId: number): Promise
     select m.offer_id, o.name as offer_name, o.status as offer_status,
            m.sends, m.revenue, m.sales, m.clicks, m.cost, m.optouts,
            m.sent_7d, m.sent_30d, m.sent_90d, m.fresh_pool
-    from offer_group_report_mv m
+    from offer_group_report_v2_mv m
     left join offers o on o.id = m.offer_id and o.org_id = m.org_id
     where m.org_id = ${orgId}::uuid and m.group_id = ${groupId}
   `)) as unknown as Record<string, unknown>[];
 
   const totalsRows = (await db.execute(sql`
     select sends, revenue, sales, clicks, cost, optouts, sent_7d, sent_30d, sent_90d
-    from audience_report_group_totals_mv
+    from audience_report_group_totals_v2_mv
     where org_id = ${orgId}::uuid and group_id = ${groupId}
   `)) as unknown as Record<string, unknown>[];
 

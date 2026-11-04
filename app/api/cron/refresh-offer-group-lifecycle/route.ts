@@ -8,7 +8,8 @@ import { refreshOfferGroupLifecycle } from "@/lib/reporting/offer-group-report";
 export const dynamic = "force-dynamic";
 // The Offer Group report's LIFECYCLE matviews — offer_group_lifecycle_v2_mv
 // (0226, cohort sends) and offer_group_exposure_mv (0227, cohort exposure) —
-// — and, since 2026-11-04, offer_report_org_summary_mv + offer_report_offer_totals_mv,
+// — and, since 2026-11-04, offer_report_org_summary_mv + offer_report_offer_totals_v2_mv
+// (0231's v2 name, refreshed INSTEAD of offer_report_offer_totals_mv, never both),
 // moved here so the main run can afford a 230 s timeout on the group view —
 // in their own cron run at 05:30 / 20:30 UTC, 30 minutes after the main
 // refresh (/api/cron/refresh-offer-group-report). Owner, 2026-10-27: with the

@@ -14,6 +14,10 @@ import { sql } from "drizzle-orm";
 // criterion pinned to those numbers measures the calendar, not the code.
 //
 // Run: npx tsx scripts/verify-offer-group-attribution.ts
+//
+// Since 0231 this reads the *_v2 report views (each conversion under its own
+// offer); the two criteria that offers receiving only split conversions would
+// trip (3a key set, 6) allow exactly that case.
 // =============================================================================
 
 let failed = 0;
@@ -44,24 +48,24 @@ async function main() {
   // --- INPUT SCOPE, printed before any verdict. A check is not evidence until
   // you know what it ran against.
   const scope = (await q(sql`
-    SELECT (SELECT count(*) FROM offer_group_report_mv)::int              AS mv_rows,
-           (SELECT count(DISTINCT offer_id) FROM offer_group_report_mv)::int AS mv_offers,
+    SELECT (SELECT count(*) FROM offer_group_report_v2_mv)::int              AS mv_rows,
+           (SELECT count(DISTINCT offer_id) FROM offer_group_report_v2_mv)::int AS mv_offers,
            (SELECT count(*) FROM organizations)::int                      AS orgs,
            (SELECT refreshed_at FROM report_refresh_log
-             WHERE view_name = 'offer_group_report_mv')                   AS refreshed_at
+             WHERE view_name = 'offer_group_report_v2_mv')                   AS refreshed_at
   `))[0];
   console.log("=== INPUT SCOPE ===");
   console.table([scope]);
-  assert(n(scope.mv_rows) > 0, "offer_group_report_mv is non-empty (an empty scope is a failure, not a pass)");
+  assert(n(scope.mv_rows) > 0, "offer_group_report_v2_mv is non-empty (an empty scope is a failure, not a pass)");
 
   const hasTotals = n((await q(sql`
     SELECT count(*)::int AS n FROM pg_matviews
-    WHERE schemaname = 'public' AND matviewname = 'offer_report_offer_totals_mv'
+    WHERE schemaname = 'public' AND matviewname = 'offer_report_offer_totals_v2_mv'
   `))[0].n) > 0;
 
   if (!hasTotals) {
     // PRE-MIGRATION. Measure and print the defect, then fail deliberately.
-    console.log("\n=== PRE-MIGRATION STATE (offer_report_offer_totals_mv absent) ===");
+    console.log("\n=== PRE-MIGRATION STATE (offer_report_offer_totals_v2_mv absent) ===");
     const defect = await q(sql`
       SELECT m.offer_id,
              sum(m.sends)::bigint                          AS column_sum,
@@ -69,7 +73,7 @@ async function main() {
                WHERE e.offer_id = m.offer_id)::bigint      AS true_sends,
              count(*)::int                                 AS group_rows,
              count(DISTINCT m.sends)::int                  AS distinct_send_values
-      FROM offer_group_report_mv m GROUP BY m.offer_id
+      FROM offer_group_report_v2_mv m GROUP BY m.offer_id
       ORDER BY sum(m.sends) DESC LIMIT 5
     `);
     console.table(defect);
@@ -87,7 +91,7 @@ async function main() {
   // paths. Valid ONLY while all of the offer's sends fall inside 90 days —
   // asserted, not assumed.
   console.log("\n=== 1. offer 96: sends == sent_90d per row ===");
-  // Scope MUST match offer_group_report_mv's own `attr` CTE exactly, or this
+  // Scope MUST match offer_group_report_v2_mv's own `attr` CTE exactly, or this
   // guard can skip spuriously (or fail to skip when it should). The matview
   // resolves the campaign via the SEND's STAGE (ss.stage_id -> campaign_stages
   // -> offer_report_tracked_campaigns), not the denormalized ss.campaign_id,
@@ -109,7 +113,7 @@ async function main() {
                 `90d floor (${win.floor}); the two columns are no longer the same quantity.`);
   } else {
     const rows = await q(sql`
-      SELECT group_id, sends, sent_90d FROM offer_group_report_mv WHERE offer_id = 96
+      SELECT group_id, sends, sent_90d FROM offer_group_report_v2_mv WHERE offer_id = 96
     `);
     assert(rows.length > 0, `offer 96 has group rows (${rows.length})`);
     for (const r of rows) {
@@ -123,26 +127,26 @@ async function main() {
   // read here; the RATIO is the stable observable, not the absolutes.
   console.log("\n=== 2. offer 96: column sum vs footer ===");
   const offer96Exists = n((await q(sql`
-    SELECT count(*)::int AS n FROM offer_report_offer_totals_mv WHERE offer_id = 96
+    SELECT count(*)::int AS n FROM offer_report_offer_totals_v2_mv WHERE offer_id = 96
   `))[0].n) > 0;
   if (!offer96Exists) {
     // Without this guard: 0 == 0 passes the first assert, then `ratio` divides
     // 0 by max(0, 1) = 0, `ratio > 1` fails with a misleading "column doesn't
     // exceed footer" message that has nothing to do with the real problem —
     // offer 96 simply doesn't exist on this database.
-    skip("criterion 2", "offer 96 has no row in offer_report_offer_totals_mv on this database.");
+    skip("criterion 2", "offer 96 has no row in offer_report_offer_totals_v2_mv on this database.");
   } else {
     const agg = (await q(sql`
-      SELECT (SELECT sum(sends)   FROM offer_group_report_mv WHERE offer_id = 96)::bigint AS col_sends,
-             (SELECT sum(revenue) FROM offer_group_report_mv WHERE offer_id = 96)         AS col_rev,
-             (SELECT sends   FROM offer_report_offer_totals_mv WHERE offer_id = 96)::bigint AS foot_sends,
-             (SELECT revenue FROM offer_report_offer_totals_mv WHERE offer_id = 96)         AS foot_rev,
+      SELECT (SELECT sum(sends)   FROM offer_group_report_v2_mv WHERE offer_id = 96)::bigint AS col_sends,
+             (SELECT sum(revenue) FROM offer_group_report_v2_mv WHERE offer_id = 96)         AS col_rev,
+             (SELECT sends   FROM offer_report_offer_totals_v2_mv WHERE offer_id = 96)::bigint AS foot_sends,
+             (SELECT revenue FROM offer_report_offer_totals_v2_mv WHERE offer_id = 96)         AS foot_rev,
              (SELECT sum(e.sends) FROM offer_report_campaign_econ e WHERE e.offer_id = 96)::bigint AS econ_sends
     `))[0];
     const ratio = n(agg.col_sends) / Math.max(n(agg.foot_sends), 1);
     console.log(`  column ${agg.col_sends} / footer ${agg.foot_sends} = ${ratio.toFixed(3)}x ` +
                 `(revenue ${agg.col_rev} / ${agg.foot_rev})`);
-    // foot_sends reads offer_report_offer_totals_mv (MATERIALIZED, frozen at
+    // foot_sends reads offer_report_offer_totals_v2_mv (MATERIALIZED, frozen at
     // its last refresh); econ_sends aggregates offer_report_campaign_econ (a
     // plain VIEW, computed LIVE from stage_sends WHERE status='sent'), which
     // keeps growing while production keeps sending. An `===` here would fail
@@ -171,7 +175,7 @@ async function main() {
   }
 
   // --------------------------------------------------------------- criterion 3a
-  // offer_report_offer_totals_mv is a MATERIALIZED view — frozen at its last
+  // offer_report_offer_totals_v2_mv is a MATERIALIZED view — frozen at its last
   // refresh. offer_report_campaign_econ is a plain VIEW — computed LIVE, and
   // its `sends` (stage_sends WHERE status='sent') keeps growing while
   // production keeps sending (measured ~20/min average, 1,400–2,600/min
@@ -187,7 +191,7 @@ async function main() {
   // dropped or duplicated in the totals matview, or a campaign leaking across
   // the offer_id partition — without depending on when either side was last
   // computed:
-  //   (i)   the (org_id, offer_id) KEY SET of offer_report_offer_totals_mv
+  //   (i)   the (org_id, offer_id) KEY SET of offer_report_offer_totals_v2_mv
   //         equals that of offer_report_campaign_econ WHERE offer_id IS NOT
   //         NULL, checked in BOTH directions. A key set is a structural
   //         property, not a moving count — it does not depend on how many
@@ -215,24 +219,30 @@ async function main() {
   //
   // Offer/org set comes from the data, never a hardcoded 21. The row set is
   // the UNION of org_ids across every source queried, not a LEFT JOIN driven
-  // off one table — an org present in offer_report_offer_totals_mv (built
+  // off one table — an org present in offer_report_offer_totals_v2_mv (built
   // fresh by the migration this script gates) but absent from
   // offer_report_campaign_econ's org set would otherwise vanish silently
   // instead of failing loudly. Do not "simplify" this back to a single-table
   // FROM.
-  console.log("\n=== 3a. offer_report_offer_totals_mv vs live offer_report_campaign_econ: key set + monotonic bound ===");
+  console.log("\n=== 3a. offer_report_offer_totals_v2_mv vs live offer_report_campaign_econ: key set + monotonic bound ===");
 
   const keyDiff = await q(sql`
     SELECT 'totals_only' AS side, t.org_id, t.offer_id
-    FROM (SELECT DISTINCT org_id, offer_id FROM offer_report_offer_totals_mv) t
+    FROM (SELECT DISTINCT org_id, offer_id FROM offer_report_offer_totals_v2_mv) t
     LEFT JOIN (
       SELECT DISTINCT org_id, offer_id FROM offer_report_campaign_econ WHERE offer_id IS NOT NULL
     ) e ON e.org_id = t.org_id AND e.offer_id = t.offer_id
     WHERE e.org_id IS NULL
+      -- 0231: an offer that only RECEIVES split conversions (no campaign of its
+      -- own) legitimately has a footer row and no econ row.
+      AND NOT EXISTS (
+        SELECT 1 FROM offer_split_amounts_v s
+        WHERE s.org_id = t.org_id AND s.offer_id = t.offer_id AND s.campaign_offer_id IS NOT NULL
+      )
     UNION ALL
     SELECT 'econ_only' AS side, e.org_id, e.offer_id
     FROM (SELECT DISTINCT org_id, offer_id FROM offer_report_campaign_econ WHERE offer_id IS NOT NULL) e
-    LEFT JOIN (SELECT DISTINCT org_id, offer_id FROM offer_report_offer_totals_mv) t
+    LEFT JOIN (SELECT DISTINCT org_id, offer_id FROM offer_report_offer_totals_v2_mv) t
       ON t.org_id = e.org_id AND t.offer_id = e.offer_id
     WHERE t.org_id IS NULL
     ORDER BY 1, 2, 3
@@ -240,7 +250,7 @@ async function main() {
   if (keyDiff.length > 0) console.table(keyDiff);
   assert(
     keyDiff.length === 0,
-    `offer_report_offer_totals_mv and offer_report_campaign_econ(offer_id IS NOT NULL) share the same ` +
+    `offer_report_offer_totals_v2_mv and offer_report_campaign_econ(offer_id IS NOT NULL) share the same ` +
     `(org_id, offer_id) key set (${keyDiff.length} mismatched key(s)` +
     (keyDiff.length > 0
       ? `: ${keyDiff.map((k) => `${k.side} org=${k.org_id} offer=${k.offer_id}`).join(", ")}`
@@ -250,7 +260,7 @@ async function main() {
 
   const perOrg = await q(sql`
     WITH ids AS (
-      SELECT org_id FROM offer_report_offer_totals_mv
+      SELECT org_id FROM offer_report_offer_totals_v2_mv
       UNION
       SELECT org_id FROM offer_report_campaign_econ
       UNION
@@ -266,7 +276,7 @@ async function main() {
     FROM ids
     LEFT JOIN (
       SELECT org_id, sum(sends)::bigint AS footer_sum, count(*)::int AS offers
-      FROM offer_report_offer_totals_mv
+      FROM offer_report_offer_totals_v2_mv
       GROUP BY org_id
     ) t ON t.org_id = ids.org_id
     LEFT JOIN (
@@ -295,11 +305,11 @@ async function main() {
 
   const dupes = (await q(sql`
     SELECT count(*)::bigint AS total_rows, count(DISTINCT (org_id, offer_id))::bigint AS distinct_keys
-    FROM offer_report_offer_totals_mv
+    FROM offer_report_offer_totals_v2_mv
   `))[0];
   assert(
     n(dupes.total_rows) === n(dupes.distinct_keys),
-    `offer_report_offer_totals_mv has no duplicate (org_id, offer_id) keys ` +
+    `offer_report_offer_totals_v2_mv has no duplicate (org_id, offer_id) keys ` +
     `(${dupes.total_rows} rows, ${dupes.distinct_keys} distinct)`,
   );
 
@@ -308,7 +318,7 @@ async function main() {
     const footerPlusNull = n(r.footer_sum) + n(r.econ_null_sum);
     const benchDiff = n(r.benchmark) - footerPlusNull;
     console.log(`  ℹ org ${r.org_id}: benchmark ${r.benchmark} vs footer+NULL-offer ${footerPlusNull} ` +
-                `(diff ${benchDiff}) — offer_report_org_summary_mv and offer_report_offer_totals_mv refresh ` +
+                `(diff ${benchDiff}) — offer_report_org_summary_mv and offer_report_offer_totals_v2_mv refresh ` +
                 `at different times, so a non-zero diff here is EXPECTED and is NOT a failure.`);
     const econDelta = n(r.econ_offer_sum) - n(r.footer_sum);
     const econDeltaPct = n(r.footer_sum) > 0 ? (econDelta / n(r.footer_sum)) * 100 : null;
@@ -323,13 +333,13 @@ async function main() {
   console.log("\n=== 3b. 0 <= unattributed <= sends, per offer ===");
   const resid = await q(sql`
     SELECT offer_id, sends, attributable_sends, unattributed_sends
-    FROM offer_report_offer_totals_mv
+    FROM offer_report_offer_totals_v2_mv
     WHERE unattributed_sends < 0 OR unattributed_sends > sends
   `);
   console.table(await q(sql`
     SELECT offer_id, sends, attributable_sends, unattributed_sends,
            round(100.0 * unattributed_sends / NULLIF(sends, 0), 2) AS pct_unattributed
-    FROM offer_report_offer_totals_mv ORDER BY unattributed_sends DESC LIMIT 8
+    FROM offer_report_offer_totals_v2_mv ORDER BY unattributed_sends DESC LIMIT 8
   `));
   assert(resid.length === 0,
     `no offer has a residual outside [0, sends] (${resid.length} violations)`);
@@ -356,7 +366,7 @@ async function main() {
   //     here, so a large remainder is the signal something is unaccounted
   //     for, not the three named causes above.
   // Buckets are mutually exclusive per campaign and sum to exactly the same
-  // quantity offer_report_offer_totals_mv computes as unattributed_sends (both
+  // quantity offer_report_offer_totals_v2_mv computes as unattributed_sends (both
   // are sends - attributable_sends over the same campaign set). No assertion
   // here on purpose — a particular split is not something this script should
   // pin; it exists to be read, not to pass or fail.
@@ -458,18 +468,18 @@ async function main() {
       WHERE ns.nspname = 'public' AND c.relkind = 'm' AND c.relname = ${rel}
     `)).map((r) => String(r.column_name));
 
-  const groupCols = await mvCols("offer_group_report_mv");
+  const groupCols = await mvCols("offer_group_report_v2_mv");
   // Guard the guard: an empty list would make the "absent" assertion vacuous again.
   assert(groupCols.length > 0,
-    `offer_group_report_mv is a matview with ${groupCols.length} columns visible ` +
+    `offer_group_report_v2_mv is a matview with ${groupCols.length} columns visible ` +
     `(0 would mean this check is inspecting nothing)`);
   const stray = groupCols.filter((c) =>
     ["has_manual_stages", "offer_clicks", "offer_has_manual"].includes(c));
   assert(stray.length === 0,
-    `offer_group_report_mv has none of has_manual_stages/offer_clicks/offer_has_manual ` +
+    `offer_group_report_v2_mv has none of has_manual_stages/offer_clicks/offer_has_manual ` +
     `(found: ${stray.join(", ") || "none"})`);
 
-  const totalsCols = await mvCols("offer_report_offer_totals_mv");
+  const totalsCols = await mvCols("offer_report_offer_totals_v2_mv");
   assert(totalsCols.includes("has_manual_stages"),
     `has_manual_stages moved to the offer-totals matview (its columns: ${totalsCols.join(", ")})`);
 
@@ -480,9 +490,9 @@ async function main() {
   console.log("\n=== 6. every offer has rows XOR is fully external ===");
   const states = await q(sql`
     SELECT t.offer_id, t.sends, t.attributable_sends,
-           (SELECT count(*) FROM offer_group_report_mv m
+           (SELECT count(*) FROM offer_group_report_v2_mv m
              WHERE m.org_id = t.org_id AND m.offer_id = t.offer_id)::int AS group_rows
-    FROM offer_report_offer_totals_mv t
+    FROM offer_report_offer_totals_v2_mv t
   `);
   const external = states.filter((s) => n(s.group_rows) === 0);
   const withRows = states.filter((s) => n(s.group_rows) > 0);
@@ -492,6 +502,13 @@ async function main() {
       `offer ${s.offer_id}: no group rows AND attributable_sends is 0 (sends ${s.sends})`);
   }
   for (const s of withRows) {
+    // 0231: an offer whose group rows exist only through moved (split)
+    // conversions has sends 0 everywhere — its rows carry money, not traffic.
+    if (n(s.sends) === 0) {
+      assert(n(s.attributable_sends) === 0,
+        `offer ${s.offer_id}: ${s.group_rows} group rows from moved conversions only, attributable_sends 0`);
+      continue;
+    }
     assert(n(s.attributable_sends) > 0,
       `offer ${s.offer_id}: has ${s.group_rows} group rows AND attributable_sends > 0`);
   }
@@ -502,7 +519,7 @@ async function main() {
   // 0126 silently replaced Fresh pool's definition — "sendable and never
   // sent THIS offer" — with "no sent row in the last 90 days, across ALL
   // offers, no opt-out filter". 0128 and 0132 each recreated
-  // offer_group_report_mv for unrelated reasons and copied the regressed
+  // offer_group_report_v2_mv for unrelated reasons and copied the regressed
   // subquery forward without noticing, and nothing caught it for three
   // migrations. 7a and 7b recompute from base tables (contacts/opt_outs/
   // offer_exposures) — re-reading the matview would prove nothing, since the
@@ -576,7 +593,7 @@ async function main() {
     SELECT m.org_id, m.offer_id, m.group_id,
            m.fresh_pool::bigint AS stored,
            (COALESCE(g.n, 0) - COALESCE(x.n, 0))::bigint AS recomputed
-    FROM offer_group_report_mv m
+    FROM offer_group_report_v2_mv m
     LEFT JOIN sendable_per_group g ON g.org_id = m.org_id AND g.group_id = m.group_id
     LEFT JOIN exposed_per_offer_group x
       ON x.org_id = m.org_id AND x.offer_id = m.offer_id AND x.group_id = m.group_id
@@ -584,7 +601,7 @@ async function main() {
   // Guard the guard: with zero rows the bound assert below would pass
   // vacuously (an empty set trivially satisfies any bound).
   assert(freshCheck.length > 0,
-    `offer_group_report_mv has rows to recompute fresh_pool against (${freshCheck.length})`);
+    `offer_group_report_v2_mv has rows to recompute fresh_pool against (${freshCheck.length})`);
   const freshViolations = freshCheck.filter((r) => n(r.stored) < n(r.recomputed));
   if (freshViolations.length > 0) console.table(freshViolations.slice(0, 15));
   assert(freshViolations.length === 0,
@@ -625,7 +642,7 @@ async function main() {
     SELECT org_id, group_id,
            count(DISTINCT offer_id)::int AS offers_covering,
            count(DISTINCT fresh_pool)::int AS distinct_fresh_pool_values
-    FROM offer_group_report_mv
+    FROM offer_group_report_v2_mv
     GROUP BY org_id, group_id
     HAVING count(DISTINCT offer_id) > 1
     ORDER BY offers_covering DESC
@@ -666,9 +683,9 @@ async function main() {
   // exercise the semantics, with all their time-drift caveats. This only
   // proves the two source-of-truth tables are still touched at all. That is
   // exactly what went missing, three times, without anyone noticing.
-  console.log("\n=== 7c. offer_group_report_mv definition still references opt_outs and offer_exposures ===");
+  console.log("\n=== 7c. offer_group_report_v2_mv definition still references opt_outs and offer_exposures ===");
   const viewDefRow = (await q(sql`
-    SELECT pg_get_viewdef('public.offer_group_report_mv'::regclass, true) AS def
+    SELECT pg_get_viewdef('public.offer_group_report_v2_mv'::regclass, true) AS def
   `))[0];
   const viewDef = String(viewDefRow?.def ?? "");
   // Guard the guard: a failed/empty lookup must not make the "still
@@ -676,11 +693,11 @@ async function main() {
   // criterion 5's earlier information_schema.columns version pass vacuously
   // against a materialized view (see 5's comment).
   assert(viewDef.length > 0,
-    `pg_get_viewdef returned a non-empty definition for offer_group_report_mv (${viewDef.length} chars)`);
+    `pg_get_viewdef returned a non-empty definition for offer_group_report_v2_mv (${viewDef.length} chars)`);
   assert(viewDef.includes("opt_outs"),
-    "offer_group_report_mv's definition still references opt_outs (the sendable/opt-out filter)");
+    "offer_group_report_v2_mv's definition still references opt_outs (the sendable/opt-out filter)");
   assert(viewDef.includes("offer_exposures"),
-    "offer_group_report_mv's definition still references offer_exposures (the per-offer exposure anti-join)");
+    "offer_group_report_v2_mv's definition still references offer_exposures (the per-offer exposure anti-join)");
 
   // --------------------------------------------------------------- criterion 7d
   // The same shape of guard, for what migration 0183 changed: both matviews now
@@ -698,13 +715,13 @@ async function main() {
   // requires them to agree row for row. The two together are what 0183's header
   // claims; neither alone is.
   console.log("\n=== 7d. the ledger sources and the org_id join survived (migration 0183) ===");
-  // offer_report_offer_totals_mv is 0132's and may be absent on a database that
+  // offer_report_offer_totals_v2_mv is 0132's and may be absent on a database that
   // predates it — the same condition every totals-dependent criterion above
   // already skips on. pg_get_viewdef would throw rather than return empty.
   const ledgerViews = (hasTotals
-    ? ["offer_group_report_mv", "offer_report_offer_totals_mv"]
-    : ["offer_group_report_mv"]) as readonly string[];
-  if (!hasTotals) skip("7d(totals)", "offer_report_offer_totals_mv does not exist on this database (pre-0132)");
+    ? ["offer_group_report_v2_mv", "offer_report_offer_totals_v2_mv"]
+    : ["offer_group_report_v2_mv"]) as readonly string[];
+  if (!hasTotals) skip("7d(totals)", "offer_report_offer_totals_v2_mv does not exist on this database (pre-0132)");
   for (const name of ledgerViews) {
     const def = String((await q(sql`
       SELECT pg_get_viewdef(${`public.${name}`}::regclass, true) AS def

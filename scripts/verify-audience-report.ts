@@ -43,17 +43,17 @@ async function main() {
   // you know what it ran against.
   const [scope] = await q(sql`
     SELECT
-      (SELECT count(*) FROM audience_report_group_totals_mv)::int              AS totals_rows,
-      (SELECT count(DISTINCT org_id) FROM audience_report_group_totals_mv)::int AS orgs,
-      (SELECT count(*) FROM offer_group_report_mv)::int                         AS cells,
-      (SELECT refreshed_at FROM report_refresh_log WHERE view_name = 'offer_group_report_mv')           AS cells_at,
-      (SELECT refreshed_at FROM report_refresh_log WHERE view_name = 'audience_report_group_totals_mv') AS totals_at,
-      (SELECT count(*) FROM report_refresh_log WHERE view_name = 'audience_report_group_totals_mv')::int AS log_rows
+      (SELECT count(*) FROM audience_report_group_totals_v2_mv)::int              AS totals_rows,
+      (SELECT count(DISTINCT org_id) FROM audience_report_group_totals_v2_mv)::int AS orgs,
+      (SELECT count(*) FROM offer_group_report_v2_mv)::int                         AS cells,
+      (SELECT refreshed_at FROM report_refresh_log WHERE view_name = 'offer_group_report_v2_mv')           AS cells_at,
+      (SELECT refreshed_at FROM report_refresh_log WHERE view_name = 'audience_report_group_totals_v2_mv') AS totals_at,
+      (SELECT count(*) FROM report_refresh_log WHERE view_name = 'audience_report_group_totals_v2_mv')::int AS log_rows
   `);
   console.log("=== scope ===");
   console.log(`  database user: ${new URL(process.env.DATABASE_URL!).username}`);
-  console.log(`  audience_report_group_totals_mv: ${scope.totals_rows} group rows across ${scope.orgs} org(s)`);
-  console.log(`  offer_group_report_mv: ${scope.cells} offer x group cells`);
+  console.log(`  audience_report_group_totals_v2_mv: ${scope.totals_rows} group rows across ${scope.orgs} org(s)`);
+  console.log(`  offer_group_report_v2_mv: ${scope.cells} offer x group cells`);
   console.log(`  refreshed: cells ${scope.cells_at ?? "never"} · totals ${scope.totals_at ?? "never by the cron (seeded NULL)"}`);
   if (n(scope.totals_rows) === 0) {
     assert(false, "scope is EMPTY — nothing to verify (an empty scope is a failure, not a pass)");
@@ -78,7 +78,7 @@ async function main() {
              SUM(sends) AS sends, SUM(revenue) AS revenue, SUM(sales) AS sales, SUM(cost) AS cost,
              SUM(pending_revenue) AS pending_revenue,
              SUM(sent_7d) AS sent_7d, SUM(sent_30d) AS sent_30d, SUM(sent_90d) AS sent_90d
-      FROM offer_group_report_mv
+      FROM offer_group_report_v2_mv
       GROUP BY org_id, group_id
     )
     SELECT count(*)::int AS groups,
@@ -87,7 +87,7 @@ async function main() {
         OR t.cost <> s.cost OR t.pending_revenue <> s.pending_revenue
         OR t.sent_7d <> s.sent_7d OR t.sent_30d <> s.sent_30d
         OR t.sent_90d <> s.sent_90d)::int AS mismatched
-    FROM audience_report_group_totals_mv t
+    FROM audience_report_group_totals_v2_mv t
     FULL JOIN s ON s.org_id = t.org_id AND s.group_id = t.group_id
   `);
   if (n(sums.mismatched) === 0) {
@@ -102,13 +102,13 @@ async function main() {
   // The group side is the matview's own definition read from pg_matviews and
   // executed, not a copy in this file — so a regression in the migration (a
   // summed click count, a dropped membership predicate, a lost org join) is what
-  // gets tested. The cell side mirrors offer_group_report_mv's cell_clicks /
+  // gets tested. The cell side mirrors offer_group_report_v2_mv's cell_clicks /
   // cell_optouts. Both run in ONE repeatable-read snapshot, so the bounds are
   // exact: no click can land between the two sides.
   console.log("\n=== b. group-grain dedup: max(cell) <= group total <= sum(cells) ===");
   const [defRow] = await q(sql`
     SELECT definition FROM pg_matviews
-    WHERE schemaname = 'public' AND matviewname = 'audience_report_group_totals_mv'
+    WHERE schemaname = 'public' AND matviewname = 'audience_report_group_totals_v2_mv'
   `);
   const shipped = String(defRow.definition).trim().replace(/;\s*$/, "");
   const bounds = (await c.begin("isolation level repeatable read read only", (tx) =>
@@ -173,11 +173,11 @@ async function main() {
   const [stored] = await q(sql`
     WITH mx AS (
       SELECT org_id, group_id, max(clicks) AS clicks, max(optouts) AS optouts
-      FROM offer_group_report_mv GROUP BY org_id, group_id
+      FROM offer_group_report_v2_mv GROUP BY org_id, group_id
     )
     SELECT count(*)::int AS groups,
            count(*) FILTER (WHERE t.clicks < mx.clicks OR t.optouts < mx.optouts)::int AS below
-    FROM audience_report_group_totals_mv t
+    FROM audience_report_group_totals_v2_mv t
     JOIN mx ON mx.org_id = t.org_id AND mx.group_id = t.group_id
   `);
   if (n(stored.below) === 0) {
@@ -204,7 +204,7 @@ async function main() {
 
   // --- d. The helper returns every cell, archived offers included.
   console.log("\n=== d. helper = matview cells for every group, archived offers included ===");
-  const orgRows = await q(sql`SELECT DISTINCT org_id FROM audience_report_group_totals_mv`);
+  const orgRows = await q(sql`SELECT DISTINCT org_id FROM audience_report_group_totals_v2_mv`);
   const problems: string[] = [];
   let groupsChecked = 0;
   let rowsChecked = 0;
@@ -214,7 +214,7 @@ async function main() {
     const pickerGroups = await getAudienceGroups(orgId);
     // Anchor: the groups that HAVE cells (and still exist), not the helper's own query.
     const cellGroups = await q(sql`
-      SELECT DISTINCT m.group_id FROM offer_group_report_mv m
+      SELECT DISTINCT m.group_id FROM offer_group_report_v2_mv m
       JOIN contact_groups g ON g.id = m.group_id AND g.org_id = m.org_id
       WHERE m.org_id = ${orgId}::uuid
     `);
@@ -228,7 +228,7 @@ async function main() {
       const report = await getAudienceReport(orgId, g.id);
       const cells = await q(sql`
         SELECT m.offer_id, m.sends, o.status
-        FROM offer_group_report_mv m
+        FROM offer_group_report_v2_mv m
         LEFT JOIN offers o ON o.id = m.offer_id AND o.org_id = m.org_id
         WHERE m.org_id = ${orgId}::uuid AND m.group_id = ${g.id}
       `);
@@ -259,7 +259,7 @@ async function main() {
 
   // --- e. Org scoping. A REAL group id, so the org filter is what empties it.
   console.log("\n=== e. org scoping ===");
-  const [someGroup] = await q(sql`SELECT group_id FROM audience_report_group_totals_mv LIMIT 1`);
+  const [someGroup] = await q(sql`SELECT group_id FROM audience_report_group_totals_v2_mv LIMIT 1`);
   const realGroupId = n(someGroup.group_id);
   const foreignGroups = await getAudienceGroups(NO_DATA_ORG);
   const foreign = await getAudienceReport(NO_DATA_ORG, realGroupId);
@@ -272,8 +272,8 @@ async function main() {
   // --- f. Access and bookkeeping.
   console.log("\n=== f. access ===");
   const [grants] = await q(sql`
-    SELECT has_table_privilege('anon', 'public.audience_report_group_totals_mv', 'SELECT') AS anon,
-           has_table_privilege('authenticated', 'public.audience_report_group_totals_mv', 'SELECT') AS authed
+    SELECT has_table_privilege('anon', 'public.audience_report_group_totals_v2_mv', 'SELECT') AS anon,
+           has_table_privilege('authenticated', 'public.audience_report_group_totals_v2_mv', 'SELECT') AS authed
   `);
   assert(grants.anon === false && grants.authed === false,
     `anon SELECT=${grants.anon}, authenticated SELECT=${grants.authed} — both must be false (matviews have no RLS)`);

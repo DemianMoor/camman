@@ -5,7 +5,12 @@ import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-time
 import { DLR_SOURCES, terminalCte } from "@/lib/reporting/delivery";
 import { addEtDays, etDayBounds, type EtDayRange } from "@/lib/reporting/delivery-rollup";
 import { journeyForSend } from "@/lib/reporting/drip-send-journey";
-import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
+import {
+  approvedRevenueClause,
+  purchasedClause,
+  reportedRegistrationClause,
+  reportedRegistrationRevenueClause,
+} from "@/lib/sale-attribution";
 
 // drip_daily_rollup (migration 0208) — the cells behind the drip campaign
 // "Daily results" tab. Spec: docs/superpowers/specs/2026-10-12-drip-daily-results-design.md.
@@ -94,7 +99,11 @@ const RATE = sql`COALESCE(ss.cost_per_sms, pp.cost_per_sms, 0)`;
 
 const STAGE_COUNTERS = [
   "first_sends", "followup_sends", "dlr_sent", "delivered", "clicks", "opt_outs", "sales", "revenue", "send_cost",
+  // 0232: lead + registration conversions (reportedRegistrationClause) and their
+  // approved revenue — a BREAKDOWN of `revenue`, never added to it.
+  "leads", "lead_revenue",
 ] as const;
+const MONEY_COUNTERS: ReadonlySet<string> = new Set(["revenue", "send_cost", "lead_revenue"]);
 const LEAD_COUNTERS = ["leads_admitted", "admitted", "admitted_carried"] as const;
 export const ALL_COUNTERS = [...LEAD_COUNTERS, ...STAGE_COUNTERS] as const;
 
@@ -102,7 +111,7 @@ export const ALL_COUNTERS = [...LEAD_COUNTERS, ...STAGE_COUNTERS] as const;
 function part(cols: Partial<Record<(typeof STAGE_COUNTERS)[number], SQL>>): SQL {
   return sql.join(
     STAGE_COUNTERS.map((c) => {
-      const isMoney = c === "revenue" || c === "send_cost";
+      const isMoney = MONEY_COUNTERS.has(c);
       const v = cols[c] ?? (isMoney ? sql`0::numeric` : sql`0`);
       return isMoney ? sql`(${v})::numeric AS ${sql.raw(c)}` : sql`(${v})::int AS ${sql.raw(c)}`;
     }),
@@ -235,6 +244,8 @@ async function activitySql(dbc: DbOrTx, orgId: string, dc: SQL, F: SQL, within: 
       SELECT ss.campaign_id, ss.stage_id, ${PARTNER}, ${day(sql`ce.created_at`)}, ${part({
         sales: sql`count(*) FILTER (WHERE ${purchasedClause()})`,
         revenue: sql`COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)`,
+        leads: sql`count(*) FILTER (WHERE ${reportedRegistrationClause()})`,
+        lead_revenue: sql`COALESCE(sum(ce.revenue) FILTER (WHERE ${reportedRegistrationRevenueClause()}), 0)`,
       })}
       FROM conversion_events ce
       JOIN stage_sends ss ON ss.id = ce.stage_send_id
@@ -339,6 +350,8 @@ async function cohortSql(dbc: DbOrTx, orgId: string, dc: SQL, F: SQL, within: (t
       SELECT cs.campaign_id, cs.stage_id, cs.pk, cs.d, ${part({
         sales: sql`count(*) FILTER (WHERE ${purchasedClause()})`,
         revenue: sql`COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause()}), 0)`,
+        leads: sql`count(*) FILTER (WHERE ${reportedRegistrationClause()})`,
+        lead_revenue: sql`COALESCE(sum(ce.revenue) FILTER (WHERE ${reportedRegistrationRevenueClause()}), 0)`,
       })}
       FROM conversion_events ce
       JOIN cs ON cs.id = ce.stage_send_id
@@ -364,7 +377,7 @@ async function cohortSql(dbc: DbOrTx, orgId: string, dc: SQL, F: SQL, within: (t
 function assemble(): SQL {
   const sums = sql.join(
     STAGE_COUNTERS.map((c) =>
-      c === "revenue" || c === "send_cost"
+      MONEY_COUNTERS.has(c)
         ? sql`sum(${sql.raw(c)})::numeric(12, 4) AS ${sql.raw(c)}`
         : sql`sum(${sql.raw(c)})::int AS ${sql.raw(c)}`,
     ),
@@ -398,7 +411,7 @@ function assemble(): SQL {
     UNION ALL
     SELECT campaign_id, NULL::int, pk, d,
            sum(leads_admitted)::int, sum(admitted)::int, sum(admitted_carried)::int,
-           ${sql.join(STAGE_COUNTERS.map((c) => (c === "revenue" || c === "send_cost" ? sql`0::numeric(12, 4)` : sql`0`)), sql`, `)},
+           ${sql.join(STAGE_COUNTERS.map((c) => (MONEY_COUNTERS.has(c) ? sql`0::numeric(12, 4)` : sql`0`)), sql`, `)},
            NULL::int[]
     FROM leads GROUP BY campaign_id, pk, d`;
 }

@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-11-04 (0231: the Offer report / Audience Stats matviews split by conversion offer); 2026-11-04 (Keitaro offer id on the Offer form)_
+_Last updated: 2026-11-05 (drip column label Signups); 2026-11-04 (0232: leads count as Registrations in reports; drip Daily results Leads); 2026-11-04 (0231: the Offer report / Audience Stats matviews split by conversion offer); 2026-11-04 (Keitaro offer id on the Offer form)_
 
 **Status (2026-09-21):** Phases 1–4 are LIVE on production and Phase 5 (per-event columns) ships with this change; migrations **0181** (applied 2026-09-18) and **0182–0185** (applied 2026-09-21 19:05–19:07 UTC, one transaction) are recorded on production, byte-identical to `db/migrations`. The history below is how the phases got there. The ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). (Until 2026-09-21 these readers were verified on camman-v2 and by read-only checks against prod; since the Gate 3 cutover they run on production.)
 
@@ -67,6 +67,46 @@ A status-only mapping (NULL event type, e.g. Affise `rejected`) neither raises n
 | PsychoBook (`psb`) | sale | purchase | approved | sent only after the customer pays; no hold |
 | PsychoBook (`psb`) | rejected | purchase | rejected | declines either event. Seeded status-only ("keeps existing"); prod holds `purchase` as of 2026-10-06 |
 | PsychoBook (`psb`) | registration | registration | approved | Keitaro built-in type; unused today |
+
+## Leads count as Registrations in reports (0232, 2026-11-04)
+
+Owner ruling 2026-11-04. A type flagged **`event_types.counts_as_registration`**
+(migration 0232 sets it on `lead`; `LEAD_EVENT_TYPE` carries it for new orgs) is
+folded into the **retarget signal's** count columns in every report:
+
+| Surface | Effect |
+|---|---|
+| Overview, performance tabs, campaign stages, landing-page report, Keitaro funnel | **Registrations / Registration rate / Registration pending** = registration + lead; **Registration→Purchase %** uses that merged denominator. The Lead count / rate / pending columns are gone; **Lead $ / Lead pending $ / Lead EPC stay** (tier B). |
+| `/creatives` count columns, campaign Results cell + totals tiles | the Registrations count includes leads; no separate Leads count |
+| Telegram hourly | the Registrations line includes leads; lead revenue prints as a money-only line (`Leads $: …`), nothing when $0 |
+| Drip Daily results | new **Signups** (registration + lead; renamed from "Leads" 2026-11-05 to avoid "Leads arrived") and **Signup revenue** (renamed from "Lead revenue") columns, and a Signups chart line, see [drip-daily-results.md](drip-daily-results.md) |
+
+**Unchanged:** Sales, Revenue (lead revenue was and stays inside it), EPC/ROI,
+Checkouts (still the raw Keitaro `lead` count; the overlap with Registrations is
+accepted, owner ruling 1). The partner, offer, Audience Stats and offer-group
+reports have no Registrations column.
+
+**Mechanism.** `registrationMerge(types)` in
+[lib/reporting/event-columns.ts](../../lib/reporting/event-columns.ts): host = the
+first retarget-signal type, members = the other `counts_as_registration` types.
+`buildEventColumns` gives the host's count / rate / pending / funnel columns
+`mergeKeys`, `eventCellValue` sums them, and members keep only money columns. A
+persisted sort id is resolved with `resolveEventColumn(id, registry)` so a server
+sort on Registrations orders by the merged count. With no signal type in the
+registry the merge is off and Lead keeps its own columns. SQL side:
+`REPORT_REGISTRATION_EVENT_TYPE_IDS`, `reportedRegistrationClause()` and
+`reportedRegistrationRevenueClause()` in
+[lib/sale-attribution.ts](../../lib/sale-attribution.ts).
+
+⚠️ **REPORTS ONLY: a lead does not make a contact Registered.** The lanes, tiers
+and drip lifecycle read `RETARGET_EVENT_TYPE_IDS` (`is_retarget_signal`), which
+stays false on `lead`. Guard:
+[scripts/test-lead-not-registered-lane.ts](../../scripts/test-lead-not-registered-lane.ts)
+(source allowlist + a rolled-back preview fixture: a lead-only contact is not
+tier 3, a registration-only control is). Putting leads into the lane is a separate
+owner decision.
+
+Tests: `scripts/test-registration-merge.ts` (pure), `scripts/test-drip-daily-rollup.ts` (Leads bars).
 
 ## The standard event model (2026-11-03)
 

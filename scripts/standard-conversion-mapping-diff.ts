@@ -95,9 +95,10 @@ async function main() {
     if (!hasKey(LEAD_EVENT_TYPE.key)) {
       console.log(`  ADD event type '${LEAD_EVENT_TYPE.key}' (not a sale, counts revenue, not a retarget signal)`);
       sqlLines.push(
-        `INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal) ` +
+        `INSERT INTO event_types (org_id, key, label, display_order, is_purchase, counts_revenue, is_retarget_signal, counts_as_registration) ` +
           `VALUES ('${org}', '${LEAD_EVENT_TYPE.key}', '${LEAD_EVENT_TYPE.label}', ${LEAD_EVENT_TYPE.display_order}, ` +
-          `${LEAD_EVENT_TYPE.is_purchase}, ${LEAD_EVENT_TYPE.counts_revenue}, ${LEAD_EVENT_TYPE.is_retarget_signal});`,
+          `${LEAD_EVENT_TYPE.is_purchase}, ${LEAD_EVENT_TYPE.counts_revenue}, ${LEAD_EVENT_TYPE.is_retarget_signal}, ` +
+          `${LEAD_EVENT_TYPE.counts_as_registration});`,
       );
     }
 

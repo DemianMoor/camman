@@ -32,6 +32,13 @@ export interface EventTypeSpec {
   is_purchase: boolean;
   counts_revenue: boolean;
   is_retarget_signal: boolean;
+  /**
+   * REPORTS ONLY (0232): this type's events are counted inside the retarget
+   * signal's Registrations column, and its own count / rate / pending columns
+   * are hidden (its money columns stay). Never read by lane logic. See
+   * registrationMerge().
+   */
+  counts_as_registration: boolean;
   archived: boolean;
 }
 
@@ -272,6 +279,7 @@ export async function loadEventTypes(
            bool_or(et.is_purchase) AS is_purchase,
            bool_or(et.counts_revenue) AS counts_revenue,
            bool_or(et.is_retarget_signal) AS is_retarget_signal,
+           bool_or(et.counts_as_registration) AS counts_as_registration,
            bool_and(et.status = 'archived') AS archived
     FROM event_types et
     ${org}
@@ -283,6 +291,7 @@ export async function loadEventTypes(
     is_purchase: boolean;
     counts_revenue: boolean;
     is_retarget_signal: boolean;
+    counts_as_registration: boolean;
     archived: boolean;
   }[];
   return orderEventTypes(
@@ -293,6 +302,7 @@ export async function loadEventTypes(
       is_purchase: !!r.is_purchase,
       counts_revenue: !!r.counts_revenue,
       is_retarget_signal: !!r.is_retarget_signal,
+      counts_as_registration: !!r.counts_as_registration,
       archived: !!r.archived,
     })),
   );
@@ -383,6 +393,11 @@ export interface EventColumn {
   eventKey: string;
   /** "funnel" only: the NUMERATOR's key (the purchase type). */
   toKey?: string;
+  /**
+   * count / rate / pending_n / funnel on the HOST of a registration merge only:
+   * the member keys whose tallies are added to eventKey's (registrationMerge).
+   */
+  mergeKeys?: string[];
   muted: boolean;
 }
 
@@ -416,6 +431,60 @@ export function pluralizeLabel(label: string): string {
 }
 
 /**
+ * ⭐ LEADS COUNT AS REGISTRATIONS IN REPORTS (owner ruling 2026-11-04, 0232).
+ *
+ * The HOST is the first (registry order) retarget-signal type; the MEMBERS are
+ * the other types flagged counts_as_registration. Everywhere a report shows a
+ * per-type COUNT, the host's count is host + members, and a member gets no count
+ * of its own (it would show the same events twice). A member's MONEY (revenue,
+ * pending $, EPC) stays its own — the host is not a revenue type.
+ *
+ * With no host in the registry the merge is off and a member keeps its own count
+ * columns: there is no Registrations column to fold into.
+ *
+ * Config, not code: nothing here names a key. And it is REPORTS ONLY — the lanes
+ * read is_retarget_signal (lib/sale-attribution.ts RETARGET_EVENT_TYPE_IDS).
+ */
+export interface RegistrationMerge {
+  host: string | null;
+  members: string[];
+}
+
+export function registrationMerge(types: readonly EventTypeSpec[]): RegistrationMerge {
+  const ordered = orderEventTypes(types);
+  const host = ordered.find((t) => t.is_retarget_signal)?.key ?? null;
+  if (host === null) return { host: null, members: [] };
+  return {
+    host,
+    members: ordered
+      .filter((t) => t.counts_as_registration && !t.is_retarget_signal)
+      .map((t) => t.key),
+  };
+}
+
+/** The keys whose counts make up `key`'s displayed count. */
+export function countKeysFor(key: string, merge: RegistrationMerge): string[] {
+  return key === merge.host ? [key, ...merge.members] : [key];
+}
+
+/** The types that get a COUNT on screen: every type except a merge member. */
+export function countedEventTypes<T extends EventTypeSpec>(types: readonly T[]): T[] {
+  const { members } = registrationMerge(types);
+  return types.filter((t) => !members.includes(t.key));
+}
+
+/** One displayed count from a count-only map, merge applied. */
+export function mergedCount(
+  counts: EventCountMap | undefined,
+  key: string,
+  merge: RegistrationMerge,
+): number {
+  let n = 0;
+  for (const k of countKeysFor(key, merge)) n += counts?.[k] ?? 0;
+  return n;
+}
+
+/**
  * The generated column set: every column of one type together, in registry
  * order, then the funnel ratios.
  *
@@ -442,11 +511,18 @@ export function pluralizeLabel(label: string): string {
  */
 export function buildEventColumns(types: readonly EventTypeSpec[]): EventColumn[] {
   const ordered = orderEventTypes(types);
+  const merge = registrationMerge(ordered);
+  const merged = (key: string) =>
+    key === merge.host && merge.members.length > 0 ? { mergeKeys: merge.members } : {};
   const out: EventColumn[] = [];
   for (const t of ordered) {
-    out.push({ id: `evt:${t.key}:count`, header: pluralizeLabel(t.label), kind: "count", tier: "a", eventKey: t.key, muted: false });
-    out.push({ id: `evt:${t.key}:rate`, header: `${t.label} rate`, kind: "rate", tier: "a", eventKey: t.key, muted: true });
-    out.push({ id: `evt:${t.key}:pending_n`, header: `${t.label} pending`, kind: "pending_n", tier: "a", eventKey: t.key, muted: true });
+    // A merge member's events are inside the host's count columns (see
+    // registrationMerge); it keeps only its money columns.
+    if (!merge.members.includes(t.key)) {
+      out.push({ id: `evt:${t.key}:count`, header: pluralizeLabel(t.label), kind: "count", tier: "a", eventKey: t.key, ...merged(t.key), muted: false });
+      out.push({ id: `evt:${t.key}:rate`, header: `${t.label} rate`, kind: "rate", tier: "a", eventKey: t.key, ...merged(t.key), muted: true });
+      out.push({ id: `evt:${t.key}:pending_n`, header: `${t.label} pending`, kind: "pending_n", tier: "a", eventKey: t.key, ...merged(t.key), muted: true });
+    }
     if (t.counts_revenue) {
       out.push({ id: `evt:${t.key}:revenue`, header: `${t.label} $`, kind: "revenue", tier: "b", eventKey: t.key, muted: false });
       out.push({ id: `evt:${t.key}:pending_revenue`, header: `${t.label} pending $`, kind: "pending_revenue", tier: "b", eventKey: t.key, muted: true });
@@ -470,6 +546,7 @@ export function buildEventColumns(types: readonly EventTypeSpec[]): EventColumn[
         tier: "a",
         eventKey: s.key,
         toKey: p.key,
+        ...merged(s.key),
         muted: true,
       });
     }
@@ -489,6 +566,7 @@ const synthetic = (key: string, f: Partial<EventTypeSpec> = {}): EventTypeSpec =
   is_purchase: false,
   counts_revenue: false,
   is_retarget_signal: false,
+  counts_as_registration: false,
   archived: false,
   ...f,
 });
@@ -548,6 +626,17 @@ export function eventColumnById(id: string): EventColumn | null {
 }
 
 /**
+ * Resolve a persisted column id AGAINST THE REGISTRY, so the column carries its
+ * registration merge (mergeKeys). eventColumnById alone cannot know the merge,
+ * and a server-side sort on "Registrations" would otherwise order rows by the
+ * unmerged count. Falls back to the id-only parse, so a stale id of a type no
+ * longer generated still parses exactly as before.
+ */
+export function resolveEventColumn(id: string, types: readonly EventTypeSpec[]): EventColumn | null {
+  return buildEventColumns(types).find((c) => c.id === id) ?? eventColumnById(id);
+}
+
+/**
  * The value of one generated cell.
  *
  * ⭐ NULL MEANS UNKNOWN AND RENDERS AS "—". A ratio over a zero denominator is
@@ -569,17 +658,25 @@ export function eventCellValue(
   countedClickers: number,
 ): number | null {
   const t = events[col.eventKey] ?? EMPTY_TALLY;
+  // The host of a registration merge counts its members' events too
+  // (registrationMerge). Money kinds never merge.
+  let n = t.n;
+  let pendingN = t.pending_n;
+  for (const k of col.mergeKeys ?? []) {
+    n += events[k]?.n ?? 0;
+    pendingN += events[k]?.pending_n ?? 0;
+  }
   switch (col.kind) {
     case "count":
-      return t.n;
+      return n;
     case "pending_n":
-      return t.pending_n;
+      return pendingN;
     case "revenue":
       return t.revenue;
     case "pending_revenue":
       return t.pending_revenue;
     case "rate":
-      return countedClickers > 0 ? t.n / countedClickers : null;
+      return countedClickers > 0 ? n / countedClickers : null;
     case "epc":
       return countedClickers > 0 ? t.revenue / countedClickers : null;
     case "funnel": {
@@ -588,7 +685,7 @@ export function eventCellValue(
       // through to EMPTY_TALLY and would render a confident 0.0%.
       if (col.toKey === undefined) return null;
       const to = events[col.toKey] ?? EMPTY_TALLY;
-      return t.n > 0 ? to.n / t.n : null;
+      return n > 0 ? to.n / n : null;
     }
   }
 }

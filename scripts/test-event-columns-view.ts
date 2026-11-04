@@ -59,6 +59,7 @@ const T = (key: string, label: string, f: Partial<EventTypeSpec> = {}): EventTyp
   is_purchase: false,
   counts_revenue: false,
   is_retarget_signal: false,
+  counts_as_registration: false,
   archived: false,
   ...f,
 });

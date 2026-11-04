@@ -84,13 +84,24 @@ function eventBlock(m: ReportMetrics): {
   residual: string[];
 } {
   const shown = m.eventTypes.slice(0, MAX_EVENT_LINES);
-  const typed = shown.map((t) => {
+  const typed = shown.flatMap((t) => {
     const e = m.events[t.key] ?? { n: 0, revenue: 0, pending_revenue: 0 };
+    // A registration-merge MEMBER (moneyOnly): its events are in the host's
+    // count line, so it prints its money alone, and nothing when it has none.
+    if (t.moneyOnly) {
+      if (!(e.revenue > 0 || e.pending_revenue > 0)) return [];
+      const heldOnly = e.pending_revenue > 0 ? ` (${money(e.pending_revenue)} pending)` : "";
+      // Through eventLabel() like every registry label (bar T22): "Leads $: …".
+      return [`${eventLabel(t)} $: ${money(e.revenue)}${heldOnly}`];
+    }
+    // The host's count covers its members' events (countKeys).
+    let n = 0;
+    for (const k of t.countKeys ?? [t.key]) n += m.events[k]?.n ?? 0;
     const amount =
       e.revenue > 0 || e.pending_revenue > 0 ? ` · ${money(e.revenue)}` : "";
     const held =
       e.pending_revenue > 0 ? ` (${money(e.pending_revenue)} pending)` : "";
-    return `${eventLabel(t)}: ${int(e.n)}${amount}${held}`;
+    return [`${eventLabel(t)}: ${int(n)}${amount}${held}`];
   });
   // ⭐ THE RESIDUAL. `sales` is NOT Σ (is_purchase) n — it is that sum plus the
   // manual top-up plus anything the registry could not place — so a breakdown

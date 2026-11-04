@@ -52,6 +52,7 @@ const T = (
   is_purchase: false,
   counts_revenue: false,
   is_retarget_signal: false,
+  counts_as_registration: false,
   archived: false,
   ...f,
 });

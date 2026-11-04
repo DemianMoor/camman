@@ -6,8 +6,11 @@ import type { ReactNode } from "react";
 import {
   addEventMaps,
   buildEventColumns,
+  countKeysFor,
+  countedEventTypes,
   eventCellValue,
   pluralizeLabel,
+  registrationMerge,
   visibleEventTypes,
   visibleEventTypesByCount,
   type EventColumn,
@@ -304,8 +307,13 @@ export function EventColumnsBar({
 }
 
 /** The counted events of one type inside one row, formatted. Missing key ⇒ "0". */
-const eventCount = (events: EventMap, key: string): string =>
-  fmtEventCell(events[key]?.n ?? 0, "count");
+// The displayed count of one type, registration merge applied: the host counts
+// its members too (registrationMerge, lib/reporting/event-columns.ts).
+const eventCount = (events: EventMap, key: string, types: readonly EventTypeSpec[]): string => {
+  let n = 0;
+  for (const k of countKeysFor(key, registrationMerge(types))) n += events[k]?.n ?? 0;
+  return fmtEventCell(n, "count");
+};
 
 /**
  * ⭐ THE BREAKDOWN AND ITS RESIDUALS, AS ONE OBJECT — the campaign page's
@@ -367,9 +375,9 @@ export function StageEventBreakdown({
 }) {
   return (
     <>
-      {types.map((t) => (
+      {countedEventTypes(types).map((t) => (
         <span key={t.key}>
-          {pluralizeLabel(t.label)}: {eventCount(source.events, t.key)} ·{" "}
+          {pluralizeLabel(t.label)}: {eventCount(source.events, t.key, types)} ·{" "}
         </span>
       ))}
       {source.manual_topup > 0 ? (
@@ -432,6 +440,8 @@ export interface EventCountColumn {
   kind: "count" | "unmapped" | "manual_topup";
   /** The registry key a "count" column reads. EMPTY for a residual. */
   eventKey: string;
+  /** The keys whose counts make up a "count" cell (registration merge applied). EMPTY for a residual. */
+  countKeys: string[];
   /** Cell tooltip — the whole explanation, since there is no room for prose. */
   title: string;
 }
@@ -457,6 +467,7 @@ const MANUAL_TOPUP_COLUMN: EventCountColumn = {
   header: "Manual",
   kind: "manual_topup",
   eventKey: "",
+  countKeys: [],
   title:
     "Sales on this creative's stages in the same window that came from the " +
     "operator's manual tally rather than the tracker. A stage's Sales is " +
@@ -469,6 +480,7 @@ const UNMAPPED_COLUMN: EventCountColumn = {
   header: "Unmapped",
   kind: "unmapped",
   eventKey: "",
+  countKeys: [],
   title:
     "Conversions on this creative's stages in the same window that matched no " +
     "event-type mapping, so they are in NONE of the event counts to the left. " +
@@ -521,11 +533,13 @@ export function eventCountColumns<TCol>(
     types,
     rows.map((r) => r.events ?? {}),
   );
-  const cols: EventCountColumn[] = visible.map((t) => ({
+  const merge = registrationMerge(visible);
+  const cols: EventCountColumn[] = countedEventTypes(visible).map((t) => ({
     id: `evt:${t.key}:count`,
     header: pluralizeLabel(t.label),
     kind: "count",
     eventKey: t.key,
+    countKeys: countKeysFor(t.key, merge),
     title:
       `${pluralizeLabel(t.label)} attributed to this creative's stages in the last 30 days — ` +
       `the same window as Checkout Rate, and classified by the event-type registry rather than ` +
@@ -552,7 +566,9 @@ const residualOf = (col: EventCountColumn, row: EventCountRow): number =>
  */
 export function eventCountValue(col: EventCountColumn, row: EventCountRow): number {
   if (col.kind !== "count") return residualOf(col, row);
-  return row.events?.[col.eventKey] ?? 0;
+  let n = 0;
+  for (const k of col.countKeys) n += row.events?.[k] ?? 0;
+  return n;
 }
 
 /**
@@ -579,11 +595,11 @@ export function EventTotalsTiles({
 }) {
   return (
     <>
-      {types.map((t) =>
+      {countedEventTypes(types).map((t) =>
         renderTile({
           key: t.key,
           label: pluralizeLabel(t.label),
-          value: eventCount(source.events, t.key),
+          value: eventCount(source.events, t.key, types),
         }),
       )}
       {source.manual_topup > 0

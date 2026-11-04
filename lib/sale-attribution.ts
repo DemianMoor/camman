@@ -50,6 +50,34 @@ export const PURCHASE_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types e
 export const REVENUE_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.counts_revenue)`;
 export const RETARGET_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.is_retarget_signal)`;
 
+// ⭐ REPORTS ONLY (0232, owner ruling 2026-11-04): what a report counts as a
+// "Registration" — the retarget signal PLUS every type flagged
+// counts_as_registration (today: Lead). It is DELIBERATELY a separate set from
+// RETARGET_EVENT_TYPE_IDS: a lead must not put a contact in the Registered lane,
+// so no lane / tier / lifecycle reader may use this. Guard:
+// scripts/test-lead-not-registered-lane.ts.
+export const REPORT_REGISTRATION_EVENT_TYPE_IDS: SQL = sql`(SELECT et.id FROM event_types et WHERE et.is_retarget_signal OR et.counts_as_registration)`;
+
+/**
+ * A conversion a REPORT counts as a registration (pending or approved): the
+ * retarget signal or a counts_as_registration type. Reports only — see
+ * REPORT_REGISTRATION_EVENT_TYPE_IDS. Parenthesised for the same reason as
+ * purchasedClause.
+ */
+export function reportedRegistrationClause(alias = "ce"): SQL {
+  const a = sql.raw(alias);
+  return sql`(${a}.event_type_id IN ${REPORT_REGISTRATION_EVENT_TYPE_IDS} AND ${a}.status IN ('pending', 'approved'))`;
+}
+
+/**
+ * Approved revenue of a reported registration — the drip Daily results' "Lead
+ * revenue". A BREAKDOWN of approvedRevenueClause's total, never added to it.
+ */
+export function reportedRegistrationRevenueClause(alias = "ce"): SQL {
+  const a = sql.raw(alias);
+  return sql`(${a}.event_type_id IN ${REPORT_REGISTRATION_EVENT_TYPE_IDS} AND ${approvedRevenueClause(alias)})`;
+}
+
 /**
  * A counted PURCHASE event on the aliased conversion_events row.
  *

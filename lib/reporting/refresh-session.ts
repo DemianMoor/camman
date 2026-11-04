@@ -77,33 +77,38 @@ const REFRESH_WORK_MEM_KB = 393216; // 384 * 1024, what pg_settings should read 
 /**
  * Per-statement timeout for this job's connection only.
  *
- * WHY 180s: the group refresh costs 107.5s today, and the defining SELECT
- * measured 87.7-103.8s under the new work_mem on a QUIET production database.
- * 180s is ~1.7-2x that — room for a bad day without a 57014.
+ * WHY 230s (raised from 180s on 2026-11-04): the group refresh outgrew 180s.
+ * It cost 107.5s on 09-21 and ~165s on its last success (11-02 20:00 UTC run),
+ * then was cancelled at exactly 180.0s on three consecutive runs (11-03 05:00,
+ * 11-03 20:00, 11-04 05:00 UTC — Postgres log `canceling statement due to
+ * statement timeout`), freezing the Audience Stats and Offers x Group reports.
+ * Under load the same SELECT has measured 163.1s at 384MB even when it was
+ * ~100s quiet (paired A/B, 2026-09-21), so it was always the view at risk.
  *
- * It is not theoretical room. In a paired A/B on 2026-09-21, a third pair
- * landed while production was actually busy (1 and 4 other active backends):
- * the SAME query took 269.1s at the current work_mem and 163.1s at 384MB. So
- * this statement is ALREADY capable of exceeding the platform's 120s default
- * under load — today's 12.5s of headroom only holds on a quiet cluster.
+ * WHY NOT MORE — the 300s invocation budget, which is what 180s was protecting:
+ * a Vercel timeout kills the invocation with NO catch and NO alert, so the
+ * database's cancellation (SQLSTATE 57014, which throws and alerts) must stay
+ * strictly inside maxDuration. 230s only fits because the same change moved the
+ * summary and offer-totals views out of the main run into the 05:30/20:30
+ * lifecycle run (see REFRESH_SEQUENCE in ./offer-group-report). Main run,
+ * measured from the Postgres log: ~47s from cron fire to first refresh (cause
+ * unconfirmed — Vercel logs were not readable; the lifecycle route, same code,
+ * takes ~7s, so it is likely dispatch/cold start on the crowded :00 slot) +
+ * group 230 + audience-totals ~3 = ~280s. 240s would leave 10s, which a slow
+ * start could eat. Lifecycle run: four views, ~120s measured, also fits.
  *
- * WHY NOT MORE, e.g. 240s: the four views share ONE Vercel invocation capped at
- * maxDuration = 300s, and the other three stretch under load too. Budgeting
- * group 180 + offer-totals ~90 + summary ~20 + audience ~3 = ~293s still fits;
- * at 240 the same bad day is ~353s and Vercel kills the invocation — which is
- * the one failure mode with NO catch and NO alert. Keeping the database's
- * cancellation (SQLSTATE 57014, which throws and alerts) strictly inside the
- * platform's is what keeps failure loud.
+ * THIS IS A STOPGAP. The view grows ~1.4s/day with send volume (107.5s → 165s
+ * over six weeks), so 230s buys roughly five to six weeks. The real fix —
+ * making the refresh cheaper — is planned in
+ * docs/superpowers/plans/2026-11-04-offer-group-report-refresh-cost.md.
  *
- * AND IF 180s IS EXCEEDED ANYWAY, it is now contained rather than catastrophic:
- * the per-view catch means group's 57014 freezes group alone and the other
- * three still refresh and stamp. That is what makes 180 a balance rather than a
- * gamble. It also bounds a genuinely stuck refresh: one wedged statement holds
- * one session-pooler slot for at most three minutes, twice a day, instead of
- * running until the platform reaps it.
+ * IF 230s IS EXCEEDED ANYWAY, it is contained: the per-view catch means group's
+ * 57014 freezes group alone, the run alerts Tier-1 and returns 500. It also
+ * bounds a genuinely stuck refresh: one wedged statement holds one
+ * session-pooler slot for at most ~four minutes, twice a day.
  */
-export const REFRESH_STATEMENT_TIMEOUT = "180s";
-const REFRESH_STATEMENT_TIMEOUT_MS = 180000;
+export const REFRESH_STATEMENT_TIMEOUT = "230s";
+const REFRESH_STATEMENT_TIMEOUT_MS = 230000;
 
 // Moved to lib/db/session-url.ts (dependency-free, so scripts can import it);
 // re-exported here for existing importers.

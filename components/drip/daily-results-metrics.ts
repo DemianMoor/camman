@@ -11,6 +11,6 @@ export const LINE_METRICS: Record<LineMetric, { label: string; pct: boolean; pic
   conv: { label: "Conv %", pct: true, pick: (r) => r.conv_pct },
   optout: { label: "Opt-out %", pct: true, pick: (r) => r.opt_out_pct },
   sends: { label: "Sends", pct: false, pick: (r) => r.sends },
-  leads: { label: "Leads", pct: false, pick: (r) => r.leads },
+  leads: { label: "Signups", pct: false, pick: (r) => r.leads },
 };
 

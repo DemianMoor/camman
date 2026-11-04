@@ -143,7 +143,7 @@ export function fallbackAlertText(connection: RefreshConnection): string {
     `This run refreshed WITHOUT the raised settings — effective work_mem=${connection.workMemKb}kB ` +
       `(intended ${REFRESH_WORK_MEM}), statement_timeout=${connection.statementTimeoutMs}ms ` +
       `(intended ${REFRESH_STATEMENT_TIMEOUT}).`,
-    "offer_group_report_mv measured 107.5s against that 120000ms limit, so this run is back on the ~12.5s cliff and can be cancelled mid-refresh (SQLSTATE 57014).",
+    "offer_group_report_v2_mv's refresh (the stage_sends pass it shares with the old offer_group_report_mv) measured ~165s on its last success — past that 120000ms limit, so this run is likely to be cancelled mid-refresh (SQLSTATE 57014).",
     "Every run stays unprotected until session-pooler connectivity (port 5432) is fixed.",
   ].join("\n");
 }

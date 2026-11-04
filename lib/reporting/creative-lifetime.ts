@@ -63,7 +63,7 @@ export async function computeCreativeLifetime(orgId: string): Promise<CreativeLi
       to,
       providerPhoneId: null,
       attribution,
-    });
+    }, { alertOverlap: true });
     const offerTotals: Record<string, PerfMetrics> = {};
     for (const row of offer.rows) {
       if (row.key === "none") continue;

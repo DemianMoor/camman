@@ -385,6 +385,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "read-only: the .unsafe( call runs rendered SELECTs inside withReadOnlyDb's BEGIN READ ONLY transaction",
   },
   {
+    file: "verify-offer-report-v2.ts",
+    why: "read-only (0231 go #2 gate): every read is inside withReadOnlyDb's BEGIN READ ONLY; the .unsafe( call runs V6's SELECT, rendered from lib/sale-attribution's clauses by Drizzle, on that same transaction",
+  },
+  {
     file: "verify-offer-split-totals.ts",
     why: "read-only: app reads via the production report code (SELECTs only) plus .unsafe( SELECTs inside withReadOnlyDb's BEGIN READ ONLY transaction",
   },

@@ -40,7 +40,7 @@ async function main() {
       VALUES (${orgId}, ${camp.id}, 2, ${cre.id}, now(), 20, 3.25, NULL, 'Hey {creative_text} {url} {stop_text}')`);
 
     const day = formatInCampaignTimezone(new Date(), "yyyy-MM-dd");
-    const report = await getPerformanceReport(orgId, "format", { from: day, to: day, providerPhoneId: null });
+    const report = await getPerformanceReport(orgId, "format", { from: day, to: day, providerPhoneId: null }, { alertOverlap: false });
     const labels = report.rows.map((r) => r.label).sort();
     bar("F1 two rows: 'Custom' and 'T1 — Brand prefix'", JSON.stringify(labels) === JSON.stringify(["Custom", "T1 — Brand prefix"]), JSON.stringify(report.rows.map((r) => [r.label, r.sent, r.cost])));
 

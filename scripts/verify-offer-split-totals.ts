@@ -168,7 +168,8 @@ async function main() {
     from,
     to,
     providerPhoneId: null,
-  });
+    // Read-only script: the overlap alert writes alert_state, so it stays off here.
+  }, { alertOverlap: false });
   const sumRows = (rows: PerfMetrics[]) => rows.reduce((acc, r) => addMetrics(acc, r), zeroMetrics());
   const dA = diffSelected(sumRows(offerRep.rows), sumRows(seqRep.rows));
   if (dA.length) {

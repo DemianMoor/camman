@@ -147,7 +147,7 @@ export async function getOfferGroupReport(
   const groupRows = (await db.execute(sql`
     select group_id, group_name, sends, revenue, pending_revenue, sales, clicks, cost, optouts,
            sent_7d, sent_30d, sent_90d, fresh_pool
-    from offer_group_report_mv
+    from offer_group_report_v2_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
 
@@ -157,7 +157,7 @@ export async function getOfferGroupReport(
     select sends, revenue, sales, clicks, cost, optouts, has_manual_stages,
            attributable_sends, unattributed_sends,
            attributable_revenue, attributable_sales, attributable_pending_revenue
-    from offer_report_offer_totals_mv
+    from offer_report_offer_totals_v2_mv
     where org_id = ${orgId}::uuid and offer_id = ${offerId}
   `)) as unknown as Record<string, unknown>[];
 
@@ -282,13 +282,15 @@ export async function readOrgBenchmark(
   };
 }
 
-// "Data as of" for both group reports: offer_group_report_mv's refresh. The
+// "Data as of" for both group reports: offer_group_report_v2_mv's refresh. The
 // Audience Stats totals matview is derived from it and refreshed moments later
-// in the same cron run, so this one stamp is honest for both.
+// in the same cron run, so this one stamp is honest for both. (Migration 0231:
+// the *_v2 views attribute each conversion to its own offer; the old names are
+// no longer refreshed and are dropped by a later migration.)
 export async function readGroupReportRefreshedAt(): Promise<string | null> {
   const logRows = (await db.execute(sql`
     select refreshed_at from report_refresh_log
-    where view_name = 'offer_group_report_mv'
+    where view_name = 'offer_group_report_v2_mv'
   `)) as unknown as { refreshed_at: string | null }[];
   return logRows[0]?.refreshed_at
     ? new Date(logRows[0].refreshed_at).toISOString()
@@ -321,8 +323,14 @@ export type RefreshDurations = {
 };
 
 // The main run (05:00 / 20:00 UTC): the group view and the one view that SUMS
-// it. audience_report_group_totals_mv must refresh after offer_group_report_mv
-// to pick up the same snapshot. If the group refresh FAILS, it still runs and
+// it. audience_report_group_totals_v2_mv must refresh after
+// offer_group_report_v2_mv to pick up the same snapshot.
+//
+// ⚠️ 0231 (2026-11-04): these are the *_v2 views, refreshed INSTEAD of the old
+// offer_group_report_mv / audience_report_group_totals_mv — never both. Both
+// would double the run's dominant ~165 s refresh inside a 300 s invocation. The
+// v2 group view reuses the old one's stage_sends pass verbatim plus a
+// milliseconds-sized `moved` CTE, so swapping it in costs the run nothing. If the group refresh FAILS, it still runs and
 // sums the previous group snapshot — stale, but internally consistent and
 // visibly stale via its own log stamp.
 //
@@ -344,8 +352,8 @@ export type RefreshDurations = {
 // The real fix (making the refresh cheaper) is planned in
 // docs/superpowers/plans/2026-11-04-offer-group-report-refresh-cost.md.
 const REFRESH_SEQUENCE = [
-  { view: "offer_group_report_mv", durationKey: "groupMs" },
-  { view: "audience_report_group_totals_mv", durationKey: "audienceTotalsMs" },
+  { view: "offer_group_report_v2_mv", durationKey: "groupMs" },
+  { view: "audience_report_group_totals_v2_mv", durationKey: "audienceTotalsMs" },
 ] as const satisfies ReadonlyArray<{
   view: string;
   durationKey: "groupMs" | "audienceTotalsMs";
@@ -356,12 +364,14 @@ const REFRESH_SEQUENCE = [
 // that moved out of the main run (see above). None of the four reads another
 // matview, so the order only puts the views the screens have read longest
 // first. Measured budget: ~7 s to first refresh + lifecycle ~30 s + exposure
-// ~32 s + summary ~15 s + offer-totals ~36 s ≈ 120 s of 300 s.
+// ~32 s + summary ~15 s + offer-totals ~36 s ≈ 120 s of 300 s. Offer-totals is
+// offer_report_offer_totals_v2_mv since 0231, refreshed INSTEAD of the old name
+// (same stage_sends pass; the split legs read the ~3.5K-row ledger).
 const LIFECYCLE_REFRESH_SEQUENCE = [
   { view: "offer_group_lifecycle_v2_mv", durationKey: "lifecycleMs" },
   { view: "offer_group_exposure_mv", durationKey: "exposureMs" },
   { view: "offer_report_org_summary_mv", durationKey: "summaryMs" },
-  { view: "offer_report_offer_totals_mv", durationKey: "totalsMs" },
+  { view: "offer_report_offer_totals_v2_mv", durationKey: "totalsMs" },
 ] as const satisfies ReadonlyArray<{
   view: string;
   durationKey: "lifecycleMs" | "exposureMs" | "summaryMs" | "totalsMs";
@@ -562,5 +572,70 @@ export async function fillOfferGroupExposure(): Promise<{ ms: number; connection
       where view_name = 'offer_group_exposure_mv'
     `);
     return { ms, connection };
+  });
+}
+
+// ── ONE-OFF: the first fill of the 0231 *_v2 report views ────────────────────
+//
+// 0231 creates offer_group_report_v2_mv, audience_report_group_totals_v2_mv and
+// offer_report_offer_totals_v2_mv WITH NO DATA: the group view's build is the
+// ~165 s stage_sends pass, which does not fit db:migrate's 120 s server-default
+// statement_timeout. This fills them on the report's session connection (230 s
+// per statement, 384 MB work_mem) — a PLAIN REFRESH, because CONCURRENTLY
+// refuses a never-populated view — in dependency order (the audience view sums
+// the group view), stamping each view's report_refresh_log row on its own
+// success. Called only by scripts/fill-offer-report-v2.ts, attended.
+//
+// Then the three OLD views are refreshed (CONCURRENTLY, their normal refresh)
+// so scripts/verify-offer-report-v2.ts compares two snapshots minutes apart,
+// not hours. Nothing reads the v2 views until the code that reads them deploys
+// after the verify passes.
+export type OfferReportV2FillResult = {
+  /**
+   * Per view, in run order: v2 group, v2 audience, v2 totals, then the old
+   * three. A v2 failure throws (the fill did not happen); an OLD view's failure
+   * is recorded here and the run continues — the v2 views are filled, and the
+   * verify then reports the snapshot drift instead of hiding it.
+   */
+  steps: { view: string; ms: number; ok: boolean; error?: string }[];
+  connection: RefreshConnection;
+};
+
+const V2_FILL_SEQUENCE = [
+  { view: "offer_group_report_v2_mv", concurrently: false },
+  { view: "audience_report_group_totals_v2_mv", concurrently: false },
+  { view: "offer_report_offer_totals_v2_mv", concurrently: false },
+  { view: "offer_group_report_mv", concurrently: true },
+  { view: "audience_report_group_totals_mv", concurrently: true },
+  { view: "offer_report_offer_totals_mv", concurrently: true },
+] as const;
+
+export async function fillOfferReportV2(
+  onStep: (view: string, ms: number) => void = () => {},
+): Promise<OfferReportV2FillResult> {
+  return withRefreshSession(async (sessionDb, connection) => {
+    const steps: OfferReportV2FillResult["steps"] = [];
+    for (const s of V2_FILL_SEQUENCE) {
+      const t0 = Date.now();
+      try {
+        // Names come from the frozen list above, never from input.
+        await sessionDb.execute(
+          sql.raw(`refresh materialized view ${s.concurrently ? "concurrently " : ""}${s.view}`),
+        );
+        await sessionDb.execute(sql`
+          update report_refresh_log set refreshed_at = now() where view_name = ${s.view}
+        `);
+      } catch (err) {
+        if (!s.concurrently) throw err;
+        const ms = Date.now() - t0;
+        steps.push({ view: s.view, ms, ok: false, error: err instanceof Error ? err.message : String(err) });
+        onStep(s.view, ms);
+        continue;
+      }
+      const ms = Date.now() - t0;
+      steps.push({ view: s.view, ms, ok: true });
+      onStep(s.view, ms);
+    }
+    return { steps, connection };
   });
 }

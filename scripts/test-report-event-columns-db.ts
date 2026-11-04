@@ -423,7 +423,7 @@ async function main() {
 
     console.log("\ngetPerformanceReport dimension=offer:");
     const bounds = { from: DAY, to: DAY, providerPhoneId: null };
-    const report = await getPerformanceReport(orgId, "offer", bounds);
+    const report = await getPerformanceReport(orgId, "offer", bounds, { alertOverlap: false });
     const offerRow = report.rows.find((r) => r.key === String(offerId))!;
     check("R5 ⭐ dimension=offer carries the breakdown on the row", N(offerRow.events, "purchase") === 3, JSON.stringify(offerRow.events));
     check("R6 ⭐ and on the totals", N(report.totals.events, "purchase") === 3, JSON.stringify(report.totals.events));
@@ -435,7 +435,7 @@ async function main() {
     );
 
     console.log("\ngetPerformanceReport dimension=group:");
-    const groupReport = await getPerformanceReport(orgId, "group", bounds);
+    const groupReport = await getPerformanceReport(orgId, "group", bounds, { alertOverlap: false });
     const groupRows = groupReport.rows;
     check(
       "R8 ⭐ dimension=group SPLITS the breakdown, and the parts sum back to the stage total — within the split's own 2-decimal rounding",
@@ -455,7 +455,7 @@ async function main() {
     );
 
     console.log("\ngetPerformanceReport dimension=hourly:");
-    const hourly = await getPerformanceReport(orgId, "hourly", bounds);
+    const hourly = await getPerformanceReport(orgId, "hourly", bounds, { alertOverlap: false });
     const h14 = hourly.rows.find((r) => r.key === "14")!;
     const h9 = hourly.rows.find((r) => r.key === "9")!;
     const h16 = hourly.rows.find((r) => r.key === "16");

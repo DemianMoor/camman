@@ -52,14 +52,18 @@ const REPO = path.resolve(__dirname, "..");
 // Since 2026-11-04 the main run is the group view + the view that sums it; the
 // org-summary and offer-totals views moved to the lifecycle run so the group
 // view can have a 230s timeout inside the 300s invocation.
-const VIEWS = ["offer_group_report_mv", "audience_report_group_totals_mv"];
+// Since 0231 they are the *_v2 views, refreshed INSTEAD of the old names.
+const VIEWS = ["offer_group_report_v2_mv", "audience_report_group_totals_v2_mv"];
+// The pre-0231 names. No run may refresh them any more: refreshing both the old
+// and the v2 view would double the main run's dominant ~165 s refresh.
+const OLD_VIEWS = ["offer_group_report_mv", "audience_report_group_totals_mv", "offer_report_offer_totals_mv"];
 // Since 0227 the lifecycle views are their OWN run (refreshOfferGroupLifecycle,
 // /api/cron/refresh-offer-group-lifecycle) — never part of the main one.
 const LIFECYCLE_VIEWS = [
   "offer_group_lifecycle_v2_mv",
   "offer_group_exposure_mv",
   "offer_report_org_summary_mv",
-  "offer_report_offer_totals_mv",
+  "offer_report_offer_totals_v2_mv",
 ];
 
 // ── source-scan bar ──────────────────────────────────────────────────────────
@@ -290,6 +294,13 @@ async function main() {
     LIFECYCLE_VIEWS.map((v) => `${v}:${stampsAfter[v] === stampsBefore[v] ? "untouched" : "STAMPED"}`).join(" "),
   );
 
+  check(
+    "⭐ the main run does NOT refresh the pre-0231 views (v2 INSTEAD, never both)",
+    clean.outcomes.every((o) => !OLD_VIEWS.includes(o.view)) &&
+      OLD_VIEWS.every((v) => stampsAfter[v] === stampsBefore[v]),
+    OLD_VIEWS.map((v) => `${v}:${stampsAfter[v] === stampsBefore[v] ? "untouched" : "STAMPED"}`).join(" "),
+  );
+
   // ── 8b. The lifecycle run refreshes its four views, and only them ───
   const lcBefore = await readStamps(probe);
   const lc = await refreshOfferGroupLifecycle();
@@ -308,6 +319,10 @@ async function main() {
   check(
     "lifecycle run: the main-run views are untouched",
     VIEWS.every((v) => lcAfter[v] === lcBefore[v]),
+  );
+  check(
+    "⭐ lifecycle run: the pre-0231 views are untouched (v2 INSTEAD, never both)",
+    OLD_VIEWS.every((v) => lcAfter[v] === lcBefore[v]),
   );
   check(
     "lifecycle run: on the session connection with the raised settings",
@@ -342,13 +357,13 @@ async function main() {
   // ── 9. THE POINT OF THE CHANGE: one view's failure freezes ONE view ────────
   // Rename the group matview out from under the refresh so its statement fails
   // with "relation does not exist". Dependent matviews reference it by OID, so
-  // audience_report_group_totals_mv is unaffected and still refreshes — which
+  // audience_report_group_totals_v2_mv is unaffected and still refreshes — which
   // is exactly the isolation being tested.
   const before = await readStamps(probe);
   let partial: Awaited<ReturnType<typeof refreshOfferGroupReport>> | null = null;
   let threw: unknown = null;
   try {
-    await probe`alter materialized view offer_group_report_mv rename to offer_group_report_mv_rt`;
+    await probe`alter materialized view offer_group_report_v2_mv rename to offer_group_report_v2_mv_rt`;
     // Caught here on purpose: if the loop ever goes back to aborting the run on
     // the first failure, that must surface as a RED check, not as a crash that
     // skips every assertion after it.
@@ -358,7 +373,7 @@ async function main() {
       threw = e;
     }
   } finally {
-    await probe`alter materialized view offer_group_report_mv_rt rename to offer_group_report_mv`;
+    await probe`alter materialized view offer_group_report_v2_mv_rt rename to offer_group_report_v2_mv`;
   }
   const after = await readStamps(probe);
 
@@ -382,14 +397,14 @@ async function main() {
   } else {
   check(
     "the failing view is reported in `failed`",
-    partial!.failed.length === 1 && partial!.failed[0] === "offer_group_report_mv",
+    partial!.failed.length === 1 && partial!.failed[0] === "offer_group_report_v2_mv",
     `failed=[${partial!.failed.join(", ")}]`,
   );
   check(
     "the failure carries an error message (reported, not swallowed)",
-    Boolean(partial!.outcomes.find((o) => o.view === "offer_group_report_mv")?.error),
+    Boolean(partial!.outcomes.find((o) => o.view === "offer_group_report_v2_mv")?.error),
   );
-  const others = VIEWS.filter((v) => v !== "offer_group_report_mv");
+  const others = VIEWS.filter((v) => v !== "offer_group_report_v2_mv");
   check(
     "the OTHER view still refreshed — the one queued behind it",
     others.every((v) => partial!.outcomes.find((o) => o.view === v)?.ok === true),
@@ -402,7 +417,7 @@ async function main() {
   );
   check(
     "the failed view did NOT stamp a success (its staleness stays visible)",
-    after["offer_group_report_mv"] === before["offer_group_report_mv"],
+    after["offer_group_report_v2_mv"] === before["offer_group_report_v2_mv"],
   );
   }
 

@@ -177,7 +177,7 @@ async function main() {
     (await q(sql`
       WITH cell AS (
         SELECT 'cell (offer,group)' AS grain,
-               (SELECT sum(clicks)::bigint FROM offer_group_report_mv) AS rendered,
+               (SELECT sum(clicks)::bigint FROM offer_group_report_v2_mv) AS rendered,
                (SELECT sum(n)::bigint FROM (
                   SELECT count(DISTINCT cc.contact_id) AS n FROM counted_clickers cc
                   JOIN campaigns c ON c.id=cc.campaign_id
@@ -217,9 +217,9 @@ async function main() {
   // offer's groups is one offer clicker. If these ever match, either the footer
   // regressed to a sum or every campaign became single-group.
   const foot = (await q(sql`
-    SELECT (SELECT sum(clicks)::bigint FROM offer_group_report_mv) AS cell_sum,
+    SELECT (SELECT sum(clicks)::bigint FROM offer_group_report_v2_mv) AS cell_sum,
            (SELECT sum(offer_clicks)::bigint FROM (
-              SELECT DISTINCT org_id, offer_id, offer_clicks FROM offer_group_report_mv) t) AS offer_grain`))[0];
+              SELECT DISTINCT org_id, offer_id, offer_clicks FROM offer_group_report_v2_mv) t) AS offer_grain`))[0];
   console.log(`  cell sum ${foot.cell_sum} vs offer-grain footer ${foot.offer_grain}`);
   assert(
     Number(foot.offer_grain) < Number(foot.cell_sum),
@@ -251,7 +251,7 @@ async function main() {
       WHERE cs.org_id=${orgId}::uuid`))[0].n,
   );
   for (const dim of ["number", "offer", "sequence"] as const) {
-    const rep = await getPerformanceReport(orgId, dim, bounds);
+    const rep = await getPerformanceReport(orgId, dim, bounds, { alertOverlap: false });
     const truth = await getCountedClickersByDimension(d, orgId, dim);
     const rendered = rep.rows.reduce((a, x) => a + x.lifetime_clickers, 0);
     const distinctTracked = [...truth.values()].reduce((a, x) => a + x, 0);

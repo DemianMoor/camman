@@ -40,6 +40,11 @@ const bar = (name: string, ok: boolean, detail = "") => {
 const near = (a: number, b: number) => Math.abs(a - b) < 1e-6;
 
 async function main() {
+  // The overlap alert (owner ruling 2026-11-04) calls notifyTelegram, and
+  // _env-preload loads .env.local's real bot token — never message the real chat
+  // from a test. notifyTelegram reads these at call time, so unsetting here works.
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_CHAT_ID;
   const { requirePreviewDb } = await import("./_require-preview-db");
   const { db } = await import("@/db/client");
   const { getPerformanceReport } = await import("@/lib/reporting/performance-report");
@@ -121,7 +126,17 @@ async function main() {
     await ce(W, C, "approved", 7, "2026-09-01T16:00:00Z"); // drip, no stage_send_id
 
     const b = { from: DAY, to: DAY, providerPhoneId: null };
-    const offerRep = await getPerformanceReport(org, "offer", b);
+    const offerRep = await getPerformanceReport(org, "offer", b, { alertOverlap: true });
+    // P8 (owner ruling 2026-11-04): the overlap stage Z latches one alert_state row;
+    // a non-overlap stage latches none.
+    const alerts = (await db.execute(sql`
+      SELECT alert_key, state FROM alert_state WHERE org_id = ${org}::uuid AND alert_key LIKE 'offer_split_overlap:%'
+    `)) as unknown as { alert_key: string; state: string }[];
+    bar(
+      "P8 overlap stage Z latches one firing alert, nothing else",
+      alerts.length === 1 && alerts[0].alert_key === `offer_split_overlap:${org}:${Z.stage}` && alerts[0].state === "firing",
+      JSON.stringify(alerts),
+    );
     const row = (k: number) => offerRep.rows.find((r) => r.key === String(k));
     const [rA, rB, rC] = [row(A), row(B), row(C)];
 
@@ -199,12 +214,12 @@ async function main() {
         return !!c && near(c.own_payout, v as number) && near(c.lifetime_own_payout, v as number);
       }),
       JSON.stringify([A, B, C, null].map((o) => [cmRow(o)?.own_payout, cmRow(o)?.lifetime_own_payout])));
-    const crC = await getPerformanceReport(org, "creative", { ...b, offerId: C });
+    const crC = await getPerformanceReport(org, "creative", { ...b, offerId: C }, { alertOverlap: true });
     const crRowC = crC.rows.find((r) => r.offer_id === C);
     bar("dimension=creative offer_id=C: totals = C's By Offer row (sales 1, $30, sent 0)",
       crC.totals.sales === 1 && near(crC.totals.revenue, 30) && crC.totals.sent === 0 && !!crRowC && crRowC.creative_id === K,
       JSON.stringify(crC.totals));
-    const crA = await getPerformanceReport(org, "creative", { ...b, offerId: A });
+    const crA = await getPerformanceReport(org, "creative", { ...b, offerId: A }, { alertOverlap: true });
     bar("dimension=creative offer_id=A: totals sales 2, $100, sent 1000, clickers 100",
       crA.totals.sales === 2 && near(crA.totals.revenue, 100) && crA.totals.sent === 1000 && crA.totals.counted_clickers === 100,
       JSON.stringify(crA.totals));
@@ -213,10 +228,10 @@ async function main() {
     const snapshot = async () => {
       const funnel = await getStageMetricsInRange(org, DAY, DAY);
       const [num, sq, hr, off] = [
-        await getPerformanceReport(org, "number", b),
-        await getPerformanceReport(org, "sequence", b),
-        await getPerformanceReport(org, "hourly", b),
-        await getPerformanceReport(org, "offer", b),
+        await getPerformanceReport(org, "number", b, { alertOverlap: true }),
+        await getPerformanceReport(org, "sequence", b, { alertOverlap: true }),
+        await getPerformanceReport(org, "hourly", b, { alertOverlap: true }),
+        await getPerformanceReport(org, "offer", b, { alertOverlap: true }),
       ];
       const strip = <T extends { refreshedAt: string | null }>(r: T) => ({ ...r, refreshedAt: null });
       return {
@@ -241,6 +256,7 @@ async function main() {
   } finally {
     if (orgId) {
       const o = orgId;
+      await db.execute(sql`DELETE FROM alert_state WHERE org_id = ${o}::uuid`);
       await db.execute(sql`DELETE FROM conversion_events WHERE org_id = ${o}::uuid`);
       await db.execute(sql`DELETE FROM keitaro_stage_results WHERE org_id = ${o}::uuid`);
       await db.execute(sql`DELETE FROM campaign_stages WHERE org_id = ${o}::uuid`);

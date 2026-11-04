@@ -52,6 +52,8 @@ interface ViewSecurityRow extends Record<string, unknown> {
 const SECURITY_INVOKER_VIEWS = [
   "offer_report_campaign_econ",
   "offer_report_tracked_campaigns",
+  // 0231 — the split amounts the v2 report matviews move between offers.
+  "offer_split_amounts_v",
 ] as const;
 
 async function main() {
@@ -182,7 +184,7 @@ async function main() {
       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public'
         AND c.relkind = 'v'
-        AND c.relname IN ('offer_report_campaign_econ', 'offer_report_tracked_campaigns')
+        AND c.relname IN ('offer_report_campaign_econ', 'offer_report_tracked_campaigns', 'offer_split_amounts_v')
     `);
     const viewOptionsByName = new Map(
       viewRows.map((r) => [r.relname, r.reloptions ?? []]),

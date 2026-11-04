@@ -195,7 +195,7 @@ export async function GET(req: NextRequest) {
   // consumer that has no UI to fall back on the only one that cannot read the
   // breakdown. Documented in docs/operator-api.md §3, "Creative bank".
   const [report, providers, eventTypes] = await Promise.all([
-    getPerformanceReport(auth.orgId, dimension, { from, to, providerPhoneId, attribution, offerId }),
+    getPerformanceReport(auth.orgId, dimension, { from, to, providerPhoneId, attribution, offerId }, { alertOverlap: true }),
     getReportProviderOptions(auth.orgId),
     loadEventTypes(db, auth.orgId),
   ]);

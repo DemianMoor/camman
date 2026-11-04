@@ -16,7 +16,7 @@ async function main(){
   // A deliberately NARROW window — the case that motivated this work.
   const from="2026-08-09", to="2026-08-11";
   for (const dim of ["offer","number","sequence","group"] as const) {
-    const r = await getPerformanceReport(orgId, dim, { from, to, providerPhoneId: null });
+    const r = await getPerformanceReport(orgId, dim, { from, to, providerPhoneId: null }, { alertOverlap: false });
     const withLife = r.rows.filter(x => x.lifetime_clickers > 0);
     assert(r.rows.length > 0, `${dim}: returns rows`);
     assert(withLife.length > 0, `${dim}: rows carry a lifetime denominator`);
@@ -33,7 +33,7 @@ async function main(){
 
   // By-Group: the lifetime pair must be fractionally split like its period twin,
   // i.e. non-integer shares are expected and the totals must stay sane.
-  const g = await getPerformanceReport(orgId, "group", { from, to, providerPhoneId: null });
+  const g = await getPerformanceReport(orgId, "group", { from, to, providerPhoneId: null }, { alertOverlap: false });
   const anyFractional = g.rows.some(x => x.lifetime_clickers % 1 !== 0);
   assert(g.rows.length > 0, "group: rows present");
   assert(anyFractional || g.rows.length === 1, "group: lifetime clickers are fractionally split like the period figure");

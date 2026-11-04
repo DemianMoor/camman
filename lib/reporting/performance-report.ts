@@ -4,6 +4,7 @@ import { fromZonedTime } from "date-fns-tz";
 import { CAMPAIGN_TIMEZONE, formatInCampaignTimezone } from "@/lib/campaign-timezone";
 
 import { db } from "@/db/client";
+import { notifyOnTransition } from "@/lib/alerts/alert-state";
 import {
   CUSTOM_FORMAT_KEY,
   DIMENSION_NONE_KEY,
@@ -357,9 +358,11 @@ export async function getPerformanceReport(
   orgId: string,
   dimension: PerformanceDimension,
   b: Bounds,
+  // Required (see getStageDimensionReports): app routes pass true, scripts false.
+  opts: { alertOverlap: boolean },
 ): Promise<PerformanceReport> {
   if (dimension === "hourly") return getHourlyReport(orgId, b);
-  const [report] = await getStageDimensionReports(orgId, [dimension], b);
+  const [report] = await getStageDimensionReports(orgId, [dimension], b, opts);
   return report;
 }
 
@@ -370,6 +373,9 @@ export async function getStageDimensionReports(
   orgId: string,
   dimensions: StageDimension[],
   b: Bounds,
+  // Required, so every caller decides: app paths alert, read-only scripts must not
+  // (the alert writes alert_state). See alertOverlapStages.
+  opts: { alertOverlap: boolean },
 ): Promise<PerformanceReport[]> {
   const { stages, clickers } = await getStageMetricsInRange(orgId, b.from, b.to, {
     attribution: b.attribution,
@@ -439,7 +445,7 @@ export async function getStageDimensionReports(
   await dedupeTotalClickers(orgId, b, filtered, totals, clickers);
   const refreshedAt = await maxSyncedAt(orgId);
 
-  return Promise.all(
+  const reports = await Promise.all(
     dimensions.map(async (dimension): Promise<PerformanceReport> => {
       let rows: PerfRow[];
       if (dimension === "group") {
@@ -465,6 +471,33 @@ export async function getStageDimensionReports(
       return { dimension, rows, totals, refreshedAt };
     }),
   );
+  if (opts.alertOverlap) await alertOverlapStages(orgId, filtered, sliceCache);
+  return reports;
+}
+
+/**
+ * Owner ruling 2026-11-04: a stage whose moved sales exceed its tracked sales
+ * (splitStageMetrics' would_go_negative skip — the stage is reported unsplit)
+ * sends a Telegram alert in addition to the console.warn. Latched per stage via
+ * alert_state, so it fires once per stage, not once per report view; it is not
+ * cleared automatically. Best-effort: notifyOnTransition swallows its errors.
+ */
+async function alertOverlapStages(
+  orgId: string,
+  stages: StageMetrics[],
+  sliceCache: Map<number, OfferSlice[]>,
+): Promise<void> {
+  for (const s of stages) {
+    if (sliceCache.get(s.stage_id)?.[0]?.skipped !== "would_go_negative") continue;
+    await notifyOnTransition(db, {
+      alertKey: `offer_split_overlap:${orgId}:${s.stage_id}`,
+      orgId,
+      text:
+        `🟠 Tier-2 reports: stage ${s.stage_id} (campaign ${s.campaign_id}, offer ${s.offer_id ?? "none"}) has more ` +
+        `sales moved to other offers than the tracker counts for it. By-offer reports show this stage unsplit ` +
+        `until the tracker catches up. Compare keitaro_stage_results with conversion_events for the stage.`,
+    });
+  }
 }
 
 // The totals row dedupes clickers at REPORT grain — distinct (campaign,

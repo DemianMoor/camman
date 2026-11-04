@@ -43,7 +43,7 @@ async function main() {
   };
 
   for (const dim of ["number", "offer", "sequence", "group"] as const) {
-    const r = await getPerformanceReport(orgId, dim, { from, to, providerPhoneId: null });
+    const r = await getPerformanceReport(orgId, dim, { from, to, providerPhoneId: null }, { alertOverlap: false });
     const sum = r.rows.reduce((a, x) => ({
       sent: a.sent + x.sent, opt: a.opt + x.opt_outs, clickers: a.clickers + x.clickers,
       redirects: a.redirects + x.redirects, sales: a.sales + x.sales, revenue: a.revenue + x.revenue,
@@ -79,7 +79,7 @@ async function main() {
   }
 
   // hourly: single day, activity-time
-  const h = await getPerformanceReport(orgId, "hourly", { from: "2026-07-15", to: "2026-07-19", providerPhoneId: null });
+  const h = await getPerformanceReport(orgId, "hourly", { from: "2026-07-15", to: "2026-07-19", providerPhoneId: null }, { alertOverlap: false });
   console.log(`hourly rows=${h.rows.length} totals{sent:${h.totals.sent},clk:${h.totals.clickers},sales:${h.totals.sales},opt:${h.totals.opt_outs}} CR=${h.totals.sent?(h.totals.clickers/h.totals.sent*100).toFixed(1):0}%`);
   console.log("  hours:", h.rows.map((r) => `${r.label}${r.pinned?"*":""}:sent${r.sent}/clk${r.clickers}/opt${r.opt_outs}`).join("  "));
 

@@ -57,7 +57,7 @@ async function main() {
     to,
     providerPhoneId: null,
     attribution: "conversion_date",
-  });
+  }, { alertOverlap: false });
   const rows = rep.rows;
   check("control: at least 5 creative rows", rows.length >= 5, rows.length);
   check("control: at least one row has sales", rows.some((r) => r.sales > 0));
@@ -217,8 +217,8 @@ async function main() {
     skip("offer_id filter", "no row with an offer");
   } else {
     const bounds = { from, to, providerPhoneId: null, attribution: "conversion_date" as const };
-    const byOffer = await getPerformanceReport(orgId, "creative", { ...bounds, offerId: topOffer });
-    const offerReport = await getPerformanceReport(orgId, "offer", bounds);
+    const byOffer = await getPerformanceReport(orgId, "creative", { ...bounds, offerId: topOffer }, { alertOverlap: false });
+    const offerReport = await getPerformanceReport(orgId, "offer", bounds, { alertOverlap: false });
     const offerRow = offerReport.rows.find((r) => r.key === String(topOffer));
     check("offer_id: every row belongs to that offer", byOffer.rows.length > 0 && byOffer.rows.every((r) => r.offer_id === topOffer));
     const unfiltered = rows.filter((r) => r.offer_id === topOffer);
@@ -246,7 +246,7 @@ async function main() {
     to,
     providerPhoneId: null,
     attribution: "send_date",
-  });
+  }, { alertOverlap: false });
   check("send_date: rows' sent add up to totals", sd.rows.reduce((a, r) => a + r.sent, 0) === sd.totals.sent);
   const cohortTruth = new Map<string, number>();
   for (const r of await rowsOf<{ creative_id: number | null; offer_id: number | null; n: number }>(sql`

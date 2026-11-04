@@ -251,7 +251,7 @@ async function main() {
       WHERE cs.org_id=${orgId}::uuid`))[0].n,
   );
   for (const dim of ["number", "offer", "sequence"] as const) {
-    const rep = await getPerformanceReport(orgId, dim, bounds);
+    const rep = await getPerformanceReport(orgId, dim, bounds, { alertOverlap: false });
     const truth = await getCountedClickersByDimension(d, orgId, dim);
     const rendered = rep.rows.reduce((a, x) => a + x.lifetime_clickers, 0);
     const distinctTracked = [...truth.values()].reduce((a, x) => a + x, 0);

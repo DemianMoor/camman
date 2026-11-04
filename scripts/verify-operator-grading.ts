@@ -98,7 +98,7 @@ async function main() {
   for (const dim of ["number", "offer", "sequence", "group"] as const) {
     let r: Awaited<ReturnType<typeof getPerformanceReport>>;
     try {
-      r = await getPerformanceReport(orgId, dim, { from, to, providerPhoneId: null });
+      r = await getPerformanceReport(orgId, dim, { from, to, providerPhoneId: null }, { alertOverlap: false });
     } catch (e) {
       // By Group's click-weight query walks every human click (~50s at ANY range,
       // pre-existing) and can exceed the 2-minute statement timeout. Report that
@@ -156,14 +156,14 @@ async function main() {
     JOIN campaign_stages cs ON cs.id = k.stage_id
     WHERE k.org_id = ${orgId}::uuid AND c.link_mode <> 'tracked' AND cs.provider_phone_id = ${pid}
       AND k.stat_date >= ${from}::date AND k.stat_date <= ${to}::date`);
-  const rp = await getPerformanceReport(orgId, "number", { from, to, providerPhoneId: pid });
+  const rp = await getPerformanceReport(orgId, "number", { from, to, providerPhoneId: pid }, { alertOverlap: false });
   check(
     `number filtered to phone ${pid}: totals.counted_clickers = distinct for that number`,
     rp.totals.counted_clickers === pidClickTruth + pidManual,
     { got: rp.totals.counted_clickers, want: pidClickTruth + pidManual },
   );
 
-  const h = await getPerformanceReport(orgId, "hourly", { from, to, providerPhoneId: null });
+  const h = await getPerformanceReport(orgId, "hourly", { from, to, providerPhoneId: null }, { alertOverlap: false });
   const hours = h.rows.filter((x) => !x.pinned);
   check("hourly: each hour's reached equals its redirects", hours.every((x) => x.reached === x.redirects));
   check(
@@ -210,14 +210,14 @@ async function main() {
     clickers: number;
     manual_visits: number;
   }[];
-  const convTotals = (await getPerformanceReport(orgId, "offer", { from, to, providerPhoneId: null })).totals;
+  const convTotals = (await getPerformanceReport(orgId, "offer", { from, to, providerPhoneId: null }, { alertOverlap: false })).totals;
   for (const dim of ["number", "offer", "sequence"] as const) {
     const r = await getPerformanceReport(orgId, dim, {
       from,
       to,
       providerPhoneId: null,
       attribution: "send_date",
-    });
+    }, { alertOverlap: false });
     const t = r.totals;
     check(`${dim} send_date: totals.sent = cohort sends`, t.sent === cohortTruth.sent, { got: t.sent, want: cohortTruth.sent });
     check(`${dim} send_date: totals.reached = cohort reaches`, t.reached === cohortTruth.reached, { got: t.reached, want: cohortTruth.reached });

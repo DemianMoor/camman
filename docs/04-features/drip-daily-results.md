@@ -1,6 +1,6 @@
 # Drip — Daily results
 
-_Last updated: 2026-11-05 (column renamed Leads → Signups); 2026-11-04 (0232: Signups + Lead revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
@@ -114,7 +114,7 @@ Two stage counters, `leads` and `lead_revenue`, dated exactly like `sales` and
 - **Signups** = lead **and** registration conversions (`reportedRegistrationClause()`:
   a retarget-signal or `counts_as_registration` type, pending + approved). Owner
   ruling 4: one merged number. Labelled "Signups" (owner, 2026-11-05: renamed from "Leads" so it is not confused with "Leads arrived"); the column is still `leads` in the table and API.
-- **Lead revenue** = their approved revenue. It is a **breakdown of Revenue**,
+- **Signup revenue** (renamed from "Lead revenue" 2026-11-05; still `lead_revenue` in the table and API) = their approved revenue. It is a **breakdown of Revenue**,
   which already contains it (`counts_revenue`), never added again.
 
 ⚠️ Not the same thing as **Leads arrived** (partner leads admitted); the column

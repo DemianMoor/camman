@@ -79,7 +79,7 @@ folded into the **retarget signal's** count columns in every report:
 | Overview, performance tabs, campaign stages, landing-page report, Keitaro funnel | **Registrations / Registration rate / Registration pending** = registration + lead; **Registration→Purchase %** uses that merged denominator. The Lead count / rate / pending columns are gone; **Lead $ / Lead pending $ / Lead EPC stay** (tier B). |
 | `/creatives` count columns, campaign Results cell + totals tiles | the Registrations count includes leads; no separate Leads count |
 | Telegram hourly | the Registrations line includes leads; lead revenue prints as a money-only line (`Leads $: …`), nothing when $0 |
-| Drip Daily results | new **Signups** (registration + lead; renamed from "Leads" 2026-11-05 to avoid "Leads arrived") and **Lead revenue** columns, and a Signups chart line, see [drip-daily-results.md](drip-daily-results.md) |
+| Drip Daily results | new **Signups** (registration + lead; renamed from "Leads" 2026-11-05 to avoid "Leads arrived") and **Signup revenue** (renamed from "Lead revenue") columns, and a Signups chart line, see [drip-daily-results.md](drip-daily-results.md) |
 
 **Unchanged:** Sales, Revenue (lead revenue was and stays inside it), EPC/ROI,
 Checkouts (still the raw Keitaro `lead` count; the overlap with Registrations is

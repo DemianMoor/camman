@@ -4,7 +4,9 @@
 
 **Goal:** A conversion is reported under the CamMan offer it actually converted on (mapped from its Keitaro offer id), so one SMS stage whose landing page splits traffic across several offers shows each offer separately, while every campaign and stage total stays exactly as today.
 
-**Architecture:** Attribution is decided once, at ingest, in `conversion_events.offer_id` (Phase 1). Stage-grain reports keep reading `keitaro_stage_results` unchanged and apply a thin "offer split" layer that moves the ledger amounts belonging to another offer from the stage's campaign-offer slice to that offer's slice, so slices always sum to the stage (Phase 2). The offer report / Audience Stats matviews switch their join to the conversion's offer (Phase 3, migration). "Bought offer X" targeting moves to the conversion's offer last, as its own phase (Phase 4).
+**Architecture:** Attribution is decided once, at ingest, in `conversion_events.offer_id` (Phase 1). Stage-grain reports keep reading `keitaro_stage_results` unchanged and apply a thin "offer split" layer that moves the ledger amounts belonging to another offer from the stage's campaign-offer slice to that offer's slice, so slices always sum to the stage (Phase 2). The offer report / Audience Stats matviews switch their join to the conversion's offer (Phase 3, migration). This build is Phases 1–3 only; targeting is a separate card.
+
+**Execution:** subagent-driven (owner, 2026-11-04). Do not start until the owner sends approval of this file.
 
 **Tech Stack:** Next.js 16, TypeScript, Drizzle + raw SQL, Postgres (Supabase), tsx scripts (no test runner — `check()` scripts, pure or camman-v2).
 
@@ -13,7 +15,8 @@
 - By-offer reports show each offer separately; campaign/stage totals unchanged. General for any multi-offer prelander.
 - A second offer's row shows "—" for EPC, ROI and cost, with a tooltip. No cost splitting.
 - Link all nine Keitaro offers: 1→62, 11→76, 12→77, 17→82, 33→123, 34→124, 48→142, 61→152, 66→158 (archived targets included). Already linked: 41→134, 78→170, 79→171.
-- Targeting ("a sale on offer X counts as buying offer X" for exclusions, segments, Offer Group exposure) is a SEPARATE phase, only after Phases 1–3 are live and the owner has reviewed the by-offer numbers.
+- Targeting ("a sale on offer X counts as buying offer X" for exclusions, segments, Offer Group exposure) is OUT of this build — card 1amdve2aedn, only after Phases 1–3 are live and the owner has reviewed the by-offer numbers.
+- EPC/ROI on any offer row come from that offer's OWN traffic (`revenue − split_in_revenue + split_out_revenue`); "—" for EPC, ROI and cost only on rows with no sends of their own (`sent === 0 && split_in_revenue > 0`). Owner-confirmed 2026-11-04.
 - Prod backfill (Phase 1) and the summary-table migration (Phase 3) each need a separate owner "go". Dry-run only until then.
 
 ## Global Constraints
@@ -179,7 +182,7 @@
 - Ledger halves (`conv` CTE, group rows): `COALESCE(ce.offer_id, camp.offer_id)` replaces the campaign-offer join.
 - Stage-grain half of `offer_report_offer_totals_mv` (revenue/sales from `offer_report_campaign_econ`): subtract the split amounts from the campaign offer and add them to the target offer, using a view `offer_split_amounts_v (org_id, stage_id, campaign_offer_id, offer_id, sales, revenue, pending_revenue)` that is the SQL twin of `getOfferSplits` (lifetime). Both halves of the footer then agree.
 - `audience_report_group_totals_mv` depends on `offer_group_report_mv`: drop/recreate in dependency order; `security_invoker = true`; re-issue the 0183 REVOKEs.
-- `offer_group_exposure_mv` (0227) is NOT touched here — it is Phase 4.
+- `offer_group_exposure_mv` (0227) is NOT touched here — it belongs to card 1amdve2aedn.
 
 - [ ] **Step 1: Failing DB test:** fixture split stage; after refresh, `/offers/[A]/report` and `/offers/[B]/report` totals: A + B = the stage; footer `revenue` = Σ group rows' revenue for each offer; Audience Stats "all offers" row unchanged.
 - [ ] **Step 2:** Push the branch; camman-v2 auto-migrates via the preview deploy → test FAILs before the SQL change, passes after.
@@ -188,19 +191,13 @@
 
 ---
 
-## Phase 4 — "Bought offer X" = a sale on offer X (separate; starts only after the owner reviews Phases 1–3)
+## Out of scope: "bought offer X" targeting
 
-### Task 9: Targeting reads the conversion's offer
-
-**Files:**
-- Modify: `lib/sale-attribution.ts` `purchasedOfferContacts` (`COALESCE(ce.offer_id, ca.offer_id) = offerId`; rewrite the comment at :70-74 that says the campaign offer is intended); `db/migrations/0232_offer_group_exposure_conversion_offer.sql` (the inline `buyers` CTE in `offer_group_exposure_mv`, 0227:71-75).
-- Test: `scripts/test-eligibility-layers-identical.ts`, `scripts/test-preview-matches-snapshot.ts` PART F, `scripts/test-lifecycle-send-recheck.ts`, plus a new fixture bar: a contact who bought offer B through offer A's campaign is excluded from a campaign for B and NOT from one for A.
-
-- [ ] Steps: failing bar → implement → all four pass on camman-v2 → read-only prod count of contacts whose `bought_offer` membership changes, per offer → **owner approval before merge (changes who receives SMS)** and **go for 0232 on prod**.
+Moved to its own card, [1amdve2aedn](https://app.clickup.com/t/1amdve2aedn) (owner, 2026-11-04). It starts only after Phases 1–3 are live and the owner has reviewed the by-offer numbers. Nothing in this build changes `purchasedOfferContacts`, `bought_offer`, `made_purchase_for_offer` or `offer_group_exposure_mv`.
 
 ---
 
 ## Self-review notes
 
-- Spec coverage: (a) attribution → T1–T3; separate by-offer rows + unchanged totals → T4, T5, T7; "—" + tooltip → T5; general solution → T1 (any mapped Keitaro offer), T4 (any number of offers per stage); nine links → Phase 1 apply; gated backfill/migration → Phase 1/3 STOPs; targeting later → Phase 4.
-- EPC on a mixed row is traffic-based (revenue its own traffic produced). This is an interpretation of "—" on a second offer's row: pure-secondary rows show "—"; a mixed row shows its own traffic's EPC. Flagged to the owner.
+- Spec coverage: (a) attribution → T1–T3; separate by-offer rows + unchanged totals → T4, T5, T7; "—" + tooltip → T5; general solution → T1 (any mapped Keitaro offer), T4 (any number of offers per stage); nine links → Phase 1 apply; gated backfill/migration → Phase 1/3 STOPs; targeting → out of scope (card 1amdve2aedn).
+- EPC on a mixed row is traffic-based (revenue its own traffic produced); "—" only on rows with no sends of their own. Owner-confirmed 2026-11-04.

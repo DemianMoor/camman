@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-11-04 (By Offer: per-offer conversion split); 2026-10-22 (P6: By Format dimension)_
+_Last updated: 2026-11-04 (By Offer: per-offer conversion split; split-totals verify script); 2026-10-22 (P6: By Format dimension)_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -250,6 +250,7 @@ Guard: [scripts/verify-overview-phone-line.ts](../../scripts/verify-overview-pho
 - **Overview campaign cell:** [`scripts/verify-overview-phone-line.ts`](../../scripts/verify-overview-phone-line.ts) — `formatPhoneLast4` unit checks + the live endpoint's `phones` field vs `provider_phones` in the DB (both groupings).
 - **Legacy rollup:** [`scripts/test-report-rollup.ts`](../../scripts/test-report-rollup.ts) still validates the (now-unused) Phase-1 rollup aggregates.
 - **Operator-API grading fields (2026-09-14):** [`scripts/test-grading-rates.ts`](../../scripts/test-grading-rates.ts) (pure rate math), [`scripts/verify-operator-grading.ts`](../../scripts/verify-operator-grading.ts) (every dimension's `reached` and deduped clicker totals vs independent SQL; read-only on prod), [`scripts/verify-operator-grading-http.ts`](../../scripts/verify-operator-grading-http.ts) (the routes over HTTP with a session, plus a recipient-phone / `contact_id` sweep carrying its own can-go-red controls).
+- **Per-offer split totals (2026-11-04):** [`scripts/verify-offer-split-totals.ts`](../../scripts/verify-offer-split-totals.ts) `--org <uuid> [--from --to]` (ET days, default last 30) — read-only on prod (app reads are SELECTs; its own queries run in one `BEGIN READ ONLY`). Runs the production path (`getStageMetricsInRange` -> `stageMetrics` -> `getOfferSplits` -> `splitStageMetrics`) and proves per stage and per campaign that unsplit == Σ slices for every numeric `PerfMetrics` field and every `events[key]` field (exit 1 otherwise; `split_in == split_out` checked separately), lists `would_go_negative` skips, prints per offer unsplit -> split sales / approved / pending, split_in / split_out and own-traffic EPC, and the `conversion_events` rows that explain each delta.
 - ⚠️ **By Group is slow at ANY range** (measured 2026-09-14): its click-weight query walks every scored-human click (163K) and probes `stage_sends` once per click — 49s for one day, 55s for two — so with its sibling weight queries running in parallel it intermittently exceeds the 2-minute statement timeout (`57014`). Pre-existing, and `verify-lifetime-display.ts` / `test-performance-report.ts` can hit it. The reach weights run AFTER that parallel batch, not inside it, so they add no contention to it. `verify-operator-grading.ts` reports a By Group timeout as SKIPPED, never as a pass.
 
 ## By Offer: per-offer conversion split (2026-11-04)

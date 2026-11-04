@@ -193,7 +193,7 @@ const addNumMaps = (a: Record<string, number>, b: Record<string, number>, f = 1)
   return out;
 };
 
-function stageMetrics(
+export function stageMetrics(
   s: StageMetrics,
   countedByStage: Map<number, number>,
   lifetimeByStage: Map<number, number>,

@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-11-04 — Added scripts/verify-offer-split-totals.ts, a read-only check that unsplit stage metrics equal the sum of per-offer split slices, with per-offer before/after and the explaining ledger rows. No migration. — docs/04-features/reports-rollup.md
 2026-11-02 — Segment rules: added a "2 days" (`2d`) option to the campaign-use period picker (used by "In use in another campaign in the last…" and "Texted in the last…"). No migration — codes live in the rule value JSON. — docs/04-features/audience-segments.md
 
 2026-10-31 — **Partner postbacks PR 3: generic mechanism on the public /docs/partner-api page** (no migration). New Passthrough fields + Sales postbacks sections rendered from `PASSTHROUGH_DOC` / `POSTBACK_DOC` (`lib/intake/api-contract.ts`, built from `PASSTHROUGH_LIMITS`, `SYSTEM_PLACEHOLDERS`, `RETRY_DELAYS_MS`); 202 example gains a `warnings` note; `docs/partners/lead-intake.md` regenerated; drift test asserts placeholders, limits, retry schedule, no per-key names; API changelog entry 2026-10-31 — docs/partners/lead-intake.md, docs/CHANGELOG.md

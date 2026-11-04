@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-11-04 (final-review fixes: creative offer_id filter in the library, RPM own-traffic, slice memo; By Offer: per-offer conversion split; split-totals verify script); 2026-10-22 (P6: By Format dimension)_
+_Last updated: 2026-11-04 (0231: Offers × Group, the Offer report footer and Audience Stats split by conversion offer through the *_v2 matviews); 2026-11-04 (final-review fixes: creative offer_id filter in the library, RPM own-traffic, slice memo; By Offer: per-offer conversion split; split-totals verify script); 2026-10-22 (P6: By Format dimension)_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -265,6 +265,8 @@ A stage's conversions are stored under the offer they converted on (`conversion_
 - `offer_totals` of the lifetime creative blob follows By Offer ([lib/reporting/creative-lifetime.ts](../../lib/reporting/creative-lifetime.ts); a blob written before this change reads both split fields as 0).
 - `/creatives` per-offer metrics do the same split in SQL (the `split_ev` … `slices` CTEs in [lib/creatives/metrics-cache.ts](../../lib/creatives/metrics-cache.ts), lifetime like the rest of that query). Clicks, deliveries and checkouts stay on the campaign offer; the all-offers row is unchanged. Sales / payout per offer are the slice figures (= By Offer); the EPC numerator is `own_payout` / `lifetime_own_payout` (the campaign-offer slice's whole-stage payout, 0 on a split slice), so the creative picker's per-offer EPC sort ranks a creative by what its own traffic paid. The SQL would_go_negative check compares the same fields as the JS rule (sales with the manual tally, revenue, pending revenue, and per event key n / pending_n / revenue / pending revenue).
 - `/reports/landing-pages` counts a conversion for the offer it is stored under and adds other offers' stages that converted on it (sales and revenue only, on the row of the page they came through — [landing-page-report.md](landing-page-report.md)). It applies the same would_go_negative skip (checked against each stage's lifetime tracker totals), and a split-in drip conversion with no `stage_send_id` is counted in the offer's `unattributed_drip_conversions`, like the offer's own.
+
+- The precomputed **Offer report** (`/offers/[id]/report`: Offers × Group rows and the footer) and **Audience Stats** read the 0231 `*_v2` matviews, which apply the same move in SQL from `offer_split_amounts_v` (lifetime twin of `getOfferSplits`) — see [offer-group-report.md](offer-group-report.md#0231--conversions-under-their-own-offer-the-_v2-views). Audience Stats' "all offers" row is unchanged by construction; the runtime would_go_negative skip is not replicated there (`scripts/verify-offer-report-v2.ts` fails if such a stage appears).
 
 **Nothing else runs the split.** Overview, By Campaign, By Number, By Sequence, By Group, By Format, Hourly and every report total are byte-identical with and without it.
 

@@ -1,6 +1,6 @@
 # Offer Group Performance Report
 
-_Last updated: 2026-11-04 (group view outgrew the 180 s timeout — raised to 230 s, org-summary + offer-totals moved to the 05:30 / 20:30 run; see "2026-11-04 — refresh headroom" below); 2026-10-27 (offer exposure per cohort — 0x / 1x / 2x+ / Eligible now, migration 0227, offer_group_exposure_mv; lifecycle views in their own 05:30 / 20:30 UTC cron run); 2026-10-26 (lifecycle columns: Hot and Warm separate — migration 0226, offer_group_lifecycle_v2_mv)_
+_Last updated: 2026-11-04 (0231: the report reads the *_v2 matviews — each conversion under the offer it converted on; refreshed INSTEAD of the old names; see "0231 — conversions under their own offer" below); 2026-11-04 (group view outgrew the 180 s timeout — raised to 230 s, org-summary + offer-totals moved to the 05:30 / 20:30 run; see "2026-11-04 — refresh headroom" below); 2026-10-27 (offer exposure per cohort — 0x / 1x / 2x+ / Eligible now, migration 0227, offer_group_exposure_mv; lifecycle views in their own 05:30 / 20:30 UTC cron run); 2026-10-26 (lifecycle columns: Hot and Warm separate — migration 0226, offer_group_lifecycle_v2_mv)_
 
 A read-only, per-offer report that breaks an offer's **lifetime** economics down
 by contact group, plus current list-pressure (how hard each group is being
@@ -392,6 +392,63 @@ only spacing: neither lifecycle view reads another matview.
 Cost on production: v2 refreshed in **30.6 s** at its first fill (2026-10-27);
 the exposure view's cost is measured at its first fill and recorded on ClickUp
 1amdve28n15.
+
+### 0231 — conversions under their own offer (the *_v2 views)
+
+Since per-offer conversion attribution Phase 1 (#430) a conversion is stored
+under the offer it converted on (`conversion_events.offer_id`), which can differ
+from the offer of the campaign that sent it (35 rows on prod, 2026-11-04 —
+e.g. a 62 campaign whose recipient bought 76). Migration
+[`0231`](../../db/migrations/0231_offer_report_conversion_offer.sql) makes this
+report and Audience Stats attribute that money the same way Phase 2's runtime
+By Offer tab does, through three **new** matviews read and refreshed in place of
+the old ones:
+
+| Old (no longer read or refreshed once the 0231 code deploys) | New |
+|---|---|
+| `offer_group_report_mv` | `offer_group_report_v2_mv` |
+| `audience_report_group_totals_mv` | `audience_report_group_totals_v2_mv` |
+| `offer_report_offer_totals_mv` | `offer_report_offer_totals_v2_mv` |
+
+plus the plain view `offer_split_amounts_v` (the SQL twin of `getOfferSplits`,
+lifetime — Ruling R3). What moves and what stays:
+
+- **Group rows:** a split conversion's revenue / pending / sales leave the
+  campaign's offer row and land on the conversion's offer row, in the same
+  group(s) (same recipient, same targeted-group rule). Sends, cost, clicks,
+  opt-outs and sent 7d/30d/90d stay with the sending campaign's offer — they are
+  traffic. An offer that only *receives* split conversions (82, 124 today) gets
+  rows with Sends 0, so its EPC renders "—" as on the By Offer tab.
+- **Audience Stats ("all offers" row):** unchanged — the money changes offer,
+  not group.
+- **Footer:** the Keitaro-based Revenue / Sales subtract `offer_split_amounts_v`
+  from the campaign's offer and add it to the conversion's offer; the
+  ledger-based `attributable_*` move the same way at send grain. So the footer's
+  two halves agree, and A + B = the stage on both.
+- **Not replicated:** the runtime's `would_go_negative` skip. 0 such stages on
+  prod at 2026-11-04; `scripts/verify-offer-report-v2.ts` fails if one appears.
+
+**Refresh cost.** Each v2 definition keeps the old view's stage_sends pass
+byte-identical (`rate`, `attr`, `attributable` — `scripts/test-offer-report-split-db.ts`
+asserts it against `pg_get_viewdef` of the installed views); the added CTEs read
+the ~3.5K-row ledger and reach `stage_sends` by primary key only. Measured on
+prod (read-only EXPLAIN ANALYZE of each new piece alone): split view 7–16 ms,
+own-offer `conv` 24–35 ms, `moved` 9–72 ms, `attributable_moved` 16 ms. The
+cron refreshes the v2 view **instead of** the old one — **never both**, which
+would double the run's dominant ~165 s refresh inside the 300 s invocation (the
+budget above). `scripts/test-refresh-session.ts` asserts neither run touches an
+old name.
+
+**Rollout (owner go #2):** `db:migrate` creates the four objects `WITH NO DATA`
+(nothing built inside db:migrate's 120 s); `scripts/fill-offer-report-v2.ts
+--apply` fills the v2 views (plain REFRESH on the report session, 230 s) and
+then refreshes the old ones, refusing UTC hours 04, 05, 19, 20 (the cron runs);
+`scripts/verify-offer-report-v2.ts` (read-only) compares v2 to old — untouched
+offers identical, touched offers differing by exactly the split amounts,
+Audience Stats identical, the split view equal to `getOfferSplits`; only then
+the code that reads and refreshes the v2 names deploys. Rollback = redeploy the
+previous code (the old views are still there, one cron run behind). The old
+views are dropped by a later migration once the owner has reviewed the numbers.
 
 ### 0226: a new view alongside, filled after the migration
 

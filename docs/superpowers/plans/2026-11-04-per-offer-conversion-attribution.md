@@ -49,19 +49,32 @@
 
 **Interfaces:**
 - Consumes: `Lookups.offersByKeitaroId: Map<number, { orgId; offerId; affiliateNetworkId }>` (already loaded for every row's Keitaro offer id, ambiguous ids removed).
-- Produces: `export function resolveConversionOffer(stage: { orgId: string; offerId: number | null; affiliateNetworkId: number | null }, keitaroOfferId: number | null, lookups: Pick<Lookups, "offersByKeitaroId">): { offerId: number | null; affiliateNetworkId: number | null; source: "keitaro_offer" | "campaign" }` in `lib/conversions/build-rows.ts`. `buildConversionEventRows` uses it for the stage path; the resolved `affiliateNetworkId` feeds `resolveMapping`, so the rules of the offer the user actually converted on apply.
+- Produces: `export function resolveConversionOffer(stage: { orgId: string; offerId: number | null; affiliateNetworkId: number | null }, keitaroOfferId: number | null, lookups: Pick<Lookups, "offersByKeitaroId">): { offerId: number | null; affiliateNetworkId: number | null; source: "keitaro_offer" | "campaign" }` in `lib/conversions/build-rows.ts`. `buildConversionEventRows` uses it for the stage path to set the STORED `offerId` only. **Classification is unchanged:** `resolveMapping` is still called with the stage's campaign offer and its network, exactly as today (owner condition 2026-11-04: who gets texted must not change — a different network's or offer's rules could flip a row's purchase status and with it `bought_offer`). Cross-network splits keep the campaign network's rules; revisiting that belongs to card 1amdve2aedn.
 
 - [ ] **Step 1: Write the failing tests** (`R1`–`R6`, each building one source row + lookups and asserting `rows[0].offerId` and the mapping used):
-  - `R1` stage offer 10 (network 1), Keitaro offer 78 → offer 20 (network 2) same org ⇒ `offerId 20`, rule resolved on network 2 (give network 2 a `sale` rule with a different event type and assert that type).
+  - `R1` stage offer 10 (network 1), Keitaro offer 78 → offer 20 (network 2) same org ⇒ `offerId 20`, and the event type/status are the ones network 1's rule gives (give network 2 a `sale` rule with a different event type and assert it is NOT used).
   - `R2` Keitaro offer maps to an offer in another org ⇒ `offerId 10`.
   - `R3` Keitaro offer not in the map ⇒ `offerId 10`.
   - `R4` `keitaroOfferId` null ⇒ `offerId 10`.
   - `R5` Keitaro offer maps to offer 10 itself ⇒ `offerId 10`, `source "keitaro_offer"`.
   - `R6` no stage, Keitaro offer mapped ⇒ unchanged from today (`offerId` = mapped offer).
-- [ ] **Step 2:** `npx tsx scripts/test-conversion-ledger-rows.ts` → R1, R2-with-network, R5 FAIL (R2–R4, R6 pass on today's code).
+- [ ] **Step 2:** `npx tsx scripts/test-conversion-ledger-rows.ts` → R1 and R5 FAIL (R2–R4, R6 pass on today's code).
 - [ ] **Step 3:** Implement `resolveConversionOffer` and use it in the stage branch.
 - [ ] **Step 4:** Re-run → all pass (existing 38 + 6).
 - [ ] **Step 5:** Commit `feat(conversions): attribute a conversion to the offer mapped from its Keitaro offer`.
+
+### Task 1b: Prove targeting is unchanged when a row moves offer
+
+**Files:**
+- Test: `scripts/test-offer-move-targeting-invariance-db.ts` (camman-v2, rolled back)
+
+**Why:** owner condition 2026-11-04. Recon (2026-11-04, origin/main + live prod `pg_views`/`pg_matviews`/`pg_proc`) found NO targeting reader of `conversion_events.offer_id`: `purchasedOfferContacts` (`lib/sale-attribution.ts:76`, feeding `bought_offer` in `lib/sends/eligibility.ts` + `lib/sends/lifecycle-recheck.ts` and `made_purchase_for_offer` in `lib/segment-rules-eval.ts`) and `offer_group_exposure_mv` all reach the offer through `ce.campaign_id → campaigns.offer_id`. The only code reader is the alert grouping in `lib/conversions/monitor.ts`. This task pins that, so a later change cannot silently start reading it.
+
+- [ ] **Step 1: Write the test** on a fixture: org with offers A and B, campaign on A, a stage, two contacts, one approved Purchase row on contact 1 with `offer_id = A`. Capture: `purchasedOfferContacts(org, A)` and `(org, B)` contact sets; `buildStageEligibilityExclusions` `bought_offer` layer for a draft stage on A and one on B; `recheckLifecycleEligibility` result for a batch on each; segment audience for a `made_purchase_for_offer` A rule and a B rule. Then `UPDATE conversion_events SET offer_id = B`, recapture, and assert every set is IDENTICAL (`T1`–`T4`). `T5`: a source guard — `git grep` of `lib/` and `db/migrations/` for a `conversion_events` alias followed by `.offer_id` outside `lib/conversions/ingest.ts`, `lib/conversions/monitor.ts` and `lib/reporting/offer-splits.ts` must be empty (names the file that broke it).
+- [ ] **Step 2:** Run on camman-v2 → passes on today's code (it is a pin, not a red-first test); prove it CAN go red by temporarily changing `purchasedOfferContacts` to `ce.offer_id` → T1 fails; restore.
+- [ ] **Step 3:** Commit `test(conversions): moving a conversion's offer never changes who is excluded or segmented`.
+
+At go #1 the same five checks run read-only on prod for the nine-link move (Phase 1 ship section).
 
 ### Task 2: Offer attribution follows the current mapping on re-ingest
 
@@ -100,7 +113,8 @@
 ### Phase 1 ship and gated apply
 
 - [ ] PR → green (`guards`) → merge → prod deploy on the merge SHA. Live ingest now attributes NEW conversions; existing rows unchanged.
-- [ ] Prod dry run of Task 3 (read-only) with the nine mappings applied *in a rolled-back transaction*; post the report. Expected: 34 rows, $2,105.90 (62 −7/+11, 76 −11/+7, 77 −4, 82 +4, 123 −6, 124 +6, 142 −1, 152 −5, 158 +6).
+- [ ] Prod dry run of Task 3 (read-only) with the nine mappings applied *in a rolled-back transaction*; post the report: per offer before → after (rows, sales, approved revenue). Expected: 34 rows, $2,105.90 (62 −7/+11, 76 −11/+7, 77 −4, 82 +4, 123 −6, 124 +6, 142 −1, 152 −5, 158 +6).
+- [ ] In the same rolled-back transaction: `purchasedOfferContacts` for each of the nine offers + the `made_purchase_for_offer` segment audiences that exist on prod, before vs after the move → must be identical (owner condition 2026-11-04). Post the counts.
 - [ ] **STOP — owner go #1.** Then, attended: link the nine Keitaro offers (`UPDATE offers SET keitaro_offer_id = …` guarded on `keitaro_offer_id IS NULL`), run the backfill `--apply`, re-run the dry run (0 rows), and after the next projection tick confirm per-campaign totals unchanged.
 
 ---

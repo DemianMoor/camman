@@ -182,10 +182,12 @@ async function dbBars() {
       await conversion(S1.ss, L1.c, A, "approved", "30.0000", "14T06:00:00");
       await conversion(S1.ss, L1.c, A, "pending", "10.0000", "14T06:05:00");
       await conversion(S1.ss, L1.c, A, "rejected", "99.0000", "14T06:10:00"); // nothing
-      // Leads on S1, detected D2: an approved $5 lead + a pending $0 registration
-      // = 2 leads, $5 lead revenue (inside Revenue, not added again); a rejected
-      // lead counts nowhere. Sales are untouched.
+      // Leads on S1, detected D2: an approved $5 lead, a pending $2 lead and a
+      // pending $0 registration = 3 leads (≠ the 2 sales, so a leads counter
+      // that counts sales is caught), $5 lead revenue — approved only, already
+      // inside Revenue. A rejected lead counts nowhere. Sales are untouched.
       await conversion(S1.ss, L1.c, A, "approved", "5.0000", "14T06:20:00", leadType);
+      await conversion(S1.ss, L1.c, A, "pending", "2.0000", "14T06:22:00", leadType);
       await conversion(S1.ss, L1.c, A, "pending", "0.0000", "14T06:25:00", signal);
       await conversion(S1.ss, L1.c, A, "rejected", "7.0000", "14T06:30:00", leadType);
 
@@ -244,8 +246,8 @@ async function dbBars() {
       expectCell(act, "A3 lead sandbox D2 → NULL key", L, null, D2, { leads_admitted: 1, admitted: 1 });
       expectCell(act, "A4 A/K1/D1: S1 first+delivered, 1 human click, 60 s latency", A, K1, D1,
         { first_sends: 1, dlr_sent: 1, delivered: 1, clicks: 1, send_cost: "0.0100", latency_hist: hist8 });
-      expectCell(act, "A5 A/K1/D2: S4 first (undelivered, carried → no latency), click, 2 sales $30 + 2 leads $5 on DETECTION day (Revenue $35)", A, K1, D2,
-        { first_sends: 1, dlr_sent: 1, clicks: 1, sales: 2, revenue: "35.0000", send_cost: "0.0100", leads: 2, lead_revenue: "5.0000" });
+      expectCell(act, "A5 A/K1/D2: S4 first (undelivered, carried → no latency), click, 2 sales $30 + 3 leads $5 on DETECTION day (Revenue $35)", A, K1, D2,
+        { first_sends: 1, dlr_sent: 1, clicks: 1, sales: 2, revenue: "35.0000", send_cost: "0.0100", leads: 3, lead_revenue: "5.0000" });
       expectCell(act, "A6 A/∅/D1: journey-less S6 → follow-up, unattributed", A, null, D1,
         { followup_sends: 1, dlr_sent: 1, send_cost: "0.0100" });
       expectCell(act, "A7 A/∅/D2: sandbox S5 first send, no latency", A, null, D2,
@@ -259,7 +261,7 @@ async function dbBars() {
       bar("C0 cohort: exactly 7 cells", coh.length === 7, `${coh.length} (refresh said ${rc.cells})`);
       expectCell(coh, "C1 cohort D1 lead K1: J1", L, K1, D1, { admitted: 1 });
       expectCell(coh, "C2 cohort D1 A/K1: S1 + BOTH human clicks + both sales + both leads (late, D2)", A, K1, D1,
-        { first_sends: 1, dlr_sent: 1, delivered: 1, clicks: 2, sales: 2, revenue: "35.0000", send_cost: "0.0100", leads: 2, lead_revenue: "5.0000", latency_hist: hist8 });
+        { first_sends: 1, dlr_sent: 1, delivered: 1, clicks: 2, sales: 2, revenue: "35.0000", send_cost: "0.0100", leads: 3, lead_revenue: "5.0000", latency_hist: hist8 });
       expectCell(coh, "C3 cohort D1 B/K1: S2 + S3 across midnight + the STOP", B, K1, D1,
         { followup_sends: 2, dlr_sent: 1, opt_outs: 1, send_cost: "0.0320" });
       expectCell(coh, "C4 cohort D2 lead K1: J2 carried", L, K1, D2, { admitted: 1, admitted_carried: 1 });

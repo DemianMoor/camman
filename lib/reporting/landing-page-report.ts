@@ -6,7 +6,7 @@ import { lifetimeManualSalesByStage } from "@/lib/reporting/attribution";
 import { etDayBounds, sentCountsByStage } from "@/lib/reporting/delivery-rollup";
 import { dripCostByStageInRange } from "@/lib/reporting/stage-funnel";
 import { hasNoKeitaroVisits, stageIsMatureForGap } from "@/lib/reporting/tracking-gap-rules";
-import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
+import { approvedRevenueClause, countedClause, purchasedClause } from "@/lib/sale-attribution";
 
 // /reports/landing-pages — results per landing page for ONE offer, on a
 // SEND-DATE basis (docs/04-features/landing-page-report.md).
@@ -22,6 +22,12 @@ import { approvedRevenueClause, purchasedClause } from "@/lib/sale-attribution";
 // - DRIP stages are read PER SEND: a drip stage sends for weeks and its page can
 //   be switched mid-flight (stage 5064: 8,927 sends to `mdc`, then 22,492 to
 //   `mdc2`), so the page is read from each send's minted link.
+//
+// PER-OFFER SPLIT (lib/reporting/offer-splits.ts): a conversion counts for the
+// offer it is stored under (conversion_events.offer_id; NULL = the campaign's).
+// So the offer's own stages lose conversions stored under another offer, and a
+// stage of ANOTHER offer whose landing page converted on this one contributes
+// those sales / revenue (never sends, cost or clicks) to the row of its page.
 //
 // The landing-page key is the slug AS MINTED on a sent row, falling back to the
 // stage's configured page, then (manual mode, which mints nothing) the declared
@@ -138,9 +144,18 @@ export async function offersWithSends(orgId: string) {
     SELECT o.id, o.name, o.status, o.created_at
     FROM offers o
     WHERE o.org_id = ${orgId}::uuid
-      AND EXISTS (
-        SELECT 1 FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
-        WHERE c.org_id = o.org_id AND c.offer_id = o.id AND cs.sent_at IS NOT NULL
+      AND (
+        EXISTS (
+          SELECT 1 FROM campaign_stages cs JOIN campaigns c ON c.id = cs.campaign_id
+          WHERE c.org_id = o.org_id AND c.offer_id = o.id AND cs.sent_at IS NOT NULL
+        )
+        -- An offer whose only activity is conversions split in from another
+        -- offer's stages still has a report.
+        OR EXISTS (
+          SELECT 1 FROM conversion_events ce
+          WHERE ce.org_id = o.org_id AND ce.offer_id = o.id AND ce.stage_id IS NOT NULL
+            AND ${countedClause("ce")}
+        )
       )
     ORDER BY o.name
   `)) as unknown as { id: number; name: string; status: string; created_at: string }[];
@@ -221,13 +236,16 @@ export async function getLandingPageReport(args: {
   const cohortIds = cohort.map((s) => s.stage_id);
   const trackedRegularIds = regular.filter((s) => s.link_mode === "tracked").map((s) => s.stage_id);
   const dripIds = drip.map((s) => s.stage_id);
-  const cfgKey = (s: StageRow): LpKey | null =>
+  const cfgKey = (s: Pick<StageRow, "cfg_slug" | "cfg_url">): LpKey | null =>
     s.cfg_slug ? { kind: "slug", value: s.cfg_slug } : lpKeyFromUrl(s.cfg_url, paths);
   const isGap = (s: StageRow) =>
     s.link_mode === "tracked" && stageIsMatureForGap(s.sent_at, now) && hasNoKeitaroVisits(s.visits_raw, s.visits_clean);
 
   const none = Promise.resolve([] as never[]);
-  const [regularSent, manualSales, regOptOuts, regLedger, regReached, regClickers, dripSends, dripClickers, dripReached, dripCost, unattributed] =
+  // A conversion is this offer's when it is stored under it, or under no offer
+  // (then the campaign's offer is the fallback).
+  const ownConversion = sql`(ce.offer_id IS NULL OR ce.offer_id = ${offerId})`;
+  const [regularSent, manualSales, regOptOuts, regLedger, regReached, regClickers, dripSends, dripClickers, dripReached, dripCost, unattributed, splitIn] =
     await Promise.all([
       sentCountsByStage(db, { orgId, stageIds: trackedRegularIds, fromEtDay: from, toEtDay: to, toExclusiveUtc }, now),
       lifetimeManualSalesByStage({ orgId, stageIds: cohortIds }),
@@ -241,10 +259,11 @@ export async function getLandingPageReport(args: {
         ? (db.execute(sql`
             SELECT ce.stage_id,
                    count(*) FILTER (WHERE ${purchasedClause("ce")})::int AS sales,
-                   COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")}), 0)::float8 AS revenue
+                   count(*) FILTER (WHERE ${purchasedClause("ce")} AND NOT ${ownConversion})::int AS moved_sales,
+                   COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")} AND ${ownConversion}), 0)::float8 AS revenue
             FROM conversion_events ce
             WHERE ce.org_id = ${orgId}::uuid AND ce.stage_id = ANY(${idArray(cohortIds)}) GROUP BY 1
-          `) as unknown as Promise<{ stage_id: number; sales: number; revenue: number }[]>)
+          `) as unknown as Promise<{ stage_id: number; sales: number; moved_sales: number; revenue: number }[]>)
         : none,
       // Reach happens after the send, so a lower bound on offer_reached_at at
       // the window start keeps this on the partial offer_reached_at index
@@ -262,7 +281,7 @@ export async function getLandingPageReport(args: {
             WHERE org_id = ${orgId}::uuid AND stage_id = ANY(${idArray(cohortIds)})
           `) as unknown as Promise<{ stage_id: number; contact_id: string }[]>)
         : none,
-      dripIds.length ? dripSendGroups(orgId, dripIds, fromUtc, toExclusiveUtc) : none,
+      dripIds.length ? dripSendGroups(orgId, offerId, dripIds, fromUtc, toExclusiveUtc) : none,
       dripIds.length
         ? (db.execute(sql`
             SELECT DISTINCT ss.stage_id, d.url, cc.contact_id
@@ -288,11 +307,12 @@ export async function getLandingPageReport(args: {
       dripIds.length ? dripCostByStageInRange(orgId, fromUtc, toExclusiveUtc, { includeArchived: true }) : Promise.resolve(new Map<number, number>()),
       dripIds.length
         ? (db.execute(sql`
-            SELECT count(*)::int AS n FROM conversion_events
-            WHERE org_id = ${orgId}::uuid AND stage_id = ANY(${idArray(dripIds)}) AND stage_send_id IS NULL
-              AND ${purchasedClause("conversion_events")}
+            SELECT count(*)::int AS n FROM conversion_events ce
+            WHERE ce.org_id = ${orgId}::uuid AND ce.stage_id = ANY(${idArray(dripIds)}) AND ce.stage_send_id IS NULL
+              AND ${purchasedClause("ce")} AND ${ownConversion}
           `) as unknown as Promise<{ n: number }[]>)
         : none,
+      splitInGroups(orgId, offerId, fromUtc, toExclusiveUtc),
     ]);
 
   const rowsByKey = new Map<string, LandingPageRow>();
@@ -364,7 +384,10 @@ export async function getLandingPageReport(args: {
     const led = ledgerBy.get(s.stage_id);
     const ledSales = led ? Number(led.sales) : 0;
     // Manual tally tops the tracker up, never adds to it — combineSales' max().
-    const sales = ledSales + Math.max(0, (manualSales.get(s.stage_id) ?? 0) - ledSales);
+    // The max is over ALL the stage's ledger sales; the ones stored under another
+    // offer then leave (they are that offer's), as in splitStageMetrics.
+    const sales =
+      ledSales + Math.max(0, (manualSales.get(s.stage_id) ?? 0) - ledSales) - (led ? Number(led.moved_sales) : 0);
     r.sales += sales;
     r.revenue += led ? Number(led.revenue) : 0;
     r.optouts += optOutBy.get(s.stage_id) ?? 0;
@@ -426,6 +449,18 @@ export async function getLandingPageReport(args: {
     subtotals.drip.sales += Number(g.sales);
     subtotals.drip.revenue += Number(g.revenue);
   }
+  // Conversions split in from another offer's stages: sales and revenue only, on
+  // the row of the page they converted through. Same window rules as the passes
+  // above (regular: stage sent in range; drip: the converting send sent in range).
+  for (const g of splitIn) {
+    const r = rowFor(lpKeyFromUrl(g.url, paths) ?? cfgKey(g), g.brand_id, g.brand_name);
+    r.sales += Number(g.sales);
+    r.revenue += Number(g.revenue);
+    const sub = g.type === "drip" ? subtotals.drip : subtotals.regular;
+    sub.sales += Number(g.sales);
+    sub.revenue += Number(g.revenue);
+  }
+
   // Drip cost is dripCostByStageInRange's per-stage figure (the Overview's),
   // apportioned across a stage's pages by its sends' own cost — so a stage that
   // switched pages splits, and the stage total still foots.
@@ -516,7 +551,7 @@ export async function getLandingPageReport(args: {
 // send-keyed facts riding the same rows: reach, the send's own cost (the
 // apportioning weight), and the conversions and opt-outs attributed to those
 // exact sends. Materialized once so the three joins read it, not stage_sends.
-async function dripSendGroups(orgId: string, dripIds: number[], fromUtc: Date, toExclusiveUtc: Date) {
+async function dripSendGroups(orgId: string, offerId: number, dripIds: number[], fromUtc: Date, toExclusiveUtc: Date) {
   return (await db.execute(sql`
     WITH ds AS MATERIALIZED (
       SELECT ss.id, ss.stage_id, d.url, (ss.offer_reached_at IS NOT NULL) AS reached,
@@ -533,7 +568,7 @@ async function dripSendGroups(orgId: string, dripIds: number[], fromUtc: Date, t
              count(*) FILTER (WHERE ${purchasedClause("ce")})::int AS sales,
              COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")}), 0) AS revenue
       FROM conversion_events ce JOIN ds ON ds.id = ce.stage_send_id
-      WHERE ce.org_id = ${orgId}::uuid
+      WHERE ce.org_id = ${orgId}::uuid AND (ce.offer_id IS NULL OR ce.offer_id = ${offerId})
       GROUP BY 1, 2
     ),
     oo AS (
@@ -554,5 +589,42 @@ async function dripSendGroups(orgId: string, dripIds: number[], fromUtc: Date, t
   `)) as unknown as {
     stage_id: number; url: string | null; sends: number; reached: number; send_cost: number;
     sales: number; revenue: number; optouts: number;
+  }[];
+}
+
+// Conversions stored under this offer on stages of ANOTHER offer, grouped by the
+// stage and the converting send's minted destination (the page it came through).
+// Regular stages are a send-date cohort (stage sent in range, every conversion);
+// drip stages count the conversions of sends sent in range.
+async function splitInGroups(orgId: string, offerId: number, fromUtc: Date, toExclusiveUtc: Date) {
+  const from = fromUtc.toISOString();
+  const to = toExclusiveUtc.toISOString();
+  return (await db.execute(sql`
+    SELECT cs.id AS stage_id, c.type, c.brand_id, b.name AS brand_name,
+           CASE WHEN p.kind = 'slug' THEN p.slug END AS cfg_slug,
+           CASE WHEN p.kind = 'external_url' THEN p.external_url ELSE cs.full_url END AS cfg_url,
+           d.url,
+           count(*) FILTER (WHERE ${purchasedClause("ce")})::int AS sales,
+           COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")}), 0)::float8 AS revenue
+    FROM conversion_events ce
+    JOIN campaign_stages cs ON cs.id = ce.stage_id AND cs.org_id = ce.org_id
+    JOIN campaigns c ON c.id = cs.campaign_id AND c.org_id = ce.org_id
+    LEFT JOIN brands b ON b.id = c.brand_id
+    LEFT JOIN offer_landing_pages p ON p.id = cs.landing_page_id
+    LEFT JOIN stage_sends ss ON ss.id = ce.stage_send_id
+    LEFT JOIN links l ON l.id = ss.link_id
+    LEFT JOIN link_destinations d ON d.id = l.destination_id
+    WHERE ce.org_id = ${orgId}::uuid AND ce.offer_id = ${offerId}
+      AND c.offer_id IS DISTINCT FROM ${offerId}
+      AND cs.sent_at IS NOT NULL
+      AND CASE WHEN c.type = 'drip'
+               THEN ss.sent_at >= ${from}::timestamptz AND ss.sent_at < ${to}::timestamptz
+               ELSE cs.sent_at >= ${from}::timestamptz AND cs.sent_at < ${to}::timestamptz END
+    GROUP BY 1, 2, 3, 4, 5, 6, 7
+    HAVING count(*) FILTER (WHERE ${purchasedClause("ce")}) > 0
+        OR COALESCE(sum(ce.revenue) FILTER (WHERE ${approvedRevenueClause("ce")}), 0) <> 0
+  `)) as unknown as {
+    stage_id: number; type: "regular" | "drip"; brand_id: number | null; brand_name: string | null;
+    cfg_slug: string | null; cfg_url: string | null; url: string | null; sales: number; revenue: number;
   }[];
 }

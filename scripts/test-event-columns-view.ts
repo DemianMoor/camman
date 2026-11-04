@@ -23,6 +23,9 @@ import {
   isHeldBackFromDefaultView,
 } from "@/lib/reporting/column-visibility";
 import type { EventMap, EventTypeSpec } from "@/lib/reporting/event-columns";
+import { PerfValueCell, type Col } from "@/components/reports/performance-report";
+import { NO_OWN_SENDS_NOTE } from "@/lib/reporting/offer-split-display";
+import type { PerfRow } from "@/lib/reporting/performance-report";
 
 // PURE — no DB, no env, no browser. Run:
 //   npx tsx scripts/test-event-columns-view.ts
@@ -1933,6 +1936,49 @@ check(
     ` | roster drift: ${rosterDrift.join(",") || "none"} | roster not accepted by route: ${rosterNotAccepted.join(",") || "none"}` +
     ` | declared=${overviewDeclaredIds.length} sortableDeclared=${overviewSortableDeclared.length} roster=${overviewSortRoster.length} route=${routeSortable.length}`,
 );
+
+// ── PS: the per-offer split's "—" cells (By Offer, Task 5) ─────────────────
+// A row with no sends of its own (sent 0, revenue split in from another offer's
+// stage) renders EPC, EPC (all time), Cost and Profit as "—" with the owner's
+// tooltip; a mixed row divides its OWN revenue; an untouched row is unchanged.
+{
+  const perfRow = (f: Partial<PerfRow>): PerfRow => ({
+    key: "k", label: "l", sent: 0, opt_outs: 0, clickers: 0, redirects: 0, reached: null,
+    counted_clickers: 0, lifetime_clickers: 0, lifetime_revenue: 0, split_in_revenue: 0,
+    split_out_revenue: 0, sales: 0, revenue: 0, events: {}, unmapped: 0, manual_topup: 0,
+    pending_revenue: 0, cost: 0, ...f,
+  });
+  const col = (id: string, kind: Col["kind"]): Col => ({ id, header: id, kind });
+  const cell = (r: PerfRow, c: Col) => renderToStaticMarkup(createElement(PerfValueCell, { row: r, col: c }));
+  const DASH_COLS = [col("cost", "usd"), col("epc", "usd"), col("lifetime_epc", "usd"), col("profit", "profit")];
+  const title = `title="${NO_OWN_SENDS_NOTE.replace(/'/g, "&#x27;")}"`;
+
+  const secondary = perfRow({ sales: 1, revenue: 30, split_in_revenue: 30 });
+  const dashed = DASH_COLS.map((c) => cell(secondary, c));
+  check(
+    "PS1 ⭐ a row with no sends of its own renders —, with the exact tooltip, in Cost, EPC, EPC (all time) and Profit",
+    dashed.every((h) => h.includes(">—</td>") && h.includes(title)),
+    dashed.join(" | "),
+  );
+  const rev = cell(secondary, col("revenue", "usd"));
+  const sales = cell(secondary, col("sales", "count"));
+  check("PS2 …while its Sales and Revenue still show, with no tooltip",
+    rev.includes(">$30.00</td>") && sales.includes(">1</td>") && !rev.includes("title=") && !sales.includes("title="), `${rev} ${sales}`);
+
+  const mixed = perfRow({ sent: 500, counted_clickers: 40, revenue: 70, split_in_revenue: 50, cost: 5 });
+  check("PS3 a mixed row's EPC divides its OWN revenue ($20 / 40 = $0.50) and Profit subtracts from it ($15.00)",
+    cell(mixed, col("epc", "usd")).includes(">$0.50</td>") && cell(mixed, col("profit", "profit")).includes(">$15.00</td>"),
+    `${cell(mixed, col("epc", "usd"))} ${cell(mixed, col("profit", "profit"))}`);
+  const primary = perfRow({ sent: 1000, counted_clickers: 100, revenue: 100, split_out_revenue: 80, cost: 10 });
+  check("PS4 a row that split revenue OUT still earns it in EPC ($180 / 100 = $1.80)",
+    cell(primary, col("epc", "usd")).includes(">$1.80</td>"), cell(primary, col("epc", "usd")));
+
+  const plain = perfRow({ sent: 0, counted_clickers: 8, revenue: 16, cost: 0 });
+  const plainCells = [...DASH_COLS, col("revenue", "usd")].map((c) => cell(plain, c));
+  check("PS5 ⭐ a row the split did not touch — even one with sent 0 — renders numbers, never — or the tooltip",
+    plainCells.every((h) => !h.includes("—") && !h.includes("title=")) && plainCells[1].includes(">$2.00</td>"),
+    plainCells.join(" | "));
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

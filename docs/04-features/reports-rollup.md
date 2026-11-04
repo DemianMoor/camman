@@ -1,6 +1,6 @@
 # Reports Rollup
 
-_Last updated: 2026-10-22 (P6: By Format dimension)_
+_Last updated: 2026-11-04 (By Offer: per-offer conversion split); 2026-10-22 (P6: By Format dimension)_
 
 > **⚠️ SOURCE CHANGE (2026-07-20) — read this first.** The five `/reports` tabs
 > were re-sourced to **match the Overview (Keitaro) tab exactly**. On first live
@@ -251,6 +251,25 @@ Guard: [scripts/verify-overview-phone-line.ts](../../scripts/verify-overview-pho
 - **Legacy rollup:** [`scripts/test-report-rollup.ts`](../../scripts/test-report-rollup.ts) still validates the (now-unused) Phase-1 rollup aggregates.
 - **Operator-API grading fields (2026-09-14):** [`scripts/test-grading-rates.ts`](../../scripts/test-grading-rates.ts) (pure rate math), [`scripts/verify-operator-grading.ts`](../../scripts/verify-operator-grading.ts) (every dimension's `reached` and deduped clicker totals vs independent SQL; read-only on prod), [`scripts/verify-operator-grading-http.ts`](../../scripts/verify-operator-grading-http.ts) (the routes over HTTP with a session, plus a recipient-phone / `contact_id` sweep carrying its own can-go-red controls).
 - ⚠️ **By Group is slow at ANY range** (measured 2026-09-14): its click-weight query walks every scored-human click (163K) and probes `stage_sends` once per click — 49s for one day, 55s for two — so with its sibling weight queries running in parallel it intermittently exceeds the 2-minute statement timeout (`57014`). Pre-existing, and `verify-lifetime-display.ts` / `test-performance-report.ts` can hit it. The reach weights run AFTER that parallel batch, not inside it, so they add no contention to it. `verify-operator-grading.ts` reports a By Group timeout as SKIPPED, never as a pass.
+
+## By Offer: per-offer conversion split (2026-11-04)
+
+A stage's conversions are stored under the offer they converted on (`conversion_events.offer_id`, [conversion-events.md](conversion-events.md#offer-attribution-from-the-keitaro-offer-2026-11-04)), which can differ from the campaign's offer when the landing page splits traffic across offers. The stage totals (`keitaro_stage_results`) are keyed by stage, so the offer-keyed readers apply a split layer, [lib/reporting/offer-splits.ts](../../lib/reporting/offer-splits.ts):
+
+- `getOfferSplits(orgId, stageIds, range)`: ONE grouped ledger read per request for the report's stage set. Per (stage, offer other than the campaign offer) it returns the sales, approved revenue, pending revenue and per-event map. Range = the report's ET days under conversion_date (the lifetime job passes its whole history), or `null` = lifetime under send_date (a cohort stage reports everything to date).
+- `splitStageMetrics`: the campaign-offer slice keeps everything (sent, cost, clicks, opt-outs, reach, manual top-up, unmapped) minus the moved sales / revenue / pending / events; each split becomes a secondary slice with only those four fields. Σ slices = the stage, field for field. If a split would drive the campaign-offer slice negative the stage stays unsplit (`skipped: "would_go_negative"`, logged; never clamped). A split that moves nothing (only rejected conversions) is dropped, so it cannot mint an all-zero row. Unmapped conversions stay on the campaign offer.
+
+**Who reads slices:**
+- By Offer (`groupByStageDimension`), the creative × offer rows (`groupByCreativeOffer`) and the `offer_id` filter in [lib/reporting/performance-report.ts](../../lib/reporting/performance-report.ts). Under `offer_id` the stage set also includes stages that split INTO the offer, the totals are that offer's slices, and manual visits count only the offer's own stages.
+- `offer_totals` of the lifetime creative blob follows By Offer ([lib/reporting/creative-lifetime.ts](../../lib/reporting/creative-lifetime.ts); a blob written before this change reads both split fields as 0).
+- `/creatives` per-offer metrics do the same split in SQL (the `split_ev` … `slices` CTEs in [lib/creatives/metrics-cache.ts](../../lib/creatives/metrics-cache.ts), lifetime like the rest of that query). Clicks, deliveries and checkouts stay on the campaign offer; the all-offers row is unchanged.
+- `/reports/landing-pages` counts a conversion for the offer it is stored under and adds other offers' stages that converted on it (sales and revenue only, on the row of the page they came through — [landing-page-report.md](landing-page-report.md)).
+
+**Nothing else runs the split.** Overview, By Campaign, By Number, By Sequence, By Group, By Format, Hourly and every report total are byte-identical with and without it.
+
+**EPC, Profit and "—".** Each row carries `split_in_revenue` (revenue moved in from other offers' stages) and `split_out_revenue` (its own stages' revenue moved to other offers); both are 0 on any row the split did not touch. On the By-X table ([components/reports/performance-report.tsx](../../components/reports/performance-report.tsx), helpers in [lib/reporting/offer-split-display.ts](../../lib/reporting/offer-split-display.ts)) EPC and Profit use the revenue the row's OWN traffic produced, `revenue − split_in_revenue + split_out_revenue`, over the row's own counted clickers / cost. (This table has no ROI column; Profit is where the owner's ROI rule lands.) EPC (all time) already is own-traffic: `lifetime_revenue` is the stage's all-time revenue and is never split. A row with `sent === 0 && split_in_revenue > 0` has no sends of its own: Cost, EPC, EPC (all time) and Profit render "—" with the tooltip "This offer's sales here came through another offer's landing page, so they have no sends or cost of their own." Sales and Revenue still show the split-in amounts. The per-event columns are not adjusted: a mixed row's per-event rates include the split-in counts.
+
+Tests: [scripts/test-offer-splits.ts](../../scripts/test-offer-splits.ts) (pure), [scripts/test-offer-splits-db.ts](../../scripts/test-offer-splits-db.ts) and [scripts/test-offer-split-report-db.ts](../../scripts/test-offer-split-report-db.ts) (camman-v2: P1 rows sum to the stages, P2 pure-secondary row, P3 mixed-row EPC, P4 Overview / By Number / By Sequence / Hourly / totals identical with and without the split, P5 landing-page report, P6 `/creatives` = By Offer), bars PS1–PS5 in [scripts/test-event-columns-view.ts](../../scripts/test-event-columns-view.ts) (the rendered "—" cells and tooltip).
 
 ## By Format (P6, 2026-10-22 — tab behind the message-formats UI flag)
 

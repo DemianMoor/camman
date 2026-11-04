@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ A reversal postback reuses the ORIGINAL event's tid; every new event gets a new one (2026-11-03)
@@ -3859,11 +3859,17 @@ Sweeply's postback template hardcodes `status=lead` for **paid** conversions. Ke
 
 `conversion_event_mappings` classifies per network or offer, keyed on Keitaro's canonical conversion **type** (many raw statuses — `approved`, `confirmed`, `paid` — resolve to the one `Sale` type). An unknown network/type is stored with NULL event type and status and is never counted as a purchase. Guessing "it's probably a sale" is exactly how a $0 registration would have become a buyer.
 
+## Offer slices sum to the stage; "—" only on a row with no sends of its own (2026-11-04)
+
+When a report splits a stage across offers (a conversion stored under another offer, [04-features/reports-rollup.md](04-features/reports-rollup.md#by-offer-per-offer-conversion-split-2026-11-04)), the slices must add back to the stage **field for field**. The campaign-offer slice keeps sends, cost, clicks, opt-outs, reach, the manual top-up and unmapped; only sales / revenue / pending / per-event counts move. Never clamp to make it fit: a split that would drive the campaign-offer slice negative leaves the stage unsplit and logs `would_go_negative`. A new offer-keyed reader takes its slices from `splitStageMetrics` (in SQL, the same rule as the `slices` CTE in `lib/creatives/metrics-cache.ts`) instead of its own arithmetic. Only offer-keyed readers run it: campaign, stage and non-offer totals must not change.
+
+EPC and Profit on an offer row use the revenue its **own** traffic produced (`revenue − split_in_revenue + split_out_revenue`), never revenue moved in from another offer's stage. Cost, EPC, EPC (all time) and Profit render "—" (with the fixed tooltip) **only** when `sent === 0 && split_in_revenue > 0`. Any other zero renders as a number, so a row the split did not touch reads exactly as before.
+
 ## `conversion_events.offer_id` is reporting-only; targeting reaches the offer via the campaign (2026-11-04)
 
 `conversion_events.offer_id` is the offer a conversion is credited to in reports. It can differ from the campaign's offer (the Keitaro offer the link pointed at) and it moves when a mapping changes. Anything that decides **who is selected or excluded** (segment rules, send exclusions, the lifecycle re-check) must reach the offer through `ce.campaign_id → campaigns.offer_id`, as `purchasedOfferContacts` in [lib/sale-attribution.ts](../lib/sale-attribution.ts) does. Classification (event type / status) also stays on the campaign's offer and network.
 
-Source guard: T5 in `scripts/test-offer-move-targeting-invariance-db.ts` fails on any `conversion_events` alias `.offer_id` in `lib/` or `db/migrations` outside `lib/conversions/ingest.ts`, `lib/conversions/monitor.ts` and `lib/reporting/offer-splits.ts`. A new reader that needs the stored offer for a report goes on that allow-list deliberately. See [04-features/conversion-events.md](04-features/conversion-events.md#offer-attribution-from-the-keitaro-offer-2026-11-04).
+Source guard: T5 in `scripts/test-offer-move-targeting-invariance-db.ts` fails on any `conversion_events` alias `.offer_id` in `lib/` or `db/migrations` outside `lib/conversions/ingest.ts`, `lib/conversions/monitor.ts` and the by-offer reports (`lib/reporting/offer-splits.ts`, `lib/reporting/landing-page-report.ts`, `lib/creatives/metrics-cache.ts`). A new reader that needs the stored offer for a report goes on that allow-list deliberately. See [04-features/conversion-events.md](04-features/conversion-events.md#offer-attribution-from-the-keitaro-offer-2026-11-04).
 
 ## A "keep the existing value" rule has nothing to keep on a first sighting (2026-09-18)
 

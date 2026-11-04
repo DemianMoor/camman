@@ -33,6 +33,12 @@ import {
   purchasedClause,
 } from "@/lib/sale-attribution";
 import {
+  getOfferSplits,
+  splitStageMetrics,
+  type OfferSlice,
+  type OfferSplit,
+} from "@/lib/reporting/offer-splits";
+import {
   getStageMetricsInRange,
   type ClickerDenominators,
   type StageMetrics,
@@ -356,13 +362,54 @@ export async function getStageDimensionReports(
   const lifeRevByStage = clickers.lifetimeRevenueByStage;
   const metricsOf = (s: StageMetrics) =>
     stageMetrics(s, countedByStage, lifeByStage, lifeRevByStage);
-  const filtered = stages.filter(
-    (s) =>
-      (b.providerPhoneId == null || s.provider_phone_id === b.providerPhoneId) &&
-      (b.offerId == null || s.offer_id === b.offerId),
+  const byNumber = stages.filter(
+    (s) => b.providerPhoneId == null || s.provider_phone_id === b.providerPhoneId,
   );
 
-  const totals = filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), zeroMetrics());
+  // THE OFFER SPLIT (lib/reporting/offer-splits.ts): conversions stored under an
+  // offer other than the stage's campaign offer move to that offer's slice. Only
+  // the offer-keyed groupers (offer, creative x offer, the offer_id filter) read
+  // slices, so every other dimension and every total is untouched: the split
+  // never runs for them. One ledger read for the whole stage set.
+  const offerKeyed =
+    b.offerId != null || dimensions.some((d) => d === "offer" || d === "creative");
+  const splitsByStage = new Map<number, OfferSplit[]>();
+  if (offerKeyed) {
+    const splits = await getOfferSplits(
+      orgId,
+      byNumber.map((s) => s.stage_id),
+      // send_date: a cohort stage reports everything to date, so its splits do too.
+      b.attribution === "send_date" ? null : { fromEt: b.from, toEt: b.to },
+    );
+    for (const sp of splits) {
+      // An all-zero split (e.g. only rejected conversions) moves nothing and
+      // would render an empty offer row.
+      if (!isMovingSplit(sp)) continue;
+      const list = splitsByStage.get(sp.stage_id) ?? [];
+      list.push(sp);
+      splitsByStage.set(sp.stage_id, list);
+    }
+  }
+  const slicesOf = (s: StageMetrics): OfferSlice[] =>
+    splitStageMetrics(s.offer_id, metricsOf(s), splitsByStage.get(s.stage_id) ?? []);
+
+  // Under offer_id the report also carries the stages that split INTO the offer
+  // (their secondary slice is the offer's), and the totals are that offer's slices.
+  const filtered =
+    b.offerId == null
+      ? byNumber
+      : byNumber.filter(
+          (s) =>
+            s.offer_id === b.offerId ||
+            (splitsByStage.get(s.stage_id) ?? []).some((sp) => sp.offer_id === b.offerId),
+        );
+  const totals =
+    b.offerId == null
+      ? filtered.reduce((acc, s) => addMetrics(acc, metricsOf(s)), zeroMetrics())
+      : filtered
+          .flatMap(slicesOf)
+          .filter((sl) => sl.offer_id === b.offerId)
+          .reduce((acc, sl) => addMetrics(acc, sl.metrics), zeroMetrics());
   await dedupeTotalClickers(orgId, b, filtered, totals, clickers);
   const refreshedAt = await maxSyncedAt(orgId);
 
@@ -378,9 +425,9 @@ export async function getStageDimensionReports(
         // Labelled as such in the UI. See docs/04-features/epc-denominator.md.
         rows = await distributeToGroups(orgId, filtered, b, metricsOf);
       } else if (dimension === "creative") {
-        rows = await groupByCreativeOffer(orgId, filtered, b, metricsOf);
+        rows = await groupByCreativeOffer(orgId, filtered, b, slicesOf);
       } else {
-        rows = await groupByStageDimension(filtered, dimension, metricsOf);
+        rows = await groupByStageDimension(filtered, dimension, metricsOf, slicesOf);
         // Replace the summed clicker counts with DISTINCT counts at the dimension's
         // own grain — the row grain the rule refers to. Revenue stays summed; it is
         // genuinely additive.
@@ -407,13 +454,17 @@ async function dedupeTotalClickers(
     .reduce((a, s) => a + s.tally.visit_clicks_clean, 0);
   if (b.offerId != null) {
     // One offer's totals = that offer's row in dimension=offer: distinct clickers
-    // at the offer grain, over the same period scope.
+    // at the offer grain, over the same period scope. Only the offer's OWN stages
+    // add visits: a stage that merely split a conversion into it sent nothing for it.
+    const ownManualVisits = stages
+      .filter((s) => s.link_mode !== "tracked" && s.offer_id === b.offerId)
+      .reduce((a, s) => a + s.tally.visit_clicks_clean, 0);
     const [period, lifetime] = await Promise.all([
       getCountedClickersByDimension(db, orgId, "offer", periodBounds(b, stages)),
       getCountedClickersByDimension(db, orgId, "offer"),
     ]);
-    totals.counted_clickers = (period.get(b.offerId) ?? 0) + manualVisits;
-    totals.lifetime_clickers = (lifetime.get(b.offerId) ?? 0) + manualVisits;
+    totals.counted_clickers = (period.get(b.offerId) ?? 0) + ownManualVisits;
+    totals.lifetime_clickers = (lifetime.get(b.offerId) ?? 0) + ownManualVisits;
     return;
   }
   if (b.providerPhoneId == null) {
@@ -433,17 +484,29 @@ async function dedupeTotalClickers(
   totals.lifetime_clickers = lifetime + manualVisits;
 }
 
+// A split that moves something. getOfferSplits already omits event keys that are
+// zero on every field, so an empty `events` plus zero amounts moves nothing.
+function isMovingSplit(sp: OfferSplit): boolean {
+  return sp.sales !== 0 || sp.revenue !== 0 || sp.pending_revenue !== 0 || Object.keys(sp.events).length > 0;
+}
+
 // ---- number / offer / sequence: group the shared stage metrics -------------
 async function groupByStageDimension(
   stages: StageMetrics[],
   dimension: "number" | "offer" | "sequence" | "format",
   metricsOf: (s: StageMetrics) => PerfMetrics,
+  slicesOf: (s: StageMetrics) => OfferSlice[],
 ): Promise<PerfRow[]> {
   const keyOf = (s: StageMetrics): string => stageDimensionKey(s, dimension);
   const acc = new Map<string, PerfMetrics>();
+  const add = (k: string, m: PerfMetrics) => acc.set(k, addMetrics(acc.get(k) ?? zeroMetrics(), m));
   for (const s of stages) {
-    const k = keyOf(s);
-    acc.set(k, addMetrics(acc.get(k) ?? zeroMetrics(), metricsOf(s)));
+    if (dimension === "offer") {
+      // Each slice under its own offer; the slices sum to the stage.
+      for (const sl of slicesOf(s)) add(sl.offer_id == null ? "none" : String(sl.offer_id), sl.metrics);
+    } else {
+      add(keyOf(s), metricsOf(s));
+    }
   }
 
   if (dimension === "number") {
@@ -552,7 +615,7 @@ async function groupByCreativeOffer(
   orgId: string,
   stages: StageMetrics[],
   b: Bounds,
-  metricsOf: (s: StageMetrics) => PerfMetrics,
+  slicesOf: (s: StageMetrics) => OfferSlice[],
 ): Promise<PerfRow[]> {
   const { fromUtc, toExclusiveUtc } = etRangeUtc(b);
   const acc = new Map<
@@ -560,20 +623,26 @@ async function groupByCreativeOffer(
     { m: PerfMetrics; creativeId: number | null; offerId: number | null; days: string[]; manualVisits: number }
   >();
   for (const s of stages) {
-    const key = `${s.creative_id ?? DIMENSION_NONE_KEY}:${s.offer_id ?? DIMENSION_NONE_KEY}`;
-    const e = acc.get(key) ?? {
-      m: zeroMetrics(),
-      creativeId: s.creative_id,
-      offerId: s.offer_id,
-      days: [],
-      manualVisits: 0,
-    };
-    e.m = addMetrics(e.m, metricsOf(s));
-    if (s.sent_at && s.sent_at >= fromUtc && s.sent_at < toExclusiveUtc) {
-      e.days.push(formatInCampaignTimezone(s.sent_at, "yyyy-MM-dd"));
+    // One entry per offer slice of the stage. A secondary slice (conversions
+    // split to another offer) carries no sends, so no send day and no visits.
+    for (const sl of slicesOf(s)) {
+      const key = `${s.creative_id ?? DIMENSION_NONE_KEY}:${sl.offer_id ?? DIMENSION_NONE_KEY}`;
+      const e = acc.get(key) ?? {
+        m: zeroMetrics(),
+        creativeId: s.creative_id,
+        offerId: sl.offer_id,
+        days: [],
+        manualVisits: 0,
+      };
+      e.m = addMetrics(e.m, sl.metrics);
+      if (!sl.secondary) {
+        if (s.sent_at && s.sent_at >= fromUtc && s.sent_at < toExclusiveUtc) {
+          e.days.push(formatInCampaignTimezone(s.sent_at, "yyyy-MM-dd"));
+        }
+        if (s.link_mode !== "tracked") e.manualVisits += s.tally.visit_clicks_clean;
+      }
+      acc.set(key, e);
     }
-    if (s.link_mode !== "tracked") e.manualVisits += s.tally.visit_clicks_clean;
-    acc.set(key, e);
   }
 
   const entries = [...acc.entries()];

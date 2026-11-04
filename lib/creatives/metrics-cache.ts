@@ -3,6 +3,12 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db/client";
 import { overviewStageClickersSql, readCreativeCtr } from "@/lib/creatives/ctr-rollup";
 import { eventNum, type DbOrTx, type EventCountMap } from "@/lib/reporting/event-columns";
+import {
+  approvedRevenueClause,
+  countedClause,
+  pendingRevenueClause,
+  purchasedClause,
+} from "@/lib/sale-attribution";
 
 // Per-creative 30-day performance metrics, cached in memory.
 //
@@ -34,9 +40,12 @@ import { eventNum, type DbOrTx, type EventCountMap } from "@/lib/reporting/event
 export interface CreativeMetricsRow {
   creative_id: number;
   // null = the creative across ALL offers; a number = only the stages whose
-  // campaign ran that offer (campaigns.offer_id). Both grains come out of one
-  // GROUPING SETS pass, so a clicker who saw the creative under two offers is
-  // counted once in the null row and once in each offer row — never summed.
+  // campaign ran that offer (campaigns.offer_id), with conversions SPLIT to the
+  // offer they converted on (the `slices` CTE): sales / payout / event counts of a
+  // conversion stored under another offer belong to that offer's row. Both grains
+  // come out of one GROUPING SETS pass, so a clicker who saw the creative under
+  // two offers is counted once in the null row and once in each offer row — never
+  // summed. Clicks, deliveries and checkouts stay on the campaign's offer.
   offer_id: number | null;
   delivered: number;
   checkouts: number;
@@ -162,18 +171,18 @@ const cache = new Map<string, Entry>();
 // instead of N. Cleared in a finally so a failure can be retried immediately.
 const inFlight = new Map<string, Promise<CreativeMetricsRow[]>>();
 
-// Per-offer grain. A stage's offer is its campaign's offer (alias `c` in every
-// CTE below). `ok` is the offer key every CTE carries: -1 for the all-offers
-// row, the offer id otherwise, and 0 for a campaign with no offer (dropped at
-// the end — no filter selects it). -1 rather than NULL so the joins between
-// CTEs stay plain hashable equalities.
-const OFFER_EXPR = sql.raw(`coalesce(c.offer_id, 0)`);
-const OK_SELECT = sql`CASE WHEN GROUPING(${OFFER_EXPR}) = 1 THEN -1 ELSE ${OFFER_EXPR} END AS ok`;
-const groupByCreativeAndOffer = (creativeCol: string, extra = "") => {
+// Per-offer grain. A stage's offer is its campaign's offer (alias `c`) for the
+// click CTEs, and its offer SLICE (`slice_offer`, see `slices`) for the
+// conversion CTEs. `ok` is the offer key every CTE carries: -1 for the
+// all-offers row, the offer id otherwise, and 0 for a campaign with no offer
+// (dropped at the end — no filter selects it). -1 rather than NULL so the joins
+// between CTEs stay plain hashable equalities.
+const CAMPAIGN_OFFER = "coalesce(c.offer_id, 0)";
+const okSelect = (offerExpr = CAMPAIGN_OFFER) =>
+  sql.raw(`CASE WHEN GROUPING(${offerExpr}) = 1 THEN -1 ELSE ${offerExpr} END AS ok`);
+const groupByCreativeAndOffer = (creativeCol: string, extra = "", offerExpr = CAMPAIGN_OFFER) => {
   const cols = extra ? `${creativeCol}, ${extra}` : creativeCol;
-  return sql.raw(
-    `GROUP BY GROUPING SETS ((${cols}), (${cols}, coalesce(c.offer_id, 0)))`,
-  );
+  return sql.raw(`GROUP BY GROUPING SETS ((${cols}), (${cols}, ${offerExpr}))`);
 };
 
 // The two aggregates the list endpoint used to LEFT JOIN inline, combined into a
@@ -240,6 +249,91 @@ export async function computeCreativeMetrics(
          AND jsonb_typeof(ksr.events) = 'object'
        GROUP BY 1, 2
     ),
+    -- PER-OFFER SPLIT — the SQL twin of getOfferSplits + splitStageMetrics
+    -- (lib/reporting/offer-splits.ts), lifetime like k_stage. Ledger conversions
+    -- on a stage stored under an offer other than its campaign's move their sales /
+    -- payout / event counts from the campaign-offer slice to that offer's slice.
+    -- The slices sum to the stage, so the all-offers row is unchanged.
+    split_ev AS (
+      SELECT cev.stage_id, cev.offer_id, et.key AS event_key,
+             count(*) FILTER (WHERE ${purchasedClause("cev")})::int AS sales,
+             coalesce(sum(cev.revenue) FILTER (WHERE ${approvedRevenueClause("cev")}), 0)::numeric AS revenue,
+             coalesce(sum(cev.revenue) FILTER (WHERE ${pendingRevenueClause("cev")}), 0)::numeric AS pending_revenue,
+             count(*) FILTER (WHERE ${countedClause("cev")})::int AS n
+        FROM conversion_events cev
+        JOIN campaign_stages cs ON cs.id = cev.stage_id AND cs.org_id = cev.org_id
+        JOIN campaigns c ON c.id = cs.campaign_id AND c.org_id = cev.org_id
+        LEFT JOIN event_types et ON et.id = cev.event_type_id AND et.org_id = cev.org_id
+       WHERE cev.org_id = ${orgId}
+         AND cs.creative_id IS NOT NULL
+         AND cev.offer_id IS NOT NULL
+         AND cev.offer_id IS DISTINCT FROM c.offer_id
+       GROUP BY 1, 2, 3
+    ),
+    -- A (stage, offer) split that moves nothing (only rejected rows) is dropped,
+    -- so it cannot mint an all-zero offer row.
+    split AS (
+      SELECT stage_id, offer_id, sum(sales)::int AS sales, sum(revenue) AS revenue
+        FROM split_ev
+       GROUP BY 1, 2
+      HAVING sum(sales) <> 0 OR sum(revenue) <> 0 OR sum(pending_revenue) <> 0
+          OR coalesce(sum(n) FILTER (WHERE event_key IS NOT NULL), 0) <> 0
+    ),
+    split_key_n AS (
+      SELECT e.stage_id, e.event_key, sum(e.n)::int AS n
+        FROM split_ev e
+        JOIN split s ON s.stage_id = e.stage_id AND s.offer_id = e.offer_id
+       WHERE e.event_key IS NOT NULL
+       GROUP BY 1, 2
+    ),
+    -- The would_go_negative rule: a stage whose splits exceed what its tracker
+    -- totals hold stays unsplit (never clamped).
+    split_neg AS (
+      SELECT DISTINCT kn.stage_id
+        FROM split_key_n kn
+        LEFT JOIN k_stage_ev ke ON ke.stage_id = kn.stage_id AND ke.event_key = kn.event_key
+       WHERE coalesce(ke.n, 0) < kn.n
+    ),
+    split_stage AS (
+      SELECT t.stage_id, t.sales, t.revenue
+        FROM (SELECT stage_id, sum(sales)::int AS sales, sum(revenue) AS revenue FROM split GROUP BY 1) t
+        JOIN campaign_stages cs ON cs.id = t.stage_id
+        LEFT JOIN k_stage ks ON ks.stage_id = t.stage_id
+       WHERE greatest(cs.sales_count, coalesce(ks.sales, 0)) >= t.sales
+         AND coalesce(ks.revenue, 0) >= t.revenue
+         AND t.stage_id NOT IN (SELECT stage_id FROM split_neg)
+    ),
+    -- Every creative stage's offer slices: the campaign-offer slice (is_primary,
+    -- carrying everything but the moved amounts) plus one slice per offer it
+    -- split into (the moved sales and payout only).
+    slices AS (
+      SELECT cs.id AS stage_id, coalesce(c.offer_id, 0) AS slice_offer, true AS is_primary,
+             -coalesce(ss.sales, 0) AS d_sales, -coalesce(ss.revenue, 0) AS d_payout
+        FROM campaign_stages cs
+        JOIN campaigns c ON c.id = cs.campaign_id
+        LEFT JOIN split_stage ss ON ss.stage_id = cs.id
+       WHERE cs.org_id = ${orgId} AND cs.creative_id IS NOT NULL
+      UNION ALL
+      SELECT s.stage_id, s.offer_id, false, s.sales, s.revenue
+        FROM split s
+        JOIN split_stage ss ON ss.stage_id = s.stage_id
+    ),
+    -- The event counts, sliced the same way.
+    slice_ev AS (
+      SELECT ke.stage_id, coalesce(c.offer_id, 0) AS slice_offer, ke.event_key,
+             ke.n - coalesce(kn.n, 0) AS n
+        FROM k_stage_ev ke
+        JOIN campaign_stages cs ON cs.id = ke.stage_id
+        JOIN campaigns c ON c.id = cs.campaign_id
+        LEFT JOIN split_stage ss ON ss.stage_id = ke.stage_id
+        LEFT JOIN split_key_n kn ON kn.stage_id = ss.stage_id AND kn.event_key = ke.event_key
+      UNION ALL
+      SELECT e.stage_id, e.offer_id, e.event_key, e.n
+        FROM split_ev e
+        JOIN split s ON s.stage_id = e.stage_id AND s.offer_id = e.offer_id
+        JOIN split_stage ss ON ss.stage_id = e.stage_id
+       WHERE e.event_key IS NOT NULL AND e.n <> 0
+    ),
     -- …rolled up to the creative and emitted as ONE object per creative. Nothing
     -- aggregates jsonb (there is no min/max for it): the counts are summed as
     -- ordinary integers and only the last step builds the object.
@@ -251,14 +345,13 @@ export async function computeCreativeMetrics(
     creative_ev AS (
       SELECT x.creative_id, x.ok, jsonb_object_agg(x.event_key, x.n) AS events
         FROM (
-          SELECT cs.creative_id, ${OK_SELECT}, ke.event_key, sum(ke.n)::int AS n
-            FROM k_stage_ev ke
-            JOIN campaign_stages cs ON cs.id = ke.stage_id
-            JOIN campaigns c ON c.id = cs.campaign_id
+          SELECT cs.creative_id, ${okSelect("se.slice_offer")}, se.event_key, sum(se.n)::int AS n
+            FROM slice_ev se
+            JOIN campaign_stages cs ON cs.id = se.stage_id
            WHERE cs.org_id = ${orgId}
              AND cs.creative_id IS NOT NULL
              AND cs.created_at >= now() - interval '30 days'
-           ${groupByCreativeAndOffer("cs.creative_id", "ke.event_key")}
+           ${groupByCreativeAndOffer("cs.creative_id", "se.event_key", "se.slice_offer")}
         ) x
        GROUP BY x.creative_id, x.ok
     ),
@@ -271,35 +364,41 @@ export async function computeCreativeMetrics(
        WHERE org_id = ${orgId}
        GROUP BY stage_id
     ),
+    -- One row per offer SLICE of each stage (see slices): only the
+    -- campaign-offer slice carries the stage's own deliveries, checkouts, clicks
+    -- and residuals; a split slice carries the moved sales and payout alone.
     stage_agg AS (
-      SELECT cs.creative_id, ${OK_SELECT},
-             coalesce(sum(cs.delivered_count), 0)::int AS delivered,
-             coalesce(sum(cs.checkout_click_count), 0)::int AS checkouts,
+      SELECT cs.creative_id, ${okSelect("sl.slice_offer")},
+             coalesce(sum(cs.delivered_count) FILTER (WHERE sl.is_primary), 0)::int AS delivered,
+             coalesce(sum(cs.checkout_click_count) FILTER (WHERE sl.is_primary), 0)::int AS checkouts,
              -- A stage's sales = max(manual tally, Keitaro conversions): the
              -- combineSales rule (lib/stage-results.ts). sales_count ALONE is only
              -- the manual tally — the Keitaro poll never writes it — so summing it
              -- read 0 and Sales CR showed 0.0% on every creative (fixed 2026-09-15).
-             coalesce(sum(greatest(cs.sales_count, coalesce(ks.sales, 0))), 0)::int AS sales,
-             coalesce(sum(ks.revenue), 0)::numeric AS payout,
+             coalesce(sum(CASE WHEN sl.is_primary THEN greatest(cs.sales_count, coalesce(ks.sales, 0)) ELSE 0 END
+                          + sl.d_sales), 0)::int AS sales,
+             coalesce(sum(CASE WHEN sl.is_primary THEN coalesce(ks.revenue, 0) ELSE 0 END
+                          + sl.d_payout), 0)::numeric AS payout,
              -- Same CTE, same window, same rows as checkouts above: BOTH
              -- residuals are bounded by the very aggregate they qualify.
-             coalesce(sum(ks.unmapped), 0)::int AS unmapped,
+             coalesce(sum(ks.unmapped) FILTER (WHERE sl.is_primary), 0)::int AS unmapped,
              -- The manual half of the greatest() one line up, per stage, so the
              -- two cannot describe different stages. No second pass: the same
              -- row carries the manual tally and the tracker count.
-             coalesce(sum(greatest(cs.sales_count - coalesce(ks.sales, 0), 0)), 0)::int AS manual_topup,
-             coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS manual_clean,
+             coalesce(sum(greatest(cs.sales_count - coalesce(ks.sales, 0), 0)) FILTER (WHERE sl.is_primary), 0)::int AS manual_topup,
+             coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual' AND sl.is_primary), 0)::int AS manual_clean,
              coalesce(sum(CASE WHEN c.link_mode = 'tracked'
                                THEN ${overviewStageClickersSql({ visitsRaw: "ks.visits_raw", visitsClean: "ks.visits_clean", counted: "ccs.n", sentAt: "cs.sent_at" })}
-                               ELSE cs.click_count END), 0)::int AS visit_clickers
-        FROM campaign_stages cs
+                               ELSE cs.click_count END) FILTER (WHERE sl.is_primary), 0)::int AS visit_clickers
+        FROM slices sl
+        JOIN campaign_stages cs ON cs.id = sl.stage_id
         JOIN campaigns c ON c.id = cs.campaign_id
         LEFT JOIN k_stage ks ON ks.stage_id = cs.id
         LEFT JOIN cc_stage ccs ON ccs.stage_id = cs.id
        WHERE cs.org_id = ${orgId}
          AND cs.creative_id IS NOT NULL
          AND cs.created_at >= now() - interval '30 days'
-       ${groupByCreativeAndOffer("cs.creative_id")}
+       ${groupByCreativeAndOffer("cs.creative_id", "", "sl.slice_offer")}
     ),
     -- The EPC denominator: counted clickers at CREATIVE grain, from the shared
     -- cache (lib/reporting/counted-clickers.ts) - the same definition every
@@ -317,26 +416,29 @@ export async function computeCreativeMetrics(
     -- displayed so an operator can see the full history and override
     -- deliberately. Sort by recent, show both.
     stage_life AS (
-      SELECT cs.creative_id, ${OK_SELECT},
-             coalesce(sum(ks.revenue), 0)::numeric AS lifetime_payout,
-             coalesce(sum(greatest(cs.sales_count, coalesce(ks.sales, 0))), 0)::int AS lifetime_sales,
-             coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual'), 0)::int AS lifetime_manual
-        FROM campaign_stages cs
+      SELECT cs.creative_id, ${okSelect("sl.slice_offer")},
+             coalesce(sum(CASE WHEN sl.is_primary THEN coalesce(ks.revenue, 0) ELSE 0 END
+                          + sl.d_payout), 0)::numeric AS lifetime_payout,
+             coalesce(sum(CASE WHEN sl.is_primary THEN greatest(cs.sales_count, coalesce(ks.sales, 0)) ELSE 0 END
+                          + sl.d_sales), 0)::int AS lifetime_sales,
+             coalesce(sum(cs.click_count) FILTER (WHERE c.link_mode = 'manual' AND sl.is_primary), 0)::int AS lifetime_manual
+        FROM slices sl
+        JOIN campaign_stages cs ON cs.id = sl.stage_id
         JOIN campaigns c ON c.id = cs.campaign_id
         LEFT JOIN k_stage ks ON ks.stage_id = cs.id
        WHERE cs.org_id = ${orgId} AND cs.creative_id IS NOT NULL
-       ${groupByCreativeAndOffer("cs.creative_id")}
+       ${groupByCreativeAndOffer("cs.creative_id", "", "sl.slice_offer")}
     ),
     -- Clickers reach the offer through counted_clickers.campaign_id.
     click_life AS (
-      SELECT cc.creative_id, ${OK_SELECT}, count(DISTINCT cc.contact_id)::int AS lifetime_tracked
+      SELECT cc.creative_id, ${okSelect()}, count(DISTINCT cc.contact_id)::int AS lifetime_tracked
         FROM counted_clickers cc
         JOIN campaigns c ON c.id = cc.campaign_id
        WHERE cc.org_id = ${orgId} AND cc.creative_id IS NOT NULL
        ${groupByCreativeAndOffer("cc.creative_id")}
     ),
     click_agg AS (
-      SELECT cc.creative_id, ${OK_SELECT},
+      SELECT cc.creative_id, ${okSelect()},
              count(DISTINCT cc.contact_id)::int AS tracked_clean
         FROM counted_clickers cc
         JOIN campaigns c ON c.id = cc.campaign_id

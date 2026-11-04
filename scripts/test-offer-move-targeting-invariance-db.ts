@@ -38,11 +38,14 @@ const bar = (name: string, ok: boolean, detail = "") => {
 
 // ── T5: source guard ────────────────────────────────────────────────────────
 // Only these files may read conversion_events.offer_id: the ingest that writes
-// it, the monitor that groups alerts by it, and the offer-splits report.
+// it, the monitor that groups alerts by it, and the by-offer reports.
 const ALLOW = new Set([
   "lib/conversions/ingest.ts",
   "lib/conversions/monitor.ts",
   "lib/reporting/offer-splits.ts",
+  // Reporting only (per-offer split): landing-page rows per offer, creative × offer cache.
+  "lib/reporting/landing-page-report.ts",
+  "lib/creatives/metrics-cache.ts",
 ]);
 const KEYWORDS = new Set([
   "where", "on", "join", "left", "right", "inner", "outer", "cross", "full",

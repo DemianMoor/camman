@@ -13,7 +13,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
-import { maskUrl, postbackConfigError, SYSTEM_PLACEHOLDERS } from "@/lib/partners/postbacks/template";
+import {
+  DEFAULT_STATUS_WORDS,
+  maskUrl,
+  postbackConfigError,
+  STATUS_WORD_RE,
+  SYSTEM_PLACEHOLDERS,
+  type PostbackEvent,
+} from "@/lib/partners/postbacks/template";
 import type { PartnerKeyJson } from "@/lib/partners/queries";
 
 // The "Sales postback" section of a partner key card (partner_keys.postback_*),
@@ -25,6 +32,7 @@ type LogRow = {
   id: number;
   created_at: string;
   is_test: boolean;
+  event: string;
   conversion_event_id: number | null;
   status: string;
   attempts: number;
@@ -43,6 +51,12 @@ type TestResult = {
   url_masked: string | null;
   error: string | null;
 };
+
+// Invalid is not offered until the server accepts it.
+const EVENT_OPTIONS: { key: Exclude<PostbackEvent, "invalid">; label: string }[] = [
+  { key: "purchase", label: "Purchase (approved)" },
+  { key: "opt_out", label: "Opt-out" },
+];
 
 const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   delivered: "default",
@@ -70,6 +84,12 @@ export function PartnerKeyPostback({
   const [template, setTemplate] = useState(row.postback_url_template ?? "");
   const [includePayout, setIncludePayout] = useState(row.postback_include_payout);
   const [firstOnly, setFirstOnly] = useState(row.postback_first_purchase_only);
+  const wordsFromRow = (): Record<string, string> => ({
+    purchase: row.postback_status_words?.purchase ?? DEFAULT_STATUS_WORDS.purchase,
+    opt_out: row.postback_status_words?.opt_out ?? DEFAULT_STATUS_WORDS.opt_out,
+  });
+  const [events, setEvents] = useState<string[]>(row.postback_event_keys);
+  const [words, setWords] = useState<Record<string, string>>(wordsFromRow);
   // The server's own validation message from the last failed save (client and server checks can drift).
   const [serverError, setServerError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
@@ -84,11 +104,21 @@ export function PartnerKeyPostback({
   const [search, setSearch] = useState("");
 
   const trimmed = template.trim();
+  // An emptied input means "use the default"; the server merges words, so send the default explicitly.
+  const effectiveWord = (k: PostbackEvent) => (words[k] ?? "").trim() || DEFAULT_STATUS_WORDS[k];
   const dirty =
     enabled !== row.postback_enabled ||
     trimmed !== (row.postback_url_template ?? "") ||
     includePayout !== row.postback_include_payout ||
-    firstOnly !== row.postback_first_purchase_only;
+    firstOnly !== row.postback_first_purchase_only ||
+    events.slice().sort().join() !== row.postback_event_keys.slice().sort().join() ||
+    EVENT_OPTIONS.some((o) => effectiveWord(o.key) !== wordsFromRow()[o.key]);
+
+  const wordError = (k: PostbackEvent): string | null => {
+    const w = (words[k] ?? "").trim();
+    return w === "" || STATUS_WORD_RE.test(w) ? null : "Letters, digits, _ . - only, up to 32 characters";
+  };
+  const anyWordError = EVENT_OPTIONS.some((o) => wordError(o.key) !== null);
 
   // Mirrors the server check; an empty template is only an error once enabling.
   const templateError =
@@ -125,6 +155,8 @@ export function PartnerKeyPostback({
         postback_url_template: trimmed === "" ? null : trimmed,
         postback_include_payout: includePayout,
         postback_first_purchase_only: firstOnly,
+        postback_event_keys: events,
+        postback_status_words: Object.fromEntries(EVENT_OPTIONS.map((o) => [o.key, effectiveWord(o.key)])),
       }),
     });
     if (!r.ok) {
@@ -214,12 +246,44 @@ export function PartnerKeyPostback({
         {!canManage && <Badge variant="outline">{row.postback_enabled ? "enabled" : "off"}</Badge>}
       </div>
 
-      <p className="text-muted-foreground text-xs">
-        Fires on: <span className="text-foreground font-medium">Purchase (approved)</span>
+      <fieldset className="space-y-1.5" disabled={!canManage || saveApi.isLoading}>
+        <legend className="text-xs font-medium">Fires on</legend>
+        {EVENT_OPTIONS.map((o) => {
+          const checked = events.includes(o.key);
+          const err = wordError(o.key);
+          return (
+            <div key={o.key} className="space-y-0.5">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={checked && events.length === 1}
+                    onChange={(e) => setEvents(e.target.checked ? [...events, o.key] : events.filter((x) => x !== o.key))}
+                  />
+                  {o.label}
+                </label>
+                <Input
+                  aria-label={`${o.label} status word`}
+                  className="h-7 w-32 text-xs"
+                  placeholder={DEFAULT_STATUS_WORDS[o.key]}
+                  value={words[o.key] ?? ""}
+                  onChange={(e) => {
+                    setWords({ ...words, [o.key]: e.target.value });
+                    setServerError(null);
+                  }}
+                />
+              </div>
+              {err && <p className="text-destructive text-xs">{err}</p>}
+            </div>
+          );
+        })}
         {row.postback_active_since && (
-          <> · sales recorded since {formatCampaignDateTime(row.postback_active_since)} (earlier sales are never sent)</>
+          <p className="text-muted-foreground text-xs">
+            Sales recorded since {formatCampaignDateTime(row.postback_active_since)} (earlier sales are never sent)
+          </p>
         )}
-      </p>
+      </fieldset>
 
       {row.postback_enabled && !row.postback_delivery_enabled && (
         <p
@@ -317,7 +381,7 @@ export function PartnerKeyPostback({
             type="button"
             variant="outline"
             size="sm"
-            disabled={saveApi.isLoading || !dirty || templateError !== null}
+            disabled={saveApi.isLoading || !dirty || templateError !== null || anyWordError}
             onClick={() => void save()}
           >
             Save postback
@@ -333,6 +397,8 @@ export function PartnerKeyPostback({
                 setIncludePayout(row.postback_include_payout);
                 setFirstOnly(row.postback_first_purchase_only);
                 setRevealed(false);
+                setEvents(row.postback_event_keys);
+                setWords(wordsFromRow());
               }}
             >
               Reset
@@ -412,6 +478,7 @@ export function PartnerKeyPostback({
                   <tr>
                     <th className="px-2 py-1 font-medium">Time</th>
                     <th className="px-2 py-1 font-medium">Type</th>
+                    <th className="px-2 py-1 font-medium">Event</th>
                     <th className="px-2 py-1 font-medium">Conversion</th>
                     <th className="px-2 py-1 font-medium">Code</th>
                     <th className="px-2 py-1 font-medium">Attempts</th>
@@ -424,6 +491,7 @@ export function PartnerKeyPostback({
                     <tr key={l.id} className="border-t whitespace-nowrap">
                       <td className="px-2 py-1 whitespace-nowrap">{formatCampaignDateTime(l.created_at)}</td>
                       <td className="px-2 py-1">{l.is_test ? "test" : "live"}</td>
+                      <td className="px-2 py-1 font-mono">{l.event}</td>
                       <td className="px-2 py-1">{l.conversion_event_id ?? "—"}</td>
                       <td className="px-2 py-1" title={l.last_error ?? undefined}>
                         {l.last_response_code ?? "—"}

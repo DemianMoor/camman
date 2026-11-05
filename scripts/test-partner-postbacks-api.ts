@@ -198,7 +198,7 @@ async function main() {
     const ids1 = p1.rows.map((x) => x.id);
     check("newest first (id desc)", ids1.every((id, i) => i === 0 || ids1[i - 1] > id), true);
     check("field set has no raw url / payload", Object.keys(p1.rows[0]).sort(),
-      ["attempts", "conversion_event_id", "created_at", "delivered_at", "id", "is_test", "last_attempt_at", "last_error", "last_response_code", "last_url_masked", "status"]);
+      ["attempts", "conversion_event_id", "created_at", "delivered_at", "event", "id", "is_test", "last_attempt_at", "last_error", "last_response_code", "last_url_masked", "status"]);
     const p2 = await listKeyPostbacks(db, { ...base, beforeId: p1.nextBeforeId });
     const p3 = await listKeyPostbacks(db, { ...base, beforeId: p2.nextBeforeId });
     check("pages 2/3: 25 + 7, then no cursor", [p2.rows.length, p3.rows.length, p3.nextBeforeId], [25, 7, null]);

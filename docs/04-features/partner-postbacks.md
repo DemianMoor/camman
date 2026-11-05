@@ -86,7 +86,7 @@ sensitivity as the report revenue toggle. Off means the placeholder is refused a
 
 UI: [components/settings/partner-key-postback.tsx](../../components/settings/partner-key-postback.tsx).
 
-1. Set the template, Count and Include payout, then **Save postback** (needs `partner_keys.manage`).
+1. Tick the events to fire on (**Purchase (approved)**, **Opt-out**; at least one) and optionally set each event's status word (empty = default `sold` / `opt_out`; `[A-Za-z0-9_.-]{1,32}`), then set the template, Count and Include payout, then **Save postback** (needs `partner_keys.manage`).
 2. **Send test** posts a sample payload (`test_<field>` values, a `test-<uuid>` conversion id) to the *saved* template
    and shows the HTTP code and masked URL inline. A second test within a few seconds is refused (429). Test rows are
    `is_test` and never count toward idempotency or first-only.
@@ -94,7 +94,7 @@ UI: [components/settings/partner-key-postback.tsx](../../components/settings/par
    25 rows per page with **Load older** (keyset on id, `GET /api/partner-keys/[keyId]/postbacks?before=<next_before>`),
    a search box (`?q=`, 300 ms debounce; matches the masked URL, the conversion id and the lead's passthrough values —
    e.g. the partner's lead id — case-insensitive, `%`/`_` literal) and "Failed only" (`?failed=1`). Columns: time
-   (ET), test/live, conversion id, code, attempts, status, masked URL (truncated, full value on hover). Server side:
+   (ET), test/live, event, conversion id, code, attempts, status, masked URL (truncated, full value on hover). Server side:
    `listKeyPostbacks` in [lib/partners/postbacks/config.ts](../../lib/partners/postbacks/config.ts); test A5 in
    `scripts/test-partner-postbacks-api.ts`. The log is shown only to users who can manage keys.
 

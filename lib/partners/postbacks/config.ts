@@ -152,6 +152,7 @@ export type PostbackLogRow = {
   id: number;
   created_at: string;
   is_test: boolean;
+  event: string;
   conversion_event_id: number | null;
   status: string;
   attempts: number;
@@ -180,7 +181,7 @@ export async function listKeyPostbacks(
   const pattern = term === null ? null : `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
   // One row more than a page tells whether another page exists.
   const raw = (await dbc.execute(sql`
-    SELECT id, created_at, is_test, conversion_event_id, status, attempts, last_response_code,
+    SELECT id, created_at, is_test, event, conversion_event_id, status, attempts, last_response_code,
            last_error, last_url_masked, last_attempt_at, delivered_at
     FROM partner_postbacks p
     WHERE org_id = ${o.orgId}::uuid AND partner_key_id = ${o.keyId}::int

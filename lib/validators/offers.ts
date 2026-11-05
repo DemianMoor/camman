@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { GLOBAL_PIXEL_MODES } from "@/lib/conversions/build-rows";
+
 export { nullIfEmpty } from "./_helpers";
 
 // Offer validators.
@@ -43,6 +45,10 @@ const baseOfferShape = {
     .max(2147483647, "Keitaro offer ID is too large")
     .nullable()
     .optional(),
+  // Migration 0233: what a conversion WITHOUT our `from=<network code>` marker
+  // (an advertiser's global pixel) counts as on this offer. Optional on create
+  // (the column defaults to "default"); manager+ via offers.create/update.
+  global_pixel_mode: z.enum(GLOBAL_PIXEL_MODES).optional(),
   base_url: z.string().trim().max(500).optional(),
   network_id: z.number({ message: "Network is required" }).int().positive(),
   payout_model: payoutModelEnum,

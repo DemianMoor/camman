@@ -91,6 +91,7 @@ export async function POST(req: NextRequest) {
           postfix: nullIfEmpty(data.postfix),
           base_url: nullIfEmpty(data.base_url),
           keitaro_offer_id: data.keitaro_offer_id ?? null,
+          global_pixel_mode: data.global_pixel_mode ?? "default",
           network_id: data.network_id,
           payout_model: data.payout_model,
           payout_cpa:

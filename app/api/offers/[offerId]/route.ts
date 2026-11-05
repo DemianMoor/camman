@@ -64,6 +64,7 @@ export async function GET(
       postfix: offers.postfix,
       base_url: offers.base_url,
       keitaro_offer_id: offers.keitaro_offer_id,
+      global_pixel_mode: offers.global_pixel_mode,
       network_id: offers.network_id,
       payout_model: offers.payout_model,
       payout_cpa: offers.payout_cpa,

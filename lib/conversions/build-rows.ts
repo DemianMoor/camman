@@ -41,6 +41,51 @@ export function resolveMapping(
   return rule ? { eventTypeId: rule.eventTypeId, status: rule.conversionStatus } : null;
 }
 
+// ── Global pixel (migration 0233) ───────────────────────────────────────────
+// Some advertisers cannot switch their GLOBAL pixel off per offer. It never
+// carries our marker; CamMan's offer-specific postback URLs always end in
+// `from=<network code>` (lib/conversions/postback-urls.ts). The offer's
+// global_pixel_mode says what an UNMARKED conversion counts as.
+export const GLOBAL_PIXEL_MODES = ["default", "lead", "purchase", "ignore"] as const;
+export type GlobalPixelMode = (typeof GLOBAL_PIXEL_MODES)[number];
+
+export interface OfferPixelSetting {
+  mode: GlobalPixelMode;
+  networkCode: string | null; // affiliate_networks.network_id of the offer's network
+}
+
+export type GlobalPixelDecision =
+  | { kind: "rule" } // keep the network-rule result unchanged
+  | { kind: "override"; eventTypeId: number }
+  | { kind: "ignore" }; // do not write the conversion
+
+/** True when the postback carries OUR marker: `from` equals the offer's network code (case-insensitive). */
+export function hasOurMarker(rawParams: Record<string, unknown> | null, networkCode: string | null): boolean {
+  const from = rawParams?.from;
+  if (typeof from !== "string" || !networkCode) return false;
+  return from.trim().toLowerCase() === networkCode.trim().toLowerCase();
+}
+
+// Pure. Marked conversions, `default` offers and REVERSALS (a status-only rule:
+// event type NULL, status set — e.g. `rejected`) always keep the rule result.
+// lead / purchase replace only the event type (status stays the rule's); a type
+// the org lacks, or a Keitaro type no rule maps, keeps the rule result too.
+export function applyGlobalPixelMode(args: {
+  setting: OfferPixelSetting | undefined;
+  rawParams: Record<string, unknown> | null;
+  mapping: ResolvedMapping | null;
+  eventTypeIds: { lead: number | null; purchase: number | null } | undefined;
+}): GlobalPixelDecision {
+  const { setting, rawParams, mapping, eventTypeIds } = args;
+  if (!setting || setting.mode === "default") return { kind: "rule" };
+  if (hasOurMarker(rawParams, setting.networkCode)) return { kind: "rule" };
+  if (mapping && mapping.eventTypeId === null) return { kind: "rule" }; // reversal
+  if (setting.mode === "ignore") return { kind: "ignore" };
+  if (!mapping) return { kind: "rule" };
+  const target = setting.mode === "lead" ? eventTypeIds?.lead : eventTypeIds?.purchase;
+  return target == null ? { kind: "rule" } : { kind: "override", eventTypeId: target };
+}
+
 export interface Lookups {
   stageSends: Map<string, { stageId: number; contactId: string }>;
   stageIdByTrackingId: Map<string, number>; // ambiguous tracking ids omitted
@@ -50,6 +95,11 @@ export interface Lookups {
   >;
   offersByKeitaroId: Map<number, { orgId: string; offerId: number; affiliateNetworkId: number }>;
   rulesByOrg: Map<string, MappingRule[]>;
+  // 0233. REQUIRED (CLAUDE.md §11b): it decides what a conversion counts as,
+  // which decides who is a buyer. Keyed by the STORED offer id.
+  offerPixelSettings: Map<number, OfferPixelSetting>;
+  // Per org: the `lead` and `purchase` event type ids the override assigns.
+  pixelEventTypeIdsByOrg: Map<string, { lead: number | null; purchase: number | null }>;
 }
 
 export interface ConversionEventInsert {
@@ -109,9 +159,16 @@ export function resolveConversionOffer(
 export function buildConversionEventRows(
   sources: readonly LedgerSourceRow[],
   lookups: Lookups,
-): { rows: ConversionEventInsert[]; unresolved: LedgerSourceRow[] } {
+): {
+  rows: ConversionEventInsert[];
+  unresolved: LedgerSourceRow[];
+  // Unmarked conversions on an offer set to `ignore` — never written, so they
+  // can neither add a conversion nor overwrite a stored one on the same tid.
+  ignored: ConversionEventInsert[];
+} {
   const rows: ConversionEventInsert[] = [];
   const unresolved: LedgerSourceRow[] = [];
+  const ignored: ConversionEventInsert[] = [];
 
   for (const s of sources) {
     const send = s.subId1 ? lookups.stageSends.get(s.subId1) : undefined;
@@ -143,13 +200,25 @@ export function buildConversionEventRows(
       affiliateNetworkId = offer.affiliateNetworkId;
     }
 
-    const mapping = resolveMapping(lookups.rulesByOrg.get(orgId) ?? [], {
+    const ruleMapping = resolveMapping(lookups.rulesByOrg.get(orgId) ?? [], {
       offerId: mappingOfferId,
       affiliateNetworkId,
       keitaroType: s.keitaroType,
     });
+    // The global-pixel setting is read from the STORED offer (owner, 2026-11-05):
+    // the offer whose advertiser actually fired the pixel.
+    const pixel = applyGlobalPixelMode({
+      setting: offerId !== null ? lookups.offerPixelSettings.get(offerId) : undefined,
+      rawParams: s.rawParams,
+      mapping: ruleMapping,
+      eventTypeIds: lookups.pixelEventTypeIdsByOrg.get(orgId),
+    });
+    const mapping =
+      pixel.kind === "override" && ruleMapping
+        ? { eventTypeId: pixel.eventTypeId, status: ruleMapping.status }
+        : ruleMapping;
 
-    rows.push({
+    (pixel.kind === "ignore" ? ignored : rows).push({
       orgId,
       keitaroEventId: s.eventId,
       tid: s.tid,
@@ -174,5 +243,5 @@ export function buildConversionEventRows(
     });
   }
 
-  return { rows, unresolved };
+  return { rows, unresolved, ignored };
 }

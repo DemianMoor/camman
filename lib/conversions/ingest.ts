@@ -3,18 +3,22 @@ import type { PgInsertValue } from "drizzle-orm/pg-core";
 
 import type { db } from "@/db/client";
 import {
+  affiliate_networks,
   campaign_stages,
   campaigns,
   conversion_event_mappings,
   conversion_events,
+  event_types,
   offers,
   stage_sends,
 } from "@/db/schema";
 import { CAMPAIGN_TIMEZONE } from "@/lib/campaign-timezone";
 import {
   buildConversionEventRows,
+  GLOBAL_PIXEL_MODES,
   type ConversionEventInsert,
   type ConversionStatus,
+  type GlobalPixelMode,
   type Lookups,
   type MappingRule,
 } from "@/lib/conversions/build-rows";
@@ -135,7 +139,55 @@ export async function loadLookups(
     }
   }
 
-  return { stageSends, stageIdByTrackingId, stages, offersByKeitaroId, rulesByOrg };
+  // 0233: the global-pixel setting of every offer a row in this batch can be
+  // STORED under (a stage's campaign offer, or a mapped Keitaro offer), with its
+  // network's code — the `from=` value our own postback URLs carry.
+  const candidateOfferIds = [
+    ...new Set([
+      ...[...stages.values()].map((s) => s.offerId).filter((v): v is number => v !== null),
+      ...[...offersByKeitaroId.values()].map((o) => o.offerId),
+    ]),
+  ];
+  const offerPixelSettings: Lookups["offerPixelSettings"] = new Map();
+  for (const chunk of chunks(candidateOfferIds, LOOKUP_CHUNK)) {
+    const found = await ex
+      .select({ id: offers.id, mode: offers.global_pixel_mode, networkCode: affiliate_networks.network_id })
+      .from(offers)
+      .leftJoin(affiliate_networks, eq(affiliate_networks.id, offers.network_id))
+      .where(inArray(offers.id, chunk));
+    for (const r of found) {
+      offerPixelSettings.set(r.id, {
+        mode: (GLOBAL_PIXEL_MODES as readonly string[]).includes(r.mode) ? (r.mode as GlobalPixelMode) : "default",
+        networkCode: r.networkCode ?? null,
+      });
+    }
+  }
+
+  // The `lead` / `purchase` types an override assigns — only needed by orgs
+  // that have a non-default offer in this batch.
+  const pixelEventTypeIdsByOrg: Lookups["pixelEventTypeIdsByOrg"] = new Map();
+  if ([...offerPixelSettings.values()].some((s) => s.mode !== "default") && orgIds.length > 0) {
+    const found = await ex
+      .select({ orgId: event_types.org_id, id: event_types.id, key: event_types.key })
+      .from(event_types)
+      .where(and(inArray(event_types.org_id, orgIds), inArray(event_types.key, ["lead", "purchase"])));
+    for (const r of found) {
+      const cur = pixelEventTypeIdsByOrg.get(r.orgId) ?? { lead: null, purchase: null };
+      if (r.key === "lead") cur.lead = r.id;
+      if (r.key === "purchase") cur.purchase = r.id;
+      pixelEventTypeIdsByOrg.set(r.orgId, cur);
+    }
+  }
+
+  return {
+    stageSends,
+    stageIdByTrackingId,
+    stages,
+    offersByKeitaroId,
+    rulesByOrg,
+    offerPixelSettings,
+    pixelEventTypeIdsByOrg,
+  };
 }
 
 // ET wall-clock text → timestamptz in SQL, bound as ::text so postgres-js can't
@@ -390,6 +442,11 @@ export interface IngestResult {
   orgMismatch: number;
   // Up to 5 of them, as `keitaro_event_id existing_org→new_org`.
   orgMismatchSamples: string[];
+  // 0233: unmarked conversions on an offer whose global_pixel_mode is `ignore`
+  // — deliberately not written (neither inserted nor updated).
+  globalPixelIgnored: number;
+  // Up to 10 of them, as `keitaro_event_id offer=… tid=… type=… payout=…`.
+  globalPixelIgnoredSamples: string[];
   error: string | null;
 }
 
@@ -420,6 +477,8 @@ export async function ingestKeitaroConversions(
     typeConflicts: 0,
     orgMismatch: 0,
     orgMismatchSamples: [],
+    globalPixelIgnored: 0,
+    globalPixelIgnoredSamples: [],
     error: null,
   };
 
@@ -462,6 +521,10 @@ export async function ingestKeitaroConversions(
     rows: rows.length,
     unmappedInBatch: rows.filter((r) => r.status === null).length,
     statusOnlyInBatch: rows.filter((r) => r.eventTypeId === null && r.status !== null).length,
+    globalPixelIgnored: built.ignored.length,
+    globalPixelIgnoredSamples: built.ignored
+      .slice(0, 10)
+      .map((r) => `${r.keitaroEventId} offer=${r.offerId ?? "∅"} tid=${r.tid ?? "∅"} type=${r.keitaroType} payout=${r.revenue}`),
     statusOnlyFirstSeenInBatch: statusOnlyFirstSeen.length,
     statusOnlyFirstSeenSamples: statusOnlyFirstSeen
       .slice(0, 10)

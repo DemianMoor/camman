@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-05 (0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ A reversal postback reuses the ORIGINAL event's tid; every new event gets a new one (2026-11-03)
@@ -5010,3 +5010,16 @@ with two SQL sets in [lib/sale-attribution.ts](../lib/sale-attribution.ts):
 segment code. `scripts/test-lead-not-registered-lane.ts` scans for it (allowlist)
 and proves the behaviour on a rolled-back preview fixture. Making leads count
 toward the lane needs an explicit owner decision.
+
+## `from=` marks OUR postbacks; the global pixel is set per offer (0233, 2026-11-05)
+
+Every postback URL CamMan hands an advertiser ends in `from=<network code>`
+(`affiliate_networks.network_id`). A conversion whose `raw_params.from` equals the
+stored offer's network code came from one of our URLs; anything else on that offer
+is the advertiser's own (global) pixel. `offers.global_pixel_mode` decides what an
+unmarked conversion counts as (`default` = network rules). Two rules keep it safe:
+a marked postback and a reversal always follow the network rules, and the setting
+is read only by the conversion ledger (`lib/conversions/`), never by lane, send,
+audience or segment code (`scripts/test-global-pixel-mode.ts` S1/S2).
+`raw_params` holds only the LATEST postback, so the marker must be judged at
+ingest, not afterwards from the stored row.

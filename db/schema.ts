@@ -5350,6 +5350,14 @@ export const partner_keys = pgTable(
     postback_active_since: timestamp("postback_active_since", {
       withTimezone: true,
     }),
+    // Per-event postbacks (0234). event key -> status word / event key -> ISO
+    // timestamp the event became live on the key.
+    postback_status_words: jsonb("postback_status_words")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    postback_event_since: jsonb("postback_event_since")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
   },
   (table) => [
     uniqueIndex("partner_keys_token_uniq").on(table.token),
@@ -5381,7 +5389,7 @@ export const partner_keys = pgTable(
     ),
     check(
       "partner_keys_postback_event_keys_check",
-      sql`${table.postback_event_keys} <@ ARRAY['purchase']::text[] AND cardinality(${table.postback_event_keys}) >= 1`,
+      sql`${table.postback_event_keys} <@ ARRAY['purchase','opt_out','invalid']::text[] AND cardinality(${table.postback_event_keys}) >= 1`,
     ),
     check(
       "partner_keys_postback_enabled_needs_template_check",
@@ -5608,6 +5616,10 @@ export const partner_postbacks = pgTable(
     lead_event_id: uuid("lead_event_id").references(() => lead_events.id, {
       onDelete: "set null",
     }),
+    // Per-event postbacks (0234). lead_inbox_id has NO FK: the inbox row is
+    // deleted in the same transaction that writes an 'invalid' postback.
+    event: text("event").notNull().default("purchase"),
+    lead_inbox_id: uuid("lead_inbox_id"),
     is_test: boolean("is_test").notNull().default(false),
     payload: jsonb("payload").notNull(),
     status: text("status").notNull().default("pending"),
@@ -5628,6 +5640,12 @@ export const partner_postbacks = pgTable(
     uniqueIndex("partner_postbacks_key_conversion_uniq")
       .on(table.partner_key_id, table.conversion_event_id)
       .where(sql`NOT ${table.is_test}`),
+    uniqueIndex("partner_postbacks_key_journey_optout_uniq")
+      .on(table.partner_key_id, table.drip_journey_id)
+      .where(sql`NOT ${table.is_test} AND ${table.event} = 'opt_out'`),
+    uniqueIndex("partner_postbacks_key_inbox_invalid_uniq")
+      .on(table.partner_key_id, table.lead_inbox_id)
+      .where(sql`NOT ${table.is_test} AND ${table.event} = 'invalid'`),
     index("partner_postbacks_due_idx")
       .on(table.next_attempt_at)
       .where(sql`${table.status} = 'pending'`),
@@ -5638,6 +5656,10 @@ export const partner_postbacks = pgTable(
     index("partner_postbacks_journey_idx")
       .on(table.drip_journey_id)
       .where(sql`NOT ${table.is_test}`),
+    check(
+      "partner_postbacks_event_check",
+      sql`${table.event} IN ('purchase', 'opt_out', 'invalid')`,
+    ),
     check(
       "partner_postbacks_status_check",
       sql`${table.status} IN ('pending', 'delivered', 'failed', 'cancelled')`,

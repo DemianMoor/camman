@@ -141,6 +141,42 @@ async function main() {
         SELECT cmd FROM pg_policies WHERE schemaname='public' AND tablename='partner_postbacks'`)) as unknown as { cmd: string }[];
       check("only a SELECT policy", pol.map((p) => p.cmd), ["SELECT"]);
 
+      // ── S-E (0234 per-event postbacks) ────────────────────────────────
+      console.log("\nS-E per-event postbacks:");
+      // The preview DB may hold no drip_journeys row; the journey FK is not under test here,
+      // so a random uuid stands in with FK triggers off for this (rolled-back) transaction.
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      const jid = "33333333-3333-4333-8333-333333333333";
+      const inboxId = "11111111-1111-4111-8111-111111111111";
+      const evIns = (ev: string, test: boolean, journey: string | null, inbox: string | null) => sql`
+        INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, event, drip_journey_id, lead_inbox_id)
+        VALUES (${orgId}::uuid, ${keyId}, ${test}, '{}'::jsonb, ${ev}, ${journey}::uuid, ${inbox}::uuid)`;
+      const defEv = (await tx.execute(sql`
+        INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload)
+        VALUES (${orgId}::uuid, ${keyId}, true, '{}'::jsonb) RETURNING event`)) as unknown as { event: string }[];
+      check("event defaults to 'purchase'", defEv[0].event, "purchase");
+      check("event 'refund' ⇒ 23514", await sqlstate(tx, evIns("refund", true, null, null)), "23514");
+      await tx.execute(evIns("opt_out", false, jid, null));
+      check("duplicate non-test opt_out (key, journey) ⇒ 23505", await sqlstate(tx, evIns("opt_out", false, jid, null)), "23505");
+      check("test opt_out with same pair ⇒ OK", await sqlstate(tx, evIns("opt_out", true, jid, null)), "NO-ERROR");
+      check("purchase + opt_out for one journey coexist", await sqlstate(tx, evIns("purchase", false, jid, null)), "NO-ERROR");
+      await tx.execute(evIns("invalid", false, null, inboxId));
+      check("duplicate non-test invalid (key, inbox) ⇒ 23505", await sqlstate(tx, evIns("invalid", false, null, inboxId)), "23505");
+      check("lead_inbox_id has no FK (random uuid accepted)", await sqlstate(tx, evIns("invalid", false, null, "22222222-2222-4222-8222-222222222222")), "NO-ERROR");
+      check("event_keys '{purchase,opt_out,invalid}' ⇒ OK", await sqlstate(tx, sql`
+        UPDATE partner_keys SET postback_event_keys='{purchase,opt_out,invalid}' WHERE id=${keyId}`), "NO-ERROR");
+      check("event_keys '{refund}' ⇒ 23514", await sqlstate(tx, sql`
+        UPDATE partner_keys SET postback_event_keys='{refund}' WHERE id=${keyId}`), "23514");
+      const jd = (await tx.execute(sql`
+        SELECT postback_status_words, postback_event_since FROM partner_keys WHERE id=${keyId}`)) as unknown as Record<string, unknown>[];
+      check("postback_status_words defaults {}", jd[0].postback_status_words, {});
+      check("postback_event_since defaults {}", jd[0].postback_event_since, {});
+      const bf = (await tx.execute(sql`
+        SELECT count(*)::int AS n FROM partner_keys
+        WHERE postback_active_since IS NOT NULL
+          AND (postback_event_since ->> 'purchase')::timestamptz IS DISTINCT FROM postback_active_since`)) as unknown as { n: number }[];
+      check("backfill: purchase since mirrors postback_active_since", bf[0].n, 0);
+
       throw new Error("ROLLBACK_SENTINEL");
     });
   } catch (e) {

@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-11-03 (landing page fetches first name by sub_id1, 0230); 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-11-05 (L5 partner postbacks: opt_out source, 0234); 2026-11-03 (landing page fetches first name by sub_id1, 0230); 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -681,7 +681,8 @@ the ledger, so whichever commits last is correct.
 
 ## L5. Partner sales postbacks (0228: enqueue in drip-monitors, `*/5 * * * *` delivery)
 
-See [04-features/partner-postbacks.md](04-features/partner-postbacks.md). Triggered by the conversion ledger, never by
+See [04-features/partner-postbacks.md](04-features/partner-postbacks.md). Triggered by the conversion ledger (purchase)
+or a drip journey closing `opted_out` (opt_out), never by
 the send path (guard: `scripts/test-postback-send-path-guard.ts`).
 
 ```mermaid
@@ -697,6 +698,8 @@ sequenceDiagram
   M->>M: lifecycle sweep, then advisory lock
   M->>L: read approved purchases on postback-enabled keys
   M->>Q: INSERT ... ON CONFLICT DO NOTHING (one per key + conversion)
+  Note over L: opt_out: a drip journey closed opted_out, at/after the key's opt_out since (journey-only)
+  M->>Q: second INSERT for opt_out (one per key + journey, conversion_event_id NULL)
   D->>D: kill switch off? record heartbeat and stop
   D->>Q: claim due rows (SKIP LOCKED, 2-minute lease)
   D->>P: GET rendered template (https 443, no redirects, 5 s)

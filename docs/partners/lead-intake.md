@@ -84,24 +84,24 @@ Besides the fields above, we can agree a short list of extra field names with yo
 
 ## Sales postbacks
 
-If agreed, we notify a URL of yours when a lead you sent makes an approved purchase. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a postback is sent for every approved purchase or only the first one per lead.
+If agreed, we notify a URL of yours when something happens to a lead you sent: an approved purchase (`purchase`) and/or the lead opting out of messages (`opt_out`). You receive only the events agreed for your account. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a purchase postback is sent for every approved purchase or only the first one per lead. Events are independent: a lead that opts out and later buys produces both.
 
 Your URL is a template. Write any of these in curly braces and we fill them in, together with your agreed passthrough field names (for example `{your_field}`). Values are URL-encoded. A passthrough field your URL uses is required: if a lead arrived without it, or with it empty, no postback is sent for that lead. Any other value we do not have renders empty.
 
 | Placeholder | Value |
 |---|---|
 | `{status}` | The outcome word for this event, as agreed with you (for a sale, `sold` unless agreed otherwise). |
-| `{event}` | Event type of the sale. |
-| `{event_id}` | Unique id of this event. Use it to de-duplicate. |
-| `{conversion_id}` | Unique id of this sale. Use it to de-duplicate. |
-| `{occurred_at}` | When the sale happened, UTC, ISO 8601. |
-| `{currency}` | Currency code of the amount. |
-| `{payout}` | Amount for the sale. Sent only if enabled for your account. |
+| `{event}` | Event type: `purchase` or `opt_out`. |
+| `{event_id}` | Unique id of this event. Use it to de-duplicate. Different for every event, including each sale and each opt-out. |
+| `{conversion_id}` | Unique id of this sale. Sales only; empty for an opt-out. |
+| `{occurred_at}` | When the event happened, UTC, ISO 8601. For an opt-out, when we processed the STOP. |
+| `{currency}` | Currency code of the amount. Empty for an opt-out. |
+| `{payout}` | Amount for the sale. Sent only if enabled for your account. Empty for an opt-out. |
 
 Example URL:
 
 ```
-https://example.com/postback?ref={your_field}&status={status}&conversion_id={conversion_id}
+https://example.com/postback?ref={your_field}&status={status}&event_id={event_id}
 ```
 
 ### Delivery and retries
@@ -117,7 +117,9 @@ Any 2xx response means delivered. A timeout, a 5xx, 408 or 429 is retried; other
 
 After the last retry we stop.
 
-> **Note:** Delivery is at least once: the same sale can reach you more than once. De-duplicate on `{conversion_id}`.
+> **Note:** Delivery is at least once: the same event can reach you more than once. De-duplicate on `{event_id}`.
+> **Note:** `{status}` is the word agreed with you for the event (for example `sold` for a purchase and `opt_out` for an opt-out).
+> **Note:** For an opt-out, `{conversion_id}`, `{payout}` and `{currency}` are empty, and `{occurred_at}` is when we processed the STOP.
 
 ## Responses
 

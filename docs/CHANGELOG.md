@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-11-05 — Partner postbacks: opt_out event, per-event status words and since, `{event_id}` dedupe key (0234); public partner page + API changelog updated. — docs/04-features/partner-postbacks.md, docs/05-flows.md, docs/07-conventions.md, docs/partners/lead-intake.md
 2026-11-05 — Partner key card: event checkboxes + per-event status words, Event column in the postback log. No migration. — docs/04-features/partner-postbacks.md
 2026-11-04 — verify-offer-split-totals.ts now anchors on independent sources (By Offer vs By Sequence report sums; direct ledger SQL). — docs/04-features/reports-rollup.md
 2026-11-04 — Added scripts/verify-offer-split-totals.ts, a read-only check that unsplit stage metrics equal the sum of per-offer split slices, with per-offer before/after and the explaining ledger rows. No migration. — docs/04-features/reports-rollup.md

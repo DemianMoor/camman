@@ -1,6 +1,6 @@
 # Partner sales postbacks
 
-_Last updated: 2026-11-05_
+_Last updated: 2026-11-05_ (events, status words, event_id: 0234)
 
 When a lead a partner sent us produces a sale, we `GET` a URL the partner configured on their
 intake key, echoing the extra fields they sent with the lead. Generic and per key — no code per
@@ -53,7 +53,7 @@ the passthrough-fields half is in [partner-lead-intake.md](partner-lead-intake.m
 
 `partner_keys.postback_url_template` is an `https://` URL (port 443, no credentials). Placeholders may appear only in
 the **path or query**, never the host (a render that would change the host is refused). Allowed: `{status}` `{event}`
-`{conversion_id}` `{occurred_at}` `{currency}` `{payout}` plus this key's own passthrough field names (for example
+`{event_id}` `{conversion_id}` `{occurred_at}` `{currency}` `{payout}` plus this key's own passthrough field names (for example
 `{relay_lead_id}`). Values are URL-encoded. A referenced passthrough field is required (see "What fires"); any other missing value
 renders empty. Validated server-side by
 `postbackConfigError` in [lib/partners/postbacks/template.ts](../../lib/partners/postbacks/template.ts); the same
@@ -73,8 +73,9 @@ sensitivity as the report revenue toggle. Off means the placeholder is refused a
 - Retries after 1 m, 5 m, 30 m, 2 h, 6 h, 24 h; **7 attempts**, then `failed`. A key disabled while rows are pending
   cancels them unsent; an edited template applies to retries.
 - **At-least-once.** A runner that dies after the partner answered re-sends once its 2-minute lease lapses. The partner
-  must dedupe on **`{conversion_id}`**. (One real postback per key and conversion is also enforced on our side by a
-  partial unique index.)
+  must dedupe on **`{event_id}`** (`purchase-<id>`, `opt_out-<journey uuid>`, test sends `test-<uuid>`).
+  `{conversion_id}` is sale-only (empty for opt_out) and is not the dedupe key. (One real postback per key and
+  conversion, and per key and opted-out journey, is also enforced on our side by partial unique indexes.)
 - **Kill switch:** env `PARTNER_POSTBACKS_DELIVERY_ENABLED` must be `true`. Otherwise the cron only records its
   heartbeat and answers `skipped_kill_switch: true`, and Send test answers 409. Enqueue does **not** check the
   switch: an enabled key keeps queueing rows, which go out in a burst once delivery is switched on. The key JSON
@@ -125,6 +126,19 @@ value for editing (manage users only; Save or Reset masks it again).
 PR2 ships inert (the cron answers `skipped_kill_switch: true`, `partner_postbacks` is empty). To go live: set the env
 var in Vercel and redeploy, configure the partner's key, Send test to their URL, enable, and watch the log through the
 first real sale.
+
+## Events (0234)
+
+| Event | Source | Default `{status}` | `event_id` | Empty values |
+|---|---|---|---|---|
+| `purchase` | approved `conversion_events` row (purchase type) on a drip journey | `sold` | `purchase-<conversion_events.id>` | none |
+| `opt_out` | drip journey closed `opted_out` (journey-only) | `opt_out` | `opt_out-<drip_journeys.id>` | `{conversion_id}`, `{payout}`, `{currency}` |
+
+`invalid` (landline numbers) is added in a later PR and is not available yet. Events are independent: a lead that
+opts out and later buys yields both postbacks; first-purchase-only is a purchase-only rule. Sandbox keys never send
+any event. The required-fields rule applies to every event. The status word is snapshotted into the queued row at
+enqueue (a later word change does not rewrite queued rows). opt_out rows have a NULL `conversion_event_id`, so the
+`no_longer_approved` re-check at delivery applies only to rows with a conversion.
 
 ## Per-event config (0234)
 

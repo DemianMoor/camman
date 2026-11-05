@@ -22,9 +22,10 @@ import { maskUrl, renderPostbackUrl, samplePayload, type PostbackPayload } from 
 // The ledger status is re-read at claim time too: `{status}` was snapshotted at
 // enqueue, so a sale rejected (or otherwise moved off 'approved') while its row is
 // pending would otherwise go out as "approved". Such a row is cancelled unsent with
-// last_error 'no_longer_approved' (owner decision 2: approved only). Live rows only;
-// a live row's conversion_event_id is never NULL in practice (enqueue always sets it,
-// and the FK is ON DELETE RESTRICT), and a NULL one has no ledger row to re-check.
+// last_error 'no_longer_approved' (owner decision 2: approved only). Live rows only,
+// and only rows that HAVE a ledger row: opt_out rows carry a NULL conversion_event_id
+// (their source is the closed journey, not a sale), so there is nothing to re-check
+// and the re-check correctly does not apply to them.
 
 export function deliveryEnabled(): boolean {
   return process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED === "true";

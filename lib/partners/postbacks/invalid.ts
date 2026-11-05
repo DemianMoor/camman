@@ -58,25 +58,71 @@ export async function enqueueInvalidPostback(tx: DbOrTx, o: InvalidInput): Promi
   return rows.length > 0;
 }
 
+// Per-batch outcome of the invalid enqueues, filled by tryEnqueueInvalidPostback
+// and settled ONCE per enrichment batch by settleInvalidPostbackAlert.
+export type InvalidTally = { queued: number; failed: number; firstError: unknown };
+export const newInvalidTally = (): InvalidTally => ({ queued: 0, failed: 0, firstError: undefined });
+
+export type InvalidOutcome = "queued" | "skipped" | "failed";
+
 // Postbacks must never block intake: the insert runs in a SAVEPOINT
 // (tx.transaction nests as one on postgres-js), so a failure rolls back only the
-// postback and leaves the enrichment transaction usable. The failure is logged
-// and latches one Telegram alert, only once postbacks are live (same go-live
-// predicate as the other postback alerts); a later queued row clears it. The
-// alert state is written on the pooled client, never on `tx`, so it holds no
-// alert_state row lock across the enrichment batch. Never throws.
+// postback and leaves the enrichment transaction usable. On failure it logs
+// (key id + inbox id, never partner data) and records the outcome in `tally` —
+// NOTHING else: no alert, no query, no network call inside the enrichment
+// transaction (a Telegram call per failing lead would run the batch past the
+// route's maxDuration and roll the intake back). Never throws.
 export async function tryEnqueueInvalidPostback(
   tx: DbOrTx,
   o: InvalidInput,
+  tally: InvalidTally,
   insert: (tx: DbOrTx, o: InvalidInput) => Promise<boolean> = enqueueInvalidPostback,
-): Promise<void> {
+): Promise<InvalidOutcome> {
   try {
     const queued = await tx.transaction((sp) => insert(sp, o));
-    if (queued) await clearAlert(db, { alertKey: INVALID_POSTBACK_ALERT_KEY });
+    if (!queued) return "skipped";
+    tally.queued++;
+    return "queued";
   } catch (err) {
-    console.error("[enrichment] invalid postback enqueue failed (swallowed):", err instanceof Error ? err.message.split("\n")[0] : err);
-    await alertInvalidFailed(err);
+    tally.failed++;
+    if (tally.failed === 1) tally.firstError = err;
+    console.error(
+      `[enrichment] invalid postback enqueue failed (swallowed) key=${o.partnerKeyId} inbox=${o.leadInboxId}:`,
+      errorSummary(err),
+    );
+    return "failed";
   }
+}
+
+// Called ONCE per enrichment batch, AFTER its transaction has ended. Same latch
+// semantics as the sales enqueue alert in lib/drip/monitors.ts: any failure ⇒
+// latch (one page per transition, first error only); a clean batch that queued
+// at least one row and COMMITTED ⇒ clear; nothing queued and nothing failed ⇒
+// leave the latch as it is (no evidence either way). `committed` is false when
+// the batch rolled back — its queued rows are gone, so it never clears.
+// Best-effort; never throws (it runs in a finally next to the batch's own error).
+export async function settleInvalidPostbackAlert(
+  tally: InvalidTally,
+  committed: boolean,
+  deps: { alert: (err: unknown) => Promise<void>; clear: () => Promise<void> } = {
+    alert: alertInvalidFailed,
+    clear: () => clearAlert(db, { alertKey: INVALID_POSTBACK_ALERT_KEY }),
+  },
+): Promise<void> {
+  try {
+    if (tally.failed > 0) await deps.alert(tally.firstError);
+    else if (committed && tally.queued > 0) await deps.clear();
+  } catch (err) {
+    console.error("[enrichment] invalid postback alert settle failed (swallowed):", errorSummary(err));
+  }
+}
+
+// Drizzle wraps the driver error ("Failed query: <sql>", then a params line) —
+// name the cause, first line only: the params line would carry partner data.
+function errorSummary(err: unknown): string {
+  const e = err instanceof Error && err.cause instanceof Error ? err.cause : err;
+  const name = e instanceof Error ? e.name : typeof e;
+  return `${name}: ${(e instanceof Error ? e.message : String(e)).split("\n")[0].slice(0, 160)}`;
 }
 
 async function alertInvalidFailed(err: unknown): Promise<void> {
@@ -84,14 +130,10 @@ async function alertInvalidFailed(err: unknown): Promise<void> {
     const switchOn = deliveryEnabled();
     const anyKeyEnabled = switchOn ? false : await anyPostbackKeyEnabled();
     if (!postbacksLive({ deliveryEnabled: switchOn, anyKeyEnabled })) return;
-    // Drizzle wraps the driver error ("Failed query: <sql>…") — name the cause; never forward SQL text.
-    const e = err instanceof Error && err.cause instanceof Error ? err.cause : err;
-    const name = e instanceof Error ? e.name : typeof e;
-    const message = (e instanceof Error ? e.message : String(e)).split("\n")[0].slice(0, 160);
     await notifyOnTransition(db, {
       alertKey: INVALID_POSTBACK_ALERT_KEY,
       text:
-        `🔴 Partner postbacks: queueing an invalid-number postback failed (${name}: ${message}). ` +
+        `🔴 Partner postbacks: queueing an invalid-number postback failed (${errorSummary(err)}). ` +
         `Landline leads are still discarded, but their partners are not being told. ` +
         `Check the /api/cron/lead-enrichment logs in Vercel.`,
     });

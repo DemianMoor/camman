@@ -10,7 +10,10 @@ import type { DbOrTx } from "@/lib/intake/partner-key";
 import {
   enqueueInvalidPostback,
   INVALID_POSTBACK_ALERT_KEY,
+  newInvalidTally,
+  settleInvalidPostbackAlert,
   tryEnqueueInvalidPostback,
+  type InvalidTally,
 } from "@/lib/partners/postbacks/invalid";
 import { createPartnerWithKey } from "./_partner-fixture";
 import { fictionalPhones, refuseIfPhonesInUse } from "./_fictional-phones";
@@ -27,7 +30,11 @@ import { fictionalPhones, refuseIfPhonesInUse } from "./_fictional-phones";
 //   I4 an `unknown` line-type row in the same batch ⇒ no postback (G19)
 //   I5 tryEnqueueInvalidPostback with an insert that fails a SQL statement ⇒
 //      resolves, the outer transaction stays usable, the lead's DELETE still
-//      happens, and the failure alert latches
+//      happens; it reports 'failed' and does no alert / IO of its own
+//   S1-S6 the per-batch alert decision (settleInvalidPostbackAlert, injected
+//      alert/clear — no Telegram): any failure ⇒ alert once with the first
+//      error; clean + ≥1 queued + committed ⇒ clear; otherwise neither
+//   I3 also: after the committed batch that queued a row, the latch is 'ok'
 //
 // I1/I2/I5 run in ONE rolled-back transaction. I3/I4 drive runEnrichmentBatch,
 // which opens its own transaction, so their fixtures are COMMITTED in a marked
@@ -169,15 +176,24 @@ async function rolledBackCases(RUN: string) {
         VALUES (${orgId}::uuid, ${keyInv}::int, ${`${RUN}-inv`}, now(), '{}'::jsonb, '+12005550100',
                 ${JSON.stringify(pd)}::jsonb)
         RETURNING id::text AS id`))[0].id;
+      // No alert, no query beyond the savepoint, no network: alert_state is
+      // byte-identical afterwards (postbacks forced "live" so an in-tx alert
+      // WOULD write) and fetch is never called.
       const alertBefore = await alertRow();
       const envBefore = process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED;
-      process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED = "true"; // postbacks "live" ⇒ the alert latches
+      process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED = "true";
+      const realFetch = globalThis.fetch;
+      let fetches = 0;
+      globalThis.fetch = (async () => { fetches++; throw new Error("no network in I5"); }) as typeof fetch;
       let threw = false;
-      let latched: Awaited<ReturnType<typeof alertRow>>;
+      let outcome: string | undefined;
+      const tally5 = newInvalidTally();
+      let alertAfter: Awaited<ReturnType<typeof alertRow>>;
       try {
-        await tryEnqueueInvalidPostback(
+        outcome = await tryEnqueueInvalidPostback(
           tx,
           { orgId, partnerKeyId: keyInv, leadInboxId: inbox5, partnerData: pd, at },
+          tally5,
           async (sp) => {
             await sp.execute(sql`SELECT 1/0`); // a real SQL failure, aborting the savepoint
             return true;
@@ -186,7 +202,8 @@ async function rolledBackCases(RUN: string) {
       } catch {
         threw = true;
       } finally {
-        latched = await alertRow();
+        globalThis.fetch = realFetch;
+        alertAfter = await alertRow();
         if (envBefore === undefined) delete process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED;
         else process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED = envBefore;
         await restoreAlert(alertBefore);
@@ -197,7 +214,18 @@ async function rolledBackCases(RUN: string) {
       await tx.execute(sql`DELETE FROM lead_inbox WHERE id = ${inbox5}::uuid`);
       const gone = (await q(tx, sql`SELECT 1 FROM lead_inbox WHERE id = ${inbox5}::uuid`)).length === 0;
       check("I5 the lead's DELETE still happens", gone);
-      check("I5 the failure alert latches (postbacks live)", latched?.state === "firing", JSON.stringify(latched ?? null));
+      check("I5 the helper reports 'failed' and tallies it",
+        outcome === "failed" && tally5.failed === 1 && tally5.queued === 0 && tally5.firstError instanceof Error,
+        `${outcome} ${JSON.stringify({ q: tally5.queued, f: tally5.failed })}`);
+      check("I5 no alert written, no network call", JSON.stringify(alertAfter ?? null) === JSON.stringify(alertBefore ?? null) && fetches === 0,
+        `fetches ${fetches}, ${JSON.stringify(alertBefore ?? null)} → ${JSON.stringify(alertAfter ?? null)}`);
+      const tallyOk = newInvalidTally();
+      const okOut = await tryEnqueueInvalidPostback(tx,
+        { orgId, partnerKeyId: keyInv, leadInboxId: randomUUID(), partnerData: pd, at }, tallyOk);
+      const skipOut = await tryEnqueueInvalidPostback(tx,
+        { orgId, partnerKeyId: keyNoInv, leadInboxId: randomUUID(), partnerData: pd, at }, tallyOk);
+      check("I5 outcomes: queued / skipped, tally counts only the queued one",
+        okOut === "queued" && skipOut === "skipped" && tallyOk.queued === 1 && tallyOk.failed === 0, `${okOut} ${skipOut}`);
       const n5 = (await q(tx, sql`SELECT 1 FROM partner_postbacks WHERE lead_inbox_id = ${inbox5}::uuid`)).length;
       check("I5 nothing queued by the failed insert", n5 === 0, `rows ${n5}`);
 
@@ -257,6 +285,8 @@ async function enrichmentCases(RUN: string) {
     const unk = await one<{ status: string } | undefined>(sql`SELECT status FROM lead_inbox WHERE id = ${inboxIds.unknown}::uuid`);
     check("I4 the unknown row is processed, not discarded", unk?.status === "processed" && enr.processed === 1,
       `status ${unk?.status}, processed ${enr.processed}`);
+    const afterBatch = await alertRow();
+    check("I3 the batch's settle cleared the latch after commit", afterBatch?.state === "ok", JSON.stringify(afterBatch ?? null));
     check("I4 the unknown row produces no postback (G19)",
       pbs.filter((r) => r.lead_inbox_id === inboxIds.unknown).length === 0 && pbs.length === 1, `postbacks ${pbs.length}`);
   } finally {
@@ -291,9 +321,35 @@ async function enrichmentCases(RUN: string) {
   }
 }
 
+async function settleCases() {
+  const run = async (t: Partial<InvalidTally>, committed: boolean, alertThrows = false) => {
+    const calls = { alert: [] as unknown[], clear: 0 };
+    await settleInvalidPostbackAlert({ ...newInvalidTally(), ...t }, committed, {
+      alert: async (e) => { calls.alert.push(e); if (alertThrows) throw new Error("telegram down"); },
+      clear: async () => { calls.clear++; },
+    });
+    return calls;
+  };
+  const e1 = new Error("first");
+  const s1 = await run({ failed: 3, queued: 0, firstError: e1 }, true);
+  check("S1 failures ⇒ alert called once with the first error, no clear", s1.alert.length === 1 && s1.alert[0] === e1 && s1.clear === 0);
+  const s2 = await run({ failed: 0, queued: 2 }, true);
+  check("S2 all ok, ≥1 queued, committed ⇒ clear once, no alert", s2.alert.length === 0 && s2.clear === 1);
+  const s3 = await run({ failed: 0, queued: 0 }, true);
+  check("S3 nothing queued, no failures ⇒ neither", s3.alert.length === 0 && s3.clear === 0);
+  const s4 = await run({ failed: 0, queued: 2 }, false);
+  check("S4 queued but the batch rolled back ⇒ neither", s4.alert.length === 0 && s4.clear === 0);
+  const s5 = await run({ failed: 1, queued: 5, firstError: e1 }, true);
+  check("S5 failures and queued rows ⇒ alert only", s5.alert.length === 1 && s5.clear === 0);
+  let threw = false;
+  try { await run({ failed: 1, firstError: e1 }, true, true); } catch { threw = true; }
+  check("S6 a failing alert never throws", threw === false);
+}
+
 async function main() {
   console.log(`Target DB: ${requirePreviewDb().label}`);
   const RUN = `pbi-${Date.now().toString(36)}`;
+  await settleCases();
   await rolledBackCases(RUN);
   await enrichmentCases(RUN);
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) FAILED.`);

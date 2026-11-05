@@ -13,7 +13,11 @@ import {
 } from "@/lib/contact-attributes";
 import { extractLeadFields } from "@/lib/intake/fields";
 import type { DbOrTx } from "@/lib/intake/partner-key";
-import { tryEnqueueInvalidPostback } from "@/lib/partners/postbacks/invalid";
+import {
+  newInvalidTally,
+  settleInvalidPostbackAlert,
+  tryEnqueueInvalidPostback,
+} from "@/lib/partners/postbacks/invalid";
 import { enqueueNormalized } from "@/lib/telnyx/enqueue";
 import { bumpIntakeCounters, counterForLineType } from "./counters";
 import {
@@ -278,7 +282,10 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
     byKey: new Map<string, { partnerKeyId: number; tag: string; phones: string[] }>(),
   };
 
-  await db.transaction(async (tx) => {
+  // Invalid-postback outcomes for this batch, settled into ONE alert decision
+  // after the transaction ends — never a network call inside it.
+  const invalidTally = newInvalidTally();
+  const batchFailure = await db.transaction(async (tx) => {
     // Claim: 'awaiting_lookup' whose result has landed (pass 2 — finishing a
     // lead) FIRST, then 'received' (pass 1), oldest first within each. SKIP
     // LOCKED so a slow batch never blocks the next tick, and the lease already
@@ -399,10 +406,11 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
         // The partner's `invalid` postback (0234), queued BEFORE the inbox row
         // goes — the row's id is the postback's event_id. Landline only (G19).
         // Savepointed and never throws: a postback must never block intake.
+        // Outcomes go into the batch tally; alerting happens after the commit.
         await tryEnqueueInvalidPostback(tx, {
           orgId, partnerKeyId: row.partner_key_id, leadInboxId: row.id,
           partnerData: row.partner_data, at: now,
-        });
+        }, invalidTally);
         // Counted, THEN removed — same transaction, so there is no window in
         // which the lead is neither a row nor a count.
         await tx.execute(sql`DELETE FROM lead_inbox WHERE id = ${row.id}`);
@@ -486,7 +494,11 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
       });
       res.processed++;
     }
-  });
+  }).then(() => null, (err: unknown) => ({ err }));
+  // The batch transaction has ended (committed, or rolled back): settle the
+  // invalid-postback alert once, then surface the batch's own error unchanged.
+  await settleInvalidPostbackAlert(invalidTally, batchFailure === null);
+  if (batchFailure) throw batchFailure.err;
 
   // Enqueue AFTER the claim transaction commits. Priority 100 so drip jumps
   // ahead of bulk uploads in the account-global queue (migration 0158); every

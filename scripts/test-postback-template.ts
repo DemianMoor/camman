@@ -1,4 +1,4 @@
-import { postbackConfigError, renderPostbackUrl, maskUrl, samplePayload, type PostbackPayload } from "@/lib/partners/postbacks/template";
+import { postbackConfigError, renderPostbackUrl, maskUrl, samplePayload, statusWordFor, type PostbackPayload } from "@/lib/partners/postbacks/template";
 
 // Pure-function test for the postback URL template. No DB.
 
@@ -10,7 +10,7 @@ function check(label: string, actual: unknown, expected: unknown) {
 }
 
 const base: PostbackPayload = {
-  event: "purchase", status: "approved", conversion_id: "c1", occurred_at: "2026-10-30T00:00:00.000Z",
+  event: "purchase", event_id: "ev1", status: "approved", conversion_id: "c1", occurred_at: "2026-10-30T00:00:00.000Z",
   currency: "USD", payout: "12.50", fields: { relay_lead_id: "a b&c" },
 };
 const T = "https://p.example/pb?rid={relay_lead_id}&s={status}&c={conversion_id}";
@@ -71,8 +71,20 @@ check("T5 repeated", maskUrl("https://h/pb?token=a&token=b"), "https://h/pb?toke
 check("T5 case-insensitive", maskUrl("https://h/pb?API_KEY=z"), "https://h/pb?API_KEY=***");
 
 // samplePayload
-const s = samplePayload(["list_id"]);
-check("S1 sample", [s.fields, s.status, s.payout, s.currency, s.conversion_id.startsWith("test-")], [{ list_id: "test_list_id" }, "approved", "0.00", "USD", true]);
+const s = samplePayload(["list_id"], {});
+check("S1 sample", [s.fields, s.status, s.payout, s.currency, s.conversion_id.startsWith("test-")], [{ list_id: "test_list_id" }, "sold", "0.00", "USD", true]);
+
+// T8 per-event status words + event_id
+check("T8 default opt_out", statusWordFor({}, "opt_out"), "opt_out");
+check("T8 invalid stored word falls back", statusWordFor({ purchase: "sold!" }, "purchase"), "sold");
+check("T8 valid stored word", statusWordFor({ purchase: "SALE" }, "purchase"), "SALE");
+check("T8 non-string falls back", statusWordFor({ invalid: 5 }, "invalid"), "invalid");
+const evP: PostbackPayload = { event: "opt_out", event_id: "opt_out-abc", status: "opt_out", conversion_id: "", occurred_at: "2026-10-30T00:00:00.000Z", payout: null, currency: null, fields: {} };
+check("T8 render event_id", renderPostbackUrl("https://p.example/pb?e={event_id}&s={status}", evP, false), "https://p.example/pb?e=opt_out-abc&s=opt_out");
+check("T8 config accepts {event_id}", postbackConfigError({ template: "https://p.example/pb?e={event_id}", passthroughFields: [], includePayout: false }), null);
+const s8 = samplePayload([], {});
+check("T8 sample event_id/status", [s8.event, s8.event_id.startsWith("test-"), s8.status], ["purchase", true, "sold"]);
+check("T8 sample custom word", samplePayload([], { purchase: "SALE" }).status, "SALE");
 
 if (failed) { console.log(`\n${failed} FAILED`); process.exit(1); }
 console.log("\nAll passed");

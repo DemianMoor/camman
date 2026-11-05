@@ -180,6 +180,7 @@ export const PASSTHROUGH_DOC = {
 const PLACEHOLDER_MEANING: Record<(typeof SYSTEM_PLACEHOLDERS)[number], string> = {
   status: "Outcome of the sale. Always `approved`: postbacks are sent for approved sales only.",
   event: "Event type of the sale.",
+  event_id: "Unique id of this event. Use it to de-duplicate.",
   conversion_id: "Unique id of this sale. Use it to de-duplicate.",
   occurred_at: "When the sale happened, UTC, ISO 8601.",
   currency: "Currency code of the amount.",

@@ -689,16 +689,18 @@ the send path (guard: `scripts/test-postback-send-path-guard.ts`).
 sequenceDiagram
   autonumber
   participant L as conversion_events (ledger)
+  participant J as drip_journeys
   participant M as /api/cron/drip-monitors
   participant Q as partner_postbacks
   participant D as /api/cron/partner-postbacks
   participant P as Partner URL
   participant T as Telegram
-  Note over L: approved is_purchase sale, created at/after postback_active_since
+  Note over L: approved is_purchase sale, created at/after the key's purchase since (partner_keys.postback_event_since)
   M->>M: lifecycle sweep, then advisory lock
   M->>L: read approved purchases on postback-enabled keys
   M->>Q: INSERT ... ON CONFLICT DO NOTHING (one per key + conversion)
-  Note over L: opt_out: a drip journey closed opted_out, at/after the key's opt_out since (journey-only)
+  Note over J: opt_out: a journey closed opted_out, closed_at at/after the key's opt_out since (journey-only)
+  M->>J: read opted_out journeys on postback-enabled keys
   M->>Q: second INSERT for opt_out (one per key + journey, conversion_event_id NULL)
   D->>D: kill switch off? record heartbeat and stop
   D->>Q: claim due rows (SKIP LOCKED, 2-minute lease)

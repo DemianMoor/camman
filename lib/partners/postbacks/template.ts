@@ -99,7 +99,13 @@ function renderRaw(template: string, p: PostbackPayload, includePayout: boolean)
     switch (name) {
       case "status": value = p.status; break;
       case "event": value = p.event; break;
-      case "event_id": value = p.event_id; break;
+      case "event_id": {
+        // Rows queued before event_id existed lack it in the stored jsonb (the type says
+        // string, the data may not): fall back to the format enqueue writes for a sale.
+        const stored = (p as { event_id?: string }).event_id;
+        value = stored ? stored : p.conversion_id ? `purchase-${p.conversion_id}` : "";
+        break;
+      }
       case "conversion_id": value = p.conversion_id; break;
       case "occurred_at": value = p.occurred_at; break;
       case "currency": value = p.currency; break;

@@ -99,6 +99,10 @@ UI: [components/settings/partner-key-postback.tsx](../../components/settings/par
    `listKeyPostbacks` in [lib/partners/postbacks/config.ts](../../lib/partners/postbacks/config.ts); test A5 in
    `scripts/test-partner-postbacks-api.ts`. The log is shown only to users who can manage keys.
 
+Unticking an event only stops new rows for it; rows already queued for that event are still sent, because delivery
+([lib/partners/postbacks/deliver.ts](../../lib/partners/postbacks/deliver.ts)) re-checks only the key's `postback_enabled`
+(disabled ⇒ pending rows are cancelled unsent, `last_error = 'postback_disabled'`) and, for sales, that the ledger row is still `approved`.
+
 **Who sees the template.** `postback_url_template` can carry a secret query value, so it is returned raw only to callers with `partner_keys.manage`; view-only callers (`partner_keys.view`) get `maskUrl(template)` from every key read (`normalizeKeyRows(rows, canManage)` in [lib/partners/queries.ts](../../lib/partners/queries.ts); test `scripts/test-partner-key-template-masking.ts`).
 
 URLs are stored and shown **masked**: query values whose name contains `token`, `key`, `secret`, `sig`, `auth` or

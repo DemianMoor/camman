@@ -190,6 +190,7 @@ export async function listKeyPostbacks(
       ${pattern === null ? sql`` : sql`AND (
         last_url_masked ILIKE ${pattern}
         OR conversion_event_id::text ILIKE ${pattern}
+        OR (p.payload ->> 'event_id') ILIKE ${pattern}
         OR EXISTS (SELECT 1 FROM jsonb_each_text(coalesce(p.payload -> 'fields', '{}'::jsonb)) f
                    WHERE f.value ILIKE ${pattern}))`}
     ORDER BY id DESC

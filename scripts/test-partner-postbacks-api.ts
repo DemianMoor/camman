@@ -192,6 +192,8 @@ async function main() {
     await db.execute(sql`INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts, last_url_masked)
       VALUES (${orgId}::uuid, ${k5}::int, true, '{"fields":{"relay_lead_id":"RL-Needle_7"}}'::jsonb, 'delivered', 1, 'https://h.example/p?lead_id=RL-Needle_7&k=***'),
              (${orgId}::uuid, ${k5}::int, true, '{"fields":{}}'::jsonb, 'delivered', 1, 'https://h.example/p?c=conv-50%25-off')`);
+    await db.execute(sql`INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts, last_url_masked)
+      VALUES (${orgId}::uuid, ${k5}::int, true, '{"event_id":"opt_out-9f3c2b1a-7d4e-4c55-8a10-ev1dzz"}'::jsonb, 'delivered', 1, 'https://h.example/p?s=opt_out')`);
     const base = { orgId, keyId: k5, failedOnly: false, search: null, beforeId: null };
     const p1 = await listKeyPostbacks(db, base);
     check("page 1: 25 rows + a cursor", [p1.rows.length, p1.nextBeforeId !== null], [25, true]);
@@ -201,14 +203,15 @@ async function main() {
       ["attempts", "conversion_event_id", "created_at", "delivered_at", "event", "id", "is_test", "last_attempt_at", "last_error", "last_response_code", "last_url_masked", "status"]);
     const p2 = await listKeyPostbacks(db, { ...base, beforeId: p1.nextBeforeId });
     const p3 = await listKeyPostbacks(db, { ...base, beforeId: p2.nextBeforeId });
-    check("pages 2/3: 25 + 7, then no cursor", [p2.rows.length, p3.rows.length, p3.nextBeforeId], [25, 7, null]);
+    check("pages 2/3: 25 + 8, then no cursor", [p2.rows.length, p3.rows.length, p3.nextBeforeId], [25, 8, null]);
     const allIds = [...ids1, ...p2.rows.map((x) => x.id), ...p3.rows.map((x) => x.id)];
-    check("57 distinct rows across pages, no overlap", new Set(allIds).size, 57);
+    check("58 distinct rows across pages, no overlap", new Set(allIds).size, 58);
     const failedOnly = await listKeyPostbacks(db, { ...base, failedOnly: true });
     check("failed=1 filters, this key only", failedOnly.rows.length === 11 && failedOnly.rows.every((x) => x.status === "failed"), true);
     check("other org sees nothing", (await listKeyPostbacks(db, { ...base, orgId: orgB })).rows.length, 0);
     check("search by the partner's lead id (payload field), case-insensitive",
       (await listKeyPostbacks(db, { ...base, search: "rl-needle_7" })).rows.length, 1);
+    check("search by part of the payload event_id", (await listKeyPostbacks(db, { ...base, search: "7d4e-4c55-8a10-ev1d" })).rows.length, 1);
     check("search by URL contents", (await listKeyPostbacks(db, { ...base, search: "lead_id=RL" })).rows.length, 1);
     check("% in the search is literal (finds 50%25)", (await listKeyPostbacks(db, { ...base, search: "50%25" })).rows.length, 1);
     check("% is not a wildcard (Needle%7 matches nothing)", (await listKeyPostbacks(db, { ...base, search: "Needle%7" })).rows.length, 0);

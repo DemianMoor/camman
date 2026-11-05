@@ -425,6 +425,11 @@ async function main() {
       // Lead missing the template's passthrough field (relay_lead_id).
       const c12c = await mkContact(orgId);
       const j12c = await mkJourney(orgId, camp, c12c, await mkLead(orgId, c12c, keyOpt, { list_id: "L12c" }), "opted_out");
+      // Event-list predicate in isolation: opt_out stamp old enough, but opt_out NOT in the key's events.
+      const keyStampOnly = await mkKey(orgId, "stamponly", { optOutSince: "2 hours" });
+      await tx.execute(sql`UPDATE partner_keys SET postback_event_keys = ARRAY['purchase']::text[] WHERE id = ${keyStampOnly}::int`);
+      const c12f = await mkContact(orgId);
+      const j12f = await mkJourney(orgId, camp, c12f, await mkLead(orgId, c12f, keyStampOnly, { relay_lead_id: "R12f" }), "opted_out");
       // Live journey (not opted out) on an opt_out key.
       const c12d = await mkContact(orgId);
       const j12d = await mkJourney(orgId, camp, c12d, await mkLead(orgId, c12d, keyOpt, { relay_lead_id: "R12d" }), "active");
@@ -435,6 +440,7 @@ async function main() {
             [(await rowsForJourney(j12b, "opt_out")).length, (await rowsForJourney(j12b)).length], [0, 0]);
       check("⭐ lead missing the template's passthrough field ⇒ 0", (await rowsForJourney(j12c, "opt_out")).length, 0);
       check("live journey ⇒ 0", (await rowsForJourney(j12d, "opt_out")).length, 0);
+      check("⭐ opt_out stamped but not in the key's events ⇒ 0 opt_out rows", (await rowsForJourney(j12f, "opt_out")).length, 0);
 
       // ── E13 first-only is a purchase rule ───────────────────────────────
       console.log("\nE13. first-purchase-only key still fires opt_out:");

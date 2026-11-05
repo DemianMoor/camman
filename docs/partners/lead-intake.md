@@ -82,7 +82,7 @@ Besides the fields above, we can agree a short list of extra field names with yo
 }
 ```
 
-## Sales postbacks
+## Postbacks
 
 If agreed, we notify a URL of yours when something happens to a lead you sent: an approved purchase (`purchase`) and/or the lead opting out of messages (`opt_out`). You receive only the events agreed for your account. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a purchase postback is sent for every approved purchase or only the first one per lead. Events are independent: a lead that opts out and later buys produces both.
 

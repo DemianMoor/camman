@@ -81,6 +81,11 @@ check("T8 valid stored word", statusWordFor({ purchase: "SALE" }, "purchase"), "
 check("T8 non-string falls back", statusWordFor({ invalid: 5 }, "invalid"), "invalid");
 const evP: PostbackPayload = { event: "opt_out", event_id: "opt_out-abc", status: "opt_out", conversion_id: "", occurred_at: "2026-10-30T00:00:00.000Z", payout: null, currency: null, fields: {} };
 check("T8 render event_id", renderPostbackUrl("https://p.example/pb?e={event_id}&s={status}", evP, false), "https://p.example/pb?e=opt_out-abc&s=opt_out");
+const legacy = { ...evP, event: "purchase", status: "sold", conversion_id: "123", event_id: undefined } as unknown as PostbackPayload;
+delete (legacy as unknown as Record<string, unknown>).event_id;
+check("T9 legacy payload (no event_id) derives purchase-<conversion_id>", renderPostbackUrl("https://p.example/pb?e={event_id}", legacy, false), "https://p.example/pb?e=purchase-123");
+const legacyNone = { ...legacy, conversion_id: "" } as PostbackPayload;
+check("T9 legacy payload with no conversion id => empty", renderPostbackUrl("https://p.example/pb?e={event_id}", legacyNone, false), "https://p.example/pb?e=");
 check("T8 config accepts {event_id}", postbackConfigError({ template: "https://p.example/pb?e={event_id}", passthroughFields: [], includePayout: false }), null);
 const s8 = samplePayload([], {});
 check("T8 sample event_id/status", [s8.event, s8.event_id.startsWith("test-"), s8.status], ["purchase", true, "sold"]);

@@ -263,6 +263,11 @@ export function PartnerKeyPostback({
                   />
                   {o.label}
                 </label>
+                {row.postback_event_since?.[o.key] && (
+                  <span className="text-muted-foreground">
+                    since {formatCampaignDateTime(row.postback_event_since[o.key])}
+                  </span>
+                )}
                 <Input
                   aria-label={`${o.label} status word`}
                   className="h-7 w-32 text-xs"
@@ -278,11 +283,6 @@ export function PartnerKeyPostback({
             </div>
           );
         })}
-        {row.postback_active_since && (
-          <p className="text-muted-foreground text-xs">
-            Sales recorded since {formatCampaignDateTime(row.postback_active_since)} (earlier sales are never sent)
-          </p>
-        )}
       </fieldset>
 
       {row.postback_enabled && !row.postback_delivery_enabled && (

@@ -195,7 +195,7 @@ export const POSTBACK_PLACEHOLDERS = SYSTEM_PLACEHOLDERS.map((name) => ({
 
 /** Sales postbacks: our call to the partner's URL when a lead they sent buys. */
 export const POSTBACK_DOC = {
-  title: "Sales postbacks",
+  title: "Postbacks",
   intro:
     "If agreed, we notify a URL of yours when something happens to a lead you sent: an " +
     "approved purchase (`purchase`) and/or the lead opting out of messages (`opt_out`). " +

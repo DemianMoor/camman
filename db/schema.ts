@@ -523,6 +523,11 @@ export const texthub_inbound_events = pgTable(
     processed_at: timestamp("processed_at", { withTimezone: true }),
   },
   (table) => [
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("texthub_inbound_events_matched_contact_id_idx")
+      .on(table.matched_contact_id)
+      .where(sql`matched_contact_id IS NOT NULL`),
     index("texthub_inbound_events_org_id_idx").on(table.org_id),
     index("texthub_inbound_events_received_at_idx").on(table.received_at),
   ],
@@ -682,6 +687,11 @@ export const ahoi_inbound_events = pgTable(
     processed_at: timestamp("processed_at", { withTimezone: true }),
   },
   (table) => [
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("ahoi_inbound_events_matched_contact_id_idx")
+      .on(table.matched_contact_id)
+      .where(sql`matched_contact_id IS NOT NULL`),
     index("ahoi_inbound_events_org_id_idx").on(table.org_id),
     index("ahoi_inbound_events_received_at_idx").on(table.received_at),
     uniqueIndex("ahoi_inbound_events_provider_uuid_uniq")
@@ -745,6 +755,11 @@ export const textrequest_inbound_events = pgTable(
     processed_at: timestamp("processed_at", { withTimezone: true }),
   },
   (table) => [
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("textrequest_inbound_events_matched_contact_id_idx")
+      .on(table.matched_contact_id)
+      .where(sql`matched_contact_id IS NOT NULL`),
     index("textrequest_inbound_events_org_id_idx").on(table.org_id),
     index("textrequest_inbound_events_received_at_idx").on(table.received_at),
     index("textrequest_inbound_events_dedup_idx").on(
@@ -833,6 +848,11 @@ export const tells_webhook_events = pgTable(
     process_error: text("process_error"),
   },
   (table) => [
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("tells_webhook_events_matched_contact_id_idx")
+      .on(table.matched_contact_id)
+      .where(sql`matched_contact_id IS NOT NULL`),
     index("tells_webhook_events_org_id_idx").on(table.org_id),
     index("tells_webhook_events_received_at_idx").on(table.received_at),
     index("tells_webhook_events_unprocessed_idx")
@@ -1459,6 +1479,9 @@ export const stage_manual_recipients = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.stage_id, table.contact_id] }),
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("stage_manual_recipients_contact_id_idx").on(table.contact_id),
     // INCLUDE (contact_id) is in the SQL only (drizzle cannot express it).
     index("stage_manual_recipients_org_sent_idx")
       .on(table.org_id, table.sent_at)
@@ -2789,6 +2812,11 @@ export const stage_result_rows = pgTable(
       table.stage_id,
       table.phone_number,
     ),
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("stage_result_rows_contact_id_idx")
+      .on(table.contact_id)
+      .where(sql`contact_id IS NOT NULL`),
     index("stage_result_rows_import_id_idx").on(table.import_id),
     index("stage_result_rows_stage_outcome_idx").on(
       table.stage_id,
@@ -3375,6 +3403,9 @@ export const stage_sends = pgTable(
     sent_at: timestamp("sent_at", { withTimezone: true }),
   },
   (table) => [
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("stage_sends_contact_id_idx").on(table.contact_id),
     index("stage_sends_org_id_idx").on(table.org_id),
     index("stage_sends_stage_id_idx").on(table.stage_id),
     index("stage_sends_link_id_idx").on(table.link_id),
@@ -3834,6 +3865,9 @@ export const creative_exposures = pgTable(
       table.contact_id,
       table.creative_id,
     ),
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("creative_exposures_contact_id_idx").on(table.contact_id),
     // Anti-join driver: suppression set for ONE creative, probed by contact.
     // Bounded by segment size, not ledger size.
     index("creative_exposures_org_creative_contact_idx").on(
@@ -3874,6 +3908,9 @@ export const offer_exposures = pgTable(
       table.contact_id,
       table.offer_id,
     ),
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("offer_exposures_contact_id_idx").on(table.contact_id),
     // Drives the "exclude" anti-join (suppression set for one offer).
     index("offer_exposures_org_offer_contact_idx").on(
       table.org_id,
@@ -4409,6 +4446,9 @@ export const counted_clickers = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.stage_id, table.contact_id] }),
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("counted_clickers_contact_id_idx").on(table.contact_id),
     index("counted_clickers_campaign_idx").on(
       table.campaign_id,
       table.contact_id,
@@ -5571,6 +5611,9 @@ export const lead_events = pgTable(
     uniqueIndex("lead_events_inbox_uniq")
       .on(table.inbox_id)
       .where(sql`${table.inbox_id} IS NOT NULL`),
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("lead_events_contact_id_idx").on(table.contact_id),
     index("lead_events_org_contact_received_idx").on(
       table.org_id,
       table.contact_id,
@@ -5983,6 +6026,9 @@ export const drip_journeys = pgTable(
       table.state,
       table.routed_at.desc(),
     ),
+    // 0235: index the FK so deleting a contact is an index probe, not a seq scan
+    // (scripts/test-contact-fk-index-guard.ts).
+    index("drip_journeys_contact_id_idx").on(table.contact_id),
     index("drip_journeys_org_contact_idx").on(
       table.org_id,
       table.contact_id,

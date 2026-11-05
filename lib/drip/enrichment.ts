@@ -13,6 +13,7 @@ import {
 } from "@/lib/contact-attributes";
 import { extractLeadFields } from "@/lib/intake/fields";
 import type { DbOrTx } from "@/lib/intake/partner-key";
+import { tryEnqueueInvalidPostback } from "@/lib/partners/postbacks/invalid";
 import { enqueueNormalized } from "@/lib/telnyx/enqueue";
 import { bumpIntakeCounters, counterForLineType } from "./counters";
 import {
@@ -394,6 +395,13 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
           orgId, partnerKeyId: row.partner_key_id, at: now,
           interestTag: row.interest_tag,
           deltas: { received: 1, landline: 1 },
+        });
+        // The partner's `invalid` postback (0234), queued BEFORE the inbox row
+        // goes — the row's id is the postback's event_id. Landline only (G19).
+        // Savepointed and never throws: a postback must never block intake.
+        await tryEnqueueInvalidPostback(tx, {
+          orgId, partnerKeyId: row.partner_key_id, leadInboxId: row.id,
+          partnerData: row.partner_data, at: now,
         });
         // Counted, THEN removed — same transaction, so there is no window in
         // which the lead is neither a row nor a count.

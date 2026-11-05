@@ -50,7 +50,7 @@ export function requiredFieldsPresent(partnerData: SQL): SQL {
 
 // The key's status word for `event` (validated on write, so no regex here),
 // else the default from template.ts.
-function statusWord(event: PostbackEvent): SQL {
+export function statusWord(event: PostbackEvent): SQL {
   return sql`coalesce(k.postback_status_words ->> ${event}::text, ${DEFAULT_STATUS_WORDS[event]}::text)`;
 }
 

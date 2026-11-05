@@ -52,10 +52,10 @@ type TestResult = {
   error: string | null;
 };
 
-// Invalid is not offered until the server accepts it.
-const EVENT_OPTIONS: { key: Exclude<PostbackEvent, "invalid">; label: string }[] = [
+const EVENT_OPTIONS: { key: PostbackEvent; label: string }[] = [
   { key: "purchase", label: "Purchase (approved)" },
   { key: "opt_out", label: "Opt-out" },
+  { key: "invalid", label: "Invalid number" },
 ];
 
 const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
@@ -87,6 +87,7 @@ export function PartnerKeyPostback({
   const wordsFromRow = (): Record<string, string> => ({
     purchase: row.postback_status_words?.purchase ?? DEFAULT_STATUS_WORDS.purchase,
     opt_out: row.postback_status_words?.opt_out ?? DEFAULT_STATUS_WORDS.opt_out,
+    invalid: row.postback_status_words?.invalid ?? DEFAULT_STATUS_WORDS.invalid,
   });
   const [events, setEvents] = useState<string[]>(row.postback_event_keys);
   const [words, setWords] = useState<Record<string, string>>(wordsFromRow);

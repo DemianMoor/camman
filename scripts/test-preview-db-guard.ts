@@ -87,6 +87,10 @@ const EXCLUSIONS: ReadonlyArray<{
 }> = [
   // ── production operations tooling: changing production IS the purpose ──────
   {
+    file: "relabel-global-pixel-sales.ts",
+    why: "0233 one-time relabel of the Affiliati global-pixel 'sales' on offers 170/171 to Lead on prod, on the owner's go; dry-run (READ ONLY) by default, --apply refuses unless --ids equals the live candidate list exactly",
+  },
+  {
     file: "repair-drip-membership-appearance.ts",
     why: "partner attribution Phase 2 (Q2) data repair: dates drip partner×tag memberships at first delivery on prod, on the owner's go; dry-run by default, every changed stamp backed up first (append-only), --revert restores",
   },

@@ -1,6 +1,6 @@
 # 06 — Integrations & Environment
 
-_Last updated: 2026-11-03 (KEITARO_POSTBACK_URL — per-network Postback URLs panel); 2026-11-03 (public first-name endpoint for brand landing pages, CORS brand origins — 0230); 2026-11-03 (NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED); 2026-10-31 (outbound partner postbacks, PARTNER_POSTBACKS_DELIVERY_ENABLED); 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
+_Last updated: 2026-11-05 (postback events: opt_out, event_id dedupe); 2026-11-03 (KEITARO_POSTBACK_URL — per-network Postback URLs panel); 2026-11-03 (public first-name endpoint for brand landing pages, CORS brand origins — 0230); 2026-11-03 (NEXT_PUBLIC_STAGE_URL_GEO_PARAMS_UI_ENABLED); 2026-10-31 (outbound partner postbacks, PARTNER_POSTBACKS_DELIVERY_ENABLED); 2026-10-20 (NEXT_PUBLIC_MESSAGE_FORMATS_UI_ENABLED); 2026-10-13 (DRIP_DAILY_RESULTS_LOCAL_PREVIEW); 2026-10-12_
 
 External services CamMan talks to, their contracts, and every environment variable (**names + purpose only — never values or secrets**). Source: [`.env.example`](../.env.example), `lib/spam/`, `lib/links/`, `lib/sends/`, `lib/alerts/`, `lib/keitaro/`.
 
@@ -124,7 +124,7 @@ See [04-features/partner-lead-intake.md](04-features/partner-lead-intake.md).
 
 ## Outbound: partner sales postbacks (0228)
 
-We `GET` a URL the partner configured on their intake key when one of their leads buys. The host is partner-chosen, so
+We `GET` a URL the partner configured on their intake key when one of their leads buys or opts out (per-key event list). The host is partner-chosen, so
 the request is locked down: https on port 443 only, private/reserved addresses refused at connect time, redirects never
 followed, 5 s timeout, response body discarded. Credentials in the URL are rejected, and sensitive query values are
 masked in every stored or displayed copy.
@@ -134,7 +134,7 @@ masked in every stored or displayed copy.
 | Config | per key, `partner_keys.postback_*`, at `/settings/partners` |
 | Runtime | `/api/cron/partner-postbacks` (`*/5`), `CRON_SECRET` |
 | Kill switch | `PARTNER_POSTBACKS_DELIVERY_ENABLED` (must be `true`; unset or anything else means nothing is sent) |
-| Delivery guarantee | at-least-once; the partner dedupes on `{conversion_id}` |
+| Delivery guarantee | at-least-once; the partner dedupes on `{event_id}` |
 
 See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
 

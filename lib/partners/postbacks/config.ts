@@ -19,7 +19,30 @@ const POSTBACK_TRIGGERS = [
   "postback_include_payout",
   "passthrough_fields",
   "postback_enabled",
+  "postback_event_keys",
 ] as const;
+
+type EventLiveness = { enabled: boolean; events: string[] };
+
+/**
+ * Per-event "since" stamps. An event is live when the key is enabled AND the event is in its
+ * event list. Keeps the stamp of an event live before and after, stamps `nowIso` on one that
+ * becomes live, drops one that stops being live. Pure.
+ */
+export function nextEventSince(
+  prev: Record<string, string>,
+  wasLive: EventLiveness,
+  nowLive: EventLiveness,
+  nowIso: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!nowLive.enabled) return out;
+  for (const ev of nowLive.events) {
+    const was = wasLive.enabled && wasLive.events.includes(ev);
+    out[ev] = was && prev[ev] ? prev[ev] : nowIso;
+  }
+  return out;
+}
 
 export async function applyPartnerKeyPatch(
   dbc: DbOrTx,
@@ -75,6 +98,21 @@ export async function applyPartnerKeyPatch(
     }
   }
 
+  // Status words MERGE into the stored map (a PATCH of one event keeps the others).
+  const statusWords = {
+    ...((existing.postback_status_words ?? {}) as Record<string, string>),
+    ...(input.postback_status_words ?? {}),
+  };
+  // Per-event since, from the MERGED enabled/events. App clock (new Date()); the DB clock
+  // is used for postback_active_since, the two never need to agree to the millisecond.
+  const eventKeys = input.postback_event_keys ?? (existing.postback_event_keys as string[]);
+  const eventSince = nextEventSince(
+    (existing.postback_event_since ?? {}) as Record<string, string>,
+    { enabled: existing.postback_enabled, events: existing.postback_event_keys as string[] },
+    { enabled, events: eventKeys },
+    new Date().toISOString(),
+  );
+
   const activeSince =
     !existing.postback_enabled && enabled
       ? { postback_active_since: sql`now()` }
@@ -95,6 +133,8 @@ export async function applyPartnerKeyPatch(
       ...(input.postback_include_payout !== undefined ? { postback_include_payout: input.postback_include_payout } : {}),
       ...(input.postback_first_purchase_only !== undefined ? { postback_first_purchase_only: input.postback_first_purchase_only } : {}),
       ...(input.postback_event_keys !== undefined ? { postback_event_keys: input.postback_event_keys } : {}),
+      ...(input.postback_status_words !== undefined ? { postback_status_words: statusWords } : {}),
+      postback_event_since: eventSince,
       ...activeSince,
       ...(input.sandbox !== undefined ? { sandbox: input.sandbox } : {}),
       ...(input.rate_per_sec !== undefined ? { rate_per_sec: input.rate_per_sec } : {}),

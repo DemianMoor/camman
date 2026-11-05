@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { LEAD_FIELD_KEYS } from "@/lib/intake/fields";
 import { passthroughNamesError } from "@/lib/intake/passthrough";
+import { POSTBACK_EVENTS, STATUS_WORD_RE } from "@/lib/partners/postbacks/template";
 
 // Partner-key management validators — Drip Phase 2.
 //
@@ -41,7 +42,11 @@ const shared = {
   postback_url_template: z.string().trim().max(2048).nullable().optional(),
   postback_include_payout: z.boolean().optional(),
   postback_first_purchase_only: z.boolean().optional(),
-  postback_event_keys: z.array(z.enum(["purchase"])).min(1).optional(),
+  // PR1 refuses "invalid" (Task 7 widens this enum).
+  postback_event_keys: z.array(z.enum(["purchase", "opt_out"])).min(1).optional(),
+  // Merged into the stored map by applyPartnerKeyPatch. postback_event_since is
+  // deliberately absent: it is server-written only.
+  postback_status_words: z.partialRecord(z.enum(POSTBACK_EVENTS), z.string().regex(STATUS_WORD_RE)).optional(),
   sandbox: z.boolean().optional(),
   rate_per_sec: z.number().int().positive().max(10000).optional(),
   rate_per_day: z.number().int().positive().max(10_000_000).optional(),

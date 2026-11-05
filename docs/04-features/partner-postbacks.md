@@ -115,3 +115,8 @@ value for editing (manage users only; Save or Reset masks it again).
 PR2 ships inert (the cron answers `skipped_kill_switch: true`, `partner_postbacks` is empty). To go live: set the env
 var in Vercel and redeploy, configure the partner's key, Send test to their URL, enable, and watch the log through the
 first real sale.
+
+## Per-event config (0234)
+
+- `postback_event_keys` lists the events a key sends (`purchase`, `opt_out`; `invalid` arrives later). `postback_status_words` maps event -> the word sent as `{status}` (`^[A-Za-z0-9_.-]{1,32}$`); a PATCH **merges** into the stored map.
+- `postback_event_since` (event -> ISO time it went live) is server-written only, by `nextEventSince` in `lib/partners/postbacks/config.ts`. An event is live when the key is enabled AND the event is in its list: becoming live stamps now, staying live keeps the old stamp, ceasing to be live drops it. Disable then enable re-stamps every live event.

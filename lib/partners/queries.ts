@@ -39,6 +39,10 @@ export interface PartnerKeyJson {
   postback_first_purchase_only: boolean;
   postback_event_keys: string[];
   postback_active_since: string | null;
+  /** Event key -> word sent as {status}; missing = the default word. */
+  postback_status_words: Record<string, string>;
+  /** Event key -> ISO time it went live. Server-written only. */
+  postback_event_since: Record<string, string>;
   /** NOT a key column: whether postback delivery is switched on for this environment
    *  (PARTNER_POSTBACKS_DELIVERY_ENABLED, evaluated server-side). Same for every key;
    *  the UI warns when a key is enabled but delivery is off (rows queue, nothing sends). */
@@ -81,7 +85,7 @@ export const KEY_LIST_SQL: SQL = sql`
     SELECT k.id, k.partner_id, k.partner_slug, k.name, k.interest_tag_mode, k.interest_tag,
            k.field_mapping, k.passthrough_fields, k.postback_enabled, k.postback_url_template,
            k.postback_include_payout, k.postback_first_purchase_only, k.postback_event_keys,
-           k.postback_active_since, k.sandbox, k.rate_per_sec, k.rate_per_day,
+           k.postback_active_since, k.postback_status_words, k.postback_event_since, k.sandbox, k.rate_per_sec, k.rate_per_day,
            k.max_payload_bytes, k.status, k.created_at, k.rotated_at, k.last_seen_at,
            k.secret_last4,
            COALESCE(u.accepted_today, 0)::int AS accepted_today,

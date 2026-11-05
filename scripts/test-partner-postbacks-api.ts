@@ -4,7 +4,7 @@ import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — 
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { applyPartnerKeyPatch, listKeyPostbacks } from "@/lib/partners/postbacks/config";
+import { applyPartnerKeyPatch, listKeyPostbacks, nextEventSince } from "@/lib/partners/postbacks/config";
 import { deliveryEnabled, sendTestPostback, type TestPostbackResult } from "@/lib/partners/postbacks/deliver";
 import type { SendResult } from "@/lib/partners/postbacks/http";
 import { can } from "@/lib/permissions";
@@ -215,6 +215,39 @@ async function main() {
     check("_ is not a wildcard (RL_Needle does not match RL-Needle)", (await listKeyPostbacks(db, { ...base, search: "RL_Needle" })).rows.length, 0);
     check("whitespace-only search = no filter", (await listKeyPostbacks(db, { ...base, search: "   " })).rows.length, 25);
     check("no match ⇒ 0 rows, no cursor", await listKeyPostbacks(db, { ...base, search: "zz-nothing" }), { rows: [], nextBeforeId: null });
+
+    // ── A7 ─────────────────────────────────────────────────────────────
+    console.log("\nA7. event keys, status words, per-event since:");
+    const OLD = "2026-01-01T00:00:00.000Z";
+    const NOW = "2026-11-05T12:00:00.000Z";
+    const off = { enabled: false, events: ["purchase", "opt_out"] };
+    check("A7a off->on stamps both", nextEventSince({}, off, { enabled: true, events: ["purchase", "opt_out"] }, NOW), { purchase: NOW, opt_out: NOW });
+    check("A7a adding opt_out keeps purchase stamp", nextEventSince({ purchase: OLD }, { enabled: true, events: ["purchase"] }, { enabled: true, events: ["purchase", "opt_out"] }, NOW), { purchase: OLD, opt_out: NOW });
+    check("A7a on->off drops all", nextEventSince({ purchase: OLD, opt_out: OLD }, { enabled: true, events: ["purchase", "opt_out"] }, off, NOW), {});
+    check("A7a removing opt_out drops it", nextEventSince({ purchase: OLD, opt_out: OLD }, { enabled: true, events: ["purchase", "opt_out"] }, { enabled: true, events: ["purchase"] }, NOW), { purchase: OLD });
+    const evSince = async (k: number) =>
+      (await q<{ s: Record<string, string>; w: Record<string, string> }>(sql`SELECT postback_event_since AS s, postback_status_words AS w FROM partner_keys WHERE id = ${k}::int`))[0];
+    const k7 = await mk(orgId, "a7");
+    check("A7b space in word rejected by schema", partnerKeyUpdateSchema.safeParse({ postback_status_words: { purchase: "sold now" } }).success, false);
+    check("A7b empty word rejected by schema", partnerKeyUpdateSchema.safeParse({ postback_status_words: { purchase: "" } }).success, false);
+    check("A7b unknown event rejected by schema", partnerKeyUpdateSchema.safeParse({ postback_status_words: { bogus: "x" } }).success, false);
+    check("A7b ok", (await patch(k7, { postback_status_words: { purchase: "SOLD" } })).ok, true);
+    check("A7b second word merges", (await patch(k7, { postback_status_words: { opt_out: "STOPPED" } })).ok, true);
+    check("A7b stored merged", JSON.stringify(Object.entries((await evSince(k7)).w).sort()), JSON.stringify([["opt_out", "STOPPED"], ["purchase", "SOLD"]]));
+    check("A7e invalid event key rejected (PR1)", partnerKeyUpdateSchema.safeParse({ postback_event_keys: ["invalid"] }).success, false);
+    check("A7e client cannot set postback_event_since", partnerKeyUpdateSchema.safeParse({ postback_event_since: { purchase: OLD } }).success, false);
+    check("A7c enable", (await patch(k7, { postback_enabled: true, postback_url_template: TPL })).ok, true);
+    check("A7c purchase stamped on enable", Object.keys((await evSince(k7)).s), ["purchase"]);
+    await db.execute(sql`UPDATE partner_keys SET postback_event_since = ${JSON.stringify({ purchase: OLD })}::jsonb WHERE id = ${k7}::int`);
+    check("A7c add opt_out", (await patch(k7, { postback_event_keys: ["purchase", "opt_out"] })).ok, true);
+    const s7 = (await evSince(k7)).s;
+    check("A7c purchase unchanged", s7.purchase, OLD);
+    check("A7c opt_out stamped ~now", Math.abs(Date.now() - new Date(s7.opt_out).getTime()) < 5000, true);
+    await patch(k7, { postback_enabled: false });
+    check("A7d disable clears", (await evSince(k7)).s, {});
+    await patch(k7, { postback_enabled: true });
+    const s7d = (await evSince(k7)).s;
+    check("A7d re-enable restamps both ~now", Object.keys(s7d).sort().join() === "opt_out,purchase" && Object.values(s7d).every((v) => Math.abs(Date.now() - new Date(v).getTime()) < 5000), true);
 
     // ── A6 ─────────────────────────────────────────────────────────────
     console.log("\nA6. permissions (can() at the routes' decision point):");

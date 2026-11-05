@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-11-05 — Partner postbacks PR2: `invalid` event (landline numbers at enrichment, savepoint + per-batch alert), public partner page + API changelog updated, stale deliver.ts comment fixed. No migration. — docs/04-features/partner-postbacks.md, docs/05-flows.md, docs/07-conventions.md, docs/partners/lead-intake.md
 2026-11-05 — Partner postbacks PR1 review fixes: legacy payloads render {event_id} as purchase-<conversion_id>, key card shows per-event since, log search matches event_id, section retitled Postbacks, stale docs corrected. No migration. — docs/03-data-model.md, docs/04-features/partner-postbacks.md, docs/05-flows.md, docs/07-conventions.md, docs/partners/lead-intake.md
 2026-11-05 — Partner postbacks: opt_out event, per-event status words and since, `{event_id}` dedupe key (0234); public partner page + API changelog updated. — docs/04-features/partner-postbacks.md, docs/05-flows.md, docs/07-conventions.md, docs/partners/lead-intake.md
 2026-11-05 — Partner key card: event checkboxes + per-event status words, Event column in the postback log. No migration. — docs/04-features/partner-postbacks.md

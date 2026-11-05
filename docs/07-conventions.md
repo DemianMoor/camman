@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-05 (partner postback events: event_id format, per-event since, opt_out journey-only); 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-05 (invalid postback: landline only, never blocks enrichment); 2026-11-05 (partner postback events: event_id format, per-event since, opt_out journey-only); 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ A reversal postback reuses the ORIGINAL event's tid; every new event gets a new one (2026-11-03)
@@ -5008,6 +5008,14 @@ See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
 - **opt_out is journey-only, by owner ruling 2026-11-05**: it fires once per drip journey that closed `opted_out`; `occurred_at` is when we processed the STOP. Opt-outs of contacts without a drip journey do not fire.
 - **Events are independent.** A lead that opts out and later buys gets both; first-purchase-only is a purchase-only rule; sandbox keys send no event; the required-fields rule applies to every event.
 - **Status words** are per event (`^[A-Za-z0-9_.-]{1,32}$`) and snapshotted at enqueue. opt_out rows have a NULL `conversion_event_id`, so the delivery-time `no_longer_approved` re-check applies only to rows with a conversion.
+
+## Invalid postbacks: landline only; they never block enrichment (PR2, 2026-11-05)
+
+See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
+
+- **`invalid` = landline only; `unknown` and `voip` stay sendable (G19).** Only a landline is discarded at enrichment, so only a landline is reported. Never report `unknown`/`voip` as invalid.
+- **Postbacks never block enrichment: savepoint + per-batch alert after the tx.** The queue insert runs in a savepoint inside the enrichment transaction, before the inbox row is deleted. A failure is tallied, never thrown; one latched alert (`partner-postbacks-invalid-failed`) is settled after the batch transaction ends. Never alert or call out per lead inside the transaction. Guard: `scripts/test-postback-invalid-enrichment-guard.ts`.
+- `event_id = invalid-<lead_inbox.id>`; `occurred_at` = enrichment time; `{conversion_id}`/`{payout}`/`{currency}` empty; no sandbox, no backfill.
 
 ## Report-only registration flag vs the lane flag (0232, 2026-11-04)
 

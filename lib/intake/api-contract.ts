@@ -198,7 +198,8 @@ export const POSTBACK_DOC = {
   title: "Postbacks",
   intro:
     "If agreed, we notify a URL of yours when something happens to a lead you sent: an " +
-    "approved purchase (`purchase`) and/or the lead opting out of messages (`opt_out`). " +
+    "approved purchase (`purchase`), the lead opting out of messages (`opt_out`) and/or the " +
+    "lead's number turning out to be a landline (`invalid`). " +
     "You receive only the events agreed for your account. " +
     "We make an HTTP GET to your https URL (port 443). Depending on your agreement, a " +
     "purchase postback is sent for every approved purchase or only the first one per lead. " +
@@ -220,6 +221,7 @@ export const POSTBACK_DOC = {
     "Delivery is at least once: the same event can reach you more than once. De-duplicate on `{event_id}`.",
     "`{status}` is the word agreed with you for the event (for example `sold` for a purchase and `opt_out` for an opt-out).",
     "For an opt-out, `{conversion_id}`, `{payout}` and `{currency}` are empty, and `{occurred_at}` is when we processed the STOP.",
+    "`invalid` is sent once per lead, when we find the number is a landline and cannot be messaged. Only landlines are reported: a number we cannot classify, or a VoIP number, stays sendable and is never reported invalid. It is sent only for leads processed after the event was turned on for your account, never for sandbox keys, and `{occurred_at}` is when we checked the number. `{status}` is the word agreed with you (default `invalid`), and `{conversion_id}`, `{payout}` and `{currency}` are empty.",
   ],
 };
 
@@ -286,6 +288,12 @@ export interface ChangelogEntry {
  * at. See docs/07-conventions.md.
  */
 export const API_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: "2026-11-05",
+    changes: [
+      "Postbacks: invalid number postbacks (landline numbers) are available per agreement, sent once per lead when we find its number is a landline. Other numbers are never reported invalid. `{conversion_id}`, `{payout}` and `{currency}` are empty and `{status}` is the word agreed with you. No change to intake request fields or responses.",
+    ],
+  },
   {
     date: "2026-11-05",
     changes: [

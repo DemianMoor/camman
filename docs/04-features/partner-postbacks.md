@@ -167,7 +167,7 @@ enqueue (a later word change does not rewrite queued rows). opt_out and invalid 
   network call) happens inside the transaction.
 - **One alert per batch, after the transaction.** `settleInvalidPostbackAlert` raises the latched Telegram alert
   `partner-postbacks-invalid-failed` if any enqueue failed (first error only, gated on postbacks being live), and
-  clears it after a committed batch that queued at least one row.
+  clears it after a committed batch that attempted at least one enqueue (queued or skipped) and failed none.
 - Guard: `scripts/test-postback-invalid-enrichment-guard.ts` (in `check:guards`) proves the insert precedes the DELETE.
 - Operating: ticking **Invalid** on a key stamps its invalid since; only leads enriched after that are reported.
   Watch the Postback log for the first `invalid` rows, and the alert above if enrichment logs show enqueue failures.

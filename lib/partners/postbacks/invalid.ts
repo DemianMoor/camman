@@ -60,8 +60,8 @@ export async function enqueueInvalidPostback(tx: DbOrTx, o: InvalidInput): Promi
 
 // Per-batch outcome of the invalid enqueues, filled by tryEnqueueInvalidPostback
 // and settled ONCE per enrichment batch by settleInvalidPostbackAlert.
-export type InvalidTally = { queued: number; failed: number; firstError: unknown };
-export const newInvalidTally = (): InvalidTally => ({ queued: 0, failed: 0, firstError: undefined });
+export type InvalidTally = { queued: number; skipped: number; failed: number; firstError: unknown };
+export const newInvalidTally = (): InvalidTally => ({ queued: 0, skipped: 0, failed: 0, firstError: undefined });
 
 export type InvalidOutcome = "queued" | "skipped" | "failed";
 
@@ -80,7 +80,10 @@ export async function tryEnqueueInvalidPostback(
 ): Promise<InvalidOutcome> {
   try {
     const queued = await tx.transaction((sp) => insert(sp, o));
-    if (!queued) return "skipped";
+    if (!queued) {
+      tally.skipped++;
+      return "skipped";
+    }
     tally.queued++;
     return "queued";
   } catch (err) {
@@ -96,22 +99,23 @@ export async function tryEnqueueInvalidPostback(
 
 // Called ONCE per enrichment batch, AFTER its transaction has ended. Same latch
 // semantics as the sales enqueue alert in lib/drip/monitors.ts: any failure ⇒
-// latch (one page per transition, first error only); a clean batch that queued
-// at least one row and COMMITTED ⇒ clear; nothing queued and nothing failed ⇒
-// leave the latch as it is (no evidence either way). `committed` is false when
+// latch (one page per transition, first error only); a COMMITTED batch that
+// attempted at least one enqueue (queued or skipped — skipped is the normal
+// outcome until a key has `invalid` ticked) and failed none ⇒ clear; nothing
+// attempted ⇒ leave the latch as it is (no evidence either way). `committed` is false when
 // the batch rolled back — its queued rows are gone, so it never clears.
 // Best-effort; never throws (it runs in a finally next to the batch's own error).
 export async function settleInvalidPostbackAlert(
   tally: InvalidTally,
   committed: boolean,
-  deps: { alert: (err: unknown) => Promise<void>; clear: () => Promise<void> } = {
+  deps: { alert: (err: unknown, failed: number) => Promise<void>; clear: () => Promise<void> } = {
     alert: alertInvalidFailed,
     clear: () => clearAlert(db, { alertKey: INVALID_POSTBACK_ALERT_KEY }),
   },
 ): Promise<void> {
   try {
-    if (tally.failed > 0) await deps.alert(tally.firstError);
-    else if (committed && tally.queued > 0) await deps.clear();
+    if (tally.failed > 0) await deps.alert(tally.firstError, tally.failed);
+    else if (committed && tally.queued + tally.skipped > 0) await deps.clear();
   } catch (err) {
     console.error("[enrichment] invalid postback alert settle failed (swallowed):", errorSummary(err));
   }
@@ -125,7 +129,7 @@ function errorSummary(err: unknown): string {
   return `${name}: ${(e instanceof Error ? e.message : String(e)).split("\n")[0].slice(0, 160)}`;
 }
 
-async function alertInvalidFailed(err: unknown): Promise<void> {
+async function alertInvalidFailed(err: unknown, failed: number): Promise<void> {
   try {
     const switchOn = deliveryEnabled();
     const anyKeyEnabled = switchOn ? false : await anyPostbackKeyEnabled();
@@ -133,8 +137,7 @@ async function alertInvalidFailed(err: unknown): Promise<void> {
     await notifyOnTransition(db, {
       alertKey: INVALID_POSTBACK_ALERT_KEY,
       text:
-        `🔴 Partner postbacks: queueing an invalid-number postback failed (${errorSummary(err)}). ` +
-        `Landline leads are still discarded, but their partners are not being told. ` +
+        `🔴 Partner postbacks: ${failed} invalid-number postback(s) failed to queue in the last enrichment batch: ${errorSummary(err)}. ` +
         `Check the /api/cron/lead-enrichment logs in Vercel.`,
     });
   } catch (alertErr) {

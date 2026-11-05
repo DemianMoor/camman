@@ -94,7 +94,7 @@ Your URL is a template. Write any of these in curly braces and we fill them in, 
 | `{event}` | Event type: `purchase`, `opt_out` or `invalid`. |
 | `{event_id}` | Unique id of this event. Use it to de-duplicate. Different for every event, including each sale, each opt-out and each invalid number. |
 | `{conversion_id}` | Unique id of this sale. Sales only; empty for an opt-out or invalid number. |
-| `{occurred_at}` | When the event happened, UTC, ISO 8601. For an opt-out, when we processed the STOP. For an invalid number, when we checked the number. |
+| `{occurred_at}` | When the event happened, UTC, ISO 8601. For an opt-out, when we processed the STOP. For an invalid number, when we processed the lead. |
 | `{currency}` | Currency code of the amount. Empty for an opt-out or invalid number. |
 | `{payout}` | Amount for the sale. Sent only if enabled for your account. Empty for an opt-out or invalid number. |
 
@@ -123,7 +123,7 @@ After the last retry we stop.
 >
 > **Note:** For an opt-out or invalid number, `{conversion_id}`, `{payout}` and `{currency}` are empty. `{occurred_at}` is when we processed the STOP for an opt-out.
 >
-> **Note:** `invalid` is sent once per lead, when we find the number is a landline and cannot be messaged. Only landlines are reported: a number we cannot classify, or a VoIP number, stays sendable and is never reported invalid. It is sent only for leads processed after the event was turned on for your account, never for sandbox keys, and `{occurred_at}` is when we checked the number. `{status}` is the word agreed with you (default `invalid`), and `{conversion_id}`, `{payout}` and `{currency}` are empty.
+> **Note:** `invalid` is sent once per lead, when we find the number is a landline and cannot be messaged. Only landlines are reported: a number we cannot classify, or a VoIP number, stays sendable and is never reported invalid. It is sent only for leads processed after the event was turned on for your account, never for sandbox keys, and `{occurred_at}` is when we processed the lead. `{status}` is the word agreed with you (default `invalid`), and `{conversion_id}`, `{payout}` and `{currency}` are empty.
 
 ## Responses
 

@@ -33,7 +33,7 @@ import { fictionalPhones, refuseIfPhonesInUse } from "./_fictional-phones";
 //      happens; it reports 'failed' and does no alert / IO of its own
 //   S1-S6 the per-batch alert decision (settleInvalidPostbackAlert, injected
 //      alert/clear — no Telegram): any failure ⇒ alert once with the first
-//      error; clean + ≥1 queued + committed ⇒ clear; otherwise neither
+//      error; committed + ≥1 attempted (queued or skipped) + no failure ⇒ clear; otherwise neither
 //   I3 also: after the committed batch that queued a row, the latch is 'ok'
 //
 // I1/I2/I5 run in ONE rolled-back transaction. I3/I4 drive runEnrichmentBatch,
@@ -336,7 +336,11 @@ async function settleCases() {
   const s2 = await run({ failed: 0, queued: 2 }, true);
   check("S2 all ok, ≥1 queued, committed ⇒ clear once, no alert", s2.alert.length === 0 && s2.clear === 1);
   const s3 = await run({ failed: 0, queued: 0 }, true);
-  check("S3 nothing queued, no failures ⇒ neither", s3.alert.length === 0 && s3.clear === 0);
+  check("S3 nothing attempted, no failures ⇒ neither", s3.alert.length === 0 && s3.clear === 0);
+  const s3b = await run({ failed: 0, queued: 0, skipped: 4 }, true);
+  check("S3b skipped-only committed batch ⇒ clear once, no alert", s3b.alert.length === 0 && s3b.clear === 1);
+  const s4b = await run({ failed: 0, skipped: 3 }, false);
+  check("S4b skipped-only but rolled back ⇒ neither", s4b.alert.length === 0 && s4b.clear === 0);
   const s4 = await run({ failed: 0, queued: 2 }, false);
   check("S4 queued but the batch rolled back ⇒ neither", s4.alert.length === 0 && s4.clear === 0);
   const s5 = await run({ failed: 1, queued: 5, firstError: e1 }, true);

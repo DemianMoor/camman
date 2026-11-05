@@ -129,7 +129,7 @@ ${POSTBACK_DOC.retryDelaysMs.map((ms, i) => `${i + 1}. ${formatDelay(ms)}`).join
 
 ${POSTBACK_DOC.retryOutro}
 
-${POSTBACK_DOC.rules.map((r) => `> **Note:** ${r}`).join("\n")}
+${POSTBACK_DOC.rules.map((r) => `> **Note:** ${r}`).join("\n>\n")}
 
 ## Responses
 

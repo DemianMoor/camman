@@ -118,7 +118,9 @@ Any 2xx response means delivered. A timeout, a 5xx, 408 or 429 is retried; other
 After the last retry we stop.
 
 > **Note:** Delivery is at least once: the same event can reach you more than once. De-duplicate on `{event_id}`.
+>
 > **Note:** `{status}` is the word agreed with you for the event (for example `sold` for a purchase and `opt_out` for an opt-out).
+>
 > **Note:** For an opt-out, `{conversion_id}`, `{payout}` and `{currency}` are empty, and `{occurred_at}` is when we processed the STOP.
 
 ## Responses

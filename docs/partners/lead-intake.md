@@ -84,19 +84,19 @@ Besides the fields above, we can agree a short list of extra field names with yo
 
 ## Postbacks
 
-If agreed, we notify a URL of yours when something happens to a lead you sent: an approved purchase (`purchase`) and/or the lead opting out of messages (`opt_out`). You receive only the events agreed for your account. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a purchase postback is sent for every approved purchase or only the first one per lead. Events are independent: a lead that opts out and later buys produces both.
+If agreed, we notify a URL of yours when something happens to a lead you sent: an approved purchase (`purchase`), the lead opting out of messages (`opt_out`) and/or the lead's number turning out to be a landline (`invalid`). You receive only the events agreed for your account. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a purchase postback is sent for every approved purchase or only the first one per lead. Events are independent: a lead that opts out and later buys produces both.
 
 Your URL is a template. Write any of these in curly braces and we fill them in, together with your agreed passthrough field names (for example `{your_field}`). Values are URL-encoded. A passthrough field your URL uses is required: if a lead arrived without it, or with it empty, no postback is sent for that lead. Any other value we do not have renders empty.
 
 | Placeholder | Value |
 |---|---|
 | `{status}` | The outcome word for this event, as agreed with you (for a sale, `sold` unless agreed otherwise). |
-| `{event}` | Event type: `purchase` or `opt_out`. |
-| `{event_id}` | Unique id of this event. Use it to de-duplicate. Different for every event, including each sale and each opt-out. |
-| `{conversion_id}` | Unique id of this sale. Sales only; empty for an opt-out. |
-| `{occurred_at}` | When the event happened, UTC, ISO 8601. For an opt-out, when we processed the STOP. |
-| `{currency}` | Currency code of the amount. Empty for an opt-out. |
-| `{payout}` | Amount for the sale. Sent only if enabled for your account. Empty for an opt-out. |
+| `{event}` | Event type: `purchase`, `opt_out` or `invalid`. |
+| `{event_id}` | Unique id of this event. Use it to de-duplicate. Different for every event, including each sale, each opt-out and each invalid number. |
+| `{conversion_id}` | Unique id of this sale. Sales only; empty for an opt-out or invalid number. |
+| `{occurred_at}` | When the event happened, UTC, ISO 8601. For an opt-out, when we processed the STOP. For an invalid number, when we processed the lead. |
+| `{currency}` | Currency code of the amount. Empty for an opt-out or invalid number. |
+| `{payout}` | Amount for the sale. Sent only if enabled for your account. Empty for an opt-out or invalid number. |
 
 Example URL:
 
@@ -119,9 +119,11 @@ After the last retry we stop.
 
 > **Note:** Delivery is at least once: the same event can reach you more than once. De-duplicate on `{event_id}`.
 >
-> **Note:** `{status}` is the word agreed with you for the event (for example `sold` for a purchase and `opt_out` for an opt-out).
+> **Note:** `{status}` is the word agreed with you for the event (for example `sold` for a purchase, `opt_out` for an opt-out and `invalid` for an invalid number).
 >
-> **Note:** For an opt-out, `{conversion_id}`, `{payout}` and `{currency}` are empty, and `{occurred_at}` is when we processed the STOP.
+> **Note:** For an opt-out or invalid number, `{conversion_id}`, `{payout}` and `{currency}` are empty. `{occurred_at}` is when we processed the STOP for an opt-out.
+>
+> **Note:** `invalid` is sent once per lead, when we find the number is a landline and cannot be messaged. Only landlines are reported: a number we cannot classify, or a VoIP number, stays sendable and is never reported invalid. It is sent only for leads processed after the event was turned on for your account, never for sandbox keys, and `{occurred_at}` is when we processed the lead. `{status}` is the word agreed with you (default `invalid`), and `{conversion_id}`, `{payout}` and `{currency}` are empty.
 
 ## Responses
 

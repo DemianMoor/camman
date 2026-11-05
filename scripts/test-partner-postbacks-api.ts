@@ -237,7 +237,8 @@ async function main() {
     check("A7b ok", (await patch(k7, { postback_status_words: { purchase: "SOLD" } })).ok, true);
     check("A7b second word merges", (await patch(k7, { postback_status_words: { opt_out: "STOPPED" } })).ok, true);
     check("A7b stored merged", JSON.stringify(Object.entries((await evSince(k7)).w).sort()), JSON.stringify([["opt_out", "STOPPED"], ["purchase", "SOLD"]]));
-    check("A7e invalid event key rejected (PR1)", partnerKeyUpdateSchema.safeParse({ postback_event_keys: ["invalid"] }).success, false);
+    check("A7e invalid event key accepted (PR2)", partnerKeyUpdateSchema.safeParse({ postback_event_keys: ["invalid"] }).success, true);
+    check("A7e unknown event key rejected", partnerKeyUpdateSchema.safeParse({ postback_event_keys: ["sale"] }).success, false);
     check("A7e client cannot set postback_event_since", partnerKeyUpdateSchema.safeParse({ postback_event_since: { purchase: OLD } }).success, false);
     check("A7c enable", (await patch(k7, { postback_enabled: true, postback_url_template: TPL })).ok, true);
     check("A7c purchase stamped on enable", Object.keys((await evSince(k7)).s), ["purchase"]);

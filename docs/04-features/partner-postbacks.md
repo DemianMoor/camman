@@ -1,6 +1,6 @@
 # Partner sales postbacks
 
-_Last updated: 2026-11-05_ (events, status words, event_id: 0234)
+_Last updated: 2026-11-05_ (events, status words, event_id: 0234; invalid event, PR2)
 
 When a lead a partner sent us produces a sale, we `GET` a URL the partner configured on their
 intake key, echoing the extra fields they sent with the lead. Generic and per key — no code per
@@ -21,7 +21,12 @@ the passthrough-fields half is in [partner-lead-intake.md](partner-lead-intake.m
   opt_out-<drip_journeys.id>`, `{occurred_at}` = the journey's `closed_at` (processing time, UTC `Z`),
   `{conversion_id}` empty, `{currency}` / `{payout}` empty. First-purchase-only does **not** apply to opt_out, and
   a queued opt_out does not count as the journey's "first" postback (test E13).
-- **`{status}` is the key's per-event word** (`postback_status_words`; defaults `sold` / `opt_out`). The sale
+- **`invalid`** (when the key has `invalid` in its events): the lead's number is a **landline** at enrichment
+  (`lib/drip/enrichment.ts`). Landline only (G19): `unknown` and `voip` numbers stay sendable and are never reported
+  invalid. One row per key and inbox lead (`partner_postbacks_key_inbox_invalid_uniq`). `event_id =
+  invalid-<lead_inbox.id>`, `{occurred_at}` = enrichment time, `{conversion_id}` / `{currency}` / `{payout}` empty.
+  Same non-sandbox and required-fields rules; at/after the key's invalid since, never backfilled.
+- **`{status}` is the key's per-event word** (`postback_status_words`; defaults `sold` / `opt_out` / `invalid`). The sale
   payload is snapshotted at enqueue, so delivery re-reads the ledger row
   (org-matched) when it claims a live row: if its status is no longer `'approved'` (rejected while the postback was
   pending), the row is `cancelled` with `last_error = 'no_longer_approved'` and nothing is sent. A sale re-approved
@@ -67,13 +72,14 @@ sensitivity as the report revenue toggle. Off means the placeholder is refused a
 - Enqueue: `enqueuePartnerPostbacks` ([lib/partners/postbacks/enqueue.ts](../../lib/partners/postbacks/enqueue.ts)), one
   idempotent `INSERT … SELECT` per event (purchase, opt_out) run by `/api/cron/drip-monitors` after the lifecycle sweep, under a transaction
   advisory lock (serialises first-only picks). Never from the send path.
+  `invalid` is the exception to "queued by drip-monitors": it is written by enrichment, see below.
 - Delivery: `/api/cron/partner-postbacks` (`*/5 * * * *`, [deliver.ts](../../lib/partners/postbacks/deliver.ts)).
   `GET`, https:443 only, private/reserved addresses refused at connect time, redirects never followed, 5 s timeout.
   2xx is delivered; 408, 429, 5xx and network errors retry; anything else fails.
 - Retries after 1 m, 5 m, 30 m, 2 h, 6 h, 24 h; **7 attempts**, then `failed`. A key disabled while rows are pending
   cancels them unsent; an edited template applies to retries.
 - **At-least-once.** A runner that dies after the partner answered re-sends once its 2-minute lease lapses. The partner
-  must dedupe on **`{event_id}`** (`purchase-<id>`, `opt_out-<journey uuid>`, test sends `test-<uuid>`).
+  must dedupe on **`{event_id}`** (`purchase-<id>`, `opt_out-<journey uuid>`, `invalid-<lead_inbox uuid>`, test sends `test-<uuid>`).
   `{conversion_id}` is sale-only (empty for opt_out) and is not the dedupe key. (One real postback per key and
   conversion, and per key and opted-out journey, is also enforced on our side by partial unique indexes.)
 - **Kill switch:** env `PARTNER_POSTBACKS_DELIVERY_ENABLED` must be `true`. Otherwise the cron only records its
@@ -87,7 +93,7 @@ sensitivity as the report revenue toggle. Off means the placeholder is refused a
 
 UI: [components/settings/partner-key-postback.tsx](../../components/settings/partner-key-postback.tsx).
 
-1. Tick the events to fire on (**Purchase (approved)**, **Opt-out**; at least one) and optionally set each event's status word (empty = default `sold` / `opt_out`; `[A-Za-z0-9_.-]{1,32}`), then set the template, Count and Include payout, then **Save postback** (needs `partner_keys.manage`).
+1. Tick the events to fire on (**Purchase (approved)**, **Opt-out**, **Invalid**; at least one) and optionally set each event's status word (empty = default `sold` / `opt_out` / `invalid`; `[A-Za-z0-9_.-]{1,32}`), then set the template, Count and Include payout, then **Save postback** (needs `partner_keys.manage`).
 2. **Send test** posts a sample payload (`test_<field>` values, a `test-<uuid>` conversion id) to the *saved* template
    and shows the HTTP code and masked URL inline. A second test within a few seconds is refused (429). Test rows are
    `is_test` and never count toward idempotency or first-only.
@@ -137,14 +143,31 @@ first real sale.
 |---|---|---|---|---|
 | `purchase` | approved `conversion_events` row (purchase type) on a drip journey | `sold` | `purchase-<conversion_events.id>` | none |
 | `opt_out` | drip journey closed `opted_out` (journey-only) | `opt_out` | `opt_out-<drip_journeys.id>` | `{conversion_id}`, `{payout}`, `{currency}` |
+| `invalid` | lead's number is a landline at enrichment (landline only, G19) | `invalid` | `invalid-<lead_inbox.id>` | `{conversion_id}`, `{payout}`, `{currency}` |
 
-`invalid` (landline numbers) is added in a later PR and is not available yet. Events are independent: a lead that
+Events are independent: a lead that
 opts out and later buys yields both postbacks; first-purchase-only is a purchase-only rule. Sandbox keys never send
 any event. The required-fields rule applies to every event. The status word is snapshotted into the queued row at
-enqueue (a later word change does not rewrite queued rows). opt_out rows have a NULL `conversion_event_id`, so the
+enqueue (a later word change does not rewrite queued rows). opt_out and invalid rows have a NULL `conversion_event_id`, so the
 `no_longer_approved` re-check at delivery applies only to rows with a conversion.
 
 ## Per-event config (0234)
 
-- `postback_event_keys` lists the events a key sends (`purchase`, `opt_out`; `invalid` arrives later). `postback_status_words` maps event -> the word sent as `{status}` (`^[A-Za-z0-9_.-]{1,32}$`); a PATCH **merges** into the stored map.
+- `postback_event_keys` lists the events a key sends (`purchase`, `opt_out`, `invalid`). `postback_status_words` maps event -> the word sent as `{status}` (`^[A-Za-z0-9_.-]{1,32}$`); a PATCH **merges** into the stored map.
 - `postback_event_since` (event -> ISO time it went live) is server-written only, by `nextEventSince` in `lib/partners/postbacks/config.ts`. An event is live when the key is enabled AND the event is in its list: becoming live stamps now, staying live keeps the old stamp, ceasing to be live drops it. Disable then enable re-stamps every live event.
+
+## Invalid postbacks at enrichment (PR2)
+
+- Source: the landline branch of `lib/drip/enrichment.ts`, which discards the lead. `enqueueInvalidPostback`
+  ([lib/partners/postbacks/invalid.ts](../../lib/partners/postbacks/invalid.ts)) runs **inside the enrichment
+  transaction, before the lead_inbox row is deleted** (hence no FK on `lead_inbox_id`). The same `eventLive` and
+  required-fields rules as the other events apply; sandbox keys never queue one.
+- **Never blocks enrichment.** The insert runs in a **savepoint** (`tryEnqueueInvalidPostback`): a failure rolls back
+  only the postback, the landline lead is still discarded, and the failure is only tallied. Nothing else (no alert, no
+  network call) happens inside the transaction.
+- **One alert per batch, after the transaction.** `settleInvalidPostbackAlert` raises the latched Telegram alert
+  `partner-postbacks-invalid-failed` if any enqueue failed (first error only, gated on postbacks being live), and
+  clears it after a committed batch that attempted at least one enqueue (queued or skipped) and failed none.
+- Guard: `scripts/test-postback-invalid-enrichment-guard.ts` (in `check:guards`) proves the insert precedes the DELETE.
+- Operating: ticking **Invalid** on a key stamps its invalid since; only leads enriched after that are reported.
+  Watch the Postback log for the first `invalid` rows, and the alert above if enrichment logs show enqueue failures.

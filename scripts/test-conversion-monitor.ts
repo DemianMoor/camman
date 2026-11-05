@@ -99,6 +99,9 @@ const run = (over: Partial<IngestResult>): IngestResult => ({
   typeConflicts: 0,
   orgMismatch: 0,
   orgMismatchSamples: [],
+  // A clean run: nothing skipped by a global-pixel `ignore` setting.
+  globalPixelIgnored: 0,
+  globalPixelIgnoredSamples: [],
   error: null,
   ...over,
 });

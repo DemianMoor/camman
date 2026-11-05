@@ -1,6 +1,6 @@
 # Conversion events (multi-event conversions)
 
-_Last updated: 2026-11-05 (drip column label Signups); 2026-11-04 (0232: leads count as Registrations in reports; drip Daily results Leads); 2026-11-04 (0231: the Offer report / Audience Stats matviews split by conversion offer); 2026-11-04 (Keitaro offer id on the Offer form)_
+_Last updated: 2026-11-05 (0233: per-offer global-pixel setting); 2026-11-05 (drip column label Signups); 2026-11-04 (0232: leads count as Registrations in reports; drip Daily results Leads); 2026-11-04 (0231: the Offer report / Audience Stats matviews split by conversion offer); 2026-11-04 (Keitaro offer id on the Offer form)_
 
 **Status (2026-09-21):** Phases 1–4 are LIVE on production and Phase 5 (per-event columns) ships with this change; migrations **0181** (applied 2026-09-18) and **0182–0185** (applied 2026-09-21 19:05–19:07 UTC, one transaction) are recorded on production, byte-identical to `db/migrations`. The history below is how the phases got there. The ledger is kept live on the `*/5` Keitaro poll tick, with Tier-2 Telegram alerts. `purchasedClause`, the campaign tier, segment purchase rules, drip and the audience pools now read the ledger (Phase 3 Tasks 1–2). `keitaro_stage_results`' CONVERSION columns (checkouts/sales/revenue/pending_revenue/payout_at_conversion) are now a projection of the ledger, dated by `occurred_at` — see [Stage-day projection](#stage-day-projection-phase-3-task-3) below; every stage-grain reader (reports, the campaign page, the offer report, …) inherits this with zero code changes since they all read `keitaro_stage_results`. The per-RECIPIENT readers (partner report, the by-group `sale` weight basis, the hourly sales/revenue pair, Rule F's rescue, the dormant rollup, the campaign-activity badge) now read the ledger too — see [Per-recipient reporting readers](#per-recipient-reporting-readers-phase-3-task-4) below. **Revenue and EPC now count APPROVED conversions only, with pending revenue its own column** (Task 6) — see [Revenue and EPC](#revenue-and-epc-phase-3-task-6) below; this also closes Rule F's numerator/denominator window (§ Per-recipient reporting readers). (Until 2026-09-21 these readers were verified on camman-v2 and by read-only checks against prod; since the Gate 3 cutover they run on production.)
 
@@ -67,6 +67,57 @@ A status-only mapping (NULL event type, e.g. Affise `rejected`) neither raises n
 | PsychoBook (`psb`) | sale | purchase | approved | sent only after the customer pays; no hold |
 | PsychoBook (`psb`) | rejected | purchase | rejected | declines either event. Seeded status-only ("keeps existing"); prod holds `purchase` as of 2026-10-06 |
 | PsychoBook (`psb`) | registration | registration | approved | Keitaro built-in type; unused today |
+
+## Global pixel conversions per offer (0233, 2026-11-05)
+
+Some advertisers (Affiliati) cannot switch their **global pixel** off per offer.
+It always posts `status=sale` and never carries a `from=` marker, while our own
+offer-specific postback URLs always end in `from=<network code>`
+([lib/conversions/postback-urls.ts](../../lib/conversions/postback-urls.ts); the
+code is `affiliate_networks.network_id`, e.g. `afl`). On the debt offers the
+global pixel fires on a **form submit**, which is a Lead, not a sale.
+
+`offers.global_pixel_mode`, set on the Offer form by managers and above
+("Global pixel conversions (no from= marker) count as"):
+
+| Postback | `default` | `lead` / `purchase` | `ignore` |
+|---|---|---|---|
+| `from` = the offer's network code (ours) | network rules | network rules | network rules |
+| no marker, normal type (`sale`, `lead`…) | network rules | event type forced to the org's `lead` / `purchase` type; status from the rule | **not written** — counted in the ingest result's `globalPixelIgnored` (+ samples); on an existing tid the stored row is left untouched |
+| no marker, reversal (a status-only rule, e.g. `rejected`) | network rules | network rules | network rules |
+
+- Read from the offer the conversion is **stored** under (the Keitaro offer whose
+  advertiser fired the pixel), not the campaign's offer — owner ruling 2026-11-05.
+  Normal rule matching still uses the campaign's offer and network.
+- The marker check is exact (case-insensitive): another network's `from` value
+  (`Sweeply.pro`, `Secco`) is unmarked here.
+- A Keitaro type no rule maps stays unmapped (the setting never invents a type);
+  an org without a `lead`/`purchase` type keeps the rule result.
+- If the advertiser later turns the global pixel off, only marked postbacks
+  arrive and the setting does nothing.
+- Every existing offer is `default`: identical to before.
+- Code: `applyGlobalPixelMode` / `hasOurMarker` in
+  [lib/conversions/build-rows.ts](../../lib/conversions/build-rows.ts); the lookups
+  (`offerPixelSettings`, `pixelEventTypeIdsByOrg` — **required** fields, §11b) load
+  in `loadLookups` ([lib/conversions/ingest.ts](../../lib/conversions/ingest.ts)).
+- Test: [scripts/test-global-pixel-mode.ts](../../scripts/test-global-pixel-mode.ts)
+  (pure; red when the override is switched off; source scan that no lane, send,
+  audience or segment file reads the setting).
+
+⚠️ **Who gets texted.** No lane, tier, send or audience code reads the setting.
+But it changes a conversion's event type, and Purchase is what makes a contact a
+**buyer** (campaign tiers, drip lifecycle, purchase segment rules, bought-offer
+exclusion). Setting an offer to `lead` therefore stops its global-pixel
+converters counting as buyers — owner-approved for the debt offers 170/171
+(form submitters keep getting follow-ups). Choosing `purchase` on another offer
+would do the reverse.
+
+⚠️ **Same tid.** An event type is locked once set. If an advertiser's global
+pixel and its offer-specific pixel ever post the SAME tid, Keitaro merges them
+into one conversion and the first type wins (the second only raises the conflict
+flag). Before setting `lead`, confirm the two pixels send different transaction
+ids — for 170/171 Affiliati's test (form submit, then enrollment, same click) is
+the check.
 
 ## Leads count as Registrations in reports (0232, 2026-11-04)
 

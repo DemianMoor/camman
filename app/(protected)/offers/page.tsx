@@ -53,6 +53,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
+import type { GlobalPixelMode } from "@/lib/conversions/build-rows";
 import { isEntityAvailable } from "@/lib/feature-flags";
 import { useApiCall } from "@/lib/hooks/use-api-call";
 import { usePersistedFilters } from "@/lib/hooks/use-persisted-filters";
@@ -72,6 +73,7 @@ type Offer = {
   postfix: string | null;
   base_url: string | null;
   keitaro_offer_id: number | null;
+  global_pixel_mode: GlobalPixelMode;
   network_id: number | null;
   payout_model: "cpa" | "revshare";
   payout_cpa: string | null;
@@ -784,6 +786,7 @@ export default function OffersPage() {
               postfix: editing.postfix ?? "",
               base_url: editing.base_url ?? "",
               keitaro_offer_id: editing.keitaro_offer_id,
+              global_pixel_mode: editing.global_pixel_mode,
               // Pre-migration rows may have null network_id; the form
               // treats undefined as "untouched" so the user is forced to
               // pick before save.

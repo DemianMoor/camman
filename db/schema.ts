@@ -250,6 +250,11 @@ export const offers = pgTable(
       .default(sql`'[]'::jsonb`),
     avatar_url: text("avatar_url"),
     color: text("color"),
+    // Migration 0233: what a conversion WITHOUT our `from=<network code>`
+    // marker (an advertiser's global pixel) counts as on this offer —
+    // default (network rules) / lead / purchase / ignore. See
+    // applyGlobalPixelMode in lib/conversions/build-rows.ts.
+    global_pixel_mode: text("global_pixel_mode").notNull().default("default"),
     status: text("status").notNull().default("active"),
     archived_at: timestamp("archived_at", { withTimezone: true }),
     created_at: timestamp("created_at", { withTimezone: true })
@@ -269,6 +274,10 @@ export const offers = pgTable(
     check(
       "offers_payout_model_check",
       sql`${table.payout_model} IN ('cpa', 'revshare')`,
+    ),
+    check(
+      "offers_global_pixel_mode_check",
+      sql`${table.global_pixel_mode} IN ('default', 'lead', 'purchase', 'ignore')`,
     ),
   ],
 );

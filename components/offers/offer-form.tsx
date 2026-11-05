@@ -86,6 +86,7 @@ export function OfferForm({
       postfix: initialValues?.postfix ?? "",
       base_url: initialValues?.base_url ?? "",
       keitaro_offer_id: initialValues?.keitaro_offer_id ?? null,
+      global_pixel_mode: initialValues?.global_pixel_mode ?? "default",
       // RHF treats undefined as "untouched" — the Select renders its
       // placeholder until the user picks a network. zodResolver will then
       // produce the "Network is required" error on submit.
@@ -283,6 +284,40 @@ export function OfferForm({
                 <FormDescription>
                   Conversions whose Keitaro offer id matches are reported
                   under this offer. Must be unique within the organization.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="global_pixel_mode"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Global pixel conversions (no from= marker) count as</FormLabel>
+                <Select
+                  value={field.value ?? "default"}
+                  onValueChange={field.onChange}
+                  disabled={isSubmitting || !canEditKeitaroOfferId}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="default">Default (network rules)</SelectItem>
+                    <SelectItem value="lead">Lead</SelectItem>
+                    <SelectItem value="purchase">Purchase</SelectItem>
+                    <SelectItem value="ignore">Ignore</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormDescription>
+                  For advertisers whose global pixel can&apos;t be turned off per
+                  offer. Applies only to conversions without our from= marker;
+                  postbacks from our own URLs and reversals always follow the
+                  network rules. Ignore drops them entirely.
                 </FormDescription>
                 <FormMessage />
               </FormItem>

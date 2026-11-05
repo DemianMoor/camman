@@ -129,6 +129,10 @@ const lookups: Lookups = {
   ]),
   offersByKeitaroId: new Map([[41, { orgId: ORG, offerId: 134, affiliateNetworkId: 43 }]]),
   rulesByOrg: new Map([[ORG, rules]]),
+  // No offer has a global-pixel setting here: these bars test attribution and
+  // network rules only. The setting has its own test, test-global-pixel-mode.ts.
+  offerPixelSettings: new Map(),
+  pixelEventTypeIdsByOrg: new Map(),
 };
 const src = (over: Partial<LedgerSourceRow>): LedgerSourceRow => ({
   eventId: "ev-1",
@@ -206,6 +210,9 @@ const rLookups: Lookups = {
       ] satisfies MappingRule[],
     ],
   ]),
+  // Stored-offer resolution bars only; no global-pixel setting (see above).
+  offerPixelSettings: new Map(),
+  pixelEventTypeIdsByOrg: new Map(),
 };
 const rRow = (keitaroOfferId: number | null) =>
   buildConversionEventRows(

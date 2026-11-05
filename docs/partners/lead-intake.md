@@ -90,8 +90,9 @@ Your URL is a template. Write any of these in curly braces and we fill them in, 
 
 | Placeholder | Value |
 |---|---|
-| `{status}` | Outcome of the sale. Always `approved`: postbacks are sent for approved sales only. |
+| `{status}` | The outcome word for this event, as agreed with you (for a sale, `sold` unless agreed otherwise). |
 | `{event}` | Event type of the sale. |
+| `{event_id}` | Unique id of this event. Use it to de-duplicate. |
 | `{conversion_id}` | Unique id of this sale. Use it to de-duplicate. |
 | `{occurred_at}` | When the sale happened, UTC, ISO 8601. |
 | `{currency}` | Currency code of the amount. |

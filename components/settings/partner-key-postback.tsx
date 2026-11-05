@@ -6,13 +6,14 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { toastApiError } from "@/lib/api/toast-error";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
 import { useApiCall } from "@/lib/hooks/use-api-call";
-import { postbackConfigError, SYSTEM_PLACEHOLDERS } from "@/lib/partners/postbacks/template";
+import { maskUrl, postbackConfigError, SYSTEM_PLACEHOLDERS } from "@/lib/partners/postbacks/template";
 import type { PartnerKeyJson } from "@/lib/partners/queries";
 
 // The "Sales postback" section of a partner key card (partner_keys.postback_*),
@@ -33,6 +34,8 @@ type LogRow = {
   last_attempt_at: string | null;
   delivered_at: string | null;
 };
+
+type LogPage = { data: LogRow[]; next_before: number | null };
 
 type TestResult = {
   ok: boolean;
@@ -59,7 +62,8 @@ export function PartnerKeyPostback({
 }) {
   const saveApi = useApiCall<unknown>();
   const testApi = useApiCall<TestResult>();
-  const logApi = useApiCall<{ data: LogRow[] }>();
+  const logApi = useApiCall<LogPage>();
+  const moreApi = useApiCall<LogPage>();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [enabled, setEnabled] = useState(row.postback_enabled);
@@ -71,7 +75,13 @@ export function PartnerKeyPostback({
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [failedOnly, setFailedOnly] = useState(false);
+  // The saved template can carry the partner's key in its query; it is shown masked
+  // until the user chooses to edit it. Nothing to hide in an empty template.
+  const [revealed, setRevealed] = useState(false);
   const [logRows, setLogRows] = useState<LogRow[] | null>(null);
+  const [nextBefore, setNextBefore] = useState<number | null>(null);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
 
   const trimmed = template.trim();
   const dirty =
@@ -92,6 +102,8 @@ export function PartnerKeyPostback({
     ...SYSTEM_PLACEHOLDERS.filter((p) => p !== "payout" || includePayout),
     ...row.passthrough_fields,
   ];
+
+  const showRawTemplate = revealed || dirty || template === "";
 
   const insertChip = (name: string) => {
     const el = textareaRef.current;
@@ -121,6 +133,7 @@ export function PartnerKeyPostback({
     }
     setServerError(null);
     toast.success("Postback settings saved");
+    setRevealed(false);
     onChanged();
   };
 
@@ -129,18 +142,46 @@ export function PartnerKeyPostback({
   const [logTick, setLogTick] = useState(0);
   const reloadLog = () => setLogTick((n) => n + 1);
 
+  // Search fires 300 ms after the last keystroke, not on every one.
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  const logUrl = (before: number | null) => {
+    const q = new URLSearchParams();
+    if (failedOnly) q.set("failed", "1");
+    if (search) q.set("q", search);
+    if (before !== null) q.set("before", String(before));
+    const qs = q.toString();
+    return `/api/partner-keys/${row.id}/postbacks${qs ? `?${qs}` : ""}`;
+  };
+
+  // First page; any filter change or refresh starts over.
   useEffect(() => {
     if (!canManage) return;
     let live = true;
-    void loadLog(`/api/partner-keys/${row.id}/postbacks${failedOnly ? "?failed=1" : ""}`).then((r) => {
+    void loadLog(logUrl(null)).then((r) => {
       if (!live) return;
-      if (r.ok) setLogRows(r.data.data);
-      else toastApiError(r);
+      if (r.ok) {
+        setLogRows(r.data.data);
+        setNextBefore(r.data.next_before);
+      } else toastApiError(r);
     });
     return () => {
       live = false;
     };
-  }, [canManage, loadLog, row.id, failedOnly, logTick]);
+    // logUrl is derived from the deps below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canManage, loadLog, row.id, failedOnly, search, logTick]);
+
+  const loadMore = async () => {
+    if (nextBefore === null) return;
+    const r = await moreApi.execute(logUrl(nextBefore));
+    if (!r.ok) return toastApiError(r);
+    setLogRows((prev) => [...(prev ?? []), ...r.data.data]);
+    setNextBefore(r.data.next_before);
+  };
 
   const sendTest = async () => {
     setTestResult(null);
@@ -212,23 +253,31 @@ export function PartnerKeyPostback({
       </fieldset>
 
       <div className="space-y-1">
-        <Label htmlFor={`postback-template-${row.id}`} className="text-xs">
-          Postback URL template
-        </Label>
+        <div className="flex items-center justify-between">
+          <Label htmlFor={`postback-template-${row.id}`} className="text-xs">
+            Postback URL template
+          </Label>
+          {canManage && !showRawTemplate && (
+            <Button type="button" variant="ghost" size="sm" className="h-6 text-xs" onClick={() => setRevealed(true)}>
+              Edit
+            </Button>
+          )}
+        </div>
         <Textarea
           id={`postback-template-${row.id}`}
           ref={textareaRef}
           rows={3}
           className="font-mono text-xs"
           placeholder="https://partner.example/pb?rid={relay_lead_id}&c={conversion_id}&s={status}"
-          value={template}
+          value={showRawTemplate ? template : maskUrl(template)}
+          readOnly={!showRawTemplate}
           onChange={(e) => {
             setTemplate(e.target.value);
             setServerError(null);
           }}
           disabled={!canManage || saveApi.isLoading}
         />
-        {canManage && (
+        {canManage && showRawTemplate && (
           <div className="flex flex-wrap gap-1.5">
             {chips.map((c) => (
               <button
@@ -283,6 +332,7 @@ export function PartnerKeyPostback({
                 setTemplate(row.postback_url_template ?? "");
                 setIncludePayout(row.postback_include_payout);
                 setFirstOnly(row.postback_first_purchase_only);
+                setRevealed(false);
               }}
             >
               Reset
@@ -309,7 +359,7 @@ export function PartnerKeyPostback({
           {testResult.url_masked && (
             <>
               {" "}
-              — <code className="break-all">{testResult.url_masked}</code>
+              — <code className="break-all">{maskUrl(testResult.url_masked)}</code>
             </>
           )}
         </p>
@@ -325,6 +375,14 @@ export function PartnerKeyPostback({
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium">Postback log</span>
             <div className="flex items-center gap-2">
+              <Input
+                type="search"
+                aria-label="Search postbacks"
+                placeholder="Lead id, conversion, URL…"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                className="h-7 w-52 text-xs"
+              />
               <Label htmlFor={`postback-failed-${row.id}`} className="text-xs">
                 Failed only
               </Label>
@@ -343,30 +401,30 @@ export function PartnerKeyPostback({
           </div>
           {logRows && logRows.length === 0 && (
             <p className="text-muted-foreground text-xs">
-              {failedOnly ? "No failed postbacks." : "No postbacks yet."}
+              {search ? "No postbacks match." : failedOnly ? "No failed postbacks." : "No postbacks yet."}
             </p>
           )}
           {logRows && logRows.length > 0 && (
-            <div className="max-h-72 overflow-auto rounded-md border">
+            // Fixed height (about 9 rows), newest first; older rows load on demand.
+            <div className="h-72 overflow-auto rounded-md border">
               <table className="w-full text-left text-xs">
                 <thead className="bg-muted text-muted-foreground sticky top-0">
                   <tr>
                     <th className="px-2 py-1 font-medium">Time</th>
                     <th className="px-2 py-1 font-medium">Type</th>
                     <th className="px-2 py-1 font-medium">Conversion</th>
-                    <th className="px-2 py-1 font-medium">URL</th>
                     <th className="px-2 py-1 font-medium">Code</th>
                     <th className="px-2 py-1 font-medium">Attempts</th>
                     <th className="px-2 py-1 font-medium">Status</th>
+                    <th className="px-2 py-1 font-medium">URL</th>
                   </tr>
                 </thead>
                 <tbody>
                   {logRows.map((l) => (
-                    <tr key={l.id} className="border-t align-top">
+                    <tr key={l.id} className="border-t whitespace-nowrap">
                       <td className="px-2 py-1 whitespace-nowrap">{formatCampaignDateTime(l.created_at)}</td>
                       <td className="px-2 py-1">{l.is_test ? "test" : "live"}</td>
                       <td className="px-2 py-1">{l.conversion_event_id ?? "—"}</td>
-                      <td className="max-w-80 min-w-56 px-2 py-1 font-mono break-all">{l.last_url_masked ?? "—"}</td>
                       <td className="px-2 py-1" title={l.last_error ?? undefined}>
                         {l.last_response_code ?? "—"}
                       </td>
@@ -377,10 +435,23 @@ export function PartnerKeyPostback({
                           <span className="text-destructive ml-1">{l.last_error}</span>
                         )}
                       </td>
+                      <td
+                        className="max-w-96 truncate px-2 py-1 font-mono"
+                        title={l.last_url_masked ? maskUrl(l.last_url_masked) : undefined}
+                      >
+                        {l.last_url_masked ? maskUrl(l.last_url_masked) : "—"}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {nextBefore !== null && (
+                <div className="border-t p-1 text-center">
+                  <Button type="button" variant="ghost" size="sm" disabled={moreApi.isLoading} onClick={loadMore}>
+                    {moreApi.isLoading ? "Loading…" : "Load older"}
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </div>

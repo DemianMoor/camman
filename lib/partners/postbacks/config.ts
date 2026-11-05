@@ -122,25 +122,45 @@ export type PostbackLogRow = {
   delivered_at: string | null;
 };
 
-/** Last 50 postbacks of one key, newest first. Never the raw URL or the payload. */
+export const POSTBACK_LOG_PAGE_SIZE = 25;
+export const POSTBACK_LOG_SEARCH_MAX = 100;
+
+/**
+ * One page of a key's postbacks, newest first. Keyset on id: `beforeId` is the last
+ * id of the previous page. Never the raw URL or the payload. `search` matches the
+ * MASKED url, the conversion id and the lead's passthrough values (e.g. the
+ * partner's lead id), case-insensitive.
+ */
 export async function listKeyPostbacks(
   dbc: DbOrTx,
-  o: { orgId: string; keyId: number; failedOnly: boolean },
-): Promise<PostbackLogRow[]> {
-  const rows = (await dbc.execute(sql`
+  o: { orgId: string; keyId: number; failedOnly: boolean; search: string | null; beforeId: number | null },
+): Promise<{ rows: PostbackLogRow[]; nextBeforeId: number | null }> {
+  const term = o.search?.trim().slice(0, POSTBACK_LOG_SEARCH_MAX) || null;
+  // LIKE metacharacters typed by the user are literal.
+  const pattern = term === null ? null : `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  // One row more than a page tells whether another page exists.
+  const raw = (await dbc.execute(sql`
     SELECT id, created_at, is_test, conversion_event_id, status, attempts, last_response_code,
            last_error, last_url_masked, last_attempt_at, delivered_at
-    FROM partner_postbacks
+    FROM partner_postbacks p
     WHERE org_id = ${o.orgId}::uuid AND partner_key_id = ${o.keyId}::int
       ${o.failedOnly ? sql`AND status = 'failed'` : sql``}
-    ORDER BY created_at DESC, id DESC
-    LIMIT 50`)) as unknown as Record<string, unknown>[];
+      ${o.beforeId === null ? sql`` : sql`AND id < ${o.beforeId}::bigint`}
+      ${pattern === null ? sql`` : sql`AND (
+        last_url_masked ILIKE ${pattern}
+        OR conversion_event_id::text ILIKE ${pattern}
+        OR EXISTS (SELECT 1 FROM jsonb_each_text(coalesce(p.payload -> 'fields', '{}'::jsonb)) f
+                   WHERE f.value ILIKE ${pattern}))`}
+    ORDER BY id DESC
+    LIMIT ${POSTBACK_LOG_PAGE_SIZE + 1}`)) as unknown as Record<string, unknown>[];
+  const page = raw.slice(0, POSTBACK_LOG_PAGE_SIZE);
   // Raw db.execute rows carry Date objects for timestamptz; the declared type is string.
-  return rows.map((r) => {
-    const out = { ...r };
+  const rows = page.map((r) => {
+    const out: Record<string, unknown> = { ...r, id: Number(r.id) };
     for (const f of ["created_at", "last_attempt_at", "delivered_at"]) {
       if (out[f] instanceof Date) out[f] = (out[f] as Date).toISOString();
     }
     return out as unknown as PostbackLogRow;
   });
+  return { rows, nextBeforeId: raw.length > POSTBACK_LOG_PAGE_SIZE ? rows[rows.length - 1].id : null };
 }

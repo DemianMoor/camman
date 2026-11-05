@@ -14,7 +14,8 @@ import type { DbOrTx } from "@/lib/intake/partner-key";
 import { ENQUEUE_LOCK_KEY, enqueuePartnerPostbacks } from "@/lib/partners/postbacks/enqueue";
 import { createPartnerWithKey } from "./_partner-fixture";
 
-// Partner sales postbacks — enqueue from the conversion_events ledger (E1-E9).
+// Partner postbacks — enqueue purchase rows from the conversion_events ledger
+// (E1-E10) and opt_out rows from opted-out drip journeys (E11-E14).
 //
 // Preview DB only, ONE transaction, rolled back. Fixtures live in a throwaway
 // org created inside the transaction. enqueuePartnerPostbacks scans ALL orgs, so
@@ -77,15 +78,24 @@ async function main() {
         ),
       ) as Record<"purchase" | "registration" | "upsell", number>;
 
-      const mkKey = async (org: string, slug: string, o: { enabled?: boolean; firstOnly?: boolean; template?: string } = {}) => {
-        const k = await createPartnerWithKey(tx, { orgId: org, slug: `${RUN}-${slug}`, sandbox: true });
+      // Live keys are NON-sandbox: every event skips sandbox keys. `optOutSince`
+      // (an interval before now()) adds opt_out to the key's events with that since.
+      const mkKey = async (org: string, slug: string, o: {
+        enabled?: boolean; firstOnly?: boolean; template?: string; sandbox?: boolean;
+        optOutSince?: string; words?: Record<string, string>;
+      } = {}) => {
+        const k = await createPartnerWithKey(tx, { orgId: org, slug: `${RUN}-${slug}`, sandbox: o.sandbox ?? false });
         await tx.execute(sql`
           UPDATE partner_keys
           SET passthrough_fields = '["list_id","relay_lead_id"]'::jsonb,
               postback_url_template = ${o.template ?? "https://p.example/pb?rid={relay_lead_id}&c={conversion_id}"}::text,
               postback_enabled = ${o.enabled ?? true}::boolean,
               postback_first_purchase_only = ${o.firstOnly ?? false}::boolean,
-              postback_active_since = now() - interval '1 hour'
+              postback_active_since = now() - interval '1 hour',
+              postback_event_keys = ${o.optOutSince ? sql`ARRAY['purchase','opt_out']::text[]` : sql`ARRAY['purchase']::text[]`},
+              postback_event_since = jsonb_build_object('purchase', now() - interval '1 hour')
+                || ${o.optOutSince ? sql`jsonb_build_object('opt_out', now() - ${o.optOutSince}::interval)` : sql`'{}'::jsonb`},
+              postback_status_words = ${JSON.stringify(o.words ?? {})}::jsonb
           WHERE id = ${k.keyId}::int`);
         return k.keyId;
       };
@@ -118,15 +128,15 @@ async function main() {
       /** A journey. Live states carry no closed_at; terminal ones do (drip_journeys_closed_at_check). */
       const mkJourney = async (
         org: string, campaignId: number, cid: string, le: string,
-        state: "active" | "completed", routedAgo = "2 days",
+        state: "active" | "completed" | "opted_out", routedAgo = "2 days", closedAgo = "1 hour",
       ) =>
         (await q<{ id: string }>(tx, sql`
           INSERT INTO drip_journeys (org_id, campaign_id, contact_id, lead_event_id, state,
                                      routed_at, first_send_at, close_reason, closed_at)
           VALUES (${org}::uuid, ${campaignId}::int, ${cid}::uuid, ${le}::uuid, ${state},
                   now() - ${routedAgo}::interval, now() - ${routedAgo}::interval,
-                  ${state === "completed" ? "all_stages_sent" : null}::text,
-                  ${state === "completed" ? sql`now() - interval '1 hour'` : sql`NULL`})
+                  ${state === "completed" ? "all_stages_sent" : state === "opted_out" ? "stop_received" : null}::text,
+                  ${state === "active" ? sql`NULL` : sql`now() - ${closedAgo}::interval`})
           RETURNING id::text AS id`))[0].id;
       /** A ledger row. `createdAgo` / `occurredAgo` are intervals before the frozen now(). */
       const mkSale = async (o: {
@@ -149,10 +159,15 @@ async function main() {
         await enqueuePartnerPostbacks(tx);
         await enqueuePartnerPostbacks(tx);
       };
-      const rowsForJourney = (jid: string) =>
-        q<{ conversion_event_id: number; lead_event_id: string; partner_key_id: number; payload: Row; status: string; org_id: string }>(tx, sql`
-          SELECT conversion_event_id, lead_event_id::text AS lead_event_id, partner_key_id, payload, status, org_id::text AS org_id
-          FROM partner_postbacks WHERE drip_journey_id = ${jid}::uuid ORDER BY id`);
+      type PbRow = {
+        conversion_event_id: number | null; lead_event_id: string; partner_key_id: number;
+        payload: Row; status: string; org_id: string; event: string;
+      };
+      const rowsForJourney = (jid: string, event = "purchase") =>
+        q<PbRow>(tx, sql`
+          SELECT conversion_event_id, lead_event_id::text AS lead_event_id, partner_key_id, payload, status,
+                 org_id::text AS org_id, event
+          FROM partner_postbacks WHERE drip_journey_id = ${jid}::uuid AND event = ${event}::text ORDER BY id`);
       const rowsForConversion = (ceId: number) =>
         q<Row>(tx, sql`SELECT id FROM partner_postbacks WHERE conversion_event_id = ${ceId}::bigint`);
       const stateOf = async (jid: string) =>
@@ -175,11 +190,11 @@ async function main() {
       const occ = (await q<{ s: string }>(tx, sql`
         SELECT to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS s FROM conversion_events WHERE id = ${ce1}::bigint`))[0].s;
       check("⭐ payload is exactly the PostbackPayload shape", r1[0]?.payload, {
-        event: "purchase", fields: { list_id: "L1", relay_lead_id: "R1" }, payout: "42.5000",
-        status: "approved", currency: "USD", occurred_at: occ, conversion_id: String(ce1),
+        event: "purchase", event_id: `purchase-${ce1}`, fields: { list_id: "L1", relay_lead_id: "R1" }, payout: "42.5000",
+        status: "sold", currency: "USD", occurred_at: occ, conversion_id: String(ce1),
       });
       check("payload keys", Object.keys(r1[0]?.payload ?? {}).sort(),
-            ["conversion_id", "currency", "event", "fields", "occurred_at", "payout", "status"]);
+            ["conversion_id", "currency", "event", "event_id", "fields", "occurred_at", "payout", "status"]);
 
       // ── E2 completed, purchase lands later, reclassified ⇒ 1 row ────────
       console.log("\nE2. completed journey, late purchase, reclassified:");
@@ -201,6 +216,7 @@ async function main() {
       check("journey stays opted_out", await stateOf(j3), "opted_out");
       await enqueueTwice();
       check("⭐ fires anyway: 1 row", (await rowsForJourney(j3)).length, 1);
+      check("E12: key without opt_out in its events ⇒ 0 opt_out rows", (await rowsForJourney(j3, "opt_out")).length, 0);
 
       // ── E4 pending ⇒ 0; approved in place ⇒ 1; revenue change ⇒ still 1 ─
       console.log("\nE4. ledger row pending → approved → revenue change:");
@@ -346,12 +362,117 @@ async function main() {
       check("an unreferenced passthrough field is not required (E2's lead has no list_id and fired)",
             (await rowsForJourney(j2)).length, 1);
 
+      // ── E10 purchase on the new shape: event column, status word, event_id ─
+      console.log("\nE10. purchase row: event, status word, event_id:");
+      check("E1 row event column = purchase", r1[0]?.event, "purchase");
+      check("E1 default word = sold", r1[0]?.payload.status, "sold");
+      const keyWord = await mkKey(orgId, "word", { words: { purchase: "SALE" } });
+      const c10 = await mkContact(orgId);
+      const j10 = await mkJourney(orgId, camp, c10, await mkLead(orgId, c10, keyWord, { relay_lead_id: "R10" }), "active");
+      const ce10 = await mkSale({ cid: c10 });
+      await enqueueTwice();
+      const r10 = await rowsForJourney(j10);
+      check("⭐ key's word + event_id", [r10.length, r10[0]?.event, r10[0]?.payload.status, r10[0]?.payload.event_id],
+            [1, "purchase", "SALE", `purchase-${ce10}`]);
+
+      // ── E11 opted-out journey ⇒ 1 opt_out row ───────────────────────────
+      console.log("\nE11. opted-out journey ⇒ opt_out row:");
+      const keyOpt = await mkKey(orgId, "opt", { optOutSince: "2 hours" });
+      const c11 = await mkContact(orgId);
+      const le11 = await mkLead(orgId, c11, keyOpt, { list_id: "L11", relay_lead_id: "R11" });
+      const j11 = await mkJourney(orgId, camp, c11, le11, "opted_out", "2 days", "1 hour");
+      const first = await enqueuePartnerPostbacks(tx);
+      const second = await enqueuePartnerPostbacks(tx);
+      const r11 = await rowsForJourney(j11, "opt_out");
+      const closedAt = (await q<{ s: string }>(tx, sql`
+        SELECT to_char(closed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS s FROM drip_journeys WHERE id = ${j11}::uuid`))[0].s;
+      check("⭐ exactly 1 opt_out row after two runs", r11.length, 1);
+      check("row columns: no conversion, the lead, the key, the org, pending",
+            [r11[0]?.conversion_event_id, r11[0]?.lead_event_id, Number(r11[0]?.partner_key_id), r11[0]?.org_id, r11[0]?.status],
+            [null, le11, keyOpt, orgId, "pending"]);
+      check("⭐ payload is exactly the opt_out PostbackPayload", r11[0]?.payload, {
+        event: "opt_out", event_id: `opt_out-${j11}`, status: "opt_out", conversion_id: "",
+        occurred_at: closedAt, currency: null, payout: null, fields: { list_id: "L11", relay_lead_id: "R11" },
+      });
+      check("occurred_at is UTC Z", /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(closedAt), true);
+      check("no purchase row for a journey with no sale", (await rowsForJourney(j11)).length, 0);
+      check("⭐ queuedByEvent: first run counts the opt_out, second run queues nothing",
+            [first.queuedByEvent?.opt_out >= 1, first.queued === first.queuedByEvent?.purchase + first.queuedByEvent?.opt_out,
+             second.queued, second.queuedByEvent],
+            [true, true, 0, { purchase: 0, opt_out: 0 }]);
+      const keyOptWord = await mkKey(orgId, "optword", { optOutSince: "2 hours", words: { opt_out: "STOP" } });
+      const c11w = await mkContact(orgId);
+      const j11w = await mkJourney(orgId, camp, c11w, await mkLead(orgId, c11w, keyOptWord, { relay_lead_id: "R11W" }), "opted_out");
+      await enqueueTwice();
+      check("opt_out uses the key's word", (await rowsForJourney(j11w, "opt_out"))[0]?.payload.status, "STOP");
+
+      // ── E12 not fired ───────────────────────────────────────────────────
+      console.log("\nE12. opt_out not fired:");
+      // opt_out turned on 30 min ago; the journey closed 1 h ago (before it).
+      const keyOptLate = await mkKey(orgId, "optlate", { optOutSince: "30 minutes" });
+      const c12a = await mkContact(orgId);
+      const j12a = await mkJourney(orgId, camp, c12a, await mkLead(orgId, c12a, keyOptLate, { relay_lead_id: "R12a" }), "opted_out");
+      // Closed 31 days ago, on a key whose opt_out since is older still: outside the 30-day window.
+      const keyOptOld = await mkKey(orgId, "optold", { optOutSince: "60 days" });
+      const c12e = await mkContact(orgId);
+      const j12e = await mkJourney(orgId, camp, c12e, await mkLead(orgId, c12e, keyOptOld, { relay_lead_id: "R12e" }),
+                                   "opted_out", "40 days", "31 days");
+      // Sandbox key with both events live: neither the sale nor the opt-out fires.
+      const keySandbox = await mkKey(orgId, "sandbox", { sandbox: true, optOutSince: "2 hours" });
+      const c12b = await mkContact(orgId);
+      const j12b = await mkJourney(orgId, camp, c12b, await mkLead(orgId, c12b, keySandbox, { relay_lead_id: "R12b" }), "opted_out");
+      await mkSale({ cid: c12b });
+      // Lead missing the template's passthrough field (relay_lead_id).
+      const c12c = await mkContact(orgId);
+      const j12c = await mkJourney(orgId, camp, c12c, await mkLead(orgId, c12c, keyOpt, { list_id: "L12c" }), "opted_out");
+      // Live journey (not opted out) on an opt_out key.
+      const c12d = await mkContact(orgId);
+      const j12d = await mkJourney(orgId, camp, c12d, await mkLead(orgId, c12d, keyOpt, { relay_lead_id: "R12d" }), "active");
+      await enqueueTwice();
+      check("⭐ journey closed before the opt_out since ⇒ 0", (await rowsForJourney(j12a, "opt_out")).length, 0);
+      check("closed outside the 30-day window ⇒ 0", (await rowsForJourney(j12e, "opt_out")).length, 0);
+      check("⭐ sandbox key ⇒ 0 opt_out and 0 purchase",
+            [(await rowsForJourney(j12b, "opt_out")).length, (await rowsForJourney(j12b)).length], [0, 0]);
+      check("⭐ lead missing the template's passthrough field ⇒ 0", (await rowsForJourney(j12c, "opt_out")).length, 0);
+      check("live journey ⇒ 0", (await rowsForJourney(j12d, "opt_out")).length, 0);
+
+      // ── E13 first-only is a purchase rule ───────────────────────────────
+      console.log("\nE13. first-purchase-only key still fires opt_out:");
+      const keyOptFirst = await mkKey(orgId, "optfirst", { firstOnly: true, optOutSince: "2 hours" });
+      const c13 = await mkContact(orgId);
+      const j13 = await mkJourney(orgId, camp, c13, await mkLead(orgId, c13, keyOptFirst, { relay_lead_id: "R13" }), "opted_out");
+      // The opt-out is queued FIRST, before any sale exists; the sale that lands
+      // later must still fire (first-only counts the journey's PURCHASE rows).
+      await enqueueTwice();
+      check("opt_out queued before the sale", (await rowsForJourney(j13, "opt_out")).length, 1);
+      await mkSale({ cid: c13, occurredAgo: "20 minutes" });
+      await enqueueTwice();
+      await mkSale({ cid: c13, occurredAgo: "10 minutes" });
+      await enqueueTwice();
+      check("⭐ 1 purchase + 1 opt_out row",
+            [(await rowsForJourney(j13)).length, (await rowsForJourney(j13, "opt_out")).length], [1, 1]);
+
+      // ── E14 org-matched joins ───────────────────────────────────────────
+      console.log("\nE14. opt_out across orgs:");
+      // Org-B journey whose lead is an org-A lead on org A's opt_out key.
+      const c14 = await mkContact(orgId);
+      const j14 = await mkJourney(orgB, camp, c14, await mkLead(orgId, c14, keyOpt, { relay_lead_id: "R14" }), "opted_out");
+      // Org-B journey + org-B lead, but the lead points at org A's opt_out key.
+      const j14b = await mkJourney(orgB, camp, c14, await mkLead(orgB, c14, keyOpt, { relay_lead_id: "R14b" }), "opted_out");
+      await enqueueTwice();
+      check("⭐ journey in another org with the same contact id ⇒ 0",
+            [(await rowsForJourney(j14, "opt_out")).length, (await rowsForJourney(j14b, "opt_out")).length], [0, 0]);
+
       // Sanity: everything this fixture queued, by key.
-      const byKey = await q<{ k: number; n: number }>(tx, sql`
-        SELECT partner_key_id AS k, count(*)::int AS n FROM partner_postbacks
-        WHERE org_id IN (${orgId}::uuid, ${orgB}::uuid) GROUP BY 1 ORDER BY 1`);
-      check("fixture totals per key (every: E1+E2+E3+E4+E5×2+E6+E8+E9a = 9, first-only: E5+E5b = 2, system-only: E9c = 1, E6 journey-1 key: 0)",
-            byKey.map((r) => [Number(r.k), Number(r.n)]), [[key, 9], [keyFirst, 2], [keySys, 1]].sort((a, b) => a[0] - b[0]));
+      const byKey = await q<{ k: number; e: string; n: number }>(tx, sql`
+        SELECT partner_key_id AS k, event AS e, count(*)::int AS n FROM partner_postbacks
+        WHERE org_id IN (${orgId}::uuid, ${orgB}::uuid) GROUP BY 1, 2 ORDER BY 1, 2`);
+      check("fixture totals per key+event (every: E1+E2+E3+E4+E5×2+E6+E8+E9a = 9, first-only: E5+E5b = 2, system-only: E9c = 1, " +
+            "word: E10 = 1, opt: E11 = 1 opt_out, optword: 1 opt_out, optfirst: E13 = 1 + 1, E6 journey-1 / late / old / sandbox: 0)",
+            byKey.map((r) => [Number(r.k), r.e, Number(r.n)]),
+            ([[key, "purchase", 9], [keyFirst, "purchase", 2], [keySys, "purchase", 1], [keyWord, "purchase", 1],
+              [keyOpt, "opt_out", 1], [keyOptWord, "opt_out", 1], [keyOptFirst, "opt_out", 1], [keyOptFirst, "purchase", 1],
+            ] as [number, string, number][]).sort((a, b) => a[0] - b[0] || a[1].localeCompare(b[1])));
 
       // The serialising advisory lock is taken in the caller's transaction (and
       // held until it ends). A bigint key shows as classid = high 32 bits,

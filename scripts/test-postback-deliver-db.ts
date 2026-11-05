@@ -91,7 +91,7 @@ async function main() {
     /** A due pending row; conversion_id doubles as the fake transport's routing key. */
     const mkRow = async (keyId: number, cid: string) => {
       const payload = {
-        event: "purchase", status: "approved", conversion_id: cid, occurred_at: new Date().toISOString(),
+        event: "purchase", event_id: `purchase-${cid}`, status: "sold", conversion_id: cid, occurred_at: new Date().toISOString(),
         currency: "USD", payout: "1.0000", fields: { tok: SECRET },
       };
       const id = Number((await q<{ id: number }>(sql`
@@ -292,7 +292,7 @@ async function main() {
     const d13b = await mkRow(key, "D13b");
     await db.execute(sql`UPDATE partner_postbacks SET conversion_event_id = ${ceRejected}::bigint WHERE id = ${d13a}::bigint`);
     await db.execute(sql`UPDATE partner_postbacks SET conversion_event_id = ${ceStill}::bigint WHERE id = ${d13b}::bigint`);
-    // Rejected after enqueue: the payload still says "approved".
+    // Rejected after enqueue: the payload (status word "sold") still reads as a sale.
     await db.execute(sql`UPDATE conversion_events SET status = 'rejected' WHERE id = ${ceRejected}::bigint`);
     calls.length = 0;
     const r13 = await run();

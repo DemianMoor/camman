@@ -11,17 +11,27 @@ the passthrough-fields half is in [partner-lead-intake.md](partner-lead-intake.m
 ## What fires
 
 - A `conversion_events` row (the ledger) whose event type has `event_types.is_purchase`, with
-  `status = 'approved'`, attributed to a **drip journey** whose lead arrived on a key with postbacks enabled.
-  Upsell and registration events never fire. A later rejection is visible in the ledger and **nothing is sent**
-  (no reversal postbacks in v1).
-- **`{status}` is always `approved`.** The payload is snapshotted at enqueue, so delivery re-reads the ledger row
+  `status = 'approved'`, attributed to a **drip journey** whose lead arrived on a non-sandbox key with postbacks
+  enabled and `purchase` in its events. Upsell and registration events never fire. A later rejection is visible in
+  the ledger and **nothing is sent** (no reversal postbacks in v1). `event = 'purchase'`,
+  `event_id = purchase-<conversion_events.id>`.
+- **`opt_out`** (when the key has `opt_out` in its events): a drip journey closed `opted_out` (STOP while the
+  journey was live) within the last 30 days, at/after the key's opt_out since, same non-sandbox and required-fields
+  rules. One row per key and journey (`partner_postbacks_key_journey_optout_uniq`). `event_id =
+  opt_out-<drip_journeys.id>`, `{occurred_at}` = the journey's `closed_at` (processing time, UTC `Z`),
+  `{conversion_id}` empty, `{currency}` / `{payout}` empty. First-purchase-only does **not** apply to opt_out, and
+  a queued opt_out does not count as the journey's "first" postback (test E13).
+- **`{status}` is the key's per-event word** (`postback_status_words`; defaults `sold` / `opt_out`). The sale
+  payload is snapshotted at enqueue, so delivery re-reads the ledger row
   (org-matched) when it claims a live row: if its status is no longer `'approved'` (rejected while the postback was
   pending), the row is `cancelled` with `last_error = 'no_longer_approved'` and nothing is sent. A sale re-approved
   afterwards is not re-queued (the per-key/conversion unique index already holds the cancelled row).
 - **Regardless of journey state**, including `opted_out`. The trigger is the ledger, never the journey (the
   lifecycle sweep skips posture-off orgs and never reclassifies `opted_out`).
-- **Never backfilled.** Only ledger rows created at/after the key's `postback_active_since` (stamped when postbacks
-  are enabled). A sale recorded `pending` before enabling and approved after does **not** fire.
+- **Never backfilled, per event.** Only sources at/after the event's own since in
+  `partner_keys.postback_event_since` (stamped when that event becomes live): ledger rows by `created_at`, opted-out
+  journeys by `closed_at`. Turning `opt_out` on later never sends the opt-outs before it. A sale recorded `pending`
+  before enabling and approved after does **not** fire.
 - **Required fields (derived from the template).** Every passthrough field the key's template references (e.g.
   `{relay_lead_id}`) must have a non-empty value in the lead's stored `partner_data`, or the sale is **never
   queued** — silently, no row. A partner that sends the field in only some feeds gets no empty-value postbacks
@@ -55,7 +65,7 @@ sensitivity as the report revenue toggle. Off means the placeholder is refused a
 ## Delivery
 
 - Enqueue: `enqueuePartnerPostbacks` ([lib/partners/postbacks/enqueue.ts](../../lib/partners/postbacks/enqueue.ts)), one
-  idempotent `INSERT … SELECT` run by `/api/cron/drip-monitors` after the lifecycle sweep, under a transaction
+  idempotent `INSERT … SELECT` per event (purchase, opt_out) run by `/api/cron/drip-monitors` after the lifecycle sweep, under a transaction
   advisory lock (serialises first-only picks). Never from the send path.
 - Delivery: `/api/cron/partner-postbacks` (`*/5 * * * *`, [deliver.ts](../../lib/partners/postbacks/deliver.ts)).
   `GET`, https:443 only, private/reserved addresses refused at connect time, redirects never followed, 5 s timeout.

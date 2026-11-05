@@ -86,7 +86,7 @@ Besides the fields above, we can agree a short list of extra field names with yo
 
 If agreed, we notify a URL of yours when a lead you sent makes an approved purchase. We make an HTTP GET to your https URL (port 443). Depending on your agreement, a postback is sent for every approved purchase or only the first one per lead.
 
-Your URL is a template. Write any of these in curly braces and we fill them in, together with your agreed passthrough field names (for example `{your_field}`). Values are URL-encoded; a value we do not have renders empty.
+Your URL is a template. Write any of these in curly braces and we fill them in, together with your agreed passthrough field names (for example `{your_field}`). Values are URL-encoded. A passthrough field your URL uses is required: if a lead arrived without it, or with it empty, no postback is sent for that lead. Any other value we do not have renders empty.
 
 | Placeholder | Value |
 |---|---|

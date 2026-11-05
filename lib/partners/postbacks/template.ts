@@ -17,7 +17,8 @@ export interface PostbackPayload {
 
 const PLACEHOLDER_RE = /\{([^{}]*)\}/g;
 const MAX_TEMPLATE_LENGTH = 2048;
-const SENSITIVE_PARAM_RE = /token|key|secret|sig|auth|pass/i;
+// `k` alone is a common API-key parameter name (a partner's template uses it).
+const SENSITIVE_PARAM_RE = /token|key|secret|sig|auth|pass|^k$/i;
 
 export function postbackConfigError(c: {
   template: string;

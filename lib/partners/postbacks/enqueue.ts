@@ -28,7 +28,8 @@ export const ENQUEUE_LOCK_KEY = 7_228_000_000_001; // < 2^53, exact as a JS numb
 //   • created at/after the key's postback_active_since (decision 4: never backfill —
 //     a row created pending before enable and approved after does NOT fire),
 // on the drip journey it belongs to (anchor below), whose lead came in on a key
-// with postbacks enabled. NO journey-state predicate (decision 4: fires whatever
+// with postbacks enabled, and whose stored partner_data has a non-empty value for
+// every passthrough field the template references. NO journey-state predicate (decision 4: fires whatever
 // the journey ended as, including opted_out) and NO drip-posture check.
 //
 // Idempotency is the partial unique (partner_key_id, conversion_event_id) WHERE
@@ -75,6 +76,17 @@ async function enqueueLocked(t: DbOrTx): Promise<{ queued: number }> {
      AND ce.created_at >= k.postback_active_since
     WHERE ce.status = 'approved'
       AND ce.created_at > now() - interval '30 days'
+      -- Required fields: every passthrough field the key's TEMPLATE references must
+      -- be non-empty on this lead, else the sale is skipped silently (never queued).
+      -- Derived from the template, never configured: a partner that sends the field
+      -- in only some of its feeds gets no postback with an empty value. System
+      -- placeholders ({status}, {payout}, …) are not passthrough fields, so they are
+      -- never required. partner_data is fixed at intake, so a skip is final.
+      AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text(k.passthrough_fields) AS f(name)
+        WHERE strpos(k.postback_url_template, '{' || f.name || '}') > 0
+          AND coalesce(btrim(le.partner_data ->> f.name), '') = ''
+      )
       -- Journey anchor: the SAME rule as reclassifyCompletedJourneysOnPurchase in
       -- lib/drip/lifecycle.ts — the sale belongs to j iff it happened at/after j
       -- was routed and before the contact's NEXT journey on this campaign was

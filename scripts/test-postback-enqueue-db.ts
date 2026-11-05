@@ -14,7 +14,7 @@ import type { DbOrTx } from "@/lib/intake/partner-key";
 import { ENQUEUE_LOCK_KEY, enqueuePartnerPostbacks } from "@/lib/partners/postbacks/enqueue";
 import { createPartnerWithKey } from "./_partner-fixture";
 
-// Partner sales postbacks — enqueue from the conversion_events ledger (E1-E8).
+// Partner sales postbacks — enqueue from the conversion_events ledger (E1-E9).
 //
 // Preview DB only, ONE transaction, rolled back. Fixtures live in a throwaway
 // org created inside the transaction. enqueuePartnerPostbacks scans ALL orgs, so
@@ -77,12 +77,12 @@ async function main() {
         ),
       ) as Record<"purchase" | "registration" | "upsell", number>;
 
-      const mkKey = async (org: string, slug: string, o: { enabled?: boolean; firstOnly?: boolean } = {}) => {
+      const mkKey = async (org: string, slug: string, o: { enabled?: boolean; firstOnly?: boolean; template?: string } = {}) => {
         const k = await createPartnerWithKey(tx, { orgId: org, slug: `${RUN}-${slug}`, sandbox: true });
         await tx.execute(sql`
           UPDATE partner_keys
           SET passthrough_fields = '["list_id","relay_lead_id"]'::jsonb,
-              postback_url_template = 'https://p.example/pb?rid={relay_lead_id}&c={conversion_id}',
+              postback_url_template = ${o.template ?? "https://p.example/pb?rid={relay_lead_id}&c={conversion_id}"}::text,
               postback_enabled = ${o.enabled ?? true}::boolean,
               postback_first_purchase_only = ${o.firstOnly ?? false}::boolean,
               postback_active_since = now() - interval '1 hour'
@@ -94,6 +94,8 @@ async function main() {
       const keyOff = await mkKey(orgId, "off", { enabled: false });
       const keyB = await mkKey(orgB, "orgb");
       const keyJ1 = await mkKey(orgId, "e6j1"); // E6 journey 1's lead: a DIFFERENT enabled key
+      // E9c: a template that references NO passthrough field — nothing is required.
+      const keySys = await mkKey(orgId, "sys", { template: "https://p.example/pb?s=sold&c={conversion_id}&st={status}" });
 
       const mkCampaign = async (org: string, type: "drip" | "regular") =>
         Number((await q<{ id: number }>(tx, sql`
@@ -318,12 +320,38 @@ async function main() {
             (await q<{ d: boolean }>(tx, sql`SELECT drip_enabled AS d FROM org_settings WHERE org_id = ${orgId}::uuid`))[0].d, false);
       check("⭐ still enqueues 1 row", (await rowsForJourney(j8)).length, 1);
 
+      // ── E9 required fields: template-referenced passthrough fields must be non-empty ─
+      console.log("\nE9. required fields (derived from the template):");
+      const c9a = await mkContact(orgId);
+      const j9a = await mkJourney(orgId, camp, c9a, await mkLead(orgId, c9a, key, { relay_lead_id: "R9A" }), "active");
+      await mkSale({ cid: c9a });
+      const c9b = await mkContact(orgId);
+      const j9b = await mkJourney(orgId, camp, c9b, await mkLead(orgId, c9b, key, { list_id: "L9B" }), "active");
+      await mkSale({ cid: c9b });
+      const c9e = await mkContact(orgId);
+      const j9e = await mkJourney(orgId, camp, c9e, await mkLead(orgId, c9e, key, { relay_lead_id: "   " }), "active");
+      await mkSale({ cid: c9e });
+      const c9f = await mkContact(orgId);
+      const j9f = await mkJourney(orgId, camp, c9f, await mkLead(orgId, c9f, keyFirst, {}), "active");
+      await mkSale({ cid: c9f });
+      const c9c = await mkContact(orgId);
+      const j9c = await mkJourney(orgId, camp, c9c, await mkLead(orgId, c9c, keySys, {}), "active");
+      await mkSale({ cid: c9c });
+      await enqueueTwice();
+      check("⭐ lead WITH relay_lead_id ⇒ 1 row", (await rowsForJourney(j9a)).length, 1);
+      check("⭐ lead WITHOUT relay_lead_id (only an unreferenced field) ⇒ 0 rows", (await rowsForJourney(j9b)).length, 0);
+      check("⭐ relay_lead_id blank/whitespace ⇒ 0 rows", (await rowsForJourney(j9e)).length, 0);
+      check("⭐ first-only key, lead without the field ⇒ 0 rows", (await rowsForJourney(j9f)).length, 0);
+      check("⭐ system-placeholders-only template, lead with NO partner data ⇒ 1 row", (await rowsForJourney(j9c)).length, 1);
+      check("an unreferenced passthrough field is not required (E2's lead has no list_id and fired)",
+            (await rowsForJourney(j2)).length, 1);
+
       // Sanity: everything this fixture queued, by key.
       const byKey = await q<{ k: number; n: number }>(tx, sql`
         SELECT partner_key_id AS k, count(*)::int AS n FROM partner_postbacks
         WHERE org_id IN (${orgId}::uuid, ${orgB}::uuid) GROUP BY 1 ORDER BY 1`);
-      check("fixture totals per key (every: E1+E2+E3+E4+E5×2+E6+E8 = 8, first-only: E5+E5b = 2, E6 journey-1 key: 0)",
-            byKey.map((r) => [Number(r.k), Number(r.n)]), [[key, 8], [keyFirst, 2]]);
+      check("fixture totals per key (every: E1+E2+E3+E4+E5×2+E6+E8+E9a = 9, first-only: E5+E5b = 2, system-only: E9c = 1, E6 journey-1 key: 0)",
+            byKey.map((r) => [Number(r.k), Number(r.n)]), [[key, 9], [keyFirst, 2], [keySys, 1]].sort((a, b) => a[0] - b[0]));
 
       // The serialising advisory lock is taken in the caller's transaction (and
       // held until it ends). A bigint key shows as classid = high 32 bits,

@@ -1,6 +1,6 @@
 # Partner sales postbacks
 
-_Last updated: 2026-10-31_
+_Last updated: 2026-11-02_
 
 When a lead a partner sent us produces a sale, we `GET` a URL the partner configured on their
 intake key, echoing the extra fields they sent with the lead. Generic and per key — no code per
@@ -22,6 +22,13 @@ the passthrough-fields half is in [partner-lead-intake.md](partner-lead-intake.m
   lifecycle sweep skips posture-off orgs and never reclassifies `opted_out`).
 - **Never backfilled.** Only ledger rows created at/after the key's `postback_active_since` (stamped when postbacks
   are enabled). A sale recorded `pending` before enabling and approved after does **not** fire.
+- **Required fields (derived from the template).** Every passthrough field the key's template references (e.g.
+  `{relay_lead_id}`) must have a non-empty value in the lead's stored `partner_data`, or the sale is **never
+  queued** — silently, no row. A partner that sends the field in only some feeds gets no empty-value postbacks
+  from the others. Nothing is configured: the rule reads the template, so a template that uses only system
+  placeholders requires nothing. `partner_data` is fixed at intake, so a skip is final. SQL in
+  [lib/partners/postbacks/enqueue.ts](../../lib/partners/postbacks/enqueue.ts); test E9 in
+  `scripts/test-postback-enqueue-db.ts`.
 - Regular (non-drip) campaigns do not fire. Attributing regular campaigns to partner groups is a **follow-up**, tied
   to the partner-group-attribution workstream; not built.
 
@@ -37,7 +44,8 @@ the passthrough-fields half is in [partner-lead-intake.md](partner-lead-intake.m
 `partner_keys.postback_url_template` is an `https://` URL (port 443, no credentials). Placeholders may appear only in
 the **path or query**, never the host (a render that would change the host is refused). Allowed: `{status}` `{event}`
 `{conversion_id}` `{occurred_at}` `{currency}` `{payout}` plus this key's own passthrough field names (for example
-`{relay_lead_id}`). Values are URL-encoded; a missing field renders empty. Validated server-side by
+`{relay_lead_id}`). Values are URL-encoded. A referenced passthrough field is required (see "What fires"); any other missing value
+renders empty. Validated server-side by
 `postbackConfigError` in [lib/partners/postbacks/template.ts](../../lib/partners/postbacks/template.ts); the same
 function drives the inline error in the UI.
 
@@ -78,7 +86,7 @@ UI: [components/settings/partner-key-postback.tsx](../../components/settings/par
 **Who sees the template.** `postback_url_template` can carry a secret query value, so it is returned raw only to callers with `partner_keys.manage`; view-only callers (`partner_keys.view`) get `maskUrl(template)` from every key read (`normalizeKeyRows(rows, canManage)` in [lib/partners/queries.ts](../../lib/partners/queries.ts); test `scripts/test-partner-key-template-masking.ts`).
 
 URLs are stored and shown **masked**: query values whose name contains `token`, `key`, `secret`, `sig`, `auth` or
-`pass` become `***`. The raw URL is never logged or returned.
+`pass`, or is exactly `k` (any case), become `***`. The raw URL is never logged or returned.
 
 ## Alerts
 

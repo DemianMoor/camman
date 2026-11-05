@@ -65,6 +65,7 @@ check("P8 uppercase invalid", typeof passthroughNamesError(["List"]), "string");
 check("P8 zip built-in", passthroughNamesError(["zip"]), "zip is already a built-in field");
 check("P8 zip_code built-in", passthroughNamesError(["zip_code"]), "zip_code is already a built-in field");
 check("P8 payout reserved", passthroughNamesError(["payout"]), "payout is a reserved placeholder name");
+check("P8 event_id reserved", passthroughNamesError(["event_id"]), "event_id is a reserved placeholder name");
 check("P8 duplicates", typeof passthroughNamesError(["list_id", "list_id"]), "string");
 check("P8 valid", passthroughNamesError(["list_id", "relay_lead_id"]), null);
 

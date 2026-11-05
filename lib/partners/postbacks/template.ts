@@ -5,8 +5,26 @@ import { SYSTEM_PLACEHOLDERS } from "@/lib/intake/passthrough";
 
 export { SYSTEM_PLACEHOLDERS };
 
+export const POSTBACK_EVENTS = ["purchase", "opt_out", "invalid"] as const;
+export type PostbackEvent = (typeof POSTBACK_EVENTS)[number];
+
+export const DEFAULT_STATUS_WORDS: Record<PostbackEvent, string> = {
+  purchase: "sold",
+  opt_out: "opt_out",
+  invalid: "invalid",
+};
+
+export const STATUS_WORD_RE = /^[A-Za-z0-9_.-]{1,32}$/;
+
+/** The partner's stored status word for an event, else the default. */
+export function statusWordFor(words: Record<string, unknown>, event: PostbackEvent): string {
+  const w = words[event];
+  return typeof w === "string" && STATUS_WORD_RE.test(w) ? w : DEFAULT_STATUS_WORDS[event];
+}
+
 export interface PostbackPayload {
-  event: "purchase";
+  event: PostbackEvent;
+  event_id: string;
   status: string;
   conversion_id: string;
   occurred_at: string;
@@ -81,6 +99,13 @@ function renderRaw(template: string, p: PostbackPayload, includePayout: boolean)
     switch (name) {
       case "status": value = p.status; break;
       case "event": value = p.event; break;
+      case "event_id": {
+        // Rows queued before event_id existed lack it in the stored jsonb (the type says
+        // string, the data may not): fall back to the format enqueue writes for a sale.
+        const stored = (p as { event_id?: string }).event_id;
+        value = stored ? stored : p.conversion_id ? `purchase-${p.conversion_id}` : "";
+        break;
+      }
       case "conversion_id": value = p.conversion_id; break;
       case "occurred_at": value = p.occurred_at; break;
       case "currency": value = p.currency; break;
@@ -119,10 +144,11 @@ export function maskUrl(url: string): string {
   return `${head}?${masked}${frag}`;
 }
 
-export function samplePayload(passthroughFields: readonly string[]): PostbackPayload {
+export function samplePayload(passthroughFields: readonly string[], words: Record<string, unknown>): PostbackPayload {
   return {
     event: "purchase",
-    status: "approved",
+    event_id: `test-${crypto.randomUUID()}`,
+    status: statusWordFor(words, "purchase"),
     conversion_id: `test-${crypto.randomUUID()}`,
     occurred_at: new Date().toISOString(),
     currency: "USD",

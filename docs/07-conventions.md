@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-05 (partner postback events: event_id format, per-event since, opt_out journey-only); 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ A reversal postback reuses the ORIGINAL event's tid; every new event gets a new one (2026-11-03)
@@ -4990,14 +4990,24 @@ Every SMS body is assembled by `lib/messages/` — `tags.ts` (personalization ta
 See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
 
 - **Idempotency is a unique index, not a check.** `partner_postbacks` has `UNIQUE (partner_key_id, conversion_event_id) WHERE NOT is_test`; enqueue is `INSERT … ON CONFLICT DO NOTHING`. An in-place ledger update (revenue, status) can therefore never queue a second postback. Never replace this with a SELECT-then-INSERT.
-- **Delivery is at-least-once.** The claim is one autocommit `UPDATE` that leases rows for 2 minutes; no transaction is held across HTTP. A runner killed after the partner answered re-sends. `{conversion_id}` is the partner's dedupe key and is documented as such.
+- **Delivery is at-least-once.** The claim is one autocommit `UPDATE` that leases rows for 2 minutes; no transaction is held across HTTP. A runner killed after the partner answered re-sends. `{event_id}` is the partner's dedupe key and is documented as such (`{conversion_id}` is sale-only).
 - **Never from the send path.** Postbacks are queued from the conversion ledger by drip-monitors and sent by their own cron. Nothing under `lib/sends/` or `lib/drip/{send-one,scheduler,followups}.ts` may import `lib/partners/postbacks`; `scripts/test-postback-send-path-guard.ts` (in `check:guards`) fails if one does (comments stripped first). A slow or dead partner URL must never be able to slow or stop an SMS.
 - **Time budgets.** The delivery cron stops picking up rows after 40 s (`RUN_DEADLINE_MS`, route `maxDuration = 60`); a claimed row not finished within its 2-minute lease comes due again.
 - **Client code may import only `lib/partners/postbacks/template.ts`** (pure). `http`, `deliver`, `enqueue` and `config` are server-only.
-- **Do not trigger on journey state, and never backfill** (owner decisions 2026-10-30): a postback fires for an approved purchase whatever the journey ended as, and only for ledger rows created at/after `postback_active_since`.
+- **Do not trigger on journey state, and never backfill** (owner decisions 2026-10-30): a postback fires for an approved purchase whatever the journey ended as, and only for sources at/after the event's own since in `partner_keys.postback_event_since` (per event, 0234): a purchase compares `conversion_events.created_at` to `postback_event_since.purchase`; an opt_out compares `drip_journeys.closed_at` to `postback_event_since.opt_out`.
 - **The payload is a snapshot; the ledger is re-checked at send time.** `{status}` is frozen at enqueue, so the delivery claim re-reads the linked `conversion_events.status` (org-matched) for every live row and cancels it unsent (`last_error = 'no_longer_approved'`) if the sale is no longer `'approved'`. Anything else stored in the payload that the owner rules must hold at SEND time needs the same re-check — do not trust the snapshot for it. Covered by D13 in `scripts/test-postback-deliver-db.ts`.
 - **A template-referenced passthrough field is required, derived — never configured** (owner, 2026-11-02). Enqueue skips a sale whose lead has no non-empty value for a passthrough field the key's template uses; there is no per-key or per-feed list. Keep this a property of the template: a second "required fields" setting could disagree with the URL it guards.
 - **Best-effort is not silent.** A partner-postbacks step that swallows its error (enqueue in drip-monitors) must still raise a latched alert, gated on `postbacksLive()` so nothing pages before go-live — a fresh heartbeat around a swallowed failure is invisible otherwise.
+
+## Partner postback events: `event_id`, per-event since, opt_out is journey-only (0234, 2026-11-05)
+
+See [04-features/partner-postbacks.md](04-features/partner-postbacks.md).
+
+- **`{event_id}` is the partner's dedupe key**, not `{conversion_id}`. Format: `purchase-<conversion_events.id>`, `opt_out-<drip_journeys.id>` (journey uuid), test sends `test-<uuid>`. `{conversion_id}` is sale-only and empty for opt_out.
+- **"Since" is per event** (`partner_keys.postback_event_since`), server-written only: an event stamps now when it becomes live (key enabled AND event in the list), and is never backfilled. Turning an event on later never sends its earlier occurrences.
+- **opt_out is journey-only, by owner ruling 2026-11-05**: it fires once per drip journey that closed `opted_out`; `occurred_at` is when we processed the STOP. Opt-outs of contacts without a drip journey do not fire.
+- **Events are independent.** A lead that opts out and later buys gets both; first-purchase-only is a purchase-only rule; sandbox keys send no event; the required-fields rule applies to every event.
+- **Status words** are per event (`^[A-Za-z0-9_.-]{1,32}$`) and snapshotted at enqueue. opt_out rows have a NULL `conversion_event_id`, so the delivery-time `no_longer_approved` re-check applies only to rows with a conversion.
 
 ## Report-only registration flag vs the lane flag (0232, 2026-11-04)
 

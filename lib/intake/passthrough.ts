@@ -19,6 +19,7 @@ export const PASSTHROUGH_NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
 export const SYSTEM_PLACEHOLDERS = [
   "status",
   "event",
+  "event_id",
   "conversion_id",
   "occurred_at",
   "currency",

@@ -114,7 +114,7 @@ export default function PartnerApiDocsPage() {
   const toc = [
     ["auth", "Authentication"], ["endpoint", "Endpoint"], ["request", "Request format"],
     ["curl", "Quick start"], ["fields", "Fields"], ["passthrough", "Passthrough fields"],
-    ["postbacks", "Sales postbacks"], ["responses", "Response codes"],
+    ["postbacks", "Postbacks"], ["responses", "Response codes"],
     ["batching", "Batching"], ["limits", "Rate limits"], ["sandbox", "Sandbox"],
     ["changelog", "Changelog"], ["support", "Support"],
   ] as const;

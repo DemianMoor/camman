@@ -178,12 +178,13 @@ export const PASSTHROUGH_DOC = {
 };
 
 const PLACEHOLDER_MEANING: Record<(typeof SYSTEM_PLACEHOLDERS)[number], string> = {
-  status: "Outcome of the sale. Always `approved`: postbacks are sent for approved sales only.",
-  event: "Event type of the sale.",
-  conversion_id: "Unique id of this sale. Use it to de-duplicate.",
-  occurred_at: "When the sale happened, UTC, ISO 8601.",
-  currency: "Currency code of the amount.",
-  payout: "Amount for the sale. Sent only if enabled for your account.",
+  status: "The outcome word for this event, as agreed with you (for a sale, `sold` unless agreed otherwise).",
+  event: "Event type: `purchase` or `opt_out`.",
+  event_id: "Unique id of this event. Use it to de-duplicate. Different for every event, including each sale and each opt-out.",
+  conversion_id: "Unique id of this sale. Sales only; empty for an opt-out.",
+  occurred_at: "When the event happened, UTC, ISO 8601. For an opt-out, when we processed the STOP.",
+  currency: "Currency code of the amount. Empty for an opt-out.",
+  payout: "Amount for the sale. Sent only if enabled for your account. Empty for an opt-out.",
 };
 
 /** One row per system placeholder; a compile error if one is added without a meaning. */
@@ -194,11 +195,14 @@ export const POSTBACK_PLACEHOLDERS = SYSTEM_PLACEHOLDERS.map((name) => ({
 
 /** Sales postbacks: our call to the partner's URL when a lead they sent buys. */
 export const POSTBACK_DOC = {
-  title: "Sales postbacks",
+  title: "Postbacks",
   intro:
-    "If agreed, we notify a URL of yours when a lead you sent makes an approved purchase. " +
+    "If agreed, we notify a URL of yours when something happens to a lead you sent: an " +
+    "approved purchase (`purchase`) and/or the lead opting out of messages (`opt_out`). " +
+    "You receive only the events agreed for your account. " +
     "We make an HTTP GET to your https URL (port 443). Depending on your agreement, a " +
-    "postback is sent for every approved purchase or only the first one per lead.",
+    "purchase postback is sent for every approved purchase or only the first one per lead. " +
+    "Events are independent: a lead that opts out and later buys produces both.",
   placeholderIntro:
     "Your URL is a template. Write any of these in curly braces and we fill them in, " +
     "together with your agreed passthrough field names (for example `{your_field}`). " +
@@ -206,14 +210,16 @@ export const POSTBACK_DOC = {
     "arrived without it, or with it empty, no postback is sent for that lead. Any other " +
     "value we do not have renders empty.",
   exampleUrl:
-    "https://example.com/postback?ref={your_field}&status={status}&conversion_id={conversion_id}",
+    "https://example.com/postback?ref={your_field}&status={status}&event_id={event_id}",
   retryIntro:
     "Any 2xx response means delivered. A timeout, a 5xx, 408 or 429 is retried; other " +
     "responses are not. Redirects are not followed. Retries happen after:",
   retryDelaysMs: RETRY_DELAYS_MS,
   retryOutro: "After the last retry we stop.",
   rules: [
-    "Delivery is at least once: the same sale can reach you more than once. De-duplicate on `{conversion_id}`.",
+    "Delivery is at least once: the same event can reach you more than once. De-duplicate on `{event_id}`.",
+    "`{status}` is the word agreed with you for the event (for example `sold` for a purchase and `opt_out` for an opt-out).",
+    "For an opt-out, `{conversion_id}`, `{payout}` and `{currency}` are empty, and `{occurred_at}` is when we processed the STOP.",
   ],
 };
 
@@ -280,6 +286,12 @@ export interface ChangelogEntry {
  * at. See docs/07-conventions.md.
  */
 export const API_CHANGELOG: ChangelogEntry[] = [
+  {
+    date: "2026-11-05",
+    changes: [
+      "Postbacks: opt-out postbacks are available per agreement, sent when a lead you sent opts out of messages. `{status}` is now the word agreed with you for each event. New `{event_id}` placeholder is the unique id of each event: use it to de-duplicate (instead of `{conversion_id}`, which stays sale-only). For an opt-out, `{conversion_id}`, `{payout}` and `{currency}` are empty. No change to intake request fields or responses.",
+    ],
+  },
   {
     date: "2026-11-02",
     changes: [

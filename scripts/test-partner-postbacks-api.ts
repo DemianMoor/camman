@@ -4,7 +4,7 @@ import { requirePreviewDb } from "./_require-preview-db"; // MUST be second — 
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { applyPartnerKeyPatch, listKeyPostbacks } from "@/lib/partners/postbacks/config";
+import { applyPartnerKeyPatch, listKeyPostbacks, nextEventSince } from "@/lib/partners/postbacks/config";
 import { deliveryEnabled, sendTestPostback, type TestPostbackResult } from "@/lib/partners/postbacks/deliver";
 import type { SendResult } from "@/lib/partners/postbacks/http";
 import { can } from "@/lib/permissions";
@@ -192,29 +192,65 @@ async function main() {
     await db.execute(sql`INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts, last_url_masked)
       VALUES (${orgId}::uuid, ${k5}::int, true, '{"fields":{"relay_lead_id":"RL-Needle_7"}}'::jsonb, 'delivered', 1, 'https://h.example/p?lead_id=RL-Needle_7&k=***'),
              (${orgId}::uuid, ${k5}::int, true, '{"fields":{}}'::jsonb, 'delivered', 1, 'https://h.example/p?c=conv-50%25-off')`);
+    await db.execute(sql`INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts, last_url_masked)
+      VALUES (${orgId}::uuid, ${k5}::int, true, '{"event_id":"opt_out-9f3c2b1a-7d4e-4c55-8a10-ev1dzz"}'::jsonb, 'delivered', 1, 'https://h.example/p?s=opt_out')`);
     const base = { orgId, keyId: k5, failedOnly: false, search: null, beforeId: null };
     const p1 = await listKeyPostbacks(db, base);
     check("page 1: 25 rows + a cursor", [p1.rows.length, p1.nextBeforeId !== null], [25, true]);
     const ids1 = p1.rows.map((x) => x.id);
     check("newest first (id desc)", ids1.every((id, i) => i === 0 || ids1[i - 1] > id), true);
     check("field set has no raw url / payload", Object.keys(p1.rows[0]).sort(),
-      ["attempts", "conversion_event_id", "created_at", "delivered_at", "id", "is_test", "last_attempt_at", "last_error", "last_response_code", "last_url_masked", "status"]);
+      ["attempts", "conversion_event_id", "created_at", "delivered_at", "event", "id", "is_test", "last_attempt_at", "last_error", "last_response_code", "last_url_masked", "status"]);
     const p2 = await listKeyPostbacks(db, { ...base, beforeId: p1.nextBeforeId });
     const p3 = await listKeyPostbacks(db, { ...base, beforeId: p2.nextBeforeId });
-    check("pages 2/3: 25 + 7, then no cursor", [p2.rows.length, p3.rows.length, p3.nextBeforeId], [25, 7, null]);
+    check("pages 2/3: 25 + 8, then no cursor", [p2.rows.length, p3.rows.length, p3.nextBeforeId], [25, 8, null]);
     const allIds = [...ids1, ...p2.rows.map((x) => x.id), ...p3.rows.map((x) => x.id)];
-    check("57 distinct rows across pages, no overlap", new Set(allIds).size, 57);
+    check("58 distinct rows across pages, no overlap", new Set(allIds).size, 58);
     const failedOnly = await listKeyPostbacks(db, { ...base, failedOnly: true });
     check("failed=1 filters, this key only", failedOnly.rows.length === 11 && failedOnly.rows.every((x) => x.status === "failed"), true);
     check("other org sees nothing", (await listKeyPostbacks(db, { ...base, orgId: orgB })).rows.length, 0);
     check("search by the partner's lead id (payload field), case-insensitive",
       (await listKeyPostbacks(db, { ...base, search: "rl-needle_7" })).rows.length, 1);
+    check("search by part of the payload event_id", (await listKeyPostbacks(db, { ...base, search: "7d4e-4c55-8a10-ev1d" })).rows.length, 1);
     check("search by URL contents", (await listKeyPostbacks(db, { ...base, search: "lead_id=RL" })).rows.length, 1);
     check("% in the search is literal (finds 50%25)", (await listKeyPostbacks(db, { ...base, search: "50%25" })).rows.length, 1);
     check("% is not a wildcard (Needle%7 matches nothing)", (await listKeyPostbacks(db, { ...base, search: "Needle%7" })).rows.length, 0);
     check("_ is not a wildcard (RL_Needle does not match RL-Needle)", (await listKeyPostbacks(db, { ...base, search: "RL_Needle" })).rows.length, 0);
     check("whitespace-only search = no filter", (await listKeyPostbacks(db, { ...base, search: "   " })).rows.length, 25);
     check("no match ⇒ 0 rows, no cursor", await listKeyPostbacks(db, { ...base, search: "zz-nothing" }), { rows: [], nextBeforeId: null });
+
+    // ── A7 ─────────────────────────────────────────────────────────────
+    console.log("\nA7. event keys, status words, per-event since:");
+    const OLD = "2026-01-01T00:00:00.000Z";
+    const NOW = "2026-11-05T12:00:00.000Z";
+    const off = { enabled: false, events: ["purchase", "opt_out"] };
+    check("A7a off->on stamps both", nextEventSince({}, off, { enabled: true, events: ["purchase", "opt_out"] }, NOW), { purchase: NOW, opt_out: NOW });
+    check("A7a adding opt_out keeps purchase stamp", nextEventSince({ purchase: OLD }, { enabled: true, events: ["purchase"] }, { enabled: true, events: ["purchase", "opt_out"] }, NOW), { purchase: OLD, opt_out: NOW });
+    check("A7a on->off drops all", nextEventSince({ purchase: OLD, opt_out: OLD }, { enabled: true, events: ["purchase", "opt_out"] }, off, NOW), {});
+    check("A7a removing opt_out drops it", nextEventSince({ purchase: OLD, opt_out: OLD }, { enabled: true, events: ["purchase", "opt_out"] }, { enabled: true, events: ["purchase"] }, NOW), { purchase: OLD });
+    const evSince = async (k: number) =>
+      (await q<{ s: Record<string, string>; w: Record<string, string> }>(sql`SELECT postback_event_since AS s, postback_status_words AS w FROM partner_keys WHERE id = ${k}::int`))[0];
+    const k7 = await mk(orgId, "a7");
+    check("A7b space in word rejected by schema", partnerKeyUpdateSchema.safeParse({ postback_status_words: { purchase: "sold now" } }).success, false);
+    check("A7b empty word rejected by schema", partnerKeyUpdateSchema.safeParse({ postback_status_words: { purchase: "" } }).success, false);
+    check("A7b unknown event rejected by schema", partnerKeyUpdateSchema.safeParse({ postback_status_words: { bogus: "x" } }).success, false);
+    check("A7b ok", (await patch(k7, { postback_status_words: { purchase: "SOLD" } })).ok, true);
+    check("A7b second word merges", (await patch(k7, { postback_status_words: { opt_out: "STOPPED" } })).ok, true);
+    check("A7b stored merged", JSON.stringify(Object.entries((await evSince(k7)).w).sort()), JSON.stringify([["opt_out", "STOPPED"], ["purchase", "SOLD"]]));
+    check("A7e invalid event key rejected (PR1)", partnerKeyUpdateSchema.safeParse({ postback_event_keys: ["invalid"] }).success, false);
+    check("A7e client cannot set postback_event_since", partnerKeyUpdateSchema.safeParse({ postback_event_since: { purchase: OLD } }).success, false);
+    check("A7c enable", (await patch(k7, { postback_enabled: true, postback_url_template: TPL })).ok, true);
+    check("A7c purchase stamped on enable", Object.keys((await evSince(k7)).s), ["purchase"]);
+    await db.execute(sql`UPDATE partner_keys SET postback_event_since = ${JSON.stringify({ purchase: OLD })}::jsonb WHERE id = ${k7}::int`);
+    check("A7c add opt_out", (await patch(k7, { postback_event_keys: ["purchase", "opt_out"] })).ok, true);
+    const s7 = (await evSince(k7)).s;
+    check("A7c purchase unchanged", s7.purchase, OLD);
+    check("A7c opt_out stamped ~now", Math.abs(Date.now() - new Date(s7.opt_out).getTime()) < 5000, true);
+    await patch(k7, { postback_enabled: false });
+    check("A7d disable clears", (await evSince(k7)).s, {});
+    await patch(k7, { postback_enabled: true });
+    const s7d = (await evSince(k7)).s;
+    check("A7d re-enable restamps both ~now", Object.keys(s7d).sort().join() === "opt_out,purchase" && Object.values(s7d).every((v) => Math.abs(Date.now() - new Date(v).getTime()) < 5000), true);
 
     // ── A6 ─────────────────────────────────────────────────────────────
     console.log("\nA6. permissions (can() at the routes' decision point):");

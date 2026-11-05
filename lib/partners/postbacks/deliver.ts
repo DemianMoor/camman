@@ -22,9 +22,10 @@ import { maskUrl, renderPostbackUrl, samplePayload, type PostbackPayload } from 
 // The ledger status is re-read at claim time too: `{status}` was snapshotted at
 // enqueue, so a sale rejected (or otherwise moved off 'approved') while its row is
 // pending would otherwise go out as "approved". Such a row is cancelled unsent with
-// last_error 'no_longer_approved' (owner decision 2: approved only). Live rows only;
-// a live row's conversion_event_id is never NULL in practice (enqueue always sets it,
-// and the FK is ON DELETE RESTRICT), and a NULL one has no ledger row to re-check.
+// last_error 'no_longer_approved' (owner decision 2: approved only). Live rows only,
+// and only rows that HAVE a ledger row: opt_out rows carry a NULL conversion_event_id
+// (their source is the closed journey, not a sale), so there is nothing to re-check
+// and the re-check correctly does not apply to them.
 
 export function deliveryEnabled(): boolean {
   return process.env.PARTNER_POSTBACKS_DELIVERY_ENABLED === "true";
@@ -278,11 +279,12 @@ export async function sendTestPostback(
   const claimed = await dbc.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${TEST_LOCK_BASE + o.keyId}::bigint)`);
     const k = (await tx.execute(sql`
-      SELECT postback_url_template, postback_include_payout, passthrough_fields
+      SELECT postback_url_template, postback_include_payout, passthrough_fields, postback_status_words
       FROM partner_keys WHERE id = ${o.keyId}::int AND org_id = ${o.orgId}::uuid`)) as unknown as {
       postback_url_template: string | null;
       postback_include_payout: boolean;
       passthrough_fields: string[];
+      postback_status_words: Record<string, unknown>;
     }[];
     if (!k[0]) throw new Error("key_not_found");
     if (!k[0].postback_url_template) throw new Error("no_template");
@@ -294,7 +296,7 @@ export async function sendTestPostback(
           AND created_at > clock_timestamp() - interval '10 seconds') AS recent`)) as unknown as { recent: boolean }[];
     if (recent[0]?.recent) return null;
 
-    const payload = samplePayload(k[0].passthrough_fields);
+    const payload = samplePayload(k[0].passthrough_fields, k[0].postback_status_words ?? {});
     const ins = (await tx.execute(sql`
       INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts)
       VALUES (${o.orgId}::uuid, ${o.keyId}::int, true, ${JSON.stringify(payload)}::jsonb, 'pending', 0)

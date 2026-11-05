@@ -1,6 +1,6 @@
 # Partner sales postbacks
 
-_Last updated: 2026-11-02_
+_Last updated: 2026-11-05_
 
 When a lead a partner sent us produces a sale, we `GET` a URL the partner configured on their
 intake key, echoing the extra fields they sent with the lead. Generic and per key — no code per
@@ -80,13 +80,21 @@ UI: [components/settings/partner-key-postback.tsx](../../components/settings/par
 2. **Send test** posts a sample payload (`test_<field>` values, a `test-<uuid>` conversion id) to the *saved* template
    and shows the HTTP code and masked URL inline. A second test within a few seconds is refused (429). Test rows are
    `is_test` and never count toward idempotency or first-only.
-3. Enable, then watch the **Postback log** (last 50 rows, optional "Failed only"): time (ET), test/live, conversion id,
-   masked URL, code, attempts, status. The log is shown only to users who can manage keys.
+3. Enable, then watch the **Postback log**: a fixed-height box (about 9 rows) inside the key card, newest first,
+   25 rows per page with **Load older** (keyset on id, `GET /api/partner-keys/[keyId]/postbacks?before=<next_before>`),
+   a search box (`?q=`, 300 ms debounce; matches the masked URL, the conversion id and the lead's passthrough values —
+   e.g. the partner's lead id — case-insensitive, `%`/`_` literal) and "Failed only" (`?failed=1`). Columns: time
+   (ET), test/live, conversion id, code, attempts, status, masked URL (truncated, full value on hover). Server side:
+   `listKeyPostbacks` in [lib/partners/postbacks/config.ts](../../lib/partners/postbacks/config.ts); test A5 in
+   `scripts/test-partner-postbacks-api.ts`. The log is shown only to users who can manage keys.
 
 **Who sees the template.** `postback_url_template` can carry a secret query value, so it is returned raw only to callers with `partner_keys.manage`; view-only callers (`partner_keys.view`) get `maskUrl(template)` from every key read (`normalizeKeyRows(rows, canManage)` in [lib/partners/queries.ts](../../lib/partners/queries.ts); test `scripts/test-partner-key-template-masking.ts`).
 
 URLs are stored and shown **masked**: query values whose name contains `token`, `key`, `secret`, `sig`, `auth` or
-`pass`, or is exactly `k` (any case), become `***`. The raw URL is never logged or returned.
+`pass`, or is exactly `k` (any case), become `***`. The raw URL is never logged or returned. The UI applies `maskUrl`
+again at render — the Send-test banner and every log cell — so a row stored before a masking rule existed still
+renders masked. The saved template on the key card is shown masked and read-only until **Edit** reveals the raw
+value for editing (manage users only; Save or Reset masks it again).
 
 ## Alerts
 

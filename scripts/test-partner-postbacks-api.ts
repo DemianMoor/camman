@@ -188,15 +188,33 @@ async function main() {
                 now() - make_interval(secs => ${55 - i}::float8))`);
     }
     await db.execute(sql`INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status) VALUES (${orgId}::uuid, ${kOther}::int, true, '{}'::jsonb, 'failed')`);
-    const all = await listKeyPostbacks(db, { orgId, keyId: k5, failedOnly: false });
-    check("50 rows", all.length, 50);
-    const times = all.map((x) => new Date(x.created_at).getTime());
-    check("newest first", times.every((t, i) => i === 0 || times[i - 1] >= t), true);
-    check("field set has no raw url / payload", Object.keys(all[0]).sort(),
+    // Two searchable rows: a partner lead id in the payload fields, a distinctive conversion id in the URL.
+    await db.execute(sql`INSERT INTO partner_postbacks (org_id, partner_key_id, is_test, payload, status, attempts, last_url_masked)
+      VALUES (${orgId}::uuid, ${k5}::int, true, '{"fields":{"relay_lead_id":"RL-Needle_7"}}'::jsonb, 'delivered', 1, 'https://h.example/p?lead_id=RL-Needle_7&k=***'),
+             (${orgId}::uuid, ${k5}::int, true, '{"fields":{}}'::jsonb, 'delivered', 1, 'https://h.example/p?c=conv-50%25-off')`);
+    const base = { orgId, keyId: k5, failedOnly: false, search: null, beforeId: null };
+    const p1 = await listKeyPostbacks(db, base);
+    check("page 1: 25 rows + a cursor", [p1.rows.length, p1.nextBeforeId !== null], [25, true]);
+    const ids1 = p1.rows.map((x) => x.id);
+    check("newest first (id desc)", ids1.every((id, i) => i === 0 || ids1[i - 1] > id), true);
+    check("field set has no raw url / payload", Object.keys(p1.rows[0]).sort(),
       ["attempts", "conversion_event_id", "created_at", "delivered_at", "id", "is_test", "last_attempt_at", "last_error", "last_response_code", "last_url_masked", "status"]);
-    const failedOnly = await listKeyPostbacks(db, { orgId, keyId: k5, failedOnly: true });
-    check("failed=1 filters, this key only", failedOnly.length === 11 && failedOnly.every((x) => x.status === "failed"), true);
-    check("other org sees nothing", (await listKeyPostbacks(db, { orgId: orgB, keyId: k5, failedOnly: false })).length, 0);
+    const p2 = await listKeyPostbacks(db, { ...base, beforeId: p1.nextBeforeId });
+    const p3 = await listKeyPostbacks(db, { ...base, beforeId: p2.nextBeforeId });
+    check("pages 2/3: 25 + 7, then no cursor", [p2.rows.length, p3.rows.length, p3.nextBeforeId], [25, 7, null]);
+    const allIds = [...ids1, ...p2.rows.map((x) => x.id), ...p3.rows.map((x) => x.id)];
+    check("57 distinct rows across pages, no overlap", new Set(allIds).size, 57);
+    const failedOnly = await listKeyPostbacks(db, { ...base, failedOnly: true });
+    check("failed=1 filters, this key only", failedOnly.rows.length === 11 && failedOnly.rows.every((x) => x.status === "failed"), true);
+    check("other org sees nothing", (await listKeyPostbacks(db, { ...base, orgId: orgB })).rows.length, 0);
+    check("search by the partner's lead id (payload field), case-insensitive",
+      (await listKeyPostbacks(db, { ...base, search: "rl-needle_7" })).rows.length, 1);
+    check("search by URL contents", (await listKeyPostbacks(db, { ...base, search: "lead_id=RL" })).rows.length, 1);
+    check("% in the search is literal (finds 50%25)", (await listKeyPostbacks(db, { ...base, search: "50%25" })).rows.length, 1);
+    check("% is not a wildcard (Needle%7 matches nothing)", (await listKeyPostbacks(db, { ...base, search: "Needle%7" })).rows.length, 0);
+    check("_ is not a wildcard (RL_Needle does not match RL-Needle)", (await listKeyPostbacks(db, { ...base, search: "RL_Needle" })).rows.length, 0);
+    check("whitespace-only search = no filter", (await listKeyPostbacks(db, { ...base, search: "   " })).rows.length, 25);
+    check("no match ⇒ 0 rows, no cursor", await listKeyPostbacks(db, { ...base, search: "zz-nothing" }), { rows: [], nextBeforeId: null });
 
     // ── A6 ─────────────────────────────────────────────────────────────
     console.log("\nA6. permissions (can() at the routes' decision point):");

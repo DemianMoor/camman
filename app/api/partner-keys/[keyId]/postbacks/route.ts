@@ -13,7 +13,10 @@ function parseId(v: string) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-/** The last 50 postbacks of a key, newest first. `?failed=1` keeps only failed ones. */
+/**
+ * One page (25) of a key's postbacks, newest first. `?failed=1` keeps only failed
+ * ones, `?q=` searches, `?before=<id>` is the cursor from the previous `next_before`.
+ */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ keyId: string }> }) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
@@ -29,8 +32,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ keyI
     .limit(1);
   if (!key[0]) return apiError(404, "Partner key not found", API_ERROR_CODES.NOT_FOUND, { entity: "partner_key" });
 
-  const data = await listKeyPostbacks(db, {
-    orgId, keyId, failedOnly: req.nextUrl.searchParams.get("failed") === "1",
+  const sp = req.nextUrl.searchParams;
+  const beforeRaw = sp.get("before");
+  const beforeId = beforeRaw === null ? null : parseId(beforeRaw);
+  if (beforeRaw !== null && beforeId === null) {
+    return apiError(400, "Invalid cursor", API_ERROR_CODES.VALIDATION, { field: "before" });
+  }
+  const page = await listKeyPostbacks(db, {
+    orgId, keyId, failedOnly: sp.get("failed") === "1", search: sp.get("q"), beforeId,
   });
-  return NextResponse.json({ data });
+  return NextResponse.json({ data: page.rows, next_before: page.nextBeforeId });
 }

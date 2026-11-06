@@ -1,6 +1,6 @@
 # Feature — Audience Snapshot (freeze-at-activation)
 
-_Last updated: 2026-10-05_
+_Last updated: 2026-11-06_
 
 ## 1. Purpose
 A campaign's audience is **computed and frozen** the moment it transitions `draft → active`, into `campaign_audience_pool`. The whole point: adding a contact to a referenced segment later does **not** retroactively expand a live campaign's reach. Drafts carry only the *recipe* (segment ids, group ids, filters, cap); the *contacts* are materialized once.
@@ -33,7 +33,7 @@ A campaign's audience is **computed and frozen** the moment it transitions `draf
 | `computeStageAudienceCount(campaignId, orgId, filters)` | reads the **frozen** pool for an active campaign + applies stage-level filters + live opt-out exclusion. One stage. Used by the audience-count / audience-preview routes. |
 | `computeStageAudienceCountForDraft(campaign, filters)` | recomputes live from the recipe for draft-stage previews (no frozen pool yet). One stage. |
 | `computeStageAudienceCountsBatch(campaignId, orgId, stages[])` | **batched** equivalent of `computeStageAudienceCount` for MANY non-lane stages in one pass → `Map<stageId, count>`. Used by the stages-list endpoint to avoid an N+1. Numerically identical to the per-stage function (proven before ship). |
-| `computeStageAudienceCountsBatchForDraft(campaign, stages[])` | **batched** equivalent of `computeStageAudienceCountForDraft` (draft projection) in one pass. Builds the segment∩group source **once** (the per-stage version rebuilt it per stage) and `MATERIALIZED`s it so the source set-ops evaluate exactly once. |
+| `computeStageAudienceCountsBatchForDraft(campaign, stages[])` | **batched** equivalent of `computeStageAudienceCountForDraft` (draft projection) in one pass. Builds the segment∩group source **once** (the per-stage version rebuilt it per stage) and `MATERIALIZED`s it so the source set-ops evaluate exactly once. Applies the **same lifecycle exclusion layers** (`lifecycleExclusionLayers`: suppressed / bought_offer / freeze_not_due) as the single-stage count; `lifecycleRules` and `offerId` are **required** (§11b). Until 2026-11-06 the batch skipped them, so a lifecycle draft's stages list showed more than the stage preview (fixture: 13 vs 9). Bar: `scripts/test-draft-stage-counts-batch.ts` D4–D6. |
 
 ### Activation transaction (`draft → active`)
 Runs in [`app/api/campaigns/[campaignId]/status/route.ts`](../../app/api/campaigns/[campaignId]/status/route.ts):

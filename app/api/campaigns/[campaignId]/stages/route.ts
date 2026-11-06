@@ -123,6 +123,7 @@ export async function GET(
       audience_cap: campaigns.audience_cap,
       exclude_in_use_contacts: campaigns.exclude_in_use_contacts,
       lifecycle_rules: campaigns.lifecycle_rules,
+      offer_id: campaigns.offer_id,
     })
     .from(campaigns)
     .where(and(eq(campaigns.id, cid), eq(campaigns.org_id, orgId)))
@@ -144,6 +145,9 @@ export async function GET(
     cap: campaignRow[0].audience_cap ?? null,
     excludeInUse: campaignRow[0].exclude_in_use_contacts,
     lifecycleRules: campaignRow[0].lifecycle_rules === true,
+    // Required: it builds the bought_offer exclusion (CLAUDE.md §11b), exactly
+    // as stages/audience-preview passes it to the single-stage draft count.
+    offerId: campaignRow[0].offer_id ?? null,
   };
 
   const listParams = parseListParams(req);

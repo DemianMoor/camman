@@ -29,10 +29,10 @@ check("69.9% fires, exactly 70% does not", () => {
   assert.equal(isLowDelivery(1000, 699), true);
   assert.equal(isLowDelivery(1000, 700), false);
 });
-check("window = [now − 7h, now − 60 min)", () => {
+check("window = [now − 2h, now − 60 min)", () => {
   const w = lowDeliveryWindow(new Date("2026-11-05T15:52:00Z"));
   assert.equal(w.maturedBefore.toISOString(), "2026-11-05T14:52:00.000Z");
-  assert.equal(w.fromUtc.toISOString(), "2026-11-05T08:52:00.000Z");
+  assert.equal(w.fromUtc.toISOString(), "2026-11-05T13:52:00.000Z");
 });
 check("regular key is per stage; drip key is per stage per ET day", () => {
   const lateEvening = new Date("2026-11-06T03:30:00Z"); // 22:30 ET on 11-05

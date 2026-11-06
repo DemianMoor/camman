@@ -31,6 +31,7 @@ const putSchema = z.object({
   hourly_report_enabled: z.boolean().optional(),
   stall_alert_enabled: z.boolean().optional(),
   unjoinable_alert_enabled: z.boolean().optional(),
+  delivery_alert_enabled: z.boolean().optional(),
   daily_report_hour: z.number().int().min(0).max(23).optional(),
   hourly_window_from: z.number().int().min(0).max(23).optional(),
   hourly_window_to: z.number().int().min(0).max(23).optional(),

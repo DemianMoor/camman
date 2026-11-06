@@ -2,6 +2,7 @@
 
 A running log of documentation-affecting changes. Add a dated entry whenever a doc is materially updated, and note the code commit/migration that prompted it.
 
+2026-11-06 — Low-delivery Telegram alert: stage < 70% delivered an hour after sending (≥ 50 sends, txr/ahi/tls), error codes per message; cron /api/cron/delivery-alerts; switch notification_settings.delivery_alert_enabled (0236, default on) — docs/04-features/delivery-report.md §9, docs/04-features/crons.md, docs/03-data-model.md
 2026-11-04 — verify-offer-split-totals.ts now anchors on independent sources (By Offer vs By Sequence report sums; direct ledger SQL). — docs/04-features/reports-rollup.md
 2026-11-04 — Added scripts/verify-offer-split-totals.ts, a read-only check that unsplit stage metrics equal the sum of per-offer split slices, with per-offer before/after and the explaining ledger rows. No migration. — docs/04-features/reports-rollup.md
 2026-11-02 — Segment rules: added a "2 days" (`2d`) option to the campaign-use period picker (used by "In use in another campaign in the last…" and "Texted in the last…"). No migration — codes live in the rule value JSON. — docs/04-features/audience-segments.md

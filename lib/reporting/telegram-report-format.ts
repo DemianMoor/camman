@@ -312,6 +312,8 @@ export const DEFAULT_NOTIFICATION_SETTINGS = {
   hourly_report_enabled: true,
   stall_alert_enabled: true,
   unjoinable_alert_enabled: true,
+  // 0236: low-delivery alert (Delivered % < 70% an hour after sending).
+  delivery_alert_enabled: true,
   daily_report_hour: 10,
   hourly_window_from: 16,
   // 1, not 23 — the window wraps midnight. from > to is what marks the wrap.

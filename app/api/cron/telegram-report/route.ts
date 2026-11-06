@@ -71,7 +71,7 @@ async function loadNotifSettings(): Promise<NotifSettings> {
     const rows = (await db.execute(sql`
       SELECT
         daily_report_enabled, hourly_report_enabled,
-        stall_alert_enabled, unjoinable_alert_enabled,
+        stall_alert_enabled, unjoinable_alert_enabled, delivery_alert_enabled,
         daily_report_hour, hourly_window_from, hourly_window_to,
         hourly_interval_hours, active_weekdays
       FROM notification_settings
@@ -84,6 +84,7 @@ async function loadNotifSettings(): Promise<NotifSettings> {
       hourly_report_enabled: r.hourly_report_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.hourly_report_enabled,
       stall_alert_enabled: r.stall_alert_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.stall_alert_enabled,
       unjoinable_alert_enabled: r.unjoinable_alert_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.unjoinable_alert_enabled,
+      delivery_alert_enabled: r.delivery_alert_enabled ?? DEFAULT_NOTIFICATION_SETTINGS.delivery_alert_enabled,
       daily_report_hour: r.daily_report_hour ?? DEFAULT_NOTIFICATION_SETTINGS.daily_report_hour,
       hourly_window_from: r.hourly_window_from ?? DEFAULT_NOTIFICATION_SETTINGS.hourly_window_from,
       hourly_window_to: r.hourly_window_to ?? DEFAULT_NOTIFICATION_SETTINGS.hourly_window_to,

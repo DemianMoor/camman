@@ -23,6 +23,7 @@ type NotifSettings = {
   hourly_report_enabled: boolean;
   stall_alert_enabled: boolean;
   unjoinable_alert_enabled: boolean;
+  delivery_alert_enabled: boolean;
   daily_report_hour: number;
   hourly_window_from: number;
   hourly_window_to: number;
@@ -161,6 +162,13 @@ export function NotificationSettings() {
             checked={settings.unjoinable_alert_enabled}
             disabled={!canEdit || saving}
             onChange={(v) => void patch({ unjoinable_alert_enabled: v })}
+          />
+          <NotifRow
+            label="Low delivery alerts"
+            description="Fires when a stage delivers under 70% of its messages an hour after sending, with the error codes. Text Request, Ahoi and Tells only (TextHub has no delivery receipts)."
+            checked={settings.delivery_alert_enabled}
+            disabled={!canEdit || saving}
+            onChange={(v) => void patch({ delivery_alert_enabled: v })}
           />
         </CardContent>
       </Card>

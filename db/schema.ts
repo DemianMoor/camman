@@ -3755,6 +3755,10 @@ export const notification_settings = pgTable("notification_settings", {
   unjoinable_alert_enabled: boolean("unjoinable_alert_enabled")
     .notNull()
     .default(true),
+  // 0236: low-delivery alert (lib/reporting/low-delivery-alert.ts).
+  delivery_alert_enabled: boolean("delivery_alert_enabled")
+    .notNull()
+    .default(true),
   daily_report_hour: smallint("daily_report_hour").notNull().default(10),
   hourly_window_from: smallint("hourly_window_from").notNull().default(16),
   hourly_window_to: smallint("hourly_window_to").notNull().default(1),

@@ -19,14 +19,18 @@ import {
 // judged. TextHub has no receipts — its sends would read as 0% delivered — so
 // its (stage, number) rows are dropped before the rate is computed.
 //
-// Window: sends whose sent_at is in [now − 60 min − 6 h, now − 60 min). The 6 h
-// look-back bounds the receipt scan and keeps a first deploy from paging on
-// old stages. A regular stage is latched once forever; a drip stage sends all
+// Window: sends whose sent_at is in [now − 2 h, now − 60 min). Every send is
+// seen by six 10-min ticks before it leaves the window.
+// ⚠️ The look-back IS the cost: queryDeliveryByStage scans every txr receipt
+// since (window start − 1 h) by received_at, one heap page per row (no index
+// on the send key). A 6 h look-back read ~106K pages per tick and ran 15–35 s
+// on prod under IO pressure, one tick 504'd at 60 s (2026-11-06); 1 h reads
+// ~3/8 of that. A regular stage is latched once forever; a drip stage sends all
 // day for weeks, so its latch is per ET day (one alert per drip stage per day).
 
 export const LOW_DELIVERY_THRESHOLD = 0.7;
 export const LOW_DELIVERY_MATURITY_MINUTES = 60;
-export const LOW_DELIVERY_LOOKBACK_HOURS = 6;
+export const LOW_DELIVERY_LOOKBACK_HOURS = 1;
 // Below this many matured sends the percentage is noise.
 export const LOW_DELIVERY_MIN_SENDS = 50;
 const TOP_CODES = 6;

@@ -407,9 +407,14 @@ content problem nobody saw until the next day.
 - **Rule.** A stage whose sends are at least **60 min old** has
   Delivered % (delivered ÷ sent, §1 — a missing receipt counts against it)
   **below 70%** over **at least 50 sends** → one Telegram message.
-- **Window.** Sends with `sent_at` in `[now − 7 h, now − 60 min)`. The 6 h
-  look-back bounds the receipt scan and keeps a deploy from paging on old
-  stages. A long, paced stage is judged on its matured part as it goes.
+- **Window.** Sends with `sent_at` in `[now − 2 h, now − 60 min)` — each send
+  is seen by six ticks. A long, paced stage is judged on a rolling hour of its
+  matured sends. ⚠️ The look-back is the cost: the shared delivery query scans
+  every txr receipt since window start − 1 h by `received_at`, about one heap
+  page per row (no index on the send key). At 6 h that was ~106K pages per
+  tick, 15–35 s on prod under IO pressure and one 504 at 60 s (2026-11-06);
+  cut to 1 h. A covering index on `textrequest_dlr_events` would remove the
+  heap reads (needs a migration).
 - **Providers.** Only DLR-capable ones (`DLR_SOURCES`: txr / ahi / tls).
   TextHub (`txh`) rows are dropped before the rate is computed — they would
   read as 0% (§4).

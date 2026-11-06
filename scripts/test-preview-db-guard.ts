@@ -261,6 +261,14 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "builds migration 0198's contact_offer_campaigns covering index with CREATE INDEX CONCURRENTLY (cannot run inside drizzle-kit's transaction); owner-approved 2026-10-03; dry run by default, --apply only 05:00-05:50 UTC, issues only CREATE INDEX (and DROP INDEX of its own INVALID half-build with --drop-invalid)",
   },
   {
+    file: "apply-contact-blocks-indexes-concurrent.ts",
+    why: "builds migration 0237's two partial contacts indexes with CREATE INDEX CONCURRENTLY and first adds the two nullable columns they lead on (ADD COLUMN IF NOT EXISTS, identical to 0237's); attended prod run; dry run by default, --apply only 05:00-05:50 UTC unless --off-window; issues only those DDLs (and DROP INDEX of its own INVALID half-builds with --drop-invalid)",
+  },
+  {
+    file: "backfill-contact-blocks-from-opt-outs.ts",
+    why: "0237 backfill (spec O2/D5): copies opt_outs reason suppressed/scrubbed phones into contact_blocks as provider_list and mirrors contacts.blocked_at; attended prod run ('go now'); dry run by default, --apply only 05:00-05:50 UTC unless --off-window; idempotent, 5,000-contact transactions; touches no opt_outs row",
+  },
+  {
     file: "apply-contact-fk-indexes-concurrent.ts",
     why: "builds migration 0235's twelve contact-FK indexes with CREATE INDEX CONCURRENTLY (cannot run inside drizzle-kit's transaction); attended prod run; dry run by default, --apply only 05:00-05:50 UTC unless --off-window, issues only CREATE INDEX (and DROP INDEX of its own INVALID half-builds with --drop-invalid)",
   },

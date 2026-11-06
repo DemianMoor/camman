@@ -1432,14 +1432,14 @@ export default function ContactsPage() {
                 ? "Archive this contact?"
                 : confirming?.kind === "restore"
                   ? "Restore this contact?"
-                  : "Delete this contact permanently?"}
+                  : "Delete this contact?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {confirming?.kind === "archive"
                 ? "Archived contacts are hidden from the active list and excluded from new campaigns. Their data is preserved."
                 : confirming?.kind === "restore"
                   ? "Restoring a contact moves them back into the active audience."
-                  : "This permanently removes the contact and cannot be undone. Prefer archiving unless you specifically need to purge the record."}
+                  : "The contact is removed from the active list, excluded from every campaign, and its number can't be re-imported. Its history and opt-outs are kept, and it can be restored from the Archived view."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1459,7 +1459,7 @@ export default function ContactsPage() {
                 ? "Archive"
                 : confirming?.kind === "restore"
                   ? "Restore"
-                  : "Delete permanently"}
+                  : "Delete"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

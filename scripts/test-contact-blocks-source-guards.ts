@@ -13,6 +13,10 @@
 //      archived_at / is_archived. Any other writer can break the invariants
 //      (blocked_at ⇔ active ledger row; an archived contact always has one).
 //      scripts/ is out of scope (the attended backfill is the one exception).
+//   G3 No hard delete (V15). No `.delete(contacts)` / `DELETE FROM contacts`
+//      in app/ or lib/: a hard delete cascades away the contact's opt_outs, so
+//      the number becomes sendable again on re-import. Delete is
+//      softDeleteContacts. (Phase 2 Erase will be the one, explicit exception.)
 //   S  Self-test: each pattern matches a known sample, so a typo can't make a
 //      guard silently match nothing.
 // No database. Runs in check:guards.
@@ -61,6 +65,9 @@ const WRITER_PATTERNS: [string, RegExp][] = [
 ];
 const WRITER_ALLOW = new Set(["lib/contacts/blocks.ts"]);
 
+// ── G3 ──────────────────────────────────────────────────────────────────────
+const HARD_DELETE = /\.delete\(\s*contacts\s*\)|\bDELETE\s+FROM\s+contacts\b/i;
+
 console.log("S — patterns match known samples");
 const samples: [string, RegExp, string][] = [
   ["G1 SQL !=", NA_COMPARE, "count(*) FILTER (WHERE messaging_status != 'not_applicable')"],
@@ -82,6 +89,10 @@ for (const [n, re, s] of samples) {
   re.lastIndex = 0;
   bar(n, re.test(s));
 }
+bar("G3 drizzle hard delete", HARD_DELETE.test("await db\n    .delete(contacts)\n    .where(x)"));
+bar("G3 raw hard delete", HARD_DELETE.test("DELETE FROM contacts WHERE id = $1"));
+bar("G3 ignores contact_blocks / another identifier",
+  !HARD_DELETE.test("DELETE FROM contact_blocks WHERE id = 1") && !HARD_DELETE.test(".delete(contactsTable)"));
 NA_COMPARE.lastIndex = 0;
 bar("G1 ignores a label string", !NA_COMPARE.test(`landline: "Landline / Not applicable"`));
 bar(
@@ -111,6 +122,14 @@ bar("no other writer", writers.length === 0, writers.join("; "));
 const blocks = src.get("lib/contacts/blocks.ts") ?? "";
 bar("lib/contacts/blocks.ts is a writer (the guard is pointed at the right file)",
   WRITER_PATTERNS.filter(([, re]) => re.test(blocks)).length >= 2);
+
+console.log("\nG3 — no hard delete of a contact in app/ or lib/");
+const hard = [...src].filter(([file, text]) => !file.startsWith("components/") && HARD_DELETE.test(text)).map(([f]) => f);
+bar("no hard delete", hard.length === 0, hard.join(", "));
+const delRoute = src.get("app/api/contacts/[id]/route.ts") ?? "";
+const delBody = delRoute.slice(delRoute.indexOf("export async function DELETE"));
+bar("DELETE /api/contacts/[id] soft-deletes through softDeleteContacts",
+  delRoute.includes("export async function DELETE") && /softDeleteContacts\(/.test(delBody));
 
 console.log(fail === 0 ? "\nALL GREEN" : `\n${fail} FAILED`);
 process.exit(fail === 0 ? 0 : 1);

@@ -296,6 +296,18 @@ async function main() {
     bar("only the active + new phones reach the entity insert and the group; no contact for the ledger-only phone",
       entityRows.sort().join() === [P[0], P[12]].sort().join() && members.map((m) => m.phone_number).sort().join() === [P[0], P[12]].sort().join() && hAfter.n === 0,
       JSON.stringify({ entityRows, members: members.length, h: hAfter.n }));
+    // The bug the DELETE route switch closes: a hard delete cascaded away the
+    // opt-out, so the number was sendable again on re-import.
+    const cOoDel = await contact(P[17]);
+    await db.execute(sql`INSERT INTO opt_outs (org_id, contact_id, phone_number, reason, source) VALUES (${orgId}::uuid, ${cOoDel}::uuid, ${P[17]}, 'opt_out', 'test')`);
+    await tx((t) => B.softDeleteContacts(t, { orgId, contactIds: [cOoDel], actorId: null }));
+    const ooKept = await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM opt_outs WHERE contact_id = ${cOoDel}::uuid`);
+    const reup = await processAudienceUpload({
+      orgId, rawPhones: P[17], blockCheck: true, insertEntities: async (rows) => rows.length,
+    });
+    bar("soft delete keeps the opt-out, and the number is blocked on re-import",
+      ooKept.n === 1 && reup.blocked === 1 && reup.blocked_by_reason.deleted === 1 && reup.inserted === 0,
+      JSON.stringify({ optOuts: ooKept.n, blocked: reup.blocked }));
     const passRows: string[] = [];
     const up2 = await processAudienceUpload({
       orgId,

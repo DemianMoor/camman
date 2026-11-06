@@ -6,7 +6,7 @@ Spec: [docs/superpowers/specs/2026-11-06-contact-blocks-soft-delete-design.md](.
 
 ## What it is
 
-- **Delete is a soft delete.** `contacts.archived_at` is set; the row and all its history stay. The UI still says "Delete". No hard delete remains in the app (Phase 1 end state). Erase (a real hard delete, owner-only, batched in the morning window) is Phase 2.
+- **Delete is a soft delete.** `contacts.archived_at` is set; the row and all its history stay. The UI still says "Delete". Since PR 2, `DELETE /api/contacts/[id]` calls `softDeleteContacts`, so the opt-out survives and the number is blocked on re-import. No hard delete remains in the app (guard G3). Erase (a real hard delete, owner-only, batched in the morning window) is Phase 2.
 - **Block / Unblock** is phone-keyed. The `contact_blocks` ledger holds one *active* row per (org, phone). Reasons: `provider_list`, `manual`, `deleted`, `complaint`, `carrier_block`.
 - **Every import checks the ledger.** A blocked or deleted phone is skipped and counted as "blocked" in the import summary. No contact is created for a blocked phone that has none. STOP handlers and the opt-out upload are never blocked.
 - **Every forward-looking selection excludes** blocked and deleted contacts. Historical reports are unchanged.
@@ -56,7 +56,7 @@ Every function takes the caller's transaction.
 | `closeJourneysForContacts` | Live drip journeys → `exited` (`closeJourneyOnBlock` in `lib/drip/lifecycle.ts`). |
 | `releaseBatch` | Releases a batch's active rows through `unblockPhones` and stamps the batch. |
 
-Audit rows are written by the routes that call these, which arrive in PR 4. In PR 2 the only callers are the import paths, and the archive / restore / `PATCH is_archived` routes.
+Audit rows are written by the routes that call these, which arrive in PR 4. In PR 2 the only callers are the import paths, and the `DELETE`, archive, restore and `PATCH is_archived` routes on `/api/contacts/[id]`. The `/contacts` delete dialog now says the contact can be restored from the Archived view.
 
 ## Import paths (PR 2)
 
@@ -115,4 +115,4 @@ It has no send effect: every contact it touches already has an opt_outs row.
 | [scripts/test-phone-normalizer-agreement.ts](../../scripts/test-phone-normalizer-agreement.ts) (in `check:guards`) | no STOP normalizer yields a different E.164 than `validatePhone`; `parse-csv` uses `validatePhone` |
 | [scripts/test-contact-blocks-helpers.ts](../../scripts/test-contact-blocks-helpers.ts) (preview DB) | V2: all 9 D2 rows, both invariants after each, A1 belt and braces. V3. V6: cancel / pool / journey, and a 12,000-phone block in 3 chunks. V8: `processAudienceUpload` plus a source bar per import path. V9: drip intake. Lookup-stats and contact-stats with blocked contacts. |
 | [scripts/test-send-optout-invariant.ts](../../scripts/test-send-optout-invariant.ts) (preview DB) | V7: blocked or deleted after materialization → `filtered` / `blocked_cancel`; opted out and blocked → `skipped_opted_out` |
-| [scripts/test-contact-blocks-source-guards.ts](../../scripts/test-contact-blocks-source-guards.ts) (in `check:guards`) | G1: `'not_applicable'` comparisons are allowlisted. G2: single writer. |
+| [scripts/test-contact-blocks-source-guards.ts](../../scripts/test-contact-blocks-source-guards.ts) (in `check:guards`) | G1: `'not_applicable'` comparisons are allowlisted. G2: single writer. G3: no hard delete of a contact in `app/` or `lib/`, and the DELETE route calls `softDeleteContacts`. |

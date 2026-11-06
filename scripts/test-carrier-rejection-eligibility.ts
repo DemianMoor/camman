@@ -185,6 +185,7 @@ async function main() {
       id: draft, orgId, segmentIds: [], excludeSegmentIds: [], contactGroupIds: [group],
       filters: legacy(true).filters, cap: null, excludeInUse: false, lifecycleRules: false,
       carrierRejectedSuppression: true,
+      offerId: null, // legacy (non-lifecycle) draft: no offer layer applies
     };
     const stageFilters = { include_no_status: true, include_clickers: true, exclude_clickers: false, split_index: null, split_total: null };
     const single = (await computeStageAudienceCountForDraft({ ...draftCampaign, offerId: null }, stageFilters)).count;

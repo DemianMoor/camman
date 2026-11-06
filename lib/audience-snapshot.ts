@@ -1224,23 +1224,44 @@ export async function computeStageAudienceCountsBatchForDraft(
     filters: AudienceFilters;
     cap: number | null;
     excludeInUse?: boolean;
-    // campaigns.lifecycle_rules — see AudiencePreviewInput.
-    lifecycleRules?: boolean;
+    // campaigns.lifecycle_rules — see AudiencePreviewInput. ⚠️ REQUIRED
+    // (CLAUDE.md §11b): it decides whether the lifecycle exclusion layers apply,
+    // i.e. WHO is counted. It was optional here while the single-stage twin
+    // applied the layers, so the two draft counts disagreed for every lifecycle
+    // campaign (2026-11-06).
+    lifecycleRules: boolean;
     // See AudiencePreviewInput. Required (§11b).
     carrierRejectedSuppression: boolean;
+    // ⚠️ REQUIRED (§11b), as on computeStageAudienceCountForDraft: the
+    // bought_offer layer is built from it. Pass null for a campaign with no
+    // offer yet.
+    offerId: number | null;
   },
   stages: StageCountBatchItem[],
 ): Promise<Map<number, number>> {
   if (stages.length === 0) return new Map();
   const { orgId, segmentIds, contactGroupIds, filters, cap } = campaign;
   const excludeInUse = campaign.excludeInUse === true;
-  const lifecycleRules = campaign.lifecycleRules === true;
+  const lifecycleRules = campaign.lifecycleRules;
   // Only emitted for a lifecycle campaign; a legacy one passes null and the
   // CTE list stays byte-identical to before PR 4b.
   const lifecycleChips = lifecycleRules
     ? ((filters.lifecycle_statuses as string[] | undefined) ?? [])
     : null;
   const useLifecycle = lifecycleChips != null && lifecycleChips.length > 0;
+  // The lifecycle exclusions — the same layers, built the same way, as
+  // computeStageAudienceCountForDraft applies (owner ruling 2026-09-28: a
+  // configuration-level count must not promise an audience the send cannot
+  // deliver). A legacy campaign gets null and the SQL is unchanged.
+  const draftExclusions = lifecycleRules
+    ? lifecycleExclusionLayers({ orgId, offerId: campaign.offerId })
+    : null;
+  const draftExclusionTerm = (draftExclusions ?? []).reduce(
+    (acc, l) =>
+      drizzleSql`${acc}
+        and not coalesce(${drizzleSql.raw(`flagged.is_${l.key}`)}, false)`,
+    drizzleSql``,
+  );
   // No audience source on the parent campaign → every stage is trivially zero
   // (mirrors computeStageAudienceCountForDraft's short-circuit).
   if (segmentIds.length === 0 && contactGroupIds.length === 0) {
@@ -1267,7 +1288,7 @@ export async function computeStageAudienceCountsBatchForDraft(
     with sources as (
       select distinct contact_id from (${source}) u
     ),
-    ${flagSetCtes(orgId, null, dripPostureOn, lifecycleChips)},
+    ${flagSetCtes(orgId, null, dripPostureOn, lifecycleChips, draftExclusions)},
     -- MATERIALIZED is load-bearing: the source set-ops (segment-rule SQL) are
     -- expensive. Computing the flagged set once and reusing it across the
     -- per-stage cross-join keeps the batch at one source evaluation. Without it
@@ -1286,8 +1307,9 @@ export async function computeStageAudienceCountsBatchForDraft(
             ? drizzleSql`, (lc_set.contact_id is not null) as has_lifecycle`
             : drizzleSql``
         }
+        ${lifecycleFlagCols(draftExclusions)}
       from sources s
-      ${flagJoins("s", false, useLifecycle)}
+      ${flagJoins("s", false, useLifecycle, draftExclusions)}
     ),
     st as (${stagesCte}),
     qualified as (
@@ -1305,6 +1327,7 @@ export async function computeStageAudienceCountsBatchForDraft(
         flagged.has_opt_out = false
         and ${lifecycleChipPredicate(filters, { alias: "flagged", lifecycleRules })}
         and (not ${excludeInUse}::boolean or not flagged.is_in_use_elsewhere)
+        ${draftExclusionTerm}
         and (
           (st.inc_ns and not flagged.has_opt_in and not flagged.has_clicker)
           or (st.inc_cl and flagged.has_clicker)

@@ -1,6 +1,6 @@
 # Delivery Report
 
-_Last updated: 2026-10-06_
+_Last updated: 2026-11-06 (§9 low-delivery Telegram alert, 0236)_
 
 Delivery-rate visibility across every provider. Three surfaces read from **one**
 query layer — [lib/reporting/delivery.ts](../../lib/reporting/delivery.ts) — so
@@ -11,6 +11,7 @@ the human view and the automated alert can never disagree:
 | `/reports/delivery` | provider × window, expandable to **per number** | [components/reports/delivery-report.tsx](../../components/reports/delivery-report.tsx) · [app/api/reports/delivery/route.ts](../../app/api/reports/delivery/route.ts) |
 | `Delivered %` column on the Overview tab | campaign **and** stage | [components/reports/keitaro-report.tsx](../../components/reports/keitaro-report.tsx) · [app/api/keitaro/reports/route.ts](../../app/api/keitaro/reports/route.ts) |
 | Undelivered tripwire (check #4) | batch (= stage) | [lib/sends/tells-monitors.ts](../../lib/sends/tells-monitors.ts) · [app/api/cron/tells-monitors/route.ts](../../app/api/cron/tells-monitors/route.ts) |
+| Low-delivery Telegram alert (§9) | stage | [lib/reporting/low-delivery-alert.ts](../../lib/reporting/low-delivery-alert.ts) · [app/api/cron/delivery-alerts/route.ts](../../app/api/cron/delivery-alerts/route.ts) |
 
 No schema change. No migration.
 
@@ -393,3 +394,54 @@ Runbook §2b — **undelivered > 8% on a matured batch → drop MPS to 10/s, hol
 > DLR-capable provider gets its **own configured threshold** and the check
 > generalizes beyond `tls`. Until a provider has a baseline it gets **no**
 > threshold, not a default 8%. Path: ClickUp `869ehwae3`.
+
+---
+
+## 9. Low-delivery Telegram alert
+
+Added 2026-11-06 after campaign 1997 (stage 5939) delivered **1 of 1,198** on
+Text Request: every failure carried carrier code `30007` (spam filter) on a
+number that delivered 91–99% on the stages ten minutes either side — a
+content problem nobody saw until the next day.
+
+- **Rule.** A stage whose sends are at least **60 min old** has
+  Delivered % (delivered ÷ sent, §1 — a missing receipt counts against it)
+  **below 70%** over **at least 50 sends** → one Telegram message.
+- **Window.** Sends with `sent_at` in `[now − 7 h, now − 60 min)`. The 6 h
+  look-back bounds the receipt scan and keeps a deploy from paging on old
+  stages. A long, paced stage is judged on its matured part as it goes.
+- **Providers.** Only DLR-capable ones (`DLR_SOURCES`: txr / ahi / tls).
+  TextHub (`txh`) rows are dropped before the rate is computed — they would
+  read as 0% (§4).
+- **Once.** Latched in `alert_state` via `notifyOnTransition` (retries until
+  Telegram confirms). Key `low-delivery:stage:<id>` for a regular stage — once
+  ever; `low-delivery:stage:<id>:<ET day>` for a **drip** stage, which sends
+  all day for weeks — once per ET day. Nothing clears the latch.
+- **Message.** Campaign, tracking ID, stage, provider, number(s), the checked
+  send range (ET), sent / delivered / undelivered / no receipt, the error codes
+  (top 6, counted in **messages**), and the creative text.
+- **Error codes, one per undelivered message.** Text Request sends two codes
+  for one failure: its own 4-digit code on the callback (`2002`) and the
+  carrier's 5-digit code (`30007`, also stamped into `error_code` by the
+  reconcile poll). Measured 2026-11-06 they pair one-to-one (2002↔30007,
+  2003↔30006), so counting both would double every failure: the 5-digit code
+  wins, otherwise whatever code exists. Fields read: txr `error_code` /
+  `raw_body`'s `error_code`, ahi `smpp_code` / `error`, tls `error_message`.
+  Labels only for the certain carrier codes (30003–30008).
+- **Switch.** `notification_settings.delivery_alert_enabled` (0236, default
+  **on**), "Low delivery alerts" on `/settings/notifications`.
+- **Cron.** `/api/cron/delivery-alerts`, every 10 min at `:07/:17/…`.
+
+**Perf.** Reads run in one transaction with `enable_nestloop = off`: a
+one-stage `queryDeliveryByStage` measured **4.4 s** on the default planner vs
+**0.5 s** off (same misplan as §5b). The error-code query groups receipts per
+message **before** joining the stage's sends — the first draft filtered with
+`key IN (SELECT id FROM sends)`, the planner estimated 5 × 234 rows (actual
+~1,200 × a day of txr) and took **28 s**; grouped first, 2.5 s for a historical
+replay and ~0.1 s for a live tick.
+
+**Verification.** [scripts/test-low-delivery-alert.ts](../../scripts/test-low-delivery-alert.ts)
+(thresholds, window, keys incl. the drip ET-day boundary, message format). A
+read-only replay against production as of 2026-11-05 15:52 UTC flagged exactly
+stage 5939 (`30007` × 1,197) and none of the same morning's 91–99% stages.
+

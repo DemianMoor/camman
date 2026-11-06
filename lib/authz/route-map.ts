@@ -224,6 +224,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/ahoi-cdr-poll": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/carrier-rejections": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/carrier-triage": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/delivery-alerts": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/delivery-rollup": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/delivery-rollup-reconcile": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/drip-daily-rollup": null, // cron / webhook / import machinery -- no operator session reaches these

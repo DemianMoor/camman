@@ -133,6 +133,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/delivery-alerts",
+      "schedule": "7,17,27,37,47,57 * * * *"
+    },
+    {
       "path": "/api/cron/delivery-rollup",
       "schedule": "3,13,23,33,43,53 * * * *"
     },

@@ -20,11 +20,14 @@ export type CounterColumn =
   | "rejected"
   | "duplicate"
   | "sandbox"
-  | "lookups_spent";
+  | "lookups_spent"
+  // A lead whose phone is blocked or deleted (contact blocks, 0237) — discarded
+  // at enrichment like a landline, counted inside `received`.
+  | "blocked";
 
 const ALLOWED: readonly CounterColumn[] = [
   "received", "mobile", "voip", "unknown", "landline",
-  "rejected", "duplicate", "sandbox", "lookups_spent",
+  "rejected", "duplicate", "sandbox", "lookups_spent", "blocked",
 ];
 
 /** ET calendar day as YYYY-MM-DD — the counter's grain. */

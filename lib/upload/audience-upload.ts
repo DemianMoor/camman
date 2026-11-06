@@ -4,9 +4,10 @@ import { and, eq, inArray, sql as drizzleSql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { contact_contact_groups, contact_groups, contacts } from "@/db/schema";
+import { partitionBlocked, type BlockedSummary } from "@/lib/contacts/blocks";
 import { validatePhonesBatch } from "@/lib/phone-validation";
 
-export type AudienceUploadSummary = {
+export type AudienceUploadSummary = BlockedSummary & {
   submitted: number;
   valid: number;
   invalid: number;
@@ -39,6 +40,10 @@ export interface AudienceUploadConfig {
   // Optional: tag every resolved contact with these contact groups.
   // Caller is responsible for verifying these IDs are owned by orgId.
   assignToGroupIds?: number[];
+  // Contact blocks (spec §5, §11b — REQUIRED, never defaulted). true: a blocked
+  // or deleted phone is skipped entirely (no contact, no entity row, no group).
+  // false ONLY for the opt-out upload: a suppression is never blocked (O6).
+  blockCheck: boolean;
 }
 
 const CONTACT_UPSERT_CHUNK = 1000;
@@ -53,7 +58,7 @@ const INVALID_SAMPLE_LIMIT = 20;
 export async function processAudienceUpload(
   config: AudienceUploadConfig,
 ): Promise<AudienceUploadSummary> {
-  const { orgId, rawPhones, insertEntities, assignToGroupIds } = config;
+  const { orgId, rawPhones, insertEntities, assignToGroupIds, blockCheck } = config;
 
   // Resolve & verify groups up front so a bad group ID rejects the upload
   // before we do any contact work.
@@ -86,16 +91,23 @@ export async function processAudienceUpload(
 
   // Dedupe valid by normalized E.164.
   const seen = new Set<string>();
-  const dedupedValid: typeof valid = [];
+  const uniqueValid: typeof valid = [];
   let duplicates_in_input = 0;
   for (const v of valid) {
     if (seen.has(v.normalized)) {
       duplicates_in_input++;
     } else {
       seen.add(v.normalized);
-      dedupedValid.push(v);
+      uniqueValid.push(v);
     }
   }
+
+  const { allowed: dedupedValid, summary: blockedSummary } = blockCheck
+    ? await partitionBlocked(db, orgId, uniqueValid, (v) => v.normalized)
+    : {
+        allowed: uniqueValid,
+        summary: { blocked: 0, blocked_by_reason: { deleted: 0, blocked: 0 }, blocked_samples: [] },
+      };
 
   // Upsert contacts. ON CONFLICT (org_id, phone_number) DO UPDATE so we always
   // get the row back (whether newly inserted or pre-existing). Per chunk,
@@ -180,5 +192,6 @@ export async function processAudienceUpload(
     invalid_samples: invalid.slice(0, INVALID_SAMPLE_LIMIT),
     groups_applied,
     updated_contacts: updatedContactIds.size,
+    ...blockedSummary,
   };
 }

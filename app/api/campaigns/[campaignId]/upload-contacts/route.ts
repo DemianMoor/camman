@@ -10,6 +10,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { partitionBlocked, type BlockedSummary } from "@/lib/contacts/blocks";
 import { can } from "@/lib/permissions";
 import { validatePhonesBatch } from "@/lib/phone-validation";
 import { contactBulkUploadSchema } from "@/lib/validators/contacts";
@@ -23,7 +24,7 @@ function parseId(idParam: string) {
   return n;
 }
 
-type UploadResultSummary = {
+type UploadResultSummary = BlockedSummary & {
   submitted: number;
   valid: number;
   invalid: number;
@@ -137,16 +138,25 @@ export async function POST(
 
   // Dedupe valid by normalized E.164, preserving first occurrence.
   const seen = new Set<string>();
-  const dedupedValid: typeof valid = [];
+  const uniqueValid: typeof valid = [];
   let duplicates_in_input = 0;
   for (const v of valid) {
     if (seen.has(v.normalized)) {
       duplicates_in_input++;
     } else {
       seen.add(v.normalized);
-      dedupedValid.push(v);
+      uniqueValid.push(v);
     }
   }
+
+  // Contact blocks (spec §5): a blocked or deleted phone gets no contact and no
+  // group membership, so it never reaches this campaign's audience.
+  const { allowed: dedupedValid, summary: blockedSummary } = await partitionBlocked(
+    db,
+    orgId,
+    uniqueValid,
+    (v) => v.normalized,
+  );
 
   // Upsert contacts, resolving every row to an id (new or pre-existing). Track
   // which ids were already in the DB so we can report new vs. updated below.
@@ -242,6 +252,7 @@ export async function POST(
     invalid_samples: invalid.slice(0, INVALID_SAMPLE_LIMIT),
     groups_applied,
     updated_contacts: updatedContactIds.size,
+    ...blockedSummary,
   };
 
   return NextResponse.json(summary, { status: 201 });

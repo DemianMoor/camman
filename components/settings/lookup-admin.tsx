@@ -185,6 +185,8 @@ type StatGroup = {
   coverage_pct: number;
   landlines: number;
   opt_outs: number;
+  /** Absent on stats cached before 0237. */
+  blocked?: number;
   sendable: number;
   remaining: number;
 };
@@ -381,6 +383,7 @@ function LookupStatsSection() {
                 sub={`Telnyx ${num(s.telnyx)} · Manual ${num(s.manual)}`}
               />
               <Metric label="Landlines suppressed" value={num(s.landlines)} />
+              {(s.blocked ?? 0) > 0 && <Metric label="Blocked / deleted" value={num(s.blocked ?? 0)} />}
               <Metric label="Sendable" value={num(s.sendable)} />
               <Metric label="Remaining un-looked-up" value={num(s.remaining)} />
             </div>

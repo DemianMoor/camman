@@ -11,9 +11,11 @@ import {
   normalizeIncomeBand,
   normalizeZipInput,
 } from "@/lib/contact-attributes";
+import { findActiveBlocks } from "@/lib/contacts/blocks";
 import { extractLeadFields } from "@/lib/intake/fields";
 import type { DbOrTx } from "@/lib/intake/partner-key";
 import { enqueueNormalized } from "@/lib/telnyx/enqueue";
+
 import { bumpIntakeCounters, counterForLineType } from "./counters";
 import {
   addContactsToGroup,
@@ -50,6 +52,8 @@ export interface EnrichmentResult {
   claimed: number;
   processed: number;
   landline: number;
+  /** Discarded because the phone is blocked or deleted (contact blocks, 0237). */
+  blocked: number;
   awaitingLookup: number;
   /** Left as 'received' because the drip daily sub-cap was exhausted. */
   capDeferred: number;
@@ -186,7 +190,7 @@ export async function runEnrichmentBatch(
   const maxClaims = opts.maxClaims ?? ENRICHMENT_MAX_CLAIMS_PER_TICK;
   const startedAt = Date.now();
   const total: EnrichmentTickResult = {
-    claimed: 0, processed: 0, landline: 0, awaitingLookup: 0, capDeferred: 0,
+    claimed: 0, processed: 0, landline: 0, blocked: 0, awaitingLookup: 0, capDeferred: 0,
     rejected: 0, lookupsEnqueued: 0, capReached: false,
     batches: 0, hitDeadline: false, elapsedMs: 0,
   };
@@ -197,6 +201,7 @@ export async function runEnrichmentBatch(
     total.claimed += r.claimed;
     total.processed += r.processed;
     total.landline += r.landline;
+    total.blocked += r.blocked;
     total.awaitingLookup += r.awaitingLookup;
     total.capDeferred += r.capDeferred;
     total.rejected += r.rejected;
@@ -237,7 +242,7 @@ export async function insertLeadEvent(
 /** Claim one batch for ONE org and drive every row to its next state. One transaction. */
 async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
   const res: EnrichmentResult = {
-    claimed: 0, processed: 0, landline: 0, awaitingLookup: 0, capDeferred: 0,
+    claimed: 0, processed: 0, landline: 0, blocked: 0, awaitingLookup: 0, capDeferred: 0,
     rejected: 0, lookupsEnqueued: 0, capReached: false,
   };
 
@@ -316,9 +321,18 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
     // Partner x tag groups, resolved lazily — a batch usually spans one or two.
     const partnerTagGroups = new Map<string, number>();
 
-    // Budget for THIS batch's cache misses (ET-day drip sub-cap).
+    // Contact blocks (spec §5 row 8): one ledger probe for the whole batch.
+    const blockedPhones = await findActiveBlocks(
+      tx,
+      orgId,
+      rows.flatMap((r) => (r.phone_e164 ? [r.phone_e164] : [])),
+    );
+
+    // Budget for THIS batch's cache misses (ET-day drip sub-cap). A blocked
+    // lead never reaches the lookup, so it does not take budget.
     const misses = rows.filter(
-      (r) => r.status === "received" && !r.sandbox && r.phone_e164 && !r.lookup_complete,
+      (r) => r.status === "received" && !r.sandbox && r.phone_e164 && !r.lookup_complete
+        && !blockedPhones.has(r.phone_e164),
     );
     const budget = await dripLookupBudget(tx, { orgId, want: misses.length, now });
     res.capReached = budget.allowed < misses.length;
@@ -341,6 +355,21 @@ async function runEnrichmentOnce(now: Date): Promise<EnrichmentResult> {
           deltas: row.sandbox ? { sandbox: 1 } : { received: 1, rejected: 1 },
         });
         res.rejected++;
+        continue;
+      }
+
+      // ── BLOCKED / DELETED PHONE: discarded like a landline (spec §5 row 8) ──
+      // Checked BEFORE the lookup so a blocked lead never costs a Telnyx call
+      // (O8). No contact, no attributes, no lead_event, no group, no routing.
+      // Counted, THEN removed, in the same transaction (see the landline note).
+      if (blockedPhones.has(row.phone_e164)) {
+        await bumpIntakeCounters(tx, {
+          orgId, partnerKeyId: row.partner_key_id, at: now,
+          interestTag: row.interest_tag,
+          deltas: row.sandbox ? { sandbox: 1 } : { received: 1, blocked: 1 },
+        });
+        await tx.execute(sql`DELETE FROM lead_inbox WHERE id = ${row.id}`);
+        res.blocked++;
         continue;
       }
 

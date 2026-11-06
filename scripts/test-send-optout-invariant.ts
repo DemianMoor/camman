@@ -21,7 +21,11 @@ import { runStageDrain, type Sender } from "@/lib/sends/drain";
 //   3. OPT-OUT BEATS DEDUP: an opted-out contact whose phone was ALSO messaged
 //      < 1h ago lands in 'skipped_opted_out' (opt-out re-check runs before the
 //      1-hour dedup gate), NOT 'skipped_duplicate'.
-// All in a rolled-back tx (no real provider — injected sender). Requires 0116.
+//   4. BLOCKED AFTER MATERIALIZATION (contact blocks, 0237): a pending row whose
+//      contact is blocked → 'filtered' / last_error 'blocked_cancel', NOT sent.
+//   5. DELETED (archived) AFTER MATERIALIZATION → same.
+//   6. OPT-OUT BEATS BLOCK: opted out AND blocked → 'skipped_opted_out'.
+// All in a rolled-back tx (no real provider — injected sender). Requires 0116 + 0237.
 //
 // Run: npx tsx scripts/test-send-optout-invariant.ts
 
@@ -143,6 +147,50 @@ async function main() {
         `skippedOptedOut=1 skippedDuplicate=0 sent=0 (got ${JSON.stringify({ s: r3.sent, soo: r3.skippedOptedOut, sd: r3.skippedDuplicate })})`,
       );
       assert((await cnt(target3, "skipped_opted_out")) === 1, "target row is skipped_opted_out (opt-out wins over dedup)");
+
+      // ---- 4–6. CONTACT BLOCKS: send-time re-check (0237, spec §6 C / V7) ----
+      const errOf = async (stage: number) =>
+        (await one<{ status: string; last_error: string | null }>(sql`
+          SELECT status, last_error FROM stage_sends WHERE stage_id = ${stage}`));
+      console.log("4) pending row, contact BLOCKED after materialization → filtered / blocked_cancel:");
+      const target4 = await mkStage();
+      const c4 = await mkContact();
+      const c4ok = await mkContact();
+      await addRow(target4, c4, "+19991000004", "pending", null);
+      await addRow(target4, c4ok, "+19991000014", "pending", null);
+      await tx.execute(sql`UPDATE contacts SET blocked_at = now(), block_reason = 'manual' WHERE id = ${c4}`);
+      const r4 = await runStageDrain(tx, { stageId: target4, sendSms: okSender, isEnabled: () => true });
+      assert(
+        r4.ok && r4.filteredBlocked === 1 && r4.sent === 1,
+        `filteredBlocked=1 sent=1 — the unblocked row in the same batch still sends (got ${JSON.stringify({ s: r4.sent, fb: r4.filteredBlocked })})`,
+      );
+      const e4 = (await tx.execute(sql`
+        SELECT status, last_error FROM stage_sends WHERE stage_id = ${target4} AND contact_id = ${c4}`)) as unknown as { status: string; last_error: string }[];
+      assert(e4[0]?.status === "filtered" && e4[0]?.last_error === "blocked_cancel", `blocked row is filtered/blocked_cancel (got ${JSON.stringify(e4[0])})`);
+
+      console.log("5) pending row, contact DELETED (archived) after materialization → filtered / blocked_cancel:");
+      const target5 = await mkStage();
+      const c5 = await mkContact();
+      await addRow(target5, c5, "+19991000005", "pending", null);
+      await tx.execute(sql`UPDATE contacts SET archived_at = now() WHERE id = ${c5}`);
+      const r5 = await runStageDrain(tx, { stageId: target5, sendSms: okSender, isEnabled: () => true });
+      const e5 = await errOf(target5);
+      assert(
+        r5.ok && r5.filteredBlocked === 1 && r5.sent === 0 && e5.status === "filtered" && e5.last_error === "blocked_cancel",
+        `deleted row is filtered/blocked_cancel, not sent (got ${JSON.stringify({ s: r5.sent, fb: r5.filteredBlocked, ...e5 })})`,
+      );
+
+      console.log("6) opted out AND blocked → skipped_opted_out (precedence opt_out > blocked):");
+      const target6 = await mkStage();
+      const c6 = await mkContact();
+      await addRow(target6, c6, "+19991000006", "pending", null);
+      await optOut(c6, "+19991000006");
+      await tx.execute(sql`UPDATE contacts SET blocked_at = now(), block_reason = 'manual' WHERE id = ${c6}`);
+      const r6 = await runStageDrain(tx, { stageId: target6, sendSms: okSender, isEnabled: () => true });
+      assert(
+        r6.ok && r6.skippedOptedOut === 1 && r6.filteredBlocked === 0 && r6.sent === 0,
+        `skippedOptedOut=1 filteredBlocked=0 sent=0 (got ${JSON.stringify({ s: r6.sent, soo: r6.skippedOptedOut, fb: r6.filteredBlocked })})`,
+      );
 
       throw new Rollback();
     });

@@ -8,6 +8,7 @@ import {
   purchasedClause,
   registeredClause,
 } from "@/lib/sale-attribution";
+import { pgArray } from "@/lib/telnyx/pg-array";
 
 /** Either the pooled client or an open transaction. */
 type DripTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -84,6 +85,32 @@ export async function closeJourneyOnOptOut(
     "opted_out",
     "stop_received",
     sql`j.org_id = ${orgId}::uuid AND j.contact_id = ${contactId}::uuid`,
+  );
+}
+
+/**
+ * Contact blocked or deleted ⇒ close its live journeys as `exited` (spec D4,
+ * docs/superpowers/specs/2026-11-06-contact-blocks-soft-delete-design.md).
+ *
+ * Called only from lib/contacts/blocks.ts, in the SAME transaction as the block
+ * or soft delete and the cancel of its pending sends — the closeJourneyOnOptOut
+ * model. Without it the lead keeps its slot and follow-ups keep materializing,
+ * only for the drain to cancel each one.
+ */
+export async function closeJourneyOnBlock(
+  tx: DripTx,
+  {
+    orgId,
+    contactIds,
+    reason,
+  }: { orgId: string; contactIds: string[]; reason: "contact_blocked" | "contact_deleted" },
+): Promise<CloseResult> {
+  if (contactIds.length === 0) return { closed: 0, state: "exited" };
+  return close(
+    tx,
+    "exited",
+    reason,
+    sql`j.org_id = ${orgId}::uuid AND j.contact_id = ANY(${pgArray(contactIds, "uuid")})`,
   );
 }
 

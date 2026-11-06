@@ -13,6 +13,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { restoreContacts, softDeleteContacts } from "@/lib/contacts/blocks";
 import { can } from "@/lib/permissions";
 import { contactUpdateSchema } from "@/lib/validators/contacts";
 import { ageBandFromDob, ageFromDob } from "@/lib/contact-attributes";
@@ -193,19 +194,20 @@ export async function PATCH(
     );
   }
 
-  const updates: Record<string, unknown> = {
-    updated_at: drizzleSql`now()`,
-  };
-  if (parsed.data.is_archived !== undefined) {
-    updates.is_archived = parsed.data.is_archived;
-    updates.archived_at = parsed.data.is_archived ? drizzleSql`now()` : null;
-  }
-
-  const updated = await db
-    .update(contacts)
-    .set(updates)
-    .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
-    .returning();
+  // is_archived is the only updatable field. Archive / restore go through
+  // lib/contacts/blocks.ts (the only writer of archived_at — spec D2/A1).
+  const updated = await db.transaction(async (tx) => {
+    if (parsed.data.is_archived === true) {
+      await softDeleteContacts(tx, { orgId, contactIds: [id], actorId: auth.user.id });
+    } else if (parsed.data.is_archived === false) {
+      await restoreContacts(tx, { orgId, contactIds: [id], actorId: auth.user.id });
+    }
+    return tx
+      .update(contacts)
+      .set({ updated_at: drizzleSql`now()` })
+      .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
+      .returning();
+  });
 
   if (!updated[0]) {
     return apiError(404, "Contact not found", API_ERROR_CODES.NOT_FOUND, {
@@ -215,16 +217,20 @@ export async function PATCH(
   return NextResponse.json(updated[0]);
 }
 
-// Hard delete. Manager+ only. There's no RLS DELETE policy on contacts; the
-// Drizzle connection bypasses RLS, so we enforce org_id filtering at the
-// application layer (project rule).
+// SOFT delete (contact blocks, 0237). Manager+ only. The row and its history
+// stay; archived_at is set and a 'deleted' contact_blocks row stops the phone
+// being re-imported. Pending sends are cancelled, pool rows dropped, live drip
+// journeys closed — all in lib/contacts/blocks.ts. A hard delete used to
+// cascade away the contact's opt_outs, so a deleted STOP number became
+// sendable again on re-import. No route hard-deletes a contact (guard G3 in
+// scripts/test-contact-blocks-source-guards.ts).
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   if (!can(role, "contacts.delete")) {
     return apiError(403, "Forbidden", API_ERROR_CODES.FORBIDDEN);
@@ -237,10 +243,15 @@ export async function DELETE(
     });
   }
 
-  const deleted = await db
-    .delete(contacts)
-    .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
-    .returning({ id: contacts.id });
+  // Idempotent: deleting an already-deleted contact returns 200.
+  const deleted = await db.transaction(async (tx) => {
+    await softDeleteContacts(tx, { orgId, contactIds: [id], actorId: user.id });
+    return tx
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
+      .limit(1);
+  });
 
   if (!deleted[0]) {
     return apiError(404, "Contact not found", API_ERROR_CODES.NOT_FOUND, {

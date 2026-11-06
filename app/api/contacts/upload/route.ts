@@ -12,15 +12,16 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { writeUploadAttributes } from "@/lib/contact-attributes-write";
+import { partitionBlocked, type BlockedSummary } from "@/lib/contacts/blocks";
 import { bumpContactOrgStats } from "@/lib/contact-stats";
 import { can } from "@/lib/permissions";
-import { validatePhonesBatch } from "@/lib/phone-validation";
+import { validatePhone, validatePhonesBatch } from "@/lib/phone-validation";
 import { contactBulkUploadSchema } from "@/lib/validators/contacts";
 
 const CHUNK_SIZE = 1000;
 const INVALID_SAMPLE_LIMIT = 20;
 
-export type UploadResultSummary = {
+export type UploadResultSummary = BlockedSummary & {
   submitted: number;
   valid: number;
   invalid: number;
@@ -131,16 +132,24 @@ export async function POST(req: NextRequest) {
 
   // Dedup valid by normalized E.164, preserving first occurrence.
   const seen = new Set<string>();
-  const dedupedValid: typeof valid = [];
+  const uniqueValid: typeof valid = [];
   let duplicates_in_input = 0;
   for (const v of valid) {
     if (seen.has(v.normalized)) {
       duplicates_in_input++;
     } else {
       seen.add(v.normalized);
-      dedupedValid.push(v);
+      uniqueValid.push(v);
     }
   }
+
+  // Contact blocks (spec §5): a blocked or deleted phone is skipped entirely —
+  // no contact insert/update, no segment or group membership, no attributes.
+  const {
+    allowed: dedupedValid,
+    blockedPhones,
+    summary: blockedSummary,
+  } = await partitionBlocked(db, orgId, uniqueValid, (v) => v.normalized);
 
   // If we need contact_ids back (for segment assignment or group tagging),
   // upsert so every row resolves to an id. Otherwise the existing
@@ -273,12 +282,18 @@ export async function POST(req: NextRequest) {
     segments_assigned: targetSegmentIds.length,
     groups_applied,
     updated_contacts: updatedContactIds.size,
+    ...blockedSummary,
   };
 
   // Attribute columns, fill-empty only. After the contacts exist, so every
   // valid phone resolves; a phone-only upload skips this entirely.
   if (parsed.data.attributes) {
-    const a = await writeUploadAttributes(db, orgId, parsed.data.attributes);
+    const a = await writeUploadAttributes(db, orgId, {
+      ...parsed.data.attributes,
+      rows: parsed.data.attributes.rows.filter(
+        ([phone]) => !blockedPhones.has(validatePhone(phone ?? "").normalized ?? ""),
+      ),
+    });
     summary.attributes_written = a.written;
     summary.attribute_values_ignored = a.values_ignored;
   }

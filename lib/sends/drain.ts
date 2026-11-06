@@ -148,6 +148,10 @@ export interface DrainResult {
   // DISTINCT from provider rejects (failed/filtered) and manual aborts (rejected)
   // so stage stats can count STOP-cancels on their own.
   skippedOptedOut: number;
+  // Rows NOT sent because the contact was blocked or deleted (or is otherwise no
+  // longer messaging_status='eligible') AFTER materialization — the contact-blocks
+  // re-check (0237, spec §6 C / D6). Marked 'filtered' / 'blocked_cancel'.
+  filteredBlocked: number;
   processed: number;
   halted: boolean; // stopped early (kill-switch off, pause, or a breaker trip)
   stuck: number; // rows left in 'sending' (crashed mid-send — manual review)
@@ -215,6 +219,7 @@ const EMPTY = {
   filtered: 0,
   skippedDuplicate: 0,
   skippedOptedOut: 0,
+  filteredBlocked: 0,
   skippedIneligible: 0,
   skippedIneligibleByReason: {},
   recheckFailedBatches: 0,
@@ -486,6 +491,7 @@ export async function runStageDrain(
   let filtered = 0;
   let skippedDuplicate = 0;
   let skippedOptedOut = 0;
+  let filteredBlocked = 0;
   // PR 4c: the send-time lifecycle re-check. The per-reason split is what the
   // send panel shows; the batch counter is how a FAIL-OPEN shows up as a gap
   // rather than as a quiet zero.
@@ -687,7 +693,7 @@ export async function runStageDrain(
         )})
     `)) as unknown as { contact_id: string }[];
     const optedOut = new Set(optedOutRows.map((r) => r.contact_id));
-    const notOptedOut: ClaimedRow[] = [];
+    let notOptedOut: ClaimedRow[] = [];
     const optOutIds: string[] = [];
     for (const c of claimed) {
       if (optedOut.has(c.contact_id)) optOutIds.push(c.id);
@@ -705,8 +711,37 @@ export async function runStageDrain(
       `);
       skippedOptedOut += optOutIds.length;
     }
-    // Whole batch had opted out — claim the next batch (these rows left the
-    // 'pending' set, so we still make progress and can't loop forever).
+
+    // ── SEND-TIME BLOCK RE-CHECK (contact blocks, 0237 — spec §6 C) ─────────
+    // A block or soft delete cancels the contact's pending rows in its own
+    // transaction (lib/contacts/blocks.ts), but a row claimed concurrently, or a
+    // contact blocked between materialization and this claim, would still fire.
+    // messaging_status <> 'eligible' covers blocked, deleted AND a landline that
+    // leaked past the gates. Marked 'filtered' / 'blocked_cancel' (D6) — never
+    // dispatched. Opt-outs were handled first, so precedence holds:
+    // opt_out > blocked.
+    if (notOptedOut.length > 0) {
+      const ids = [...new Set(notOptedOut.map((c) => c.contact_id))];
+      const blockedRows = (await dbc.execute(sql`
+        SELECT id FROM contacts
+        WHERE org_id = ${orgId}
+          AND id IN (${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)})
+          AND messaging_status <> 'eligible'
+      `)) as unknown as { id: string }[];
+      if (blockedRows.length > 0) {
+        const blocked = new Set(blockedRows.map((r) => r.id));
+        const blockedSendIds = notOptedOut.filter((c) => blocked.has(c.contact_id)).map((c) => c.id);
+        await dbc.execute(sql`
+          UPDATE stage_sends
+          SET status = 'filtered', last_error = 'blocked_cancel'
+          WHERE id IN (${sql.join(blockedSendIds.map((id) => sql`${id}::uuid`), sql`, `)})
+        `);
+        filteredBlocked += blockedSendIds.length;
+        notOptedOut = notOptedOut.filter((c) => !blocked.has(c.contact_id));
+      }
+    }
+    // Whole batch had opted out or was blocked — claim the next batch (these
+    // rows left the 'pending' set, so we still make progress and can't loop).
     if (notOptedOut.length === 0) continue;
 
     // ── HARD 1-hour send-dedup gate (global, org-wide) ──────────────────────
@@ -1123,6 +1158,7 @@ export async function runStageDrain(
     filtered,
     skippedDuplicate,
     skippedOptedOut,
+    filteredBlocked,
     skippedIneligible,
     skippedIneligibleByReason,
     recheckFailedBatches,

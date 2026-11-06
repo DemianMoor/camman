@@ -19,7 +19,10 @@ export interface CarrierBreakdown {
   total: number;
   by_line_type: Record<string, number>;
   by_carrier_norm: Record<string, number>;
-  by_messaging_status: { eligible: number; not_applicable: number };
+  // ⚠️ Three values since 0237: "not eligible" is NOT "landline". `blocked`
+  // = blocked or deleted (contact blocks). Older cached blobs lack it — read
+  // it as `?? 0`.
+  by_messaging_status: { eligible: number; not_applicable: number; blocked?: number };
 }
 
 export interface ContactBaseStats {
@@ -241,8 +244,9 @@ export async function refreshContactOrgStats(
     ),
     ms_agg AS (
       SELECT
-        count(*) FILTER (WHERE messaging_status != 'not_applicable')::int AS eligible,
-        count(*) FILTER (WHERE messaging_status  = 'not_applicable')::int AS not_applicable
+        count(*) FILTER (WHERE messaging_status = 'eligible')::int       AS eligible,
+        count(*) FILTER (WHERE messaging_status = 'not_applicable')::int AS not_applicable,
+        count(*) FILTER (WHERE messaging_status = 'blocked')::int        AS blocked
       FROM contact_raw
     ),
     opt_out_c AS (
@@ -289,7 +293,8 @@ export async function refreshContactOrgStats(
         'by_carrier_norm',     (SELECT jsonb_object_agg(k, n) FROM cn_agg),
         'by_messaging_status', jsonb_build_object(
           'eligible',       ms.eligible,
-          'not_applicable', ms.not_applicable
+          'not_applicable', ms.not_applicable,
+          'blocked',        ms.blocked
         )
       ),
       now()

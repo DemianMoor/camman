@@ -11,8 +11,9 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { writeUploadAttributes } from "@/lib/contact-attributes-write";
+import { partitionBlocked } from "@/lib/contacts/blocks";
 import { can } from "@/lib/permissions";
-import { validatePhonesBatch } from "@/lib/phone-validation";
+import { validatePhone, validatePhonesBatch } from "@/lib/phone-validation";
 import { uploadAttributesSchema } from "@/lib/validators/contacts";
 
 const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;
@@ -93,13 +94,21 @@ export async function POST(
 
   // Dedup valid by normalized E.164.
   const seen = new Set<string>();
-  const dedupedValid: typeof valid = [];
+  const uniqueValid: typeof valid = [];
   for (const v of valid) {
     if (!seen.has(v.normalized)) {
       seen.add(v.normalized);
-      dedupedValid.push(v);
+      uniqueValid.push(v);
     }
   }
+
+  // Contact blocks (spec §5): a blocked or deleted phone gets no contact, no
+  // membership and no attributes.
+  const {
+    allowed: dedupedValid,
+    blockedPhones,
+    summary: blockedSummary,
+  } = await partitionBlocked(db, orgId, uniqueValid, (v) => v.normalized);
 
   // UPSERT contacts to get their IDs back, regardless of whether they
   // pre-existed. We track contacts_created separately by pre-checking.
@@ -155,13 +164,18 @@ export async function POST(
 
   // Attribute columns, fill-empty only — same write as the contacts upload.
   const attrs = parsed.data.attributes
-    ? await writeUploadAttributes(db, orgId, parsed.data.attributes)
+    ? await writeUploadAttributes(db, orgId, {
+        ...parsed.data.attributes,
+        rows: parsed.data.attributes.rows.filter(
+          ([phone]) => !blockedPhones.has(validatePhone(phone ?? "").normalized ?? ""),
+        ),
+      })
     : null;
 
   return NextResponse.json(
     {
       submitted: rawLines.length,
-      valid: dedupedValid.length,
+      valid: uniqueValid.length,
       invalid: invalid.length,
       contacts_created: contactsCreated,
       contacts_already_existed: contactsAlreadyExisted,
@@ -173,8 +187,9 @@ export async function POST(
       // The shared result screen renders these two unconditionally; without
       // them it crashed (undefined.toLocaleString) after every successful add.
       duplicates_in_db: contactsAlreadyExisted,
-      duplicates_in_input: valid.length - dedupedValid.length,
+      duplicates_in_input: valid.length - uniqueValid.length,
       invalid_samples: invalid.slice(0, INVALID_SAMPLE_LIMIT),
+      ...blockedSummary,
       ...(attrs
         ? { attributes_written: attrs.written, attribute_values_ignored: attrs.values_ignored }
         : {}),

@@ -75,6 +75,10 @@ type ImportResponse = {
   bounced_added: number;
   total_cost_added: number;
   skipped_idempotent: number;
+  // Contact blocks (0237): rows for a blocked / deleted phone with no contact,
+  // skipped. Results for an existing blocked contact are still recorded.
+  blocked?: number;
+  blocked_by_reason?: { deleted: number; blocked: number };
 };
 
 export interface ResultsImportFormProps {
@@ -728,6 +732,12 @@ export function ResultsImportForm({
                   />
                   <Metric label="Scrubbed" value={importResult.scrubbed_added} />
                   <Metric label="Bounced" value={importResult.bounced_added} />
+                  {(importResult.blocked ?? 0) > 0 && (
+                    <Metric
+                      label={`Blocked (deleted ${importResult.blocked_by_reason?.deleted ?? 0}, blocked ${importResult.blocked_by_reason?.blocked ?? 0})`}
+                      value={importResult.blocked ?? 0}
+                    />
+                  )}
                 </div>
               </CardContent>
             </Card>

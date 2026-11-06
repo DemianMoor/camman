@@ -13,6 +13,7 @@ import {
 } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { restoreContacts, softDeleteContacts } from "@/lib/contacts/blocks";
 import { can } from "@/lib/permissions";
 import { contactUpdateSchema } from "@/lib/validators/contacts";
 import { ageBandFromDob, ageFromDob } from "@/lib/contact-attributes";
@@ -193,19 +194,20 @@ export async function PATCH(
     );
   }
 
-  const updates: Record<string, unknown> = {
-    updated_at: drizzleSql`now()`,
-  };
-  if (parsed.data.is_archived !== undefined) {
-    updates.is_archived = parsed.data.is_archived;
-    updates.archived_at = parsed.data.is_archived ? drizzleSql`now()` : null;
-  }
-
-  const updated = await db
-    .update(contacts)
-    .set(updates)
-    .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
-    .returning();
+  // is_archived is the only updatable field. Archive / restore go through
+  // lib/contacts/blocks.ts (the only writer of archived_at — spec D2/A1).
+  const updated = await db.transaction(async (tx) => {
+    if (parsed.data.is_archived === true) {
+      await softDeleteContacts(tx, { orgId, contactIds: [id], actorId: auth.user.id });
+    } else if (parsed.data.is_archived === false) {
+      await restoreContacts(tx, { orgId, contactIds: [id], actorId: auth.user.id });
+    }
+    return tx
+      .update(contacts)
+      .set({ updated_at: drizzleSql`now()` })
+      .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
+      .returning();
+  });
 
   if (!updated[0]) {
     return apiError(404, "Contact not found", API_ERROR_CODES.NOT_FOUND, {

@@ -135,6 +135,9 @@ export async function POST(req: NextRequest) {
 
   const summary = await processAudienceUpload({
     orgId,
+    // NEVER blocked (spec O6): a suppression must always land, even for a
+    // blocked or deleted phone — precedence is opt_out > blocked.
+    blockCheck: false,
     rawPhones: parsed.data.phones!,
     assignToGroupIds: parsed.data.assign_to_group_ids,
     insertEntities: async (rows: ResolvedContact[]) => {

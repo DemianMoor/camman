@@ -69,6 +69,8 @@ export async function POST(
 
   const summary = await processAudienceUpload({
     orgId,
+    // Contact blocks (spec §5): a blocked or deleted phone is skipped.
+    blockCheck: true,
     rawPhones: parsed.data.phones,
     insertEntities: async (rows: ResolvedContact[]) => {
       if (rows.length === 0) return 0;

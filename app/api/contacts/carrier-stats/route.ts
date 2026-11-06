@@ -64,7 +64,7 @@ export async function GET() {
   let total = 0;
   const by_line_type: Record<string, number> = {};
   const by_carrier_norm: Record<string, number> = {};
-  const by_messaging_status = { eligible: 0, not_applicable: 0 };
+  const by_messaging_status = { eligible: 0, not_applicable: 0, blocked: 0 };
 
   for (const row of rows) {
     const n = row.count;
@@ -72,11 +72,10 @@ export async function GET() {
     by_line_type[row.line_type] = (by_line_type[row.line_type] ?? 0) + n;
     by_carrier_norm[row.carrier_norm] =
       (by_carrier_norm[row.carrier_norm] ?? 0) + n;
-    if (row.messaging_status === "not_applicable") {
-      by_messaging_status.not_applicable += n;
-    } else {
-      by_messaging_status.eligible += n;
-    }
+    // Three values since 0237 — "not eligible" is not "landline".
+    if (row.messaging_status === "eligible") by_messaging_status.eligible += n;
+    else if (row.messaging_status === "blocked") by_messaging_status.blocked += n;
+    else by_messaging_status.not_applicable += n;
   }
 
   return NextResponse.json({

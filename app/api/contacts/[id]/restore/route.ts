@@ -1,10 +1,11 @@
-import { and, eq, sql as drizzleSql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/db/client";
 import { contacts } from "@/db/schema";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { restoreContacts } from "@/lib/contacts/blocks";
 import { can } from "@/lib/permissions";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -15,7 +16,7 @@ export async function POST(
 ) {
   const auth = await requireApiMembership();
   if ("error" in auth) return auth.error;
-  const { orgId, role } = auth;
+  const { orgId, role, user } = auth;
 
   // Restoring is an "update" of the is_archived flag back to false; same
   // permission as archive.
@@ -30,15 +31,17 @@ export async function POST(
     });
   }
 
-  const updated = await db
-    .update(contacts)
-    .set({
-      is_archived: false,
-      archived_at: null,
-      updated_at: drizzleSql`now()`,
-    })
-    .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
-    .returning();
+  // Restore through lib/contacts/blocks.ts — the only writer of archived_at, so
+  // the ledger invariant holds (an archived contact always has an active
+  // contact_blocks row; spec D2/A1). Idempotent: a no-op returns the row.
+  const updated = await db.transaction(async (tx) => {
+    await restoreContacts(tx, { orgId, contactIds: [id], actorId: user.id });
+    return tx
+      .select()
+      .from(contacts)
+      .where(and(eq(contacts.id, id), eq(contacts.org_id, orgId)))
+      .limit(1);
+  });
 
   if (!updated[0]) {
     return apiError(404, "Contact not found", API_ERROR_CODES.NOT_FOUND, {

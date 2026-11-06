@@ -167,7 +167,7 @@ type CarrierStats = {
   total: number;
   by_line_type: Record<string, number>;
   by_carrier_norm: Record<string, number>;
-  by_messaging_status: { eligible: number; not_applicable: number };
+  by_messaging_status: { eligible: number; not_applicable: number; blocked?: number };
 };
 
 type Filters = {
@@ -372,6 +372,14 @@ function BaseMixWidget({ stats }: { stats: CarrierStats | null }) {
             total={total}
             muted
           />
+          {(stats.by_messaging_status.blocked ?? 0) > 0 && (
+            <MixRow
+              label="Blocked / deleted"
+              value={stats.by_messaging_status.blocked ?? 0}
+              total={total}
+              muted
+            />
+          )}
         </div>
         <div className="grid gap-1">
           <div className="text-[11px] font-medium text-muted-foreground">

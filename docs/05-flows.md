@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-11-03 (landing page fetches first name by sub_id1, 0230); 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-11-06 (contact blocks PR 2: import check, block / delete cancel, drain re-check — flow L6); 2026-11-03 (landing page fetches first name by sub_id1, 0230); 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -710,6 +710,42 @@ sequenceDiagram
   end
   M->>T: stale-heartbeat alert, only once postbacks are live
 ```
+
+## L6. Contact blocks — import check, block / delete, drain re-check (0237, PR 2)
+
+`lib/contacts/blocks.ts` is the only writer. Precedence: opt_out > blocked > archived > active.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Imp as Import path (8, see 04-features/contact-blocks.md)
+    participant Blk as lib/contacts/blocks.ts
+    participant DB as Postgres
+    participant Drain as lib/sends/drain.ts
+
+    Note over Imp,DB: Import (upload, group add, campaign upload, stage results, statuses, drip intake)
+    Imp->>Imp: validate + dedupe (validatePhone, strict E.164)
+    Imp->>Blk: partitionBlocked / findActiveBlocks(phones)
+    Blk->>DB: active contact_blocks rows ∪ archived/blocked contacts (A1 belt and braces)
+    Blk-->>Imp: allowed + blocked (deleted / blocked counts, ≤10 samples)
+    Imp->>DB: upsert contacts, memberships, attributes — allowed phones only
+    Note over Imp: opt-out upload + STOP ingesters skip the check (a suppression always lands)
+
+    Note over Blk,DB: Block / soft delete (one transaction)
+    Blk->>DB: contact_blocks insert (or release 'deleted' + insert) · contacts.blocked_at / archived_at
+    DB->>DB: trigger ⇒ messaging_status = 'blocked' ⇒ every = 'eligible' gate excludes it
+    Blk->>DB: stage_sends pending → filtered (contact_blocked / contact_deleted); 'sending' untouched
+    Blk->>DB: DELETE campaign_audience_pool rows
+    Blk->>DB: drip_journeys live → exited (closeJourneyOnBlock)
+
+    Note over Drain,DB: Send time (every claimed batch)
+    Drain->>DB: claim pending → sending
+    Drain->>DB: opt_outs re-check → skipped_opted_out
+    Drain->>DB: contacts.messaging_status <> 'eligible' → filtered / blocked_cancel
+    Drain->>Drain: dedup gate, then dispatch the rest
+```
+
+Unblock releases the block row and clears `blocked_at`. It never touches `opt_outs`, and an archived contact gets a `deleted` row in place of the block (A1). Restore releases the `deleted` row and clears `archived_at`; a block row is kept.
 
 ## Google Workspace sign-in (migration 0175, ClickUp 869et3vm1 Phase 1)
 

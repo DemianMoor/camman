@@ -16,6 +16,7 @@ import {
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { logCampaignEvent } from "@/lib/campaign-events";
+import { blockKind, partitionBlocked, type BlockedSummary } from "@/lib/contacts/blocks";
 import { CSV_MAX_BYTES, parseCsv } from "@/lib/imports/parse-csv";
 import {
   deriveOutcome,
@@ -180,7 +181,30 @@ export async function POST(
       byPhone.set(r.phone_number, candidate);
     }
   }
-  const processable: ProcessableRow[] = Array.from(byPhone.values());
+  const allRows: ProcessableRow[] = Array.from(byPhone.values());
+
+  // Contact blocks (spec §5 row 5, owner ruling §14): a result for a blocked or
+  // deleted phone that ALREADY has a contact is still recorded — it is history.
+  // Only creating a new contact is skipped; those rows count as `blocked`.
+  const { blockedPhones } = await partitionBlocked(db, orgId, allRows, (r) => r.phone_number);
+  const blockedExisting = new Map<string, string>(); // phone → contact id
+  const blockedList = [...blockedPhones.keys()];
+  for (let i = 0; i < blockedList.length; i += CHUNK_SIZE) {
+    const found = await db
+      .select({ id: contacts.id, phone_number: contacts.phone_number })
+      .from(contacts)
+      .where(and(eq(contacts.org_id, orgId), inArray(contacts.phone_number, blockedList.slice(i, i + CHUNK_SIZE))));
+    for (const c of found) blockedExisting.set(c.phone_number, c.id);
+  }
+  const blockedSummary: BlockedSummary = { blocked: 0, blocked_by_reason: { deleted: 0, blocked: 0 }, blocked_samples: [] };
+  const processable = allRows.filter((r) => {
+    const reason = blockedPhones.get(r.phone_number);
+    if (!reason || blockedExisting.has(r.phone_number)) return true;
+    blockedSummary.blocked++;
+    blockedSummary.blocked_by_reason[blockKind(reason)]++;
+    if (blockedSummary.blocked_samples.length < 10) blockedSummary.blocked_samples.push(r.phone_number);
+    return false;
+  });
 
   // Run the entire write path in one transaction.
   const result = await db.transaction(async (tx) => {
@@ -205,9 +229,12 @@ export async function POST(
     //    OUTCOME_PRIORITY), so a single INSERT per phone is sufficient —
     //    no risk of Postgres's "ON CONFLICT DO UPDATE command cannot
     //    affect row a second time" error.
-    const phoneToContact = new Map<string, string>();
-    for (let i = 0; i < processable.length; i += CHUNK_SIZE) {
-      const chunk = processable.slice(i, i + CHUNK_SIZE);
+    // A blocked contact is never upserted (no contact update, spec §5); its
+    // existing id is used as-is.
+    const phoneToContact = new Map<string, string>(blockedExisting);
+    const toUpsert = processable.filter((p) => !blockedExisting.has(p.phone_number));
+    for (let i = 0; i < toUpsert.length; i += CHUNK_SIZE) {
+      const chunk = toUpsert.slice(i, i + CHUNK_SIZE);
       if (chunk.length === 0) continue;
       const values = chunk.map((p) => ({
         org_id: orgId,
@@ -624,6 +651,7 @@ export async function POST(
       bounced_added: bouncedAdded,
       total_cost_added: totalCostAdded,
       skipped_idempotent: processable.length - processedRows,
+      ...blockedSummary,
     };
   });
 

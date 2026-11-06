@@ -63,6 +63,10 @@ export type UploadResultSummary = {
   duplicates_in_db: number;
   inserted: number;
   invalid_samples: { input: string; error: string }[];
+  // Contact blocks (0237): phones skipped because they are blocked or deleted.
+  // Absent on the opt-out upload, which is never blocked.
+  blocked?: number;
+  blocked_by_reason?: { deleted: number; blocked: number };
   // Optional: present on endpoints that participate in the group-tagging
   // pipeline (contacts/upload, opt-outs/upload, etc.) when the user
   // selected groups in the form below. Total new (contact, group) rows
@@ -465,6 +469,13 @@ export function PhoneUploadForm({
             value={result.duplicates_in_input}
             tone="muted"
           />
+          {(result.blocked ?? 0) > 0 && (
+            <Stat
+              label={`Blocked (deleted ${result.blocked_by_reason?.deleted ?? 0}, blocked ${result.blocked_by_reason?.blocked ?? 0})`}
+              value={result.blocked ?? 0}
+              tone="warn"
+            />
+          )}
           {typeof result.updated_contacts === "number" &&
           result.updated_contacts > 0 ? (
             <Stat

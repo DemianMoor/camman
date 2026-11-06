@@ -30,6 +30,10 @@ export type ContactStatusImportSummary = {
   by_reason: Record<ContactStatusReason, number>;
   invalid_samples: { input: string; error: string }[];
   skipped_samples: { input: string; error: string }[];
+  // Contact blocks (0237): blocked / deleted phones with NO contact, skipped
+  // (a status needs a contact). An existing blocked contact still gets its row.
+  blocked?: number;
+  blocked_by_reason?: { deleted: number; blocked: number };
 };
 
 type ImportRow = { phone: string; status: string };
@@ -250,6 +254,13 @@ export function ContactStatusImportForm({
             value={result.unknown_status}
             tone="warn"
           />
+          {(result.blocked ?? 0) > 0 && (
+            <Stat
+              label={`Blocked (deleted ${result.blocked_by_reason?.deleted ?? 0}, blocked ${result.blocked_by_reason?.blocked ?? 0})`}
+              value={result.blocked ?? 0}
+              tone="warn"
+            />
+          )}
         </div>
 
         {result.invalid_samples.length > 0 ? (

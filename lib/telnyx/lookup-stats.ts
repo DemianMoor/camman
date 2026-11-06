@@ -11,10 +11,12 @@ import { lookup_group_stats_cache } from "@/db/schema";
 // lib/segment-rules-eval.ts): messaging_status='eligible' AND NOT in the org's
 // opt_outs set (deduped). Columns are a DISJOINT partition of the population so they
 // always reconcile:
-//   total = sendable + landlines + opt_outs(non-landline)
-// because messaging_status='eligible' ⇔ line_type<>'landline':
-//   - landlines        = line_type='landline'                 (not eligible)
-//   - opt_outs         = eligible AND in opt_outs             (eligible, suppressed by opt-out)
+//   total = sendable + landlines + opt_outs(non-landline) + blocked
+// ⚠️ Since 0237 messaging_status has THREE values, so 'eligible' no longer
+// means "not a landline": a blocked or deleted contact is 'blocked'.
+//   - landlines        = line_type='landline'                          (any status)
+//   - opt_outs         = non-landline AND in opt_outs                  (opt_out > blocked)
+//   - blocked          = non-landline AND NOT in opt_outs AND 'blocked' (contact blocks)
 //   - sendable         = eligible AND NOT in opt_outs
 // and telnyx + manual = looked_up. assertReconciles() enforces both on EVERY compute
 // (not just tests), so any future change that breaks disjointness fails loudly.
@@ -32,6 +34,7 @@ export interface GroupStat {
   coverage_pct: number; // looked_up / total * 100 (0 when total=0)
   landlines: number; // auto-suppressed fixed-line contacts (retained)
   opt_outs: number; // NON-landline opt-outs (disjoint from landlines)
+  blocked: number; // NON-landline, not opted out, blocked or deleted (0237)
   sendable: number;
   remaining: number; // total - looked_up (the "needs a lookup run" number)
 }
@@ -61,11 +64,12 @@ function n(v: unknown): number {
 // Permanent invariant — throws if the disjoint partition or source split ever breaks.
 function assertReconciles(
   label: string,
-  r: { total: number; looked_up: number; telnyx: number; manual: number; landlines: number; opt_outs: number; sendable: number },
+  r: { total: number; looked_up: number; telnyx: number; manual: number; landlines: number; opt_outs: number; blocked: number; sendable: number },
 ) {
-  if (r.sendable + r.landlines + r.opt_outs !== r.total) {
+  const sum = r.sendable + r.landlines + r.opt_outs + r.blocked;
+  if (sum !== r.total) {
     throw new Error(
-      `lookup-stats reconciliation FAILED for ${label}: sendable(${r.sendable}) + landlines(${r.landlines}) + opt_outs(${r.opt_outs}) = ${r.sendable + r.landlines + r.opt_outs} != total(${r.total}). Disjoint-column invariant broken.`,
+      `lookup-stats reconciliation FAILED for ${label}: sendable(${r.sendable}) + landlines(${r.landlines}) + opt_outs(${r.opt_outs}) + blocked(${r.blocked}) = ${sum} != total(${r.total}). Disjoint-column invariant broken.`,
     );
   }
   if (r.telnyx + r.manual !== r.looked_up) {
@@ -97,6 +101,7 @@ export async function computeLookupGroupStats(
     manual: number;
     landlines: number;
     opt_outs: number;
+    blocked: number;
     sendable: number;
   }>(sql`
     WITH oo AS (SELECT DISTINCT contact_id FROM opt_outs WHERE org_id = ${orgId}::uuid)
@@ -109,6 +114,7 @@ export async function computeLookupGroupStats(
       COUNT(*) FILTER (WHERE pl.source = 'csv_import') AS manual,
       COUNT(*) FILTER (WHERE c.line_type = 'landline') AS landlines,
       COUNT(*) FILTER (WHERE oo.contact_id IS NOT NULL AND c.line_type <> 'landline') AS opt_outs,
+      COUNT(*) FILTER (WHERE c.messaging_status = 'blocked' AND oo.contact_id IS NULL AND c.line_type <> 'landline') AS blocked,
       COUNT(*) FILTER (WHERE c.messaging_status = 'eligible' AND oo.contact_id IS NULL) AS sendable
     FROM contact_contact_groups ccg
     JOIN contacts c ON c.id = ccg.contact_id
@@ -127,6 +133,7 @@ export async function computeLookupGroupStats(
       manual: n(r.manual),
       landlines: n(r.landlines),
       opt_outs: n(r.opt_outs),
+      blocked: n(r.blocked),
       sendable: n(r.sendable),
     };
     assertReconciles(`group "${r.name}" (${r.group_id})`, g);
@@ -148,6 +155,7 @@ export async function computeLookupGroupStats(
     manual: number;
     landlines: number;
     opt_outs: number;
+    blocked: number;
     sendable: number;
   }>(sql`
     WITH oo AS (SELECT DISTINCT contact_id FROM opt_outs WHERE org_id = ${orgId}::uuid)
@@ -158,6 +166,7 @@ export async function computeLookupGroupStats(
       COUNT(*) FILTER (WHERE pl.source = 'csv_import') AS manual,
       COUNT(*) FILTER (WHERE c.line_type = 'landline') AS landlines,
       COUNT(*) FILTER (WHERE oo.contact_id IS NOT NULL AND c.line_type <> 'landline') AS opt_outs,
+      COUNT(*) FILTER (WHERE c.messaging_status = 'blocked' AND oo.contact_id IS NULL AND c.line_type <> 'landline') AS blocked,
       COUNT(*) FILTER (WHERE c.messaging_status = 'eligible' AND oo.contact_id IS NULL) AS sendable
     FROM contacts c
     LEFT JOIN phone_lookups pl ON pl.phone = c.phone_number
@@ -169,7 +178,7 @@ export async function computeLookupGroupStats(
         WHERE ccg.contact_id = c.id AND cg.status = 'active'
       )`);
   const s = sumRows[0] ?? {
-    total: 0, looked_up: 0, telnyx: 0, manual: 0, landlines: 0, opt_outs: 0, sendable: 0,
+    total: 0, looked_up: 0, telnyx: 0, manual: 0, landlines: 0, opt_outs: 0, blocked: 0, sendable: 0,
   };
   const sm = {
     total: n(s.total),
@@ -178,6 +187,7 @@ export async function computeLookupGroupStats(
     manual: n(s.manual),
     landlines: n(s.landlines),
     opt_outs: n(s.opt_outs),
+    blocked: n(s.blocked),
     sendable: n(s.sendable),
   };
   assertReconciles("summary", sm);

@@ -58,6 +58,7 @@ async function main() {
       filtered: 0,
       skippedDuplicate: 0,
       skippedOptedOut: 0,
+      filteredBlocked: 0,
       skippedIneligible: 0,
       skippedIneligibleByReason: {},
       recheckFailedBatches: 0,

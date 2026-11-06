@@ -10,6 +10,7 @@ import {
   mapContactStatus,
   type ContactStatusReason,
 } from "@/lib/imports/contact-status";
+import { blockKind, findActiveBlocks, type BlockedSummary } from "@/lib/contacts/blocks";
 import { can } from "@/lib/permissions";
 import { validatePhone } from "@/lib/phone-validation";
 import { contactStatusImportSchema } from "@/lib/validators/contacts";
@@ -17,7 +18,7 @@ import { contactStatusImportSchema } from "@/lib/validators/contacts";
 const CHUNK_SIZE = 1000;
 const SAMPLE_LIMIT = 20;
 
-export type ContactStatusImportSummary = {
+export type ContactStatusImportSummary = BlockedSummary & {
   // Total rows received (after the client dropped fully-empty rows).
   submitted: number;
   // Rows with a valid phone AND a recognized status — the import candidates
@@ -139,14 +140,38 @@ export async function POST(req: NextRequest) {
       by_reason,
       invalid_samples,
       skipped_samples,
+      blocked: 0,
+      blocked_by_reason: { deleted: 0, blocked: 0 },
+      blocked_samples: [],
     };
     return NextResponse.json(summary, { status: 201 });
   }
 
   // 2. Upsert contacts so every phone resolves to a contact_id. ON CONFLICT
   //    DO UPDATE returns the row whether it pre-existed or was just inserted.
-  const phoneList = Array.from(byPhone.keys());
+  //
+  //    Contact blocks (spec §5 row 6): a suppression is NEVER blocked, so a
+  //    blocked or deleted phone that has a contact still gets its status row —
+  //    against the existing contact, which is not upserted. Only creating a NEW
+  //    contact is skipped (opt_outs needs a contact_id); those count `blocked`.
+  const blocks = await findActiveBlocks(db, orgId, Array.from(byPhone.keys()));
   const contactIdByPhone = new Map<string, string>();
+  const blockedList = [...blocks.keys()];
+  for (let i = 0; i < blockedList.length; i += CHUNK_SIZE) {
+    const found = await db
+      .select({ id: contacts.id, phone_number: contacts.phone_number })
+      .from(contacts)
+      .where(and(eq(contacts.org_id, orgId), inArray(contacts.phone_number, blockedList.slice(i, i + CHUNK_SIZE))));
+    for (const c of found) contactIdByPhone.set(c.phone_number, c.id);
+  }
+  const blockedSummary: BlockedSummary = { blocked: 0, blocked_by_reason: { deleted: 0, blocked: 0 }, blocked_samples: [] };
+  for (const [phone, reason] of blocks) {
+    if (contactIdByPhone.has(phone)) continue;
+    blockedSummary.blocked++;
+    blockedSummary.blocked_by_reason[blockKind(reason)]++;
+    if (blockedSummary.blocked_samples.length < 10) blockedSummary.blocked_samples.push(phone);
+  }
+  const phoneList = Array.from(byPhone.keys()).filter((p) => !blocks.has(p));
   for (let i = 0; i < phoneList.length; i += CHUNK_SIZE) {
     const chunk = phoneList.slice(i, i + CHUNK_SIZE);
     const upserted = await db
@@ -236,6 +261,7 @@ export async function POST(req: NextRequest) {
     by_reason,
     invalid_samples,
     skipped_samples,
+    ...blockedSummary,
   };
 
   return NextResponse.json(summary, { status: 201 });

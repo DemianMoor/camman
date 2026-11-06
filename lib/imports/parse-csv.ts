@@ -1,7 +1,7 @@
 import "server-only";
 
 import Papa from "papaparse";
-import { parsePhoneNumberFromString } from "libphonenumber-js";
+import { validatePhone } from "@/lib/phone-validation";
 
 import type { MappingColumns } from "./canonical-fields";
 import type { ParsedRow } from "./outcome";
@@ -46,13 +46,10 @@ export function parseCsv(
   for (const raw of parsed.data) {
     if (!raw || typeof raw !== "object") continue;
     const phoneRaw = readCell(raw, columns.phone_number);
-    let normalized: string | null = null;
-    if (phoneRaw) {
-      const p = parsePhoneNumberFromString(phoneRaw, "US");
-      if (p && p.isValid()) {
-        normalized = p.number; // E.164
-      }
-    }
+    // The one normalizer (contact-blocks spec O9): the same E.164 key every
+    // import path and the contact_blocks ledger use. Was an inline copy of the
+    // same libphonenumber call (strict isValid, default US).
+    const normalized = phoneRaw ? (validatePhone(phoneRaw).normalized ?? null) : null;
 
     const costRaw = readCell(raw, columns.cost);
     const costNum = costRaw != null ? Number(costRaw) : null;

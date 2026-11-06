@@ -1618,6 +1618,13 @@
       "when": 1796947200000,
       "tag": "0235_contact_fk_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 231,
+      "version": "7",
+      "when": 1797206400000,
+      "tag": "0237_contact_blocks",
+      "breakpoints": true
     }
   ]
 }

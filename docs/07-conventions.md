@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-05 (every FK into contacts leads an index — 0235); 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-06 (messaging_status 'blocked' — "not eligible" no longer means landline; one phone normalizer — 0237); 2026-11-05 (every FK into contacts leads an index — 0235); 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ Every foreign key into `contacts` leads an index (2026-11-05)
@@ -5030,3 +5030,13 @@ is read only by the conversion ledger (`lib/conversions/`), never by lane, send,
 audience or segment code (`scripts/test-global-pixel-mode.ts` S1/S2).
 `raw_params` holds only the LATEST postback, so the marker must be judged at
 ingest, not afterwards from the stored row.
+
+## ⭐ `messaging_status` has three values; "not eligible" is not "landline" (0237, 2026-11-06)
+
+Migration 0237 taught the `contacts_derive_messaging_status` trigger a third value. `blocked_at` or `archived_at` set ⇒ **`blocked`**, and it outranks landline (`not_applicable`). This is how blocked and deleted contacts leave every audience: each `messaging_status = 'eligible'` gate already excludes them, including the frozen preview reference and the offer-group matviews, with no SQL change ([04-features/contact-blocks.md](04-features/contact-blocks.md)).
+
+- **Gate on `= 'eligible'`, never on `!= 'not_applicable'`.** The second form now counts blocked and deleted contacts as sendable. Known readers to fix in PR 2: `lib/contact-stats.ts` (eligible split), `app/api/contacts/carrier-stats/route.ts`, the send guard in `lib/sends/recipients.ts`, and the contacts page tiles.
+- **Never write `messaging_status` directly.** The trigger overrides it. To exclude a contact, set `blocked_at` / `archived_at` through `lib/contacts/blocks.ts`.
+- **One phone normalizer.** Every import check and the `contact_blocks` key use `validatePhone` (strict, default US). The provider STOP normalizers (`ahoiSourceToE164`, `tellsPhoneToE164`, `textrequestPhoneToE164`) are deliberately looser: they accept unassigned NANP numbers, so a real STOP is never dropped. They must never yield a *different* E.164. Guard: `scripts/test-phone-normalizer-agreement.ts` (in `check:guards`).
+- **libphonenumber-js under tsx:** it mis-loads its metadata (`Cannot read properties of undefined (reading 'hasOwnProperty')`). Do not stub it in a test that is about phone normalization. The guard above evaluates `validatePhone` in a child `node` process (native TypeScript stripping), so `lib/phone-validation.ts` must stay free of path aliases.
+

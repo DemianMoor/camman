@@ -1173,7 +1173,8 @@ export const contacts = pgTable(
     archived_at: timestamp("archived_at", { withTimezone: true }),
     // Migration 0096: Telnyx Number Lookup enrichment. line_type + carrier_norm
     // are denormalized from the global phone_lookups cache. messaging_status is
-    // the landline hard stop (landline => 'not_applicable', else 'eligible'),
+    // the hard stop: blocked/deleted => 'blocked' (0237, outranks landline),
+    // landline => 'not_applicable', else 'eligible',
     // derived by a BEFORE INSERT/UPDATE trigger (contacts_derive_messaging_status,
     // in the migration — not a generated column, to avoid a full-table rewrite at
     // scale). Every audience/segment/send query filters `messaging_status =
@@ -1184,6 +1185,16 @@ export const contacts = pgTable(
     // looked up). Distinct from 'Unknown' (looked up, carrier undetermined).
     carrier_norm: text("carrier_norm").notNull().default("Unidentified"),
     messaging_status: text("messaging_status").notNull().default("eligible"),
+    // Migration 0237 (contact blocks, spec 2026-11-06): mirrored from the
+    // contact_blocks ledger — blocked_at IS NOT NULL ⇔ an ACTIVE ledger row for
+    // (org_id, phone_number) whose reason is not 'deleted'. Written ONLY by
+    // lib/contacts/blocks.ts. The trigger derives messaging_status = 'blocked'
+    // whenever blocked_at OR archived_at is set (archived_at = soft delete), so
+    // every `messaging_status = 'eligible'` gate excludes blocked and deleted
+    // contacts. 'deleted' is never a block_reason (a deleted contact carries
+    // archived_at instead).
+    blocked_at: timestamp("blocked_at", { withTimezone: true }),
+    block_reason: text("block_reason"),
     // Migration 0188: a PROJECTION of contact_engagement.status, which stays the
     // source of truth. Maintained by the engagement job (lib/engagement/refresh.ts)
     // in the same transaction as the contact_engagement row and its transition
@@ -1245,8 +1256,21 @@ export const contacts = pgTable(
     ),
     check(
       "contacts_messaging_status_check",
-      sql`${table.messaging_status} IN ('eligible', 'not_applicable')`,
+      sql`${table.messaging_status} IN ('eligible', 'not_applicable', 'blocked')`,
     ),
+    check(
+      "contacts_block_reason_check",
+      sql`${table.block_reason} IN ('provider_list', 'manual', 'complaint', 'carrier_block') AND (${table.blocked_at} IS NULL) = (${table.block_reason} IS NULL)`,
+    ),
+    // Migration 0237: the Blocked / Deleted views on /contacts. Partial, so they
+    // hold only blocked / deleted rows. Built CONCURRENTLY on prod
+    // (scripts/apply-contact-blocks-indexes-concurrent.ts).
+    index("contacts_org_blocked_idx")
+      .on(table.org_id, table.blocked_at.desc())
+      .where(sql`blocked_at IS NOT NULL`),
+    index("contacts_org_archived_idx")
+      .on(table.org_id, table.archived_at.desc())
+      .where(sql`archived_at IS NOT NULL`),
     // Migration 0099: includes 'Unidentified' (contacts-only; never in phone_lookups).
     check(
       "contacts_carrier_norm_check",
@@ -2714,6 +2738,103 @@ export type NewResultImportMapping = typeof result_import_mappings.$inferInsert;
 // survives even after revert. reverted_at + reverted_by_user_id are set on
 // revert; the related stage_result_rows are deleted (via CASCADE on the
 // revert path's delete from stage_result_rows).
+// ---- Contact blocks (migration 0237) ------------------------------------------
+// Spec: docs/superpowers/specs/2026-11-06-contact-blocks-soft-delete-design.md.
+// The phone-keyed block ledger. Written ONLY by lib/contacts/blocks.ts, which
+// also mirrors contacts.blocked_at / archived_at. NO FK to contacts, on purpose:
+// a row may exist for a phone the org has never imported, and must outlive a
+// Phase 2 erase. One ACTIVE row (released_at IS NULL) per (org, phone).
+
+export const contact_block_batches = pgTable(
+  "contact_block_batches",
+  {
+    id: serial("id").primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    filename: text("filename"),
+    reason: text("reason").notNull(),
+    source: text("source"),
+    note: text("note"),
+    submitted_rows: integer("submitted_rows").notNull(),
+    valid_rows: integer("valid_rows").notNull(),
+    invalid_rows: integer("invalid_rows").notNull(),
+    blocked_added: integer("blocked_added").notNull().default(0),
+    already_blocked: integer("already_blocked").notNull().default(0),
+    created_by: uuid("created_by").references(() => authUsers.id, {
+      onDelete: "set null",
+    }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    released_at: timestamp("released_at", { withTimezone: true }),
+    released_by: uuid("released_by").references(() => authUsers.id, {
+      onDelete: "set null",
+    }),
+    released_count: integer("released_count"),
+  },
+  (table) => [
+    index("contact_block_batches_org_created_idx").on(
+      table.org_id,
+      table.created_at.desc(),
+    ),
+    check(
+      "contact_block_batches_reason_check",
+      sql`${table.reason} IN ('provider_list', 'manual', 'complaint', 'carrier_block')`,
+    ),
+  ],
+);
+
+export type ContactBlockBatch = typeof contact_block_batches.$inferSelect;
+
+export const contact_blocks = pgTable(
+  "contact_blocks",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // E.164 from validatePhone (strict) — the same key as contacts.phone_number.
+    phone_number: text("phone_number").notNull(),
+    reason: text("reason").notNull(),
+    source: text("source"),
+    note: text("note"),
+    batch_id: integer("batch_id").references(() => contact_block_batches.id, {
+      onDelete: "restrict",
+    }),
+    created_at: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    created_by: uuid("created_by").references(() => authUsers.id, {
+      onDelete: "set null",
+    }),
+    released_at: timestamp("released_at", { withTimezone: true }),
+    released_by: uuid("released_by").references(() => authUsers.id, {
+      onDelete: "set null",
+    }),
+  },
+  (table) => [
+    // One active row per phone; also the import check's probe.
+    uniqueIndex("contact_blocks_org_phone_active_uniq")
+      .on(table.org_id, table.phone_number)
+      .where(sql`released_at IS NULL`),
+    index("contact_blocks_org_phone_created_idx").on(
+      table.org_id,
+      table.phone_number,
+      table.created_at.desc(),
+    ),
+    index("contact_blocks_batch_idx")
+      .on(table.batch_id)
+      .where(sql`batch_id IS NOT NULL`),
+    check(
+      "contact_blocks_reason_check",
+      sql`${table.reason} IN ('provider_list', 'manual', 'deleted', 'complaint', 'carrier_block')`,
+    ),
+  ],
+);
+
+export type ContactBlock = typeof contact_blocks.$inferSelect;
+
 export const stage_results_imports = pgTable(
   "stage_results_imports",
   {
@@ -5720,6 +5841,9 @@ export const lead_intake_daily = pgTable(
     voip: integer("voip").notNull().default(0),
     unknown: integer("unknown").notNull().default(0),
     landline: integer("landline").notNull().default(0),
+    // Migration 0237: leads discarded because the phone is blocked or deleted
+    // (contact_blocks), like a landline discard (O6).
+    blocked: integer("blocked").notNull().default(0),
     rejected: integer("rejected").notNull().default(0),
     duplicate: integer("duplicate").notNull().default(0),
     sandbox: integer("sandbox").notNull().default(0),
@@ -5788,6 +5912,9 @@ export const lead_intake_hourly = pgTable(
     voip: integer("voip").notNull().default(0),
     unknown: integer("unknown").notNull().default(0),
     landline: integer("landline").notNull().default(0),
+    // Migration 0237: leads discarded because the phone is blocked or deleted
+    // (contact_blocks), like a landline discard (O6).
+    blocked: integer("blocked").notNull().default(0),
     rejected: integer("rejected").notNull().default(0),
     duplicate: integer("duplicate").notNull().default(0),
     sandbox: integer("sandbox").notNull().default(0),

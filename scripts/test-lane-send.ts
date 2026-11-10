@@ -362,7 +362,7 @@ async function main() {
     // Approve the lane so we get PAST the not_approved check and actually hit the
     // SEND_ENABLED gate (the thing under test).
     await db.execute(sql`UPDATE campaign_stages SET send_approved = true WHERE id = ${lane[0].id}::int`);
-    const drainOff = await runStageDrain(db, {
+    const drainOff = await runStageDrain(db, { phoneScope: null /* regular stage: its own number sends (§11b) */,
       stageId: lane[0].id,
       isEnabled: () => false,
       sendSms: mockSend,

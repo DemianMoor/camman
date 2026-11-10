@@ -12,7 +12,7 @@ import { pendingForStage } from "@/lib/guardrails/pending";
 
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
 import { can } from "@/lib/permissions";
-import { runStageDrain, type DrainRefusal } from "@/lib/sends/drain";
+import { runStageDrainAllScopes, type DrainRefusal } from "@/lib/sends/drain";
 
 // Requeue a stage's FAILED sends (failed -> pending, clearing last_error) and
 // re-drain them. Human-triggered only (no cron, no auto-retry) — matches the
@@ -146,7 +146,7 @@ export async function POST(
     }
   }
 
-  const result = await runStageDrain(db, { stageId });
+  const result = await runStageDrainAllScopes(db, { stageId });
   if (!result.ok && result.reason) {
     const r = REFUSAL[result.reason];
     return NextResponse.json(

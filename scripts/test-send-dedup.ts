@@ -103,7 +103,7 @@ async function main() {
       const cPrior = await mkContact();
       await addRow(history, cPrior, "+19990000001", "sent", sql`now() - interval '10 minutes'`);
       await addRow(target1, cP, "+19990000001", "pending", null);
-      const r1 = await runStageDrain(tx, { stageId: target1, sendSms: okSender, isEnabled: () => true });
+      const r1 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: target1, sendSms: okSender, isEnabled: () => true });
       assert(r1.ok && r1.skippedDuplicate === 1 && r1.sent === 0, `skippedDuplicate=1 sent=0 (got ${JSON.stringify({ s: r1.sent, sd: r1.skippedDuplicate })})`);
       assert((await cnt(target1, "skipped_duplicate")) === 1, "target row marked skipped_duplicate");
       assert((await cnt(target1, "sent")) === 0, "target row not sent");
@@ -115,7 +115,7 @@ async function main() {
       const cQprior = await mkContact();
       await addRow(history, cQprior, "+19990000002", "sent", sql`now() - interval '90 minutes'`);
       await addRow(target2, cQ, "+19990000002", "pending", null);
-      const r2 = await runStageDrain(tx, { stageId: target2, sendSms: okSender, isEnabled: () => true });
+      const r2 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: target2, sendSms: okSender, isEnabled: () => true });
       assert(r2.ok && r2.sent === 1 && r2.skippedDuplicate === 0, `sent=1 skippedDuplicate=0 (got ${JSON.stringify({ s: r2.sent, sd: r2.skippedDuplicate })})`);
 
       // ---- 3. SAME BATCH duplicate phone → one sends, one skipped ----
@@ -125,7 +125,7 @@ async function main() {
       const cR2 = await mkContact();
       await addRow(target3, cR1, "+19990000003", "pending", null);
       await addRow(target3, cR2, "+19990000003", "pending", null);
-      const r3 = await runStageDrain(tx, { stageId: target3, sendSms: okSender, isEnabled: () => true });
+      const r3 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: target3, sendSms: okSender, isEnabled: () => true });
       assert(r3.ok && r3.sent === 1 && r3.skippedDuplicate === 1, `sent=1 skippedDuplicate=1 (got ${JSON.stringify({ s: r3.sent, sd: r3.skippedDuplicate })})`);
       assert((await cnt(target3, "sent")) === 1 && (await cnt(target3, "skipped_duplicate")) === 1, "one sent + one skipped in the stage");
 

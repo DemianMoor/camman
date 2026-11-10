@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-10-23 (0222 toll-free gate link); 2026-10-22 (P5: `creative_tags` routing rule, per-lead personalization, tag skip rows); 2026-10-21 (global `line_type` rule, 0218); 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
+_Last updated: 2026-11-10 (pool number is the real sender); 2026-10-23 (0222 toll-free gate link); 2026-10-22 (P5: `creative_tags` routing rule, per-lead personalization, tag skip rows); 2026-10-21 (global `line_type` rule, 0218); 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -334,6 +334,12 @@ Code: pure rules in [lib/drip/hourly-cap.ts](../../lib/drip/hourly-cap.ts), the 
 keep the stored value) and **Carry unsent leads to the next hour** (default OFF). The daily send cap still
 applies; both bind. **Follow-ups are not subject to the cap** and never count toward it: it is lead
 pacing, and per-number headroom covers provider throughput.
+
+> **Sending numbers decide the sender (since 2026-11-10).** The number the scheduler picks from the
+> campaign's pool is the number the message is sent from — the drain claims drip rows per stamped
+> number ([sms-send-pipeline.md](sms-send-pipeline.md#drip-stages-drain-per-sending-number-2026-11-10)).
+> Before that the stage's own number sent everything, so per-number headroom, cost and reports were
+> counted against a number that did not send.
 
 **Hour semantics.** The hour key is `date_trunc('hour', <utc instant>)`
 ([hourStartOf](../../lib/drip/hourly-cap.ts)), never a local-time truncation: ET boundaries are whole-hour

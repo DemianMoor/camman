@@ -276,6 +276,19 @@ export async function runStageDrain(
     // pacing target). Production resolves it from max_sends_per_second; this is
     // the test injection point (1 = effectively serial).
     concurrency?: number;
+    // WHICH NUMBER SENDS, and therefore which rows are claimed. REQUIRED (§11b).
+    //   null   → the stage's own provider_phone_id sends every pending row
+    //            (regular stages: one number per stage).
+    //   number → only rows whose stage_sends.provider_phone_id = this are
+    //            claimed, and THIS number (its provider, account, sender id,
+    //            per-second rate, txr callback) sends them. Drip stages: the
+    //            scheduler picks a number per message from the campaign's
+    //            "Sending numbers" pool and stamps it on the row. Before this
+    //            the drain ignored that stamp and sent everything from the
+    //            stage's number (2026-11-10: ~112K drip sends recorded under a
+    //            number that never sent them).
+    // Callers that do not know the scope use runStageDrainAllScopes.
+    phoneScope: number | null;
   },
 ): Promise<DrainResult> {
   const isEnabled = opts.isEnabled ?? envSendEnabled;
@@ -284,9 +297,13 @@ export async function runStageDrain(
   const isOrgPaused =
     opts.isOrgPaused ?? ((orgId: string) => getOrgSendsPaused(dbc, orgId));
   const batchSize = opts.batchSize ?? 50;
+  const phoneScope = opts.phoneScope;
 
   const ctx = (await dbc.execute(sql`
-    SELECT s.sms_provider_id AS provider_id,
+    SELECT -- Scoped: the provider is the SENDING NUMBER's provider, not the
+           -- stage's — a pool number may sit on a different account.
+           CASE WHEN ${phoneScope}::int IS NULL THEN s.sms_provider_id
+                ELSE pp.provider_id END AS provider_id,
            -- CONNECTION TYPE, not the row identity (migration 0134). This is
            -- what getAdapter() resolves, so it must be adapter_code: the txh2
            -- row is a TextHub-type account and previously only resolved via a
@@ -304,7 +321,8 @@ export async function runStageDrain(
            c.org_id           AS org_id,
            c.brand_id         AS brand_id,
            c.send_paused      AS campaign_send_paused,
-           s.provider_phone_id AS provider_phone_id,
+           COALESCE(${phoneScope}::int, s.provider_phone_id) AS provider_phone_id,
+           s.provider_phone_id AS stage_phone_id,
            -- Operator posture for this ACCOUNT (0138). NULL when the stage has
            -- no provider row joined, which the no_provider refusal below owns.
            p.sends_enabled         AS sends_enabled,
@@ -334,8 +352,12 @@ export async function runStageDrain(
            c.offer_id                  AS offer_id
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
-    LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
-    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
+    -- org-checked: a scope number from another org joins nothing ⇒ no_provider.
+    LEFT JOIN provider_phones pp
+      ON pp.id = COALESCE(${phoneScope}::int, s.provider_phone_id) AND pp.org_id = c.org_id
+    LEFT JOIN sms_providers p
+      ON p.id = CASE WHEN ${phoneScope}::int IS NULL THEN s.sms_provider_id
+                     ELSE pp.provider_id END
     WHERE s.id = ${opts.stageId}
     LIMIT 1
   `)) as unknown as {
@@ -347,6 +369,7 @@ export async function runStageDrain(
     brand_id: number | null;
     campaign_send_paused: boolean | null;
     provider_phone_id: number | null;
+    stage_phone_id: number | null;
     sends_enabled: boolean | null;
     send_paused: boolean | null;
     max_sends_per_run: number | null;
@@ -368,6 +391,13 @@ export async function runStageDrain(
 
   const stage = ctx[0];
   if (!stage) return { ok: false, reason: "not_found", ...EMPTY };
+  // Rows this run may claim. Scoped ⇒ only the scope number's rows; a row with
+  // no number stamped belongs to the stage's own number (none exist on prod —
+  // every drip insert stamps one — but such a row must not be stranded).
+  const scopeFilter =
+    phoneScope != null
+      ? sql`AND COALESCE(provider_phone_id, ${stage.stage_phone_id}::int) = ${phoneScope}`
+      : sql``;
   if (!stage.send_approved)
     return { ok: false, reason: "not_approved", ...EMPTY };
   // Two-switch gate (Workstream 1): the env SEND_ENABLED backstop AND the
@@ -658,6 +688,7 @@ export async function runStageDrain(
       WHERE id IN (
         SELECT id FROM stage_sends
         WHERE stage_id = ${opts.stageId} AND status = 'pending'
+          ${scopeFilter}
         ORDER BY created_at, id
         FOR UPDATE SKIP LOCKED
         LIMIT ${limit}
@@ -1024,7 +1055,7 @@ export async function runStageDrain(
     SELECT
       count(*) FILTER (WHERE status = 'sending')::int AS stuck,
       count(*) FILTER (WHERE status = 'pending')::int AS remaining
-    FROM stage_sends WHERE stage_id = ${opts.stageId}
+    FROM stage_sends WHERE stage_id = ${opts.stageId} ${scopeFilter}
   `)) as unknown as { stuck: number; remaining: number }[];
 
   const remaining = Number(counts[0]?.remaining ?? 0);
@@ -1138,3 +1169,81 @@ export async function runStageDrain(
     pausedNow,
   };
 }
+
+// The send scopes a stage drains in: [null] (the stage's own number) for a
+// regular stage; for a DRIP stage, each distinct number stamped on its pending
+// rows (the scheduler picks one per message from the campaign's pool; a row
+// with none falls back to the stage's number). A drip stage never drains
+// unscoped: null would send every row from the stage's number, which is exactly
+// the bug this exists to prevent.
+export async function drainScopesForStage(
+  dbc: DbOrTx,
+  stageId: number,
+): Promise<(number | null)[]> {
+  const rows = (await dbc.execute(sql`
+    SELECT c.type = 'drip' AS is_drip,
+           ARRAY(
+             SELECT DISTINCT COALESCE(ss.provider_phone_id, s.provider_phone_id)
+             FROM stage_sends ss
+             WHERE ss.stage_id = s.id AND ss.status = 'pending'
+               AND COALESCE(ss.provider_phone_id, s.provider_phone_id) IS NOT NULL
+             ORDER BY 1
+           ) AS phones
+    FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
+    WHERE s.id = ${stageId}
+  `)) as unknown as { is_drip: boolean; phones: number[] }[];
+  const r = rows[0];
+  if (!r || !r.is_drip) return [null];
+  return r.phones.map(Number);
+}
+
+// runStageDrain for callers that drain "the stage" without knowing its scopes
+// (the manual Drain / Approve-Send / Retry-failed routes): one run per scope,
+// results summed. A scope refused (e.g. one pool number missing credentials)
+// does not stop the others; the result is a refusal only when EVERY scope
+// refused. A drip stage with nothing pending returns an empty ok result rather
+// than an unscoped run.
+export async function runStageDrainAllScopes(
+  dbc: DbOrTx,
+  opts: Omit<Parameters<typeof runStageDrain>[1], "phoneScope">,
+): Promise<DrainResult> {
+  const scopes = await drainScopesForStage(dbc, opts.stageId);
+  if (scopes.length === 0) return { ok: true, ...EMPTY };
+  const results: DrainResult[] = [];
+  for (const phoneScope of scopes) {
+    results.push(await runStageDrain(dbc, { ...opts, phoneScope }));
+  }
+  const okOnes = results.filter((r) => r.ok);
+  if (okOnes.length === 0) return results[0];
+  const byReason: Record<string, number> = {};
+  for (const r of okOnes)
+    for (const [k, v] of Object.entries(r.skippedIneligibleByReason))
+      byReason[k] = (byReason[k] ?? 0) + v;
+  const sum = (f: (r: DrainResult) => number) => okOnes.reduce((a, r) => a + f(r), 0);
+  const stopped = okOnes.filter((r) => r.stopReason);
+  const counts = (await dbc.execute(sql`
+    SELECT count(*) FILTER (WHERE status = 'sending')::int AS stuck,
+           count(*) FILTER (WHERE status = 'pending')::int AS remaining
+    FROM stage_sends WHERE stage_id = ${opts.stageId}
+  `)) as unknown as { stuck: number; remaining: number }[];
+  return {
+    ok: true,
+    sent: sum((r) => r.sent),
+    failed: sum((r) => r.failed),
+    filtered: sum((r) => r.filtered),
+    skippedDuplicate: sum((r) => r.skippedDuplicate),
+    skippedOptedOut: sum((r) => r.skippedOptedOut),
+    skippedIneligible: sum((r) => r.skippedIneligible),
+    skippedIneligibleByReason: byReason,
+    recheckFailedBatches: sum((r) => r.recheckFailedBatches),
+    processed: sum((r) => r.processed),
+    halted: okOnes.some((r) => r.halted),
+    // Stage-wide, so rows in a refused scope still show as pending.
+    stuck: Number(counts[0]?.stuck ?? 0),
+    remaining: Number(counts[0]?.remaining ?? 0),
+    stopReason: stopped[0]?.stopReason ?? null,
+    carrierCapDetail: stopped.find((r) => r.carrierCapDetail)?.carrierCapDetail ?? null,
+    pausedNow: okOnes.some((r) => r.pausedNow),
+  };
+}
+

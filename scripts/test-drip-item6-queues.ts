@@ -108,6 +108,11 @@ async function main() {
     const prov = (await one<{ id: number }>(sql`
       INSERT INTO sms_providers (sms_provider_id, org_id, name, adapter_code, supports_api_send, sends_enabled, send_paused)
       VALUES (${"q6p" + sfx}, ${org}, ${"Q6 " + sfx}, 'txh', true, true, false) RETURNING id`)).id;
+    // Every drip row carries the number the scheduler picked (prod invariant), and
+    // the drain selector keys drip units on it.
+    const phoneId = (await one<{ id: number }>(sql`
+      INSERT INTO provider_phones (org_id, provider_id, phone_number)
+      VALUES (${org}, ${prov}, ${"+1855" + String(Date.now()).slice(-7)}) RETURNING id`)).id;
     const contact = (await one<{ id: string }>(sql`SELECT id FROM contacts WHERE org_id = ${org} LIMIT 1`)).id;
     const pendingStage = async (cid: number, scheduledMinAgo: number | null, sentMinAgo: number | null) => {
       const s = (await one<{ id: number }>(sql`
@@ -118,8 +123,8 @@ async function main() {
                 ${sentMinAgo == null ? null : sql`now() - make_interval(mins => ${sentMinAgo})`})
         RETURNING id`)).id;
       await db.execute(sql`
-        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
-        VALUES (${org}, ${cid}, ${s}, ${contact}::uuid, '+10000000000', 'x', 'pending')`);
+        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status, provider_phone_id)
+        VALUES (${org}, ${cid}, ${s}, ${contact}::uuid, '+10000000000', 'x', 'pending', ${phoneId})`);
       return s;
     };
     const regular = (await one<{ id: number }>(sql`

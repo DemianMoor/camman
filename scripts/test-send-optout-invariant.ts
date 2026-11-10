@@ -110,7 +110,7 @@ async function main() {
       const c1 = await mkContact();
       await addRow(target1, c1, "+19991000001", "pending", null);
       await optOut(c1, "+19991000001");
-      const r1 = await runStageDrain(tx, { stageId: target1, sendSms: okSender, isEnabled: () => true });
+      const r1 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: target1, sendSms: okSender, isEnabled: () => true });
       assert(
         r1.ok && r1.skippedOptedOut === 1 && r1.sent === 0,
         `skippedOptedOut=1 sent=0 (got ${JSON.stringify({ s: r1.sent, soo: r1.skippedOptedOut })})`,
@@ -123,7 +123,7 @@ async function main() {
       const target2 = await mkStage();
       const c2 = await mkContact();
       await addRow(target2, c2, "+19991000002", "pending", null);
-      const r2 = await runStageDrain(tx, { stageId: target2, sendSms: okSender, isEnabled: () => true });
+      const r2 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: target2, sendSms: okSender, isEnabled: () => true });
       assert(
         r2.ok && r2.sent === 1 && r2.skippedOptedOut === 0,
         `sent=1 skippedOptedOut=0 (got ${JSON.stringify({ s: r2.sent, soo: r2.skippedOptedOut })})`,
@@ -137,7 +137,7 @@ async function main() {
       await addRow(history, c3prior, "+19991000003", "sent", sql`now() - interval '10 minutes'`);
       await addRow(target3, c3, "+19991000003", "pending", null);
       await optOut(c3, "+19991000003");
-      const r3 = await runStageDrain(tx, { stageId: target3, sendSms: okSender, isEnabled: () => true });
+      const r3 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: target3, sendSms: okSender, isEnabled: () => true });
       assert(
         r3.ok && r3.skippedOptedOut === 1 && r3.skippedDuplicate === 0 && r3.sent === 0,
         `skippedOptedOut=1 skippedDuplicate=0 sent=0 (got ${JSON.stringify({ s: r3.sent, soo: r3.skippedOptedOut, sd: r3.skippedDuplicate })})`,

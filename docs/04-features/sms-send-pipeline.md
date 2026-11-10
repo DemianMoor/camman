@@ -1,6 +1,6 @@
 # Feature — SMS Send Pipeline (TextHub)
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-11-10 (drip stages drain per sending number); 2026-10-22_
 
 ## 1. Purpose
 For **tracked** campaigns, send SMS directly via the TextHub API instead of exporting a CSV. The pipeline **materializes** one row per recipient (minting a unique tracked link each), then a heavily-gated **drain** actually fires the messages. Multiple safety gates and circuit breakers exist because sending is irreversible and costs money.
@@ -53,6 +53,16 @@ Before any recipient is enumerated or materialized, `kickoffStageSend` builds on
 - **Hard ceiling (G8), unconditional.** Regardless of the override, more than `MAX_SEGMENTS` segments refuses with `segment_ceiling_exceeded` — Ahoi's silent multipart splitting (see [06-integrations.md](../06-integrations.md)) can never runaway-bill or send an unbounded number of parts. See the G8 entry in [07-conventions.md](../07-conventions.md) for the ceiling rationale (kept in one place, not duplicated here).
 - **Applies uniformly to manual and tracked modes** — both build the same representative text shape, so a manual-mode stage with a pasted long `short_url` is gated the same way.
 - Both refusals are in `scheduled.ts`'s `PERMANENT_REFUSALS` — a stage refused this way won't self-resolve within a scheduled window; a human must edit the creative (shorten the text or flip the override).
+
+### Drip stages drain per sending number (2026-11-10)
+
+`runStageDrain` takes a **required** `phoneScope` (§11b). `null` = a regular stage: the stage's own `provider_phone_id` sends every pending row. A number = only rows whose `stage_sends.provider_phone_id` is that number are claimed, and **that number** supplies the provider (`provider_phones.provider_id`, not the stage's `sms_provider_id`), account/key, sender id, per-second rate, carrier caps and the txr status-callback token. A scope that is not one of the org's numbers is refused `no_provider`.
+
+- **Why.** The drip scheduler picks a number per message from the campaign's *Sending numbers* pool ([lib/drip/numbers.ts](../../lib/drip/numbers.ts)) and stamps it on the row, but the drain used to ignore the stamp and send everything from the stage's number. Text Request's own record showed the stage's number (`dashboard_phone`) while CamMan recorded the pool number — ~112K drip sends across campaigns 1683/1705/1789/1814 were attributed, costed and daily-limit-counted against a number that never sent them. Those historical rows are NOT rewritten by this fix.
+- **Cron (Phase B).** `selectDrainableStages` emits one unit per regular stage (`phone_scope` NULL) and one per (drip stage, distinct number on its pending rows). A unit's `provider_id` / `provider_phone_id` / send window / `max_sends_per_run` are the number's, so the per-phone lease (`send-drain:p<id>`) and the provider budget follow the number that actually sends.
+- **Manual routes** (Drain, Approve-Send, Retry-failed) call `runStageDrainAllScopes` ([drain.ts](../../lib/sends/drain.ts)): `drainScopesForStage` → `[null]` for a regular stage, the stamped numbers for a drip stage; results summed; one refused scope does not stop the others. A drip stage never drains unscoped.
+- **Unstamped drip row** (none exist on prod; every drip insert stamps one) falls back to the stage's number rather than being stranded.
+- Bar: [scripts/test-drip-sender-number.ts](../../scripts/test-drip-sender-number.ts) (preview DB).
 
 ### Step 2 — Drain (`drain.ts`, `runStageDrain`)
 ```mermaid

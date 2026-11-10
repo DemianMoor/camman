@@ -34,7 +34,7 @@ async function main() {
   const { requirePreviewDb } = await import("./_require-preview-db");
   const { fictionalPhones, refuseIfPhonesInUse } = await import("./_fictional-phones");
   const { db } = await import("@/db/client");
-  const { runStageDrain } = await import("@/lib/sends/drain");
+  const { runStageDrainAllScopes } = await import("@/lib/sends/drain");
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const one = async <T>(q: SQL): Promise<T> =>
@@ -103,7 +103,7 @@ async function main() {
       }
     }
 
-    type Opts = Parameters<typeof runStageDrain>[1];
+    type Opts = Parameters<typeof runStageDrainAllScopes>[1];
     type Sender = NonNullable<Opts["sendSms"]>;
 
     // One drain over the burst, rolled back. `flip` runs through the SAME
@@ -114,7 +114,7 @@ async function main() {
       flip: ((tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => Promise<unknown>) | null,
       before?: (tx: Parameters<Parameters<typeof db.transaction>[0]>[0]) => Promise<unknown>,
     ) => {
-      let res: Awaited<ReturnType<typeof runStageDrain>> | null = null;
+      let res: Awaited<ReturnType<typeof runStageDrainAllScopes>> | null = null;
       let counts = { sent: 0, pending: 0 };
       await db.transaction(async (tx) => {
         if (before) await before(tx);
@@ -128,7 +128,7 @@ async function main() {
             status: 200, timedOut: false,
           };
         };
-        res = await runStageDrain(tx, {
+        res = await runStageDrainAllScopes(tx, { // drip stage: one run per number stamped on its rows, as the manual routes do
           stageId, sendSms: sender, batchSize: BATCH, concurrency: 10, // the production default rate (10/s)
           isEnabled: () => true, isOrgEnabled: async () => true, isOrgPaused: async () => false,
         });

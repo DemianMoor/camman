@@ -235,26 +235,26 @@ async function main() {
 
       console.log("Gate: not approved");
       await addPending(stageId, contact, "m1");
-      const g1 = await runStageDrain(tx, { stageId, sendSms: okSender, isEnabled: () => true });
+      const g1 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId, sendSms: okSender, isEnabled: () => true });
       assert(!g1.ok && g1.reason === "not_approved", "unapproved stage refused");
       assert((await statusOf(stageId, "pending")) === 1, "nothing claimed while unapproved");
 
       await tx.execute(sql`UPDATE campaign_stages SET send_approved = true WHERE id = ${stageId}`);
 
       console.log("Gate: SEND_ENABLED off");
-      const g2 = await runStageDrain(tx, { stageId, sendSms: okSender, isEnabled: () => false });
+      const g2 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId, sendSms: okSender, isEnabled: () => false });
       assert(!g2.ok && g2.reason === "send_disabled", "kill-switch off refuses");
       assert((await statusOf(stageId, "pending")) === 1, "nothing claimed while disabled");
 
       console.log("Gate: DB master switch (org_settings.sends_enabled) off");
-      const g3 = await runStageDrain(tx, {
+      const g3 = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */,
         stageId, sendSms: okSender, isEnabled: () => true, isOrgEnabled: async () => false,
       });
       assert(!g3.ok && g3.reason === "send_disabled_org", "DB switch off refuses with distinct reason");
       assert((await statusOf(stageId, "pending")) === 1, "nothing claimed while DB switch off");
 
       console.log("Happy path (sent + message id):");
-      const h = await runStageDrain(tx, { stageId, sendSms: okSender, isEnabled: () => true });
+      const h = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId, sendSms: okSender, isEnabled: () => true });
       assert(h.ok && h.sent === 1 && h.failed === 0, "1 sent");
       const sentRow = await one<{ status: string; texthub_message_id: string | null; sent_at: string | null; attempts: number }>(
         sql`SELECT status, texthub_message_id, sent_at, attempts FROM stage_sends WHERE stage_id = ${stageId} AND status = 'sent' LIMIT 1`,
@@ -276,7 +276,7 @@ async function main() {
 
       console.log("Failure path:");
       await addPending(stageId, contact, "m2");
-      const f = await runStageDrain(tx, { stageId, sendSms: failSender, isEnabled: () => true });
+      const f = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId, sendSms: failSender, isEnabled: () => true });
       assert(f.ok && f.failed === 1 && f.sent === 0, "1 failed");
       const failRow = await one<{ last_error: string | null; attempts: number }>(
         sql`SELECT last_error, attempts FROM stage_sends WHERE stage_id = ${stageId} AND status = 'failed' LIMIT 1`,
@@ -285,7 +285,7 @@ async function main() {
 
       console.log("Filtered path (TextHub 'Suppressed' → status='filtered', NOT 'failed'):");
       await addPending(stageId, await mkContact(), "m-supp");
-      const fl = await runStageDrain(tx, { stageId, sendSms: suppressedSender, isEnabled: () => true });
+      const fl = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId, sendSms: suppressedSender, isEnabled: () => true });
       assert(fl.ok && fl.filtered === 1 && fl.failed === 0, "1 filtered, 0 failed (suppression split out of failed)");
       assert((await statusOf(stageId, "filtered")) === 1, "row marked status='filtered'");
       const flRow = await one<{ last_error: string | null; status: string }>(
@@ -311,7 +311,7 @@ async function main() {
         INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
         VALUES (${orgId}, ${camp.id}, ${stageId}, ${await mkContact()}, ${"+15555550001"}, ${"stuck"}, 'sending')
       `);
-      const s = await runStageDrain(tx, { stageId, sendSms: okSender, isEnabled: () => true });
+      const s = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId, sendSms: okSender, isEnabled: () => true });
       assert(s.ok && s.processed === 0, "no pending rows → nothing processed");
       assert(s.stuck === 1, "stuck 'sending' row surfaced in stuck count");
       assert((await statusOf(stageId, "sending")) === 1, "stuck row left untouched (not retried)");
@@ -325,7 +325,7 @@ async function main() {
         calls++;
         return calls <= 3;
       };
-      const hh = await runStageDrain(tx, { stageId: batchStage, sendSms: okSender, isEnabled: flip, batchSize: 1 });
+      const hh = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: batchStage, sendSms: okSender, isEnabled: flip, batchSize: 1 });
       assert(hh.ok && hh.halted === true, "halted mid-drain when kill-switch flipped");
       assert(hh.sent >= 1 && hh.remaining >= 1, "some sent before halt, some pending left untouched");
 
@@ -336,7 +336,7 @@ async function main() {
       await tx.execute(sql`UPDATE sms_providers SET send_paused = true WHERE id = ${pausedProv}`);
       const pausedStage = await mkStage(pausedProv);
       await addPending(pausedStage, await mkContact(), "p1");
-      const pr = await runStageDrain(tx, { stageId: pausedStage, sendSms: okSender, isEnabled: () => true });
+      const pr = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: pausedStage, sendSms: okSender, isEnabled: () => true });
       assert(!pr.ok && pr.reason === "provider_paused", "paused provider refuses before claiming");
       assert((await statusOf(pausedStage, "pending")) === 1, "nothing claimed while paused");
 
@@ -365,7 +365,7 @@ async function main() {
       await addCred(capProv);
       const capStage = await mkStage(capProv);
       for (let i = 0; i < 5; i++) await addPending(capStage, await mkContact(), `c${i}`);
-      const cap = await runStageDrain(tx, { stageId: capStage, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
+      const cap = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: capStage, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
       assert(cap.ok && cap.sent === 2, "sent exactly up to the 24h ceiling (2 of 5)");
       assert(cap.stopReason === "rate_24h", "stopReason = rate_24h");
       assert(cap.halted === false && cap.pausedNow === false, "soft ceiling does NOT pause");
@@ -380,7 +380,7 @@ async function main() {
       await addCred(minProv);
       const minStage = await mkStage(minProv);
       for (let i = 0; i < 4; i++) await addPending(minStage, await mkContact(), `mn${i}`);
-      const mn = await runStageDrain(tx, { stageId: minStage, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
+      const mn = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: minStage, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
       assert(mn.ok && mn.sent === 1 && mn.stopReason === "rate_minute", "per-minute ceiling stops at the cap");
       assert(mn.halted === false && mn.pausedNow === false, "per-minute soft ceiling does NOT pause");
 
@@ -395,7 +395,7 @@ async function main() {
       await addCred(provA);
       const stageA = await mkStage(provA);
       for (let i = 0; i < 6; i++) await addPending(stageA, await mkContact(), `ra${i}`);
-      const raDrain = await runStageDrain(tx, { stageId: stageA, sendSms: okSender, isEnabled: () => true });
+      const raDrain = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: stageA, sendSms: okSender, isEnabled: () => true });
       assert(raDrain.ok && raDrain.sent === 6, "provider A sent its 6 (baseline org volume)");
       // Provider B: a DIFFERENT provider in the SAME org with a 24h cap of 5. The
       // org-wide 24h count is now 6 (> 5); B's OWN count is 0. Pre-fix this drain
@@ -406,7 +406,7 @@ async function main() {
       assert((await countSentSince(tx, orgId, provB, 86_400)) === 0, "countSentSince scopes to provider B (0), NOT the org-wide 6");
       const stageB = await mkStage(provB);
       for (let i = 0; i < 3; i++) await addPending(stageB, await mkContact(), `rb${i}`);
-      const rbDrain = await runStageDrain(tx, { stageId: stageB, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
+      const rbDrain = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: stageB, sendSms: okSender, isEnabled: () => true, batchSize: 1 });
       assert(rbDrain.ok && rbDrain.sent === 3, "provider B drains all 3 despite org-wide volume exceeding B's cap");
       assert(rbDrain.stopReason === null, "provider B never soft-stops on another provider's volume");
 
@@ -425,7 +425,7 @@ async function main() {
         }
         return { ok: true, messageId: "TH-mid", response: "queued", providerStatus: null, suppressed: false, rawBody: '{"id":"TH-mid"}', error: null, status: 200, timedOut: false };
       };
-      const mid = await runStageDrain(tx, { stageId: midStage, sendSms: pausingSender, isEnabled: () => true, batchSize: 1 });
+      const mid = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: midStage, sendSms: pausingSender, isEnabled: () => true, batchSize: 1 });
       assert(mid.ok && mid.sent === 2, "sent 2 before the concurrent pause took effect");
       assert(mid.halted === true && mid.stopReason === "paused", "halted at next batch on mid-run pause");
       assert(mid.remaining === 1, "1 row left pending (untouched) after the mid-run kill");
@@ -496,7 +496,7 @@ async function main() {
         winSendCalls++;
         return { ok: true, messageId: "TH-win", response: "queued", providerStatus: null, suppressed: false, rawBody: '{"id":"TH-win"}', error: null, status: 200, timedOut: false };
       };
-      const win = await runStageDrain(tx, { stageId: winStage, sendSms: countingSender, isEnabled: () => true, batchSize: 1 });
+      const win = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: winStage, sendSms: countingSender, isEnabled: () => true, batchSize: 1 });
       assert(win.sent === 0 && winSendCalls === 0, "closed window: NOTHING was sent (no provider call at all)");
       assert(win.stopReason === "outside_send_window", "closed window: stopReason = outside_send_window");
       assert(win.remaining === 3, "closed window: all 3 rows left pending for the next in-window tick");
@@ -507,7 +507,7 @@ async function main() {
       await addCred(spikeProv);
       const spikeStage = await mkStage(spikeProv);
       for (let i = 0; i < 12; i++) await addPending(spikeStage, await mkContact(), `s${i}`);
-      const sp = await runStageDrain(tx, { stageId: spikeStage, sendSms: failSender, isEnabled: () => true });
+      const sp = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: spikeStage, sendSms: failSender, isEnabled: () => true });
       assert(sp.ok && sp.failed === 10, "stopped after 10 consecutive failures");
       assert(sp.halted === true && sp.stopReason === "failure_spike" && sp.pausedNow === true, "failure spike latched a pause");
       const spikeState = await one<{ send_paused: boolean; send_paused_reason: string | null }>(
@@ -519,7 +519,7 @@ async function main() {
         sql`SELECT event, actor_user_id FROM send_circuit_events WHERE provider_id = ${spikeProv} ORDER BY id DESC LIMIT 1`,
       );
       assert(evt.event === "paused" && evt.actor_user_id === null, "audit event: auto-trip pause (actor NULL)");
-      const reSpike = await runStageDrain(tx, { stageId: spikeStage, sendSms: okSender, isEnabled: () => true });
+      const reSpike = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: spikeStage, sendSms: okSender, isEnabled: () => true });
       assert(!reSpike.ok && reSpike.reason === "provider_paused", "subsequent drains refuse until a human resumes");
 
       console.log("Throughput: sends within a batch fire concurrently, bounded by `concurrency`:");
@@ -538,7 +538,7 @@ async function main() {
         inFlight--;
         return { ok: true, messageId: "TH-c", response: "queued", providerStatus: null, suppressed: false, rawBody: '{"id":"TH-c"}', error: null, status: 200, timedOut: false };
       };
-      const cc = await runStageDrain(tx, { stageId: concStage, sendSms: concSender, isEnabled: () => true, concurrency: 5 });
+      const cc = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: concStage, sendSms: concSender, isEnabled: () => true, concurrency: 5 });
       assert(cc.ok && cc.sent === 6, "all 6 sent");
       assert(maxInFlight > 1, `sends overlapped — max in-flight ${maxInFlight} > 1 (not the old serial path)`);
       assert(maxInFlight <= 5, `concurrency bound respected — max in-flight ${maxInFlight} <= 5`);
@@ -550,7 +550,7 @@ async function main() {
       for (let i = 0; i < 6; i++) await addPending(paceStage, await mkContact(), `pp${i}`);
       const t0 = Date.now();
       // rate=3 ⇒ two slices of 3, each paced to ~1s with the instant sender.
-      const pc = await runStageDrain(tx, { stageId: paceStage, sendSms: okSender, isEnabled: () => true, concurrency: 3 });
+      const pc = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */, stageId: paceStage, sendSms: okSender, isEnabled: () => true, concurrency: 3 });
       const elapsed = Date.now() - t0;
       assert(pc.ok && pc.sent === 6, "all 6 sent under pacing");
       assert(elapsed >= 1600, `paced to ~3/sec — 6 sends took ${elapsed}ms (≥1600ms = ≤3/sec)`);
@@ -567,7 +567,7 @@ async function main() {
       // Control — generous time-box drains all 6.
       const tbControl = await mkStage(tbProv);
       for (let i = 0; i < 6; i++) await addPending(tbControl, await mkContact(), `tc${i}`);
-      const ctl = await runStageDrain(tx, {
+      const ctl = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */,
         stageId: tbControl, sendSms: okSender, isEnabled: () => true,
         batchSize: 1, concurrency: 10, maxDurationMs: 60_000,
       });
@@ -575,7 +575,7 @@ async function main() {
       // Test — a 250ms slice at ~100ms/batch yields after a few sends.
       const tbStage = await mkStage(tbProv);
       for (let i = 0; i < 10; i++) await addPending(tbStage, await mkContact(), `tb${i}`);
-      const tb = await runStageDrain(tx, {
+      const tb = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */,
         stageId: tbStage, sendSms: okSender, isEnabled: () => true,
         batchSize: 1, concurrency: 10, maxDurationMs: 250,
       });

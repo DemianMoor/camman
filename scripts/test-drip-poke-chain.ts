@@ -191,6 +191,11 @@ async function main() {
     const prov = (await one<{ id: number }>(sql`
       INSERT INTO sms_providers (sms_provider_id, org_id, name, adapter_code, supports_api_send, sends_enabled, send_paused)
       VALUES (${"pk" + sfx}, ${org}, ${"PK " + sfx}, 'txh', true, true, false) RETURNING id`)).id;
+    // Every drip row carries the number the scheduler picked (prod invariant), and
+    // the drain selector keys drip units on it.
+    const phoneId = (await one<{ id: number }>(sql`
+      INSERT INTO provider_phones (org_id, provider_id, phone_number)
+      VALUES (${org}, ${prov}, ${"+1855" + String(Date.now()).slice(-7)}) RETURNING id`)).id;
     const contact = (await one<{ id: string }>(sql`
       INSERT INTO contacts (org_id, phone_number) VALUES (${org}, ${`+1996${sfx}0001`}) RETURNING id`)).id;
     let seq = 1;
@@ -203,8 +208,8 @@ async function main() {
                 ${drip ? sql`now() - interval '10 minutes'` : null}, ${drip ? true : null})
         RETURNING id`)).id;
       await db.execute(sql`
-        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status)
-        VALUES (${org}, ${campaignId}, ${s}, ${contact}::uuid, '+10000000000', 'x', 'pending')`);
+        INSERT INTO stage_sends (org_id, campaign_id, stage_id, contact_id, phone, rendered_text, status, provider_phone_id)
+        VALUES (${org}, ${campaignId}, ${s}, ${contact}::uuid, '+10000000000', 'x', 'pending', ${phoneId})`);
       return s;
     };
     const regularCampaign = (await one<{ id: number }>(sql`

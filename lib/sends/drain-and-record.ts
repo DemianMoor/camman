@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { logCampaignEvent } from "@/lib/campaign-events";
-import { runStageDrain, type DrainResult, type Sender } from "@/lib/sends/drain";
+import { runStageDrainAllScopes, type DrainResult, type Sender } from "@/lib/sends/drain";
 
 export type DbOrTx = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -29,7 +29,7 @@ export async function runStageDrainAndRecord(
     maxRows?: number;
   },
 ): Promise<DrainResult> {
-  const result = await runStageDrain(dbc, {
+  const result = await runStageDrainAllScopes(dbc, {
     stageId: opts.stageId,
     sendSms: opts.sendSms,
     isEnabled: opts.isEnabled,

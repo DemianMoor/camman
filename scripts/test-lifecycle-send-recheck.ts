@@ -352,7 +352,7 @@ async function main() {
       }[] = [];
       await db
         .transaction(async (tx) => {
-          res = await runStageDrain(tx, {
+          res = await runStageDrain(tx, { phoneScope: null /* regular stage: its own number sends (§11b) */,
             stageId: stageLifecycle,
             sendSms: okSender,
             isEnabled: () => true,

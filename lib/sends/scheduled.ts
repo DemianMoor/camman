@@ -142,6 +142,12 @@ export interface DrainableRow {
   // The send-from phone. Phase B partitions the drain by this so stages on
   // different numbers drain CONCURRENTLY (a slow phone never blocks a fast one).
   provider_phone_id: number | null;
+  // runStageDrain's phoneScope. NULL for a regular stage (its own number sends);
+  // for a DRIP stage there is one row PER NUMBER stamped on its pending rows, and
+  // this is that number — provider_id / provider_phone_id / window / budget above
+  // are then the number's, so the per-phone lease and provider budget follow the
+  // number that actually sends.
+  phone_scope: number | null;
   max_sends_per_run: number | null;
   scheduled_at: string | null;
   sent_at: string | null;
@@ -171,8 +177,10 @@ export async function selectDrainableStages(
     SELECT s.id              AS stage_id,
            c.org_id          AS org_id,
            s.split_group_id  AS split_group_id,
-           s.sms_provider_id AS provider_id,
-           s.provider_phone_id AS provider_phone_id,
+           CASE WHEN u.phone_scope IS NULL THEN s.sms_provider_id
+                ELSE upp.provider_id END AS provider_id,
+           COALESCE(u.phone_scope, s.provider_phone_id) AS provider_phone_id,
+           u.phone_scope     AS phone_scope,
            p.max_sends_per_run AS max_sends_per_run,
            s.scheduled_at    AS scheduled_at,
            s.sent_at         AS sent_at,
@@ -182,7 +190,21 @@ export async function selectDrainableStages(
            p.send_window_weekend_end   AS send_window_weekend_end
     FROM campaign_stages s
     JOIN campaigns c ON c.id = s.campaign_id
-    LEFT JOIN sms_providers p ON p.id = s.sms_provider_id
+    -- Drain units: one per regular stage (scope NULL); one per (drip stage,
+    -- number stamped on its pending rows). See DrainableRow.phone_scope.
+    CROSS JOIN LATERAL (
+      SELECT NULL::int AS phone_scope WHERE c.type IS DISTINCT FROM 'drip'
+      UNION ALL
+      -- A row with no number stamped falls back to the stage's number (as in
+      -- runStageDrain's scope filter).
+      SELECT DISTINCT COALESCE(ss.provider_phone_id, s.provider_phone_id) FROM stage_sends ss
+      WHERE c.type = 'drip' AND ss.stage_id = s.id AND ss.status = 'pending'
+        AND COALESCE(ss.provider_phone_id, s.provider_phone_id) IS NOT NULL
+    ) u
+    LEFT JOIN provider_phones upp ON upp.id = u.phone_scope AND upp.org_id = c.org_id
+    LEFT JOIN sms_providers p
+      ON p.id = CASE WHEN u.phone_scope IS NULL THEN s.sms_provider_id
+                     ELSE upp.provider_id END
     WHERE c.link_mode = 'tracked'
       AND c.status = 'active'
       -- P7/P8: per-campaign opt-out-rate breaker. Additive next to the per-provider
@@ -233,7 +255,7 @@ export async function selectDrainableStages(
     -- stage became due: scheduled_at, else the release stamp. Regular stages are
     -- unchanged relative to each other (a released regular stage keeps its
     -- scheduled_at).
-    ORDER BY COALESCE(s.scheduled_at, s.sent_at) ASC NULLS LAST, s.id ASC
+    ORDER BY COALESCE(s.scheduled_at, s.sent_at) ASC NULLS LAST, s.id ASC, u.phone_scope ASC
     LIMIT ${maxStages}
   `)) as unknown as DrainableRow[];
 }
@@ -549,7 +571,12 @@ export async function runScheduledSends(
     // Injectable for tests; defaults to the real per-stage drain. maxRows is the
     // stage's remaining slice of its provider's per-tick send budget; maxDurationMs
     // is its wall-clock fairness slice (see PER_STAGE_DRAIN_MS).
-    runDrain?: (stageId: number, maxRows: number, maxDurationMs?: number) => Promise<DrainResult>;
+    runDrain?: (
+      stageId: number,
+      maxRows: number,
+      maxDurationMs: number | undefined,
+      phoneScope: number | null,
+    ) => Promise<DrainResult>;
     // Drip poke chain (0206): drain DRIP stages only and skip Phase A. A poked
     // drain must never touch a regular stage — each run gets a fresh per-provider
     // budget (max_sends_per_run), so draining regular stages more often would
@@ -572,8 +599,8 @@ export async function runScheduledSends(
   const orgId = opts?.orgId;
   const runDrain =
     opts?.runDrain ??
-    ((stageId: number, maxRows: number, maxDurationMs?: number) =>
-      runStageDrain(dbc, { stageId, sendSms, isEnabled, isOrgEnabled, maxRows, maxDurationMs }));
+    ((stageId: number, maxRows: number, maxDurationMs: number | undefined, phoneScope: number | null) =>
+      runStageDrain(dbc, { stageId, sendSms, isEnabled, isOrgEnabled, maxRows, maxDurationMs, phoneScope }));
 
   // Master kill-switch: with global sending off, no-op entirely — don't
   // materialize, don't drain, don't mark missed. Everything waits for the next
@@ -870,7 +897,7 @@ export async function runScheduledSends(
       PER_STAGE_DRAIN_MS,
       PHASE_B_DEADLINE_MS - (Date.now() - runStartedAt),
     );
-    const drain = await runDrain(row.stage_id, budgetGranted, stageMaxDurationMs);
+    const drain = await runDrain(row.stage_id, budgetGranted, stageMaxDurationMs, row.phone_scope);
     drainedStageIds.add(row.stage_id);
     result.sent += drain.sent;
     result.failed += drain.failed;

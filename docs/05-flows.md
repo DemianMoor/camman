@@ -1,6 +1,6 @@
 # 05 — End-to-end Flows
 
-_Last updated: 2026-11-03 (landing page fetches first name by sub_id1, 0230); 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
+_Last updated: 2026-11-10 (drip drains per stamped sending number); 2026-11-03 (landing page fetches first name by sub_id1, 0230); 2026-11-03 (redirect appends zip / st + sub_id_7 / sub_id_8 for flagged stages, fail-open, 0229); 2026-10-31 (L5 partner sales postbacks); 2026-10-28 (carrier-rejection Settings save recomputes the flagged set, PR 3); 2026-10-28 (carrier-rejected numbers read by materialization + drip routing, PR 2); 2026-10-24 (carrier-rejection ledger crons, 0225); 2026-10-23 (drip producers stamp status-at-send + last_click_at in the same INSERT; one-shot lifecycle backfill cron)_
 
 Sequence diagrams for the core journeys. File references point at the authoritative code.
 
@@ -89,7 +89,7 @@ sequenceDiagram
   Kick->>Kick: INSERT stage_sends + stage_send_lifecycle in ONE statement<br/>(rendered_text frozen, send_token=id; message_format_id / format_custom stamped; status-at-send + last_click_at stamped from contact_engagement via lifecycleStampInsertSql)
   Kick->>Kick: last window landed: stamp materialized_at + status draft→pending (skipped if status_set_manually)
   Op->>Drain: drain (SEND_ENABLED + approved + !paused + breakers)
-  Drain->>Drain: resolve key: stage.provider_phone_id -> provider_phones.credential_id -> provider_credentials
+  Drain->>Drain: resolve key: sending number (stage.provider_phone_id; a drip unit's stamped number) -> provider_phones.credential_id -> provider_credentials
   Drain->>Drain: decryptCredentialKey (api_key_encrypted else legacy plaintext api_key)
   loop batch
     Drain->>TH: GET send(api_key,text,number)
@@ -630,8 +630,8 @@ sequenceDiagram
   S->>S: hourly-cap maintenance (0209): clear ineligible, then per capped campaign<br/>assign fresh → able to send? → close past hours (OFF) → release backlog → room
   S->>S: runDripSchedulerBatch → due query (assigned journeys, ≤ room) → mint + gate + pending stage_sends<br/>+ stage_send_lifecycle stamp in the SAME INSERT (status + last_click_at from contact_engagement; since 2026-10-23)<br/>(first_send_at; zero-rows UPDATE ⇒ rollback)<br/>P5 tagged message: render per lead; missing data / over segments ⇒ rollback, then skipped_ineligible row + journey exited (follow-ups: row only)
   S-)D: poke (inserted > 0)
-  D->>D: runScheduledSends dripOnly (no Phase A, drip stages only)<br/>per-phone lease, pending→sending claim, 1-h dedup
-  D->>TX: send (sent_at)
+  D->>D: runScheduledSends dripOnly (no Phase A, drip stages only)<br/>one drain unit per (stage, number stamped on its pending rows) — 2026-11-10<br/>per-phone lease, pending→sending claim of THAT number's rows, 1-h dedup
+  D->>TX: send from the stamped number (its provider, account, sender id, rate) (sent_at)
   Note over E,D: A poke that meets a held lease only records poke_requested_at —<br/>the holder re-runs (≥ 5 s after its last start) before releasing.
   Note over S: cron run only: [lead-latency] per-minute line,<br/>heartbeats (pokes never stamp them)
 ```

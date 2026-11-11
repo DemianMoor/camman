@@ -4,15 +4,19 @@ import { sql, type SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { dailyMoney, displayedRoi } from "@/lib/reporting/drip-daily-money";
+import { addEtDays } from "@/lib/reporting/delivery-rollup";
 import {
   diffDripDailyRollup,
   histogramMedian,
   LATENCY_EDGES_SEC,
-  nightlyDue,
+  chunkRange,
+  freshRange,
+  nightlyUnits,
+  parseStamp,
   reconcileRange,
   refreshDripDailyRollup,
-  rollupScope,
   sumHistograms,
+  unitEligible,
 } from "@/lib/reporting/drip-daily-rollup";
 
 // drip_daily_rollup refresh (lib/reporting/drip-daily-rollup.ts) on the PREVIEW
@@ -34,27 +38,55 @@ const z = (s: string) => `2026-04-${s}Z`;
 function pure() {
   console.log("Pure:");
   const now = new Date("2026-10-12T14:00:00Z"); // 10:00 ET
-  const s1 = rollupScope(now, null);
-  bar("P1 never settled (and past 05 UTC) → settle, 14 ET days", s1.settle && s1.range.from === "2026-09-29" && s1.range.to === "2026-10-12",
-    JSON.stringify(s1));
-  const s2 = rollupScope(now, new Date("2026-10-12T05:07:00Z"));
-  bar("P2 settled this UTC day → fresh tier: today + yesterday", !s2.settle && s2.range.from === "2026-10-11" && s2.range.to === "2026-10-12",
-    JSON.stringify(s2));
-  bar("P3 bad stamp → settle", rollupScope(now, new Date("nope")).settle);
+  const fr = freshRange(now);
+  bar("P1 tier A = today + yesterday (ET)", fr.from === "2026-10-11" && fr.to === "2026-10-12", JSON.stringify(fr));
+  const units = nightlyUnits(now);
+  const settleU = units.filter((u) => u.phase === "settle");
+  const recU = units.filter((u) => u.phase === "reconcile");
+  const days = (us: typeof units) => {
+    const set = new Set<string>();
+    for (const u of us.filter((x) => x.basis === "activity"))
+      for (let d = u.range.from; d <= u.range.to; d = addEtDays(d, 1)) {
+        if (set.has(d)) return null; // overlap
+        set.add(d);
+      }
+    return [...set].sort();
+  };
+  const sd = days(settleU);
+  bar("P2 settle units cover days 2–13 back exactly once (tier A + settle = the 14-day window)",
+    !!sd && sd.length === 12 && sd[0] === "2026-09-29" && sd[11] === "2026-10-10", JSON.stringify(sd));
+  const rd = days(recU);
   const rr = reconcileRange(now);
-  bar("P4 reconcile window = days 15–21 back, frozen", rr.from === "2026-09-22" && rr.to === "2026-09-28", JSON.stringify(rr));
-  bar("P5 nothing nightly before 05 UTC, even if never run", !nightlyDue(new Date("2026-10-12T04:59:00Z"), null) &&
-    !rollupScope(new Date("2026-10-12T04:59:00Z"), null).settle);
-  bar("P6 nightly runs once per UTC day",
-    nightlyDue(new Date("2026-10-12T05:01:00Z"), new Date("2026-10-11T05:01:00Z")) &&
-      !nightlyDue(new Date("2026-10-12T09:00:00Z"), new Date("2026-10-12T05:01:00Z")));
+  bar("P3 reconcile units cover the frozen days 15–21 back exactly once",
+    rr.from === "2026-09-22" && rr.to === "2026-09-28" && !!rd && rd.length === 7 && rd[0] === rr.from && rd[6] === rr.to, JSON.stringify(rd));
+  bar("P4 chunk sizes ≤ 3 (settle) / ≤ 2 (reconcile); both bases; settle runs first; keys unique",
+    settleU.every((u) => addEtDays(u.range.from, 2) >= u.range.to) && recU.every((u) => addEtDays(u.range.from, 1) >= u.range.to) &&
+      settleU.length === 8 && recU.length === 8 && units.findIndex((u) => u.phase === "reconcile") === 8 &&
+      new Set(units.map((u) => u.key)).size === units.length);
+  const at = (iso: string) => new Date(iso);
+  const never = { done: null, attempted: null };
+  bar("P5 nothing heavy outside [05:00, 09:00) UTC, even if never run",
+    !unitEligible(at("2026-10-12T04:59:00Z"), never) && !unitEligible(at("2026-10-12T09:00:00Z"), never) &&
+      unitEligible(at("2026-10-12T05:01:00Z"), never));
+  bar("P6 done tonight → skip; done last night → due",
+    !unitEligible(at("2026-10-12T06:00:00Z"), { done: at("2026-10-12T05:10:00Z"), attempted: at("2026-10-12T05:09:00Z") }) &&
+      unitEligible(at("2026-10-12T06:00:00Z"), { done: at("2026-10-11T05:10:00Z"), attempted: at("2026-10-11T05:09:00Z") }));
+  bar("P7 failed attempt waits 60 min (the retry cap): 30 min → no, 61 min → yes",
+    !unitEligible(at("2026-10-12T05:31:00Z"), { done: null, attempted: at("2026-10-12T05:01:00Z") }) &&
+      unitEligible(at("2026-10-12T06:02:00Z"), { done: null, attempted: at("2026-10-12T05:01:00Z") }));
+  bar("P8 unparseable stamp → never", parseStamp("nope") === null && parseStamp(null) === null &&
+    parseStamp("2026-10-12 05:01:00+00")?.toISOString() === "2026-10-12T05:01:00.000Z");
+  const ch = chunkRange({ from: "2026-09-22", to: "2026-09-28" }, 2);
+  bar("P9 chunkRange newest first, last chunk short", JSON.stringify(ch) ===
+    JSON.stringify([{ from: "2026-09-27", to: "2026-09-28" }, { from: "2026-09-25", to: "2026-09-26" },
+      { from: "2026-09-23", to: "2026-09-24" }, { from: "2026-09-22", to: "2026-09-22" }]), JSON.stringify(ch));
   const h = new Array(LATENCY_EDGES_SEC.length + 1).fill(0);
   h[8] = 1; // one value in [60, 90)
-  bar("P7 median of one sample in [60,90) = 75 (bucket midpoint)", histogramMedian(h) === 75, String(histogramMedian(h)));
-  bar("P8 empty histogram → null", histogramMedian(sumHistograms([null, undefined])) === null);
+  bar("H1 median of one sample in [60,90) = 75 (bucket midpoint)", histogramMedian(h) === 75, String(histogramMedian(h)));
+  bar("H2 empty histogram → null", histogramMedian(sumHistograms([null, undefined])) === null);
   const last = new Array(LATENCY_EDGES_SEC.length + 1).fill(0);
   last[LATENCY_EDGES_SEC.length] = 3;
-  bar("P9 open-ended last bucket → its floor (48 h)", histogramMedian(last) === 172800);
+  bar("H3 open-ended last bucket → its floor (48 h)", histogramMedian(last) === 172800);
   // Owner Q1/Q3: lookup = admitted × rate; profit and ROI include it; rev/admitted.
   const m = dailyMoney({ revenue: 30, send_cost: 4, admitted: 100 }, 0.0016);
   bar("M1 lookup cost = 100 admitted × $0.0016 = $0.16", Math.abs(m.lookup_cost_usd - 0.16) < 1e-12, String(m.lookup_cost_usd));

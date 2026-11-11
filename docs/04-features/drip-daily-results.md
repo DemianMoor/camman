@@ -1,6 +1,6 @@
 # Drip — Daily results
 
-_Last updated: 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
@@ -63,8 +63,33 @@ caller must therefore pass a transaction.
 | tier | scope | when | cost (prod, 2026-10-12) |
 |---|---|---|---|
 | fresh | today + yesterday, both bases | every run | ~4.5 s warm, ~1M buffer hits, ~0 disk |
-| settle | last **14** ET days | once a night, from 05:00 UTC | cold receipts ~830 MB per 3 days (in the quiet slot on purpose) |
-| reconcile | the frozen days **15–21** back: stored vs fresh, one REPEATABLE READ snapshot | right after the settle | latched alert `drip-daily-rollup-drift` on any diff |
+| settle | days **2–13** back (with fresh = the last 14 ET days), in **3-day units** per basis (8 units) | nightly, units only inside **[05:00, 09:00) UTC** | cold receipts ~830 MB per 3 days (in the quiet slot on purpose) |
+| reconcile | the frozen days **15–21** back, in **2-day units** per basis (8 units): stored vs fresh, one REPEATABLE READ snapshot per unit | same window, after the settle units | latched alert `drip-daily-rollup-drift` on any diff |
+
+**Nightly units (2026-11-11).** Until 2026-11-11 the settle and reconcile ran as ONE
+pass, stamped only if the whole pass succeeded. When drip volume grew it stopped
+fitting in a run: every attempt was cut off in the reconcile, nothing was stamped,
+and every 15-min tick of the working day re-ran the 14-day recompute (~1,200 s of
+disk-bound DB time per hour against ~185 s overnight), which slowed campaign
+audience previews and stage creation. Now ([lib/reporting/drip-daily-rollup-nightly.ts](../../lib/reporting/drip-daily-rollup-nightly.ts)):
+- Each unit has a `cron_locks` row (`drip-daily-rollup-settle:<basis>:<n>`,
+  `drip-daily-rollup-reconcile:<basis>:<n>`, `n` = chunk position, 0 = newest):
+  `last_run_started_at` = last attempt, `watermark` = done. A run that is cut off
+  loses only its current unit.
+- `drip-daily-rollup-settle` / `-reconcile` are stamped **independently**, the
+  moment that phase's last unit is done.
+- A run starts no new unit after **120 s** (`NIGHTLY_RUN_BUDGET_MS`), so a bigger
+  night takes more runs, not longer ones. A unit over **90 s** logs
+  `[drip-daily-rollup] nightly unit over budget`.
+- **Retry cap:** nothing heavy starts outside [05:00, 09:00) UTC, and a failed unit
+  waits 60 min before retrying — at most 4 attempts per unit per night, never in
+  the working day.
+- **Same-morning alert:** a pass still unfinished at 09:00 UTC sends the latched
+  Telegram alert `drip-daily-rollup-nightly-incomplete`, naming the pending units.
+  It is re-armed at the start of every window, so each failing morning alerts.
+  Each failed unit also logs `[drip-daily-rollup] nightly unit failed`.
+- The drift alert clears only after a reconcile night with no drift
+  (`drip-daily-rollup-reconcile:drift-seen` stamps the night drift was found).
 
 **Why 14 days.** Measured on prod drip data, things that can still move a past cell:
 - sends: ≤ 15 h after admission;
@@ -77,9 +102,9 @@ caller must therefore pass a transaction.
 
 **Watchers.**
 - `/api/cron/drip-monitors` alerts when the refresh heartbeat (`drip-daily-rollup`) goes stale.
-- The refresh run alerts when its nightly stamps go stale (`drip-daily-rollup-settle`, `drip-daily-rollup-reconcile`).
+- The refresh run alerts when its nightly stamps go stale (`drip-daily-rollup-settle`, `drip-daily-rollup-reconcile`, ~2 missed nights) — the backstop behind the 09:00 UTC alert above.
 
-Heartbeats are stamped only when every org refreshed cleanly.
+The fresh heartbeat is stamped when tier A refreshed every org cleanly, whatever the nightly units do. Tests: `scripts/test-drip-daily-rollup.ts` (pure unit planning + cell maths), `scripts/test-drip-daily-rollup-nightly.ts` (orchestration: budget, retry cap, independent stamps, alerts).
 
 ## 4. Backfill and reconciliation
 

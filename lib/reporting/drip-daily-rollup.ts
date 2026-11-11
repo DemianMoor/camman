@@ -70,6 +70,21 @@ export const SETTLE_DAYS = 14;
 export const RECONCILE_WINDOW_DAYS = 7;
 /** Earliest UTC hour the nightly settle + reconciliation may start (~01:00 ET). */
 export const NIGHTLY_UTC_HOUR = 5;
+/**
+ * The nightly window CLOSES at 09:00 UTC (04:00 EST / 05:00 EDT). No heavy unit
+ * starts outside [05:00, 09:00) UTC — the retry cap. Until 2026-11-11 the settle
+ * + reconcile ran as ONE pass whose heartbeat needed the whole pass to succeed;
+ * once the pass outgrew a run it failed on every 15-min tick and repeated the
+ * 14-day recompute all working day (~1,200 s of disk-bound DB time per hour),
+ * which is what made campaign audience previews and stage creation slow.
+ */
+export const NIGHTLY_END_UTC_HOUR = 9;
+/** Settle chunk: 3 ET days per unit (days 2–13 back → 4 chunks × 2 bases). */
+export const SETTLE_CHUNK_DAYS = 3;
+/** Reconcile chunk: 2 ET days per unit (days 14–20 back → 4 chunks × 2 bases). */
+export const RECONCILE_CHUNK_DAYS = 2;
+/** A unit that failed (or was killed) is retried no sooner than this. 4 h window ⇒ ≤ 4 attempts/night. */
+export const NIGHTLY_RETRY_SPACING_MS = 60 * 60 * 1000;
 
 /**
  * Lead-to-send histogram bucket lower edges, seconds. Cell arrays have
@@ -490,25 +505,92 @@ export async function refreshDripDailyRollup(
   };
 }
 
-export interface RollupScope {
-  range: EtDayRange;
-  settle: boolean;
-}
-
-/** Whether a once-a-night job is due: in the quiet slot and not yet this UTC day. Pure. */
-export function nightlyDue(now: Date, last: Date | null): boolean {
-  if (now.getUTCHours() < NIGHTLY_UTC_HOUR) return false;
-  // An unparseable stamp counts as "never" (NaN compares false).
-  if (last == null || Number.isNaN(last.getTime())) return true;
-  return last.toISOString().slice(0, 10) !== now.toISOString().slice(0, 10);
-}
-
-/** What one run recomputes: tier A always; tier B (14 days) once a night. Pure. */
-export function rollupScope(now: Date, lastSettle: Date | null): RollupScope {
+/** Tier A, recomputed on EVERY run: today + yesterday (ET). Pure. */
+export function freshRange(now: Date): EtDayRange {
   const today = formatInCampaignTimezone(now, "yyyy-MM-dd");
-  const settle = nightlyDue(now, lastSettle);
-  const days = settle ? SETTLE_DAYS : FRESH_DAYS;
-  return { range: { from: addEtDays(today, -(days - 1)), to: today }, settle };
+  return { from: addEtDays(today, -(FRESH_DAYS - 1)), to: today };
+}
+
+/** Tonight's window, [05:00, 09:00) UTC of `now`'s UTC day. Pure. */
+export function nightWindow(now: Date): { start: Date; end: Date } {
+  const y = now.getUTCFullYear(), m = now.getUTCMonth(), d = now.getUTCDate();
+  return {
+    start: new Date(Date.UTC(y, m, d, NIGHTLY_UTC_HOUR)),
+    end: new Date(Date.UTC(y, m, d, NIGHTLY_END_UTC_HOUR)),
+  };
+}
+
+/** Split an ET day range into chunks of `days`, NEWEST first (the most-moving cells settle first). Pure. */
+export function chunkRange(range: EtDayRange, days: number): EtDayRange[] {
+  const out: EtDayRange[] = [];
+  let to = range.to;
+  while (to >= range.from) {
+    const start = addEtDays(to, -(days - 1));
+    const from = start < range.from ? range.from : start;
+    out.push({ from, to });
+    to = addEtDays(from, -1);
+  }
+  return out;
+}
+
+export type NightlyPhase = "settle" | "reconcile";
+export interface NightlyUnit {
+  /** cron_locks row: last_run_started_at = last attempt, watermark = done. Stable across nights. */
+  key: string;
+  phase: NightlyPhase;
+  basis: Basis;
+  range: EtDayRange;
+}
+
+/**
+ * Tonight's work, in run order: every settle unit, then every reconcile unit.
+ * Settle = the 14-day window minus tier A (days 2–13 back); reconcile = the
+ * frozen days 15–21 back. Keys name a chunk by its POSITION (0 = newest), so the
+ * set of cron_locks rows is fixed and does not grow night over night. Pure.
+ */
+export function nightlyUnits(now: Date): NightlyUnit[] {
+  const today = formatInCampaignTimezone(now, "yyyy-MM-dd");
+  const settle: EtDayRange = { from: addEtDays(today, -(SETTLE_DAYS - 1)), to: addEtDays(today, -FRESH_DAYS) };
+  const units: NightlyUnit[] = [];
+  const add = (phase: NightlyPhase, chunks: EtDayRange[], job: string) =>
+    chunks.forEach((range, i) => {
+      for (const basis of BASES) units.push({ key: `${job}:${basis}:${i}`, phase, basis, range });
+    });
+  add("settle", chunkRange(settle, SETTLE_CHUNK_DAYS), DRIP_DAILY_ROLLUP_SETTLE_JOB);
+  add("reconcile", chunkRange(reconcileRange(now), RECONCILE_CHUNK_DAYS), DRIP_DAILY_ROLLUP_RECONCILE_JOB);
+  return units;
+}
+
+export interface UnitState {
+  done: Date | null;
+  attempted: Date | null;
+}
+
+/** Parse a cron_locks timestamp (drizzle returns a string); unparseable ⇒ null ("never"). */
+export function parseStamp(v: string | Date | null | undefined): Date | null {
+  if (v == null) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Finished tonight: its done-stamp is at or after tonight's window start. Pure. */
+export function unitDone(now: Date, s: UnitState | undefined): boolean {
+  return !!s?.done && s.done.getTime() >= nightWindow(now).start.getTime();
+}
+
+/**
+ * May this unit start now? Inside the window, not done tonight, and not attempted
+ * within NIGHTLY_RETRY_SPACING_MS (a failed or killed attempt leaves
+ * `attempted` set and `done` unset). This IS the retry cap: nothing heavy runs
+ * outside the window, and each unit gets at most window ÷ spacing attempts. Pure.
+ */
+export function unitEligible(now: Date, s: UnitState | undefined): boolean {
+  const { start, end } = nightWindow(now);
+  const t = now.getTime();
+  if (t < start.getTime() || t >= end.getTime()) return false;
+  if (unitDone(now, s)) return false;
+  const a = s?.attempted;
+  return !a || a.getTime() < start.getTime() || t - a.getTime() >= NIGHTLY_RETRY_SPACING_MS;
 }
 
 /** The frozen window the reconciliation checks: the 7 ET days before the settle window. */

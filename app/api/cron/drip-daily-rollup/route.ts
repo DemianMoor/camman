@@ -9,43 +9,30 @@ import {
   BASES,
   diffDripDailyRollup,
   DRIP_DAILY_ROLLUP_JOB,
-  DRIP_DAILY_ROLLUP_RECONCILE_JOB,
-  DRIP_DAILY_ROLLUP_SETTLE_JOB,
-  nightlyDue,
-  reconcileRange,
+  freshRange,
   refreshDripDailyRollup,
-  rollupScope,
   type RefreshResult,
 } from "@/lib/reporting/drip-daily-rollup";
+import { runNightly } from "@/lib/reporting/drip-daily-rollup-nightly";
 
 // Refreshes drip_daily_rollup (migration 0208) — the ONLY writer besides the
 // one-off backfill. See lib/reporting/drip-daily-rollup.ts.
 //
 // Every run (every 15 min, :01/:16/:31/:46 — clear of the heavy :29 audience-pools
-// job) recomputes
-// today + yesterday (ET), both bases. Once a night, from 05:00 UTC (~01:00 ET,
-// after the send window, before the owner's day), the run widens to the last
-// 14 ET days and then reconciles the FROZEN days 15–21 back: stored cells vs a
-// fresh computation in one REPEATABLE READ snapshot. Any difference is a latched
-// Telegram alert — it means 14 days stopped being enough.
+// job):
+//   1. Tier A — today + yesterday (ET), both bases, every org. Its heartbeat is
+//      stamped whenever tier A succeeds, whatever the nightly part does.
+//   2. The nightly settle (days 2–13 back) and reconcile (frozen days 14–20 back)
+//      as small units, only inside [05:00, 09:00) UTC, until the run's budget is
+//      spent. See lib/reporting/drip-daily-rollup-nightly.ts for why (2026-11-11:
+//      the old all-or-nothing pass looped all working day and slowed the app).
 //
-// Heartbeats are stamped only when every org refreshed cleanly. This job is
-// watched by /api/cron/drip-monitors; it watches its own nightly stamps.
+// Watched by /api/cron/drip-monitors; it watches its own nightly stamps.
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const LEASE_MS = 6 * 60 * 1000;
-const DRIFT_ALERT = "drip-daily-rollup-drift";
 const NIGHTLY_STALE_ALERT = "drip-daily-rollup-nightly-stale";
-
-type OrgResult = { org_id: string; error?: string; refreshed?: RefreshResult[]; drift?: number; frozen_cells?: number };
-
-async function watermark(job: string): Promise<Date | null> {
-  const rows = (await db.execute(sql`SELECT watermark FROM cron_locks WHERE job_name = ${job}`)) as unknown as {
-    watermark: string | null;
-  }[];
-  return rows[0]?.watermark ? new Date(rows[0].watermark) : null;
-}
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const secret = process.env.CRON_SECRET;
@@ -58,81 +45,64 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const outcome = await withCronLease(
     "drip-daily-rollup-run",
     async () => {
-      const now = new Date();
-      const scope = rollupScope(now, await watermark(DRIP_DAILY_ROLLUP_SETTLE_JOB));
-      const reconcile = scope.settle && nightlyDue(now, await watermark(DRIP_DAILY_ROLLUP_RECONCILE_JOB));
-      const frozen = reconcileRange(now);
+      const runStartedMs = Date.now();
+      const range = freshRange(new Date());
+      const orgIds = (
+        (await db.execute(sql`SELECT DISTINCT org_id FROM campaigns WHERE type = 'drip'`)) as unknown as {
+          org_id: string;
+        }[]
+      ).map((r) => r.org_id);
 
-      const orgs = (await db.execute(
-        sql`SELECT DISTINCT org_id FROM campaigns WHERE type = 'drip'`,
-      )) as unknown as { org_id: string }[];
-      const results: OrgResult[] = [];
-      for (const { org_id } of orgs) {
-        // One org's failure must not stop the rest; it withholds the heartbeat.
+      // 1. Tier A. One org's failure must not stop the rest; it withholds the heartbeat.
+      const fresh: { org_id: string; error?: string; refreshed?: RefreshResult[] }[] = [];
+      for (const org_id of orgIds) {
         try {
           const refreshed: RefreshResult[] = [];
           for (const basis of BASES) {
             refreshed.push(
               await db.transaction(async (tx) => {
                 await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
-                return refreshDripDailyRollup(tx, org_id, basis, scope.range);
+                return refreshDripDailyRollup(tx, org_id, basis, range);
               }),
             );
           }
-          const r: OrgResult = { org_id, refreshed };
-          if (reconcile) {
-            let drift = 0;
-            let cells = 0;
-            for (const basis of BASES) {
-              const d = await db.transaction(
-                async (tx) => {
-                  await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
-                  return diffDripDailyRollup(tx, org_id, basis, frozen);
-                },
-                { isolationLevel: "repeatable read" },
-              );
-              drift += d.diffs.length;
-              cells += d.cells;
-              if (d.diffs.length > 0) {
-                console.error("[drip-daily-rollup] DRIFT in frozen cells", {
-                  org_id, basis, frozen, sample: d.diffs.slice(0, 5),
-                });
-              }
-            }
-            r.drift = drift;
-            r.frozen_cells = cells;
-          }
-          results.push(r);
+          fresh.push({ org_id, refreshed });
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
           console.error("[drip-daily-rollup] refresh failed", { org_id, error });
-          results.push({ org_id, error });
+          fresh.push({ org_id, error });
         }
       }
+      const freshOk = fresh.every((r) => !r.error);
+      if (freshOk) await recordHeartbeat(db, DRIP_DAILY_ROLLUP_JOB);
 
-      const ok = results.every((r) => !r.error);
-      if (ok) {
-        await recordHeartbeat(db, DRIP_DAILY_ROLLUP_JOB);
-        if (scope.settle) await recordHeartbeat(db, DRIP_DAILY_ROLLUP_SETTLE_JOB);
-        if (reconcile) {
-          await recordHeartbeat(db, DRIP_DAILY_ROLLUP_RECONCILE_JOB);
-          const drift = results.reduce((a, r) => a + (r.drift ?? 0), 0);
-          if (drift > 0) {
-            await notifyOnTransition(db, {
-              alertKey: DRIFT_ALERT,
-              text:
-                `⚠️ Drip Daily results rollup: ${drift} FROZEN cell(s) in ${frozen.from}..${frozen.to} ` +
-                `no longer match a fresh computation. Something changed a cell's source more than ` +
-                `14 days after the fact — the 14-day settle window is too short for it. ` +
-                `Vercel logs: [drip-daily-rollup] DRIFT.`,
-            });
-          } else {
-            await clearAlert(db, { alertKey: DRIFT_ALERT });
-          }
-        }
-      }
+      // 2. Nightly units (no-op outside the window).
+      const nightly = await runNightly({
+        db,
+        orgIds,
+        now: () => new Date(),
+        runStartedMs,
+        settle: async (orgId, unit) => {
+          await db.transaction(async (tx) => {
+            await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
+            await refreshDripDailyRollup(tx, orgId, unit.basis, unit.range);
+          });
+        },
+        reconcile: async (orgId, unit) =>
+          (
+            await db.transaction(
+              async (tx) => {
+                await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
+                return diffDripDailyRollup(tx, orgId, unit.basis, unit.range);
+              },
+              { isolationLevel: "repeatable read" },
+            )
+          ).diffs.length,
+        notify: (alertKey, text) => notifyOnTransition(db, { alertKey, text }),
+        clear: (alertKey) => clearAlert(db, { alertKey }),
+      });
 
-      // Watch the nightly settle + reconciliation. Latched: one message per transition.
+      // Backstop: the nightly stamps themselves going stale (~2 missed nights). Latched.
       const stale = (
         await checkHeartbeats(db, [HEARTBEAT_JOBS.dripDailyRollupSettle, HEARTBEAT_JOBS.dripDailyRollupReconcile])
       ).filter((h) => h.stale);
@@ -148,7 +118,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         await clearAlert(db, { alertKey: NIGHTLY_STALE_ALERT });
       }
 
-      return { scope, reconcile: reconcile ? frozen : null, ok, results };
+      const ok = freshOk && nightly.failed.length === 0;
+      return { range, ok, fresh, nightly, ms: Date.now() - runStartedMs };
     },
     LEASE_MS,
   );

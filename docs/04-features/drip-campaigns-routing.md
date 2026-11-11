@@ -1,6 +1,6 @@
 # Drip campaigns and routing (Phase 4)
 
-_Last updated: 2026-11-10 (pool number is the real sender); 2026-10-23 (0222 toll-free gate link); 2026-10-22 (P5: `creative_tags` routing rule, per-lead personalization, tag skip rows); 2026-10-21 (global `line_type` rule, 0218); 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
+_Last updated: 2026-11-11 (stage editor warns when a drip stage has no landing page); 2026-11-10 (pool number is the real sender); 2026-10-23 (0222 toll-free gate link); 2026-10-22 (P5: `creative_tags` routing rule, per-lead personalization, tag skip rows); 2026-10-21 (global `line_type` rule, 0218); 2026-10-15 (hour-level overflow, 0213; capacity overflow, 0210; hourly send cap; stage-off reverts; the edit screen is type-gated)_
 
 A second campaign **type**, and the worker that assigns each partner lead to exactly one drip
 campaign. **Zero sends** — a journey is an assignment, not a message. The scheduler is Phase 5.
@@ -703,6 +703,19 @@ insert.
 either tracking ID cannot be resolved, the lead is skipped, counted in
 `mintRefused`, and logged with the reason; the journey stays `routed` so the next
 tick retries after the configuration is fixed.
+
+**The stage editor warns when no landing page is selected (2026-11-11).** On a
+drip campaign, every way out of the stage editor — Save / Create stage, Cancel,
+Escape and the editor card's X — opens a "No landing page selected" dialog when
+`landing_page_id` is empty ([components/campaigns/stage-form.tsx](../../components/campaigns/stage-form.tsx),
+`requestCancel` / `missingDripLandingPage`; the X reaches it through the
+`closeRequestRef` prop from [stage-inline-creator.tsx](../../components/campaigns/stage-inline-creator.tsx)).
+"Go back and pick a page" keeps the editor open; "Continue anyway" saves or
+closes as asked. It is a warning, not a block, and it checks only the landing
+page — a stage relying on a hand-edited Full URL still sees it. Regular
+campaigns never show it. Why it exists: with hourly caps on, a stage with no
+page refuses every lead in its window (`no_landing_page` mint refusal) and they
+expire at the hour's end as `missed_hour_blocked` — 200 leads on 2026-11-11.
 
 ## Personalization tags on drip (P5, 2026-10-22)
 

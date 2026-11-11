@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -163,6 +163,8 @@ export function StageInlineEditor({
   // provider-phones list BEFORE <StageForm> mounts. Resolution runs once per
   // "New stage" session and is cached on this instance (the editor stays
   // mounted across opens/closes at the page level).
+  // StageForm fills this with its guarded close (drip no-landing-page warning).
+  const closeRequestRef = useRef<(() => void) | null>(null);
   const [resolvedDefault, setResolvedDefault] = useState<{
     sms_provider_id: number;
     provider_phone_id: number;
@@ -316,7 +318,13 @@ export function StageInlineEditor({
         <Button
           variant="ghost"
           size="icon-sm"
-          onClick={() => onOpenChange(false)}
+          // Routed through the form so the drip no-landing-page warning
+          // covers this exit too; falls back while the form hasn't mounted.
+          onClick={() =>
+            closeRequestRef.current
+              ? closeRequestRef.current()
+              : onOpenChange(false)
+          }
           aria-label="Close"
           disabled={isSubmitting}
         >
@@ -385,6 +393,7 @@ export function StageInlineEditor({
             onSubmit={handleSubmit}
             onCancel={() => onOpenChange(false)}
             isSubmitting={isSubmitting}
+            closeRequestRef={closeRequestRef}
           />
         )}
       </CardContent>

@@ -19,6 +19,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { CopyableId } from "@/components/ui/copyable-id";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -348,6 +358,10 @@ export interface StageFormProps {
   // uses this to put Cancel/Save in a sticky footer outside the form's
   // scroll container.
   renderActions?: (ctx: StageFormActionContext) => React.ReactNode;
+  // Filled by the form with its guarded close (the drip no-landing-page
+  // warning). A host with its own close control (the editor card's X) calls
+  // this instead of closing directly, so that exit is warned too.
+  closeRequestRef?: React.MutableRefObject<(() => void) | null>;
 }
 
 const NONE = "__none__";
@@ -467,6 +481,7 @@ export function StageForm({
   onCancel,
   isSubmitting,
   renderActions,
+  closeRequestRef,
 }: StageFormProps) {
   const isEdit = mode === "edit";
 
@@ -543,6 +558,8 @@ export function StageForm({
   const [newCreativeOpen, setNewCreativeOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
+  // Which exit the drip no-landing-page warning is holding (see requestCancel).
+  const [noLandingPagePrompt, setNoLandingPagePrompt] = useState<"save" | "cancel" | null>(null);
   // 2–5 in the UI per product spec; the endpoint caps at 10 if someone
   // POSTs directly.
   const [splitCount, setSplitCount] = useState<number>(2);
@@ -1184,8 +1201,38 @@ export function StageForm({
       toast.error("Pick a provider and phone number");
       return;
     }
+    if (missingDripLandingPage()) {
+      setNoLandingPagePrompt("save");
+      return;
+    }
     await onSubmit(form.getValues());
   }
+
+  // ⚠️ A drip stage with no landing page cannot mint a link, so every lead
+  // routed into its window is refused and expires at the hour's end
+  // (lib/drip/mint.ts `no_landing_page` → the `missed_hour_blocked` alert).
+  // Warn on EVERY way out of the editor — Save, Cancel, Escape and the host's
+  // X — so an existing stage opened and closed unchanged is caught too.
+  // A warning, not a block: the operator may continue.
+  function missingDripLandingPage() {
+    return campaignType === "drip" && !form.getValues("landing_page_id");
+  }
+
+  function requestCancel() {
+    if (missingDripLandingPage()) {
+      setNoLandingPagePrompt("cancel");
+      return;
+    }
+    onCancel();
+  }
+  // No deps: re-point every render so the host always calls the current closure.
+  useEffect(() => {
+    if (!closeRequestRef) return;
+    closeRequestRef.current = requestCancel;
+    return () => {
+      closeRequestRef.current = null;
+    };
+  });
 
   // Inline "+ New creative" flow. POSTs a single creative bound to the
   // campaign's offer, refetches the picker list, and auto-selects the
@@ -1351,7 +1398,7 @@ export function StageForm({
     isEdit,
     isSubmitting,
     onSave: handleSave,
-    onCancel,
+    onCancel: requestCancel,
     saveBlockedReason: destinationError,
   };
 
@@ -1380,7 +1427,7 @@ export function StageForm({
               return;
             }
             e.preventDefault();
-            onCancel();
+            requestCancel();
           }
         }}
         className="grid gap-4"
@@ -2615,6 +2662,39 @@ export function StageForm({
           </Button>
         </div>
       </FormDialog>
+
+      <AlertDialog
+        open={noLandingPagePrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) setNoLandingPagePrompt(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>No landing page selected</AlertDialogTitle>
+            <AlertDialogDescription>
+              This drip stage has no landing page, so no link can be created
+              for its messages. Every lead that arrives during this
+              stage&apos;s window will be refused and dropped at the end of the
+              hour.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Go back and pick a page</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                const action = noLandingPagePrompt;
+                setNoLandingPagePrompt(null);
+                if (action === "save") void onSubmit(form.getValues());
+                else onCancel();
+              }}
+            >
+              Continue anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Form>
   );
 }

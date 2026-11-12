@@ -36,9 +36,16 @@ import { sql, type SQL } from "drizzle-orm";
  * is skipped (measured 0.05 ms). messaging_status = 'eligible' is a LITERAL so
  * the partial index matches; landlines are never in an audience anyway.
  */
-export function lineTypeBlockedContactsSql(orgId: string): SQL {
+export function lineTypeBlockedContactsSql(
+  orgId: string,
+  // Also emit lt_c.lifecycle_status, for callers whose left side of the EXCEPT
+  // carries it (the campaign preview's membership branches). Same rows; it
+  // never changes who is blocked. Optional only because the frozen
+  // lib/audience-preview-reference calls this and must not be edited.
+  withLifecycleStatus?: boolean,
+): SQL {
   return sql`
-    SELECT lt_c.id AS contact_id
+    SELECT lt_c.id AS contact_id${withLifecycleStatus ? sql`, lt_c.lifecycle_status` : sql``}
     FROM contacts lt_c
     WHERE lt_c.org_id = ${orgId}::uuid
       AND lt_c.messaging_status = 'eligible'

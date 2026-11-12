@@ -57,7 +57,7 @@ function pure() {
     !!sd && sd.length === 12 && sd[0] === "2026-09-29" && sd[11] === "2026-10-10", JSON.stringify(sd));
   const rd = days(recU);
   const rr = reconcileRange(now);
-  bar("P3 reconcile units cover the frozen days 15–21 back exactly once",
+  bar("P3 reconcile units cover the frozen days 14–20 back exactly once",
     rr.from === "2026-09-22" && rr.to === "2026-09-28" && !!rd && rd.length === 7 && rd[0] === rr.from && rd[6] === rr.to, JSON.stringify(rd));
   bar("P4 chunk sizes ≤ 3 (settle) / ≤ 2 (reconcile); both bases; settle runs first; keys unique",
     settleU.every((u) => addEtDays(u.range.from, 2) >= u.range.to) && recU.every((u) => addEtDays(u.range.from, 1) >= u.range.to) &&

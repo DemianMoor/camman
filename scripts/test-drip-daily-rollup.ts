@@ -6,7 +6,10 @@ import { db } from "@/db/client";
 import { dailyMoney, displayedRoi } from "@/lib/reporting/drip-daily-money";
 import { addEtDays } from "@/lib/reporting/delivery-rollup";
 import {
+  applyCohortClickRepairs,
+  classifyCohortClickDiffs,
   diffDripDailyRollup,
+  repairTotalsSince,
   histogramMedian,
   LATENCY_EDGES_SEC,
   chunkRange,
@@ -344,6 +347,49 @@ async function dbBars() {
       const want = [`${C}/${D1}/${A}/${K1}`, `${C}/${D2}/${A}/${K1}`, `${C}/${D2}/${A}/unattributed`].sort().join(",");
       bar("X3 un-refreshed cohort: exactly the 3 cells whose sources changed differ",
         cdiff.diffs.map((d) => d.key).sort().join(",") === want, JSON.stringify(cdiff.diffs.map((d) => d.key)));
+
+      // ── cohort-click repair (owner ruling 2026-11-12, option B) ───────────
+      // X3's three real diffs: D1/A/K1 lost a click (stored 2 > fresh 1), D2/A/K1
+      // gained a delivery, D2/A/∅ vanished. None is a late click.
+      const k3 = classifyCohortClickDiffs(cdiff.diffs);
+      bar("K1 real diffs: stored clicks above fresh → negative; delivered changed / vanished cell → drift; 0 repairs",
+        k3.repairs.length === 0 && k3.negative.length === 1 && k3.negative[0].key === `${C}/${D1}/${A}/${K1}` && k3.drift.length === 2,
+        `${k3.repairs.length}/${k3.negative.length}/${k3.drift.length}`);
+      const kp = classifyCohortClickDiffs(poisoned.diffs);
+      bar("K2 an activity-basis clicks diff is drift, never repaired", kp.repairs.length === 0 && kp.drift.length === 1);
+      // Settle the cohort, then a LATE human click (and a bot one) on S1 → only D1/A/K1 clicks moves, 1 → 2.
+      await refreshDripDailyRollup(tx, org, "cohort", range);
+      await click(S1.link, "30T12:00:00", "human");
+      await click(S1.link, "30T12:01:00", "bot");
+      const late = await diffDripDailyRollup(tx, org, "cohort", range);
+      const kl = classifyCohortClickDiffs(late.diffs);
+      bar("K3 a late click: exactly one repair, D1/A/K1 clicks 1 → 2, nothing else",
+        late.diffs.length === 1 && kl.drift.length === 0 && kl.negative.length === 0 && kl.repairs.length === 1 &&
+          JSON.stringify(kl.repairs[0]) === JSON.stringify({ campaign_id: C, day_et: D1, stage_id: A, partner_key_id: K1, old_clicks: 1, new_clicks: 2 }),
+        JSON.stringify(kl.repairs));
+      const nRepaired = await applyCohortClickRepairs(tx, org, "test-unit:cohort:0", kl.repairs);
+      const after = find(await cells("cohort"), A, K1, D1);
+      bar("K4 repair writes ONLY clicks: 2 now, every other counter unchanged",
+        nRepaired === 1 && after?.clicks === 2 && after?.first_sends === 1 && after?.sales === 2 && after?.revenue === "35.0000");
+      const trail = (await tx.execute(sql`
+        SELECT campaign_id, basis, day_et::text AS d, stage_id, partner_key_id, old_clicks, new_clicks, unit_key
+        FROM drip_daily_rollup_repairs WHERE org_id = ${org}::uuid`)) as unknown as Cell[];
+      bar("K5 trail row: cell key + old 1 + new 2 + unit", trail.length === 1 &&
+        JSON.stringify(trail[0]) === JSON.stringify({ campaign_id: C, basis: "cohort", d: D1, stage_id: A, partner_key_id: K1, old_clicks: 1, new_clicks: 2, unit_key: "test-unit:cohort:0" }),
+        JSON.stringify(trail));
+      bar("K6 after the repair the cohort diff is clean", (await diffDripDailyRollup(tx, org, "cohort", range)).diffs.length === 0);
+      const totals = await repairTotalsSince(tx, org, new Date("2026-01-01T00:00:00Z"));
+      bar("K7 tonight's totals read from the trail: 1 cell / +1 click", totals.cells === 1 && totals.clicks === 1, JSON.stringify(totals));
+      let threw = false;
+      try {
+        await tx.transaction(async (sp) => applyCohortClickRepairs(sp, org, "test-unit:cohort:0", kl.repairs));
+      } catch {
+        threw = true;
+      }
+      const after2 = find(await cells("cohort"), A, K1, D1);
+      const trail2 = (await tx.execute(sql`SELECT count(*)::int AS n FROM drip_daily_rollup_repairs WHERE org_id = ${org}::uuid`)) as unknown as { n: number }[];
+      bar("K8 a repair whose cell no longer holds the old value throws, writes nothing",
+        threw && after2?.clicks === 2 && trail2[0].n === 1);
 
       throw new Rollback();
     });

@@ -657,6 +657,122 @@ export async function diffDripDailyRollup(
   };
 }
 
+// ── cohort-click repair (owner ruling 2026-11-12, option B) ───────────────────
+//
+// A cohort cell counts every clean click on its sends' links with NO time bound,
+// so a click arriving > 14 days after admission lands in an already-frozen cell
+// (11-12: 22 cells / +39 clicks, exactly 39 late clicks, nothing else). The
+// reconcile already computes the right value; it writes back ONLY that case:
+// cohort basis, the cell on both sides, every counter equal except `clicks`, and
+// fresh `clicks` HIGHER than stored. Everything else is drift and is not touched.
+
+export interface ClickRepair {
+  campaign_id: number;
+  day_et: string;
+  stage_id: number | null;
+  partner_key_id: number | null;
+  old_clicks: number;
+  new_clicks: number;
+}
+
+/**
+ * Split a reconcile diff into repairable late-click cells and the rest. Pure.
+ * `negative` = only clicks differ but stored is HIGHER — not a late click
+ * (clicks re-scored or removed after freezing), so it alerts like drift.
+ */
+export function classifyCohortClickDiffs(diffs: readonly CellDiff[]): {
+  repairs: ClickRepair[];
+  negative: CellDiff[];
+  drift: CellDiff[];
+} {
+  const repairs: ClickRepair[] = [];
+  const negative: CellDiff[] = [];
+  const drift: CellDiff[] = [];
+  for (const d of diffs) {
+    const { stored, live } = d;
+    if (d.basis !== "cohort" || !stored || !live) {
+      drift.push(d);
+      continue;
+    }
+    const keys = new Set([...Object.keys(stored), ...Object.keys(live)]);
+    keys.delete("clicks");
+    const othersEqual = [...keys].every((k) => JSON.stringify(stored[k] ?? null) === JSON.stringify(live[k] ?? null));
+    const oldClicks = Number(stored.clicks);
+    const newClicks = Number(live.clicks);
+    if (!othersEqual || !Number.isInteger(oldClicks) || !Number.isInteger(newClicks)) {
+      drift.push(d);
+    } else if (newClicks > oldClicks) {
+      repairs.push({
+        campaign_id: Number(live.campaign_id),
+        day_et: String(live.day_et),
+        stage_id: live.stage_id == null ? null : Number(live.stage_id),
+        partner_key_id: live.partner_key_id == null ? null : Number(live.partner_key_id),
+        old_clicks: oldClicks,
+        new_clicks: newClicks,
+      });
+    } else {
+      negative.push(d);
+    }
+  }
+  return { repairs, negative, drift };
+}
+
+/**
+ * Write the repairs: set each cohort cell's `clicks` to the fresh value, ONLY if
+ * it still holds the old one, and record the trail row (drip_daily_rollup_repairs,
+ * 0238) in the same statement. Throws if any cell did not match — the caller's
+ * transaction then rolls the whole unit back. Returns the number repaired.
+ */
+export async function applyCohortClickRepairs(
+  dbc: DbOrTx,
+  orgId: string,
+  unitKey: string,
+  repairs: readonly ClickRepair[],
+): Promise<number> {
+  if (repairs.length === 0) return 0;
+  // One jsonb parameter (never a JS array interpolated into the template).
+  const rows = (await dbc.execute(sql`
+    WITH r AS (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(repairs)}::jsonb)
+        AS x(campaign_id int, day_et date, stage_id int, partner_key_id int, old_clicks int, new_clicks int)
+    ),
+    u AS (
+      UPDATE drip_daily_rollup d
+         SET clicks = r.new_clicks, refreshed_at = now()
+        FROM r
+       WHERE d.org_id = ${orgId}::uuid AND d.basis = 'cohort'
+         AND d.campaign_id = r.campaign_id AND d.day_et = r.day_et
+         AND d.stage_id IS NOT DISTINCT FROM r.stage_id
+         AND d.partner_key_id IS NOT DISTINCT FROM r.partner_key_id
+         AND d.clicks = r.old_clicks
+      RETURNING d.campaign_id, d.day_et, d.stage_id, d.partner_key_id, r.old_clicks, r.new_clicks
+    ),
+    ins AS (
+      INSERT INTO drip_daily_rollup_repairs
+        (org_id, campaign_id, basis, day_et, stage_id, partner_key_id, old_clicks, new_clicks, unit_key)
+      SELECT ${orgId}::uuid, campaign_id, 'cohort', day_et, stage_id, partner_key_id, old_clicks, new_clicks, ${unitKey}
+      FROM u
+      RETURNING 1
+    )
+    SELECT count(*)::int AS n FROM ins
+  `)) as unknown as { n: number }[];
+  const n = Number(rows[0]?.n ?? 0);
+  if (n !== repairs.length) {
+    throw new Error(`cohort click repair: ${n} of ${repairs.length} cells still held their old value; unit rolled back`);
+  }
+  return n;
+}
+
+/** Repairs recorded for `orgId` since `since` (tonight's window start): the nightly guard's running total. */
+export async function repairTotalsSince(dbc: DbOrTx, orgId: string, since: Date): Promise<{ cells: number; clicks: number }> {
+  const rows = (await dbc.execute(sql`
+    SELECT count(*)::int AS cells, COALESCE(sum(new_clicks - old_clicks), 0)::int AS clicks
+    FROM drip_daily_rollup_repairs
+    WHERE org_id = ${orgId}::uuid AND repaired_at >= ${since.toISOString()}::timestamptz
+  `)) as unknown as { cells: number; clicks: number }[];
+  return { cells: Number(rows[0]?.cells ?? 0), clicks: Number(rows[0]?.clicks ?? 0) };
+}
+
 // ── read-time arithmetic, shared by the API and the verification scripts ──────
 
 /** Median seconds from a summed histogram, interpolated inside its bucket; null when empty. */

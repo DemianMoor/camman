@@ -6,17 +6,20 @@ import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { withCronLease } from "@/lib/cron/lease";
 import { checkHeartbeats, HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 import {
+  applyCohortClickRepairs,
   BASES,
   diffDripDailyRollup,
   DRIP_DAILY_ROLLUP_JOB,
   freshRange,
   refreshDripDailyRollup,
+  repairTotalsSince,
   type RefreshResult,
 } from "@/lib/reporting/drip-daily-rollup";
 import { runNightly } from "@/lib/reporting/drip-daily-rollup-nightly";
 
 // Refreshes drip_daily_rollup (migration 0208) — the ONLY writer besides the
-// one-off backfill. See lib/reporting/drip-daily-rollup.ts.
+// one-off backfill (and the only writer of drip_daily_rollup_repairs, 0238).
+// See lib/reporting/drip-daily-rollup.ts.
 //
 // Every run (every 15 min, :01/:16/:31/:46 — clear of the heavy :29 audience-pools
 // job):
@@ -26,6 +29,8 @@ import { runNightly } from "@/lib/reporting/drip-daily-rollup-nightly";
 //      as small units, only inside [05:00, 09:00) UTC, until the run's budget is
 //      spent. See lib/reporting/drip-daily-rollup-nightly.ts for why (2026-11-11:
 //      the old all-or-nothing pass looped all working day and slowed the app).
+//      A reconcile diff that is only late clicks on a cohort cell is written back
+//      and logged in drip_daily_rollup_repairs (0238); anything else alerts.
 //
 // Watched by /api/cron/drip-monitors; it watches its own nightly stamps.
 export const dynamic = "force-dynamic";
@@ -97,7 +102,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
               },
               { isolationLevel: "repeatable read" },
             )
-          ).diffs.length,
+          ).diffs,
+        // Late cohort clicks only (classified in runNightly); each cell guarded by its old value.
+        repair: (orgId, unitKey, repairs) =>
+          db.transaction(async (tx) => {
+            await tx.execute(sql`SET LOCAL statement_timeout = '60s'`);
+            return applyCohortClickRepairs(tx, orgId, unitKey, repairs);
+          }),
+        repairTotals: (orgId, since) => repairTotalsSince(db, orgId, since),
         notify: (alertKey, text) => notifyOnTransition(db, { alertKey, text }),
         clear: (alertKey) => clearAlert(db, { alertKey }),
       });

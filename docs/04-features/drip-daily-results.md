@@ -1,6 +1,6 @@
 # Drip — Daily results
 
-_Last updated: 2026-11-12 (reconcile range wording fixed to days 14–20; cohort-click drift source documented); 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-11-12 (late cohort clicks repaired by the reconcile, 0238 trail + nightly guard; start budget 90 s); 2026-11-12 (reconcile range wording fixed to days 14–20; cohort-click drift source documented); 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
@@ -64,7 +64,7 @@ caller must therefore pass a transaction.
 |---|---|---|---|
 | fresh | today + yesterday, both bases | every run | ~4.5 s warm, ~1M buffer hits, ~0 disk |
 | settle | days **2–13** back (with fresh = the last 14 ET days), in **3-day units** per basis (8 units) | nightly, units only inside **[05:00, 09:00) UTC** | cold receipts ~830 MB per 3 days (in the quiet slot on purpose) |
-| reconcile | the frozen days **14–20** back, in **2-day units** per basis (8 units): stored vs fresh, one REPEATABLE READ snapshot per unit | same window, after the settle units | latched alert `drip-daily-rollup-drift` on any diff |
+| reconcile | the frozen days **14–20** back, in **2-day units** per basis (8 units): stored vs fresh, one REPEATABLE READ snapshot per unit | same window, after the settle units | late cohort clicks repaired + logged (0238); any other diff → latched alert `drip-daily-rollup-drift` |
 
 **Nightly units (2026-11-11).** Until 2026-11-11 the settle and reconcile ran as ONE
 pass, stamped only if the whole pass succeeded. When drip volume grew it stopped
@@ -78,7 +78,8 @@ audience previews and stage creation. Now ([lib/reporting/drip-daily-rollup-nigh
   loses only its current unit.
 - `drip-daily-rollup-settle` / `-reconcile` are stamped **independently**, the
   moment that phase's last unit is done.
-- A run starts no new unit after **120 s** (`NIGHTLY_RUN_BUDGET_MS`), so a bigger
+- A run starts no new unit after **90 s** (`NIGHTLY_RUN_BUDGET_MS`; 120 s until
+  2026-11-12, when a run reached ~256 s of its 300 s limit), so a bigger
   night takes more runs, not longer ones. A unit over **90 s** logs
   `[drip-daily-rollup] nightly unit over budget`.
 - **Retry cap:** nothing heavy starts outside [05:00, 09:00) UTC, and a failed unit
@@ -97,8 +98,34 @@ audience previews and stage creation. Now ([lib/reporting/drip-daily-rollup-nigh
   total; exactly 39 clean clicks had arrived after those days' last settle (none
   re-scored). For cohorts routed 10-06..10-22, 2.7 % of clean clicks came ≥ 14 days
   after routing, 1.0 % ≥ 21 days, 0.16 % ≥ 30 days. The activity basis (dated by the
-  click) showed no drift. Handling is an open owner decision; until then the drift
-  alert stays latched on this.
+  click) showed no drift.
+- **Late cohort clicks are repaired, not alerted (owner ruling 2026-11-12, option B;
+  migration 0238).** A reconcile diff is written back ONLY when it is a cohort-basis
+  cell present on both sides whose every counter matches except `clicks`, and fresh
+  `clicks` is HIGHER than stored (`classifyCohortClickDiffs`). The write sets only
+  `clicks`, only if the cell still holds the old value (`applyCohortClickRepairs`;
+  otherwise the unit rolls back and retries), and records each repair in
+  `drip_daily_rollup_repairs` (cell key, `old_clicks`, `new_clicks`, `unit_key`,
+  `repaired_at`) plus a `[drip-daily-rollup] repaired late cohort clicks` log line.
+  Repairs are not drift: a night of only repairs clears `drip-daily-rollup-drift`.
+- **Still drift, never repaired:** any other counter (sends, delivered, conversions,
+  revenue, …), the activity basis, a missing or extra cell, and stored `clicks`
+  ABOVE fresh (`negative` in the run result — not a late click; re-scored or
+  removed clicks). These alert exactly as before.
+- **Nightly guard.** Per org, if tonight's repairs (from the trail) plus a unit's
+  would exceed **60 cells or +150 clicks** (`MAX_NIGHTLY_REPAIR_CELLS` /
+  `_CLICKS`), that unit and every later one that night are withheld and the latched
+  alert `drip-daily-rollup-repair-guard` fires; it clears on the next night the
+  guard does not trip (`drip-daily-rollup-reconcile:repair-guard` stamps the trip).
+  Basis: one night of late clicks on days 14–20 back was 1–19 cells / 4–36 clicks
+  (nights 10-20 … 11-12, prod); 11-12's reconcile, a week piled up (the size of the
+  first night after the change), was 22 / +39.
+- **Run result** (`nightly`): `repaired_cells`, `repaired_clicks` (this run),
+  `night_repaired_cells` (tonight so far, all runs), `repairs_withheld`,
+  `repair_guard_tripped`, `drift`, `negative`.
+- **Not covered:** a click more than 20 days after admission lands after the cell
+  leaves the reconcile window and is never counted (≈ 1 % of clean clicks for
+  cohorts 10-06..10-22).
 
 **Why 14 days.** Measured on prod drip data, things that can still move a past cell:
 - sends: ≤ 15 h after admission;

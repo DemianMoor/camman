@@ -6138,6 +6138,39 @@ export const drip_daily_rollup = pgTable(
 
 export type DripDailyRollup = typeof drip_daily_rollup.$inferSelect;
 
+// 0238: the trail of the nightly reconcile's cohort-click repairs. A cohort cell
+// counts every clean click on its sends' links with no time bound, so a click
+// arriving > 14 days after admission lands in an already-frozen cell; the
+// reconcile writes the fresh `clicks` back (only that counter, only upward) and
+// records the old/new value here. The cell key is copied, NOT foreign-keyed to
+// stage/partner key — an FK would make the trail block a stage or key delete.
+export const drip_daily_rollup_repairs = pgTable(
+  "drip_daily_rollup_repairs",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    org_id: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    campaign_id: integer("campaign_id")
+      .notNull()
+      .references(() => campaigns.id, { onDelete: "cascade" }),
+    basis: text("basis").$type<"cohort">().notNull(),
+    day_et: date("day_et").notNull(),
+    stage_id: integer("stage_id"),
+    partner_key_id: integer("partner_key_id"),
+    old_clicks: integer("old_clicks").notNull(),
+    new_clicks: integer("new_clicks").notNull(),
+    unit_key: text("unit_key").notNull(),
+    repaired_at: timestamp("repaired_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("drip_daily_rollup_repairs_org_at_idx").on(table.org_id, table.repaired_at),
+    index("drip_daily_rollup_repairs_campaign_idx").on(table.campaign_id),
+    check("drip_daily_rollup_repairs_basis_check", sql`basis = 'cohort'`),
+    check("drip_daily_rollup_repairs_upward", sql`new_clicks > old_clicks AND old_clicks >= 0`),
+  ],
+);
+
 // Per-drip-campaign number selection with a per-number ET-daily limit.
 //
 // ⚠️ The BRAND constraint is not duplicated here — which numbers may be picked

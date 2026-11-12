@@ -9,11 +9,12 @@ import { sql, type SQL } from "drizzle-orm";
 // selected via this group" rule could never reach drip.
 //
 // ⭐ SELECTION-TIME ONLY (owner ruling, 2026-10-20: "only block new sends").
-// Applied at the two audience choke points the landline hard stop already uses
-// — gateEligible() in lib/segment-rules-eval.ts and buildGroupMembershipClause()
-// in lib/audience-snapshot.ts — so snapshot, preview, draft counts, lanes and
-// the segment page all agree; and as the drip routing global rule `line_type`
-// (lib/drip/routing-eval.ts). NOT in lib/sends/eligibility.ts: queued sends,
+// Applied by gateEligible() in lib/segment-rules-eval.ts (segment pages and
+// every buildSegmentAudienceClause caller) and, for the campaign audience, ONCE
+// at the top of the combined segment/group source via excludeLineTypeBlocked
+// below (lib/audience-snapshot.ts) — so snapshot, preview, draft counts, lanes
+// and the segment page all agree; and as the drip routing global rule
+// `line_type` (lib/drip/routing-eval.ts). NOT in lib/sends/eligibility.ts: queued sends,
 // frozen pools and in-flight drip follow-ups still go out.
 //
 // Reads contacts.line_type, the copy of phone_lookups. That copy must be
@@ -36,16 +37,13 @@ import { sql, type SQL } from "drizzle-orm";
  * is skipped (measured 0.05 ms). messaging_status = 'eligible' is a LITERAL so
  * the partial index matches; landlines are never in an audience anyway.
  */
-export function lineTypeBlockedContactsSql(
-  orgId: string,
-  // Also emit lt_c.lifecycle_status, for callers whose left side of the EXCEPT
-  // carries it (the campaign preview's membership branches). Same rows; it
-  // never changes who is blocked. Optional only because the frozen
-  // lib/audience-preview-reference calls this and must not be edited.
-  withLifecycleStatus?: boolean,
-): SQL {
+export function lineTypeBlockedContactsSql(orgId: string): SQL {
+  // (#451 briefly gave this a withLifecycleStatus flag for the preview's inner
+  // EXCEPTs. Those EXCEPTs are gone — the campaign source applies the gate once
+  // via excludeLineTypeBlocked, whose NOT EXISTS passes extra columns through —
+  // so the set is contact_id only again.)
   return sql`
-    SELECT lt_c.id AS contact_id${withLifecycleStatus ? sql`, lt_c.lifecycle_status` : sql``}
+    SELECT lt_c.id AS contact_id
     FROM contacts lt_c
     WHERE lt_c.org_id = ${orgId}::uuid
       AND lt_c.messaging_status = 'eligible'
@@ -64,5 +62,29 @@ export function lineTypeBlockedContactsSql(
           AND ((lt_g.allow_voip = false AND lt_c.line_type = 'voip')
             OR (lt_g.allow_unknown = false AND lt_c.line_type = 'unknown')
             OR (lt_g.allow_toll_free = false AND lt_c.line_type = 'toll_free')))
+  `;
+}
+
+/**
+ * Drop line-type-blocked contacts from a relation that exposes `contact_id`
+ * (any other columns pass through). The CAMPAIGN-AUDIENCE form of the gate:
+ * applied ONCE at the top of the combined segment/group source — the same
+ * level as excludeCarrierRejected — by buildAudienceSourceSql,
+ * computeStageAudienceCountForDraft and buildPreviewMembership
+ * (lib/audience-snapshot.ts), whose inner clauses
+ * (buildSegmentAudienceClauseForCampaignSource, buildGroupMembershipClause)
+ * therefore omit it. Per-contact predicate ⇒ identical counts to subtracting it
+ * from every branch, at one pass instead of up to three.
+ *
+ * NOT EXISTS rather than EXCEPT so it works on the preview's tagged, multi-
+ * column UNION ALL relation, and the snapshot and preview share one shape.
+ */
+export function excludeLineTypeBlocked(relation: SQL, orgId: string): SQL {
+  return sql`
+    SELECT lt_rel.* FROM (${relation}) lt_rel
+    WHERE NOT EXISTS (
+      SELECT 1 FROM (${lineTypeBlockedContactsSql(orgId)}) lt_blk
+      WHERE lt_blk.contact_id = lt_rel.contact_id
+    )
   `;
 }

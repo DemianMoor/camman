@@ -718,11 +718,56 @@ export async function buildSegmentAudienceClause(
   segmentId: number,
   orgId: string,
   restrictUniverse?: SQL,
-  // Campaign audience preview only (buildPreviewMembership): also emit the
-  // contact's lifecycle_status, read off the eligibility join below, so the
-  // preview needn't re-probe contacts per candidate. Changes no row — only
-  // adds a column. Absent ⇒ the SQL is byte-identical to before.
-  withLifecycleStatus?: boolean,
+): Promise<SQL> {
+  return buildSegmentAudienceClauseImpl(segmentId, orgId, restrictUniverse, "inner", false);
+}
+
+// The CAMPAIGN-AUDIENCE variant: identical to buildSegmentAudienceClause except
+// that it does NOT subtract the group line-type gate (lineTypeBlockedContactsSql).
+// The caller MUST apply `excludeLineTypeBlocked` (lib/contact-groups/line-type-gate.ts)
+// ONCE at the top of the combined source relation instead. The landline hard
+// stop (messaging_status = 'eligible') is still applied here.
+//
+// Why: the gate is a pure per-contact predicate, so subtracting it from every
+// branch equals subtracting it once from their combination — (A−L)∪(B−L) =
+// (A∪B)−L, (U−L)−T = (U−T)−L — and the campaign source used to pay it up to
+// three times per statement (group universe, segment output, group branch).
+// Counts are identical; only the repeated passes go.
+//
+// A separate function rather than a parameter on buildSegmentAudienceClause so
+// no existing caller (segment pages, export, tests, the frozen reference in
+// lib/audience-preview-reference/) changes, and dropping the gate is always an
+// explicit, named choice — never a default.
+export async function buildSegmentAudienceClauseForCampaignSource(
+  segmentId: number,
+  orgId: string,
+  restrictUniverse: SQL | undefined,
+  // Also emit the contact's lifecycle_status, read off the eligibility join,
+  // so the preview needn't re-probe contacts per candidate (#451). Changes no
+  // row — only adds a column. Required (§11b spirit): every campaign builder
+  // states it — the preview membership passes its flag, the snapshot / draft
+  // sources pass false.
+  withLifecycleStatus: boolean,
+): Promise<SQL> {
+  return buildSegmentAudienceClauseImpl(
+    segmentId,
+    orgId,
+    restrictUniverse,
+    "caller_applies",
+    withLifecycleStatus,
+  );
+}
+
+async function buildSegmentAudienceClauseImpl(
+  segmentId: number,
+  orgId: string,
+  restrictUniverse: SQL | undefined,
+  // "inner": this clause subtracts the line-type gate itself.
+  // "caller_applies": the caller subtracts it once at the top (campaign source).
+  lineTypeGate: "inner" | "caller_applies",
+  // Only the campaign variant can ask for it, so the inner line-type EXCEPT
+  // (lineTypeGate = "inner") never needs a matching column.
+  withLifecycleStatus: boolean,
 ): Promise<SQL> {
   // One read to pull the segment's exclude_in_use_contacts flag alongside
   // its rules. The flag wraps the final audience clause in an EXCEPT
@@ -802,17 +847,24 @@ export async function buildSegmentAudienceClause(
   // line-type gate (migration 0218) is subtracted at the same point for the
   // same reason — see lib/contact-groups/line-type-gate.ts.
   // Wrapped in its own SELECT so the EXCEPT can never bind to a set operator a
-  // caller splices around this clause.
+  // caller splices around this clause. With lineTypeGate = "caller_applies"
+  // (campaign source) the EXCEPT is omitted — the caller applies it once at the
+  // top — and the eligible join is kept.
   function gateEligible(audience: SQL): SQL {
-    // withLifecycleStatus: the same rows with one more column on both sides of
-    // the EXCEPT. lifecycle_status is a function of the contact id, so the
-    // EXCEPT removes exactly the rows it removed before.
+    // withLifecycleStatus: the same rows with one more column (#451).
+    // lifecycle_status is a function of the contact id.
     const lsIn = withLifecycleStatus
       ? drizzleSql`, elig_c.lifecycle_status`
       : drizzleSql``;
     const lsOut = withLifecycleStatus
       ? drizzleSql`, elig_out.lifecycle_status`
       : drizzleSql``;
+    const lineTypeExcept =
+      lineTypeGate === "inner"
+        ? drizzleSql`
+        EXCEPT
+        ${lineTypeBlockedContactsSql(orgId)}`
+        : drizzleSql``;
     return drizzleSql`
       SELECT elig_out.contact_id${lsOut} FROM (
         SELECT elig_s.contact_id${lsIn}
@@ -820,9 +872,7 @@ export async function buildSegmentAudienceClause(
         INNER JOIN contacts elig_c
           ON elig_c.id = elig_s.contact_id
           AND elig_c.org_id = ${orgId}::uuid
-          AND elig_c.messaging_status = 'eligible'
-        EXCEPT
-        ${lineTypeBlockedContactsSql(orgId, withLifecycleStatus)}
+          AND elig_c.messaging_status = 'eligible'${lineTypeExcept}
       ) elig_out
     `;
   }

@@ -1,6 +1,6 @@
 # Drip — Daily results
 
-_Last updated: 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-11-12 (reconcile range wording fixed to days 14–20; cohort-click drift source documented); 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
@@ -64,7 +64,7 @@ caller must therefore pass a transaction.
 |---|---|---|---|
 | fresh | today + yesterday, both bases | every run | ~4.5 s warm, ~1M buffer hits, ~0 disk |
 | settle | days **2–13** back (with fresh = the last 14 ET days), in **3-day units** per basis (8 units) | nightly, units only inside **[05:00, 09:00) UTC** | cold receipts ~830 MB per 3 days (in the quiet slot on purpose) |
-| reconcile | the frozen days **15–21** back, in **2-day units** per basis (8 units): stored vs fresh, one REPEATABLE READ snapshot per unit | same window, after the settle units | latched alert `drip-daily-rollup-drift` on any diff |
+| reconcile | the frozen days **14–20** back, in **2-day units** per basis (8 units): stored vs fresh, one REPEATABLE READ snapshot per unit | same window, after the settle units | latched alert `drip-daily-rollup-drift` on any diff |
 
 **Nightly units (2026-11-11).** Until 2026-11-11 the settle and reconcile ran as ONE
 pass, stamped only if the whole pass succeeded. When drip volume grew it stopped
@@ -90,6 +90,15 @@ audience previews and stage creation. Now ([lib/reporting/drip-daily-rollup-nigh
   Each failed unit also logs `[drip-daily-rollup] nightly unit failed`.
 - The drift alert clears only after a reconcile night with no drift
   (`drip-daily-rollup-reconcile:drift-seen` stamps the night drift was found).
+- **Known drift source: cohort clicks (measured 2026-11-12).** The cohort basis counts
+  every clean click on a cohort send's link with no time bound, so a click arriving
+  more than 14 days after the lead was routed lands in an already-frozen cell. The
+  11-12 reconcile found 22 differing cells, all `clicks`, all cohort basis, +39 in
+  total; exactly 39 clean clicks had arrived after those days' last settle (none
+  re-scored). For cohorts routed 10-06..10-22, 2.7 % of clean clicks came ≥ 14 days
+  after routing, 1.0 % ≥ 21 days, 0.16 % ≥ 30 days. The activity basis (dated by the
+  click) showed no drift. Handling is an open owner decision; until then the drift
+  alert stays latched on this.
 
 **Why 14 days.** Measured on prod drip data, things that can still move a past cell:
 - sends: ≤ 15 h after admission;

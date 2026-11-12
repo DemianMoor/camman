@@ -66,7 +66,7 @@ export const FRESH_DAYS = 2;
  * slowness. The reconciliation is what notices if 14 ever stops being enough.
  */
 export const SETTLE_DAYS = 14;
-/** The reconciliation checks a 7-day window of FROZEN cells, days 15–21 ago. */
+/** The reconciliation checks a 7-day window of FROZEN cells, days 14–20 ago (today − 14 … today − 20, ET). */
 export const RECONCILE_WINDOW_DAYS = 7;
 /** Earliest UTC hour the nightly settle + reconciliation may start (~01:00 ET). */
 export const NIGHTLY_UTC_HOUR = 5;
@@ -545,7 +545,7 @@ export interface NightlyUnit {
 /**
  * Tonight's work, in run order: every settle unit, then every reconcile unit.
  * Settle = the 14-day window minus tier A (days 2–13 back); reconcile = the
- * frozen days 15–21 back. Keys name a chunk by its POSITION (0 = newest), so the
+ * frozen days 14–20 back. Keys name a chunk by its POSITION (0 = newest), so the
  * set of cron_locks rows is fixed and does not grow night over night. Pure.
  */
 export function nightlyUnits(now: Date): NightlyUnit[] {

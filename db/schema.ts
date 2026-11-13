@@ -4635,6 +4635,9 @@ export const lifecycle_settings = pgTable(
 
 export type LifecycleSettings = typeof lifecycle_settings.$inferSelect;
 
+// Autovacuum thresholds are per-table storage parameters (migration 0239:
+// vacuum / insert / analyze scale factor 0.02) — Drizzle cannot express them,
+// so they live only in the migration. Read pg_class.reloptions to confirm.
 export const contact_engagement = pgTable(
   "contact_engagement",
   {
@@ -4754,6 +4757,8 @@ export type ContactEngagementTransition =
 // have (it is UNIQUE per contact x offer and keeps only the FIRST exposure), and
 // the grain ClickUp 869f53efz's "Y days since / N times" rule needs. Maintained
 // by the engagement job, so the send path gains no work.
+// Autovacuum thresholds: per-table storage parameters set by migration 0239
+// (scale factors 0.02), not expressible in Drizzle.
 export const contact_offer_campaigns = pgTable(
   "contact_offer_campaigns",
   {

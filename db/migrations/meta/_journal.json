@@ -1625,6 +1625,13 @@
       "when": 1797120000000,
       "tag": "0236_delivery_alert_toggle",
       "breakpoints": true
+    },
+    {
+      "idx": 232,
+      "version": "7",
+      "when": 1797379200000,
+      "tag": "0239_autovacuum_offer_engagement",
+      "breakpoints": true
     }
   ]
 }

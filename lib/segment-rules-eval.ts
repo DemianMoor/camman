@@ -718,6 +718,11 @@ export async function buildSegmentAudienceClause(
   segmentId: number,
   orgId: string,
   restrictUniverse?: SQL,
+  // Campaign audience preview only (buildPreviewMembership): also emit the
+  // contact's lifecycle_status, read off the eligibility join below, so the
+  // preview needn't re-probe contacts per candidate. Changes no row — only
+  // adds a column. Absent ⇒ the SQL is byte-identical to before.
+  withLifecycleStatus?: boolean,
 ): Promise<SQL> {
   // One read to pull the segment's exclude_in_use_contacts flag alongside
   // its rules. The flag wraps the final audience clause in an EXCEPT
@@ -799,16 +804,25 @@ export async function buildSegmentAudienceClause(
   // Wrapped in its own SELECT so the EXCEPT can never bind to a set operator a
   // caller splices around this clause.
   function gateEligible(audience: SQL): SQL {
+    // withLifecycleStatus: the same rows with one more column on both sides of
+    // the EXCEPT. lifecycle_status is a function of the contact id, so the
+    // EXCEPT removes exactly the rows it removed before.
+    const lsIn = withLifecycleStatus
+      ? drizzleSql`, elig_c.lifecycle_status`
+      : drizzleSql``;
+    const lsOut = withLifecycleStatus
+      ? drizzleSql`, elig_out.lifecycle_status`
+      : drizzleSql``;
     return drizzleSql`
-      SELECT elig_out.contact_id FROM (
-        SELECT elig_s.contact_id
+      SELECT elig_out.contact_id${lsOut} FROM (
+        SELECT elig_s.contact_id${lsIn}
         FROM (${audience}) elig_s
         INNER JOIN contacts elig_c
           ON elig_c.id = elig_s.contact_id
           AND elig_c.org_id = ${orgId}::uuid
           AND elig_c.messaging_status = 'eligible'
         EXCEPT
-        ${lineTypeBlockedContactsSql(orgId)}
+        ${lineTypeBlockedContactsSql(orgId, withLifecycleStatus)}
       ) elig_out
     `;
   }

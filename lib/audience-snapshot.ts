@@ -108,8 +108,22 @@ function buildGroupMembershipClause(
   // status is one of these chips. Absent everywhere else, so every other
   // caller's SQL is byte-identical.
   chipStatuses?: string[],
+  // Preview membership branch only: also emit c.lifecycle_status (see
+  // buildSegmentAudienceClause's flag of the same name). Never for the
+  // restrictUniverse use, which must stay a bare `SELECT contact_id`.
+  withLifecycleStatus?: boolean,
 ): SQL | null {
   if (contactGroupIds.length === 0) return null;
+  const chipFilter = chipStatuses
+    ? drizzleSql`
+        AND c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chipStatuses))})`
+    : drizzleSql``;
+  const lsIn = withLifecycleStatus
+    ? drizzleSql`, c.lifecycle_status`
+    : drizzleSql``;
+  const lsOut = withLifecycleStatus
+    ? drizzleSql`, gm_out.lifecycle_status`
+    : drizzleSql``;
   // Landline hard stop (migration 0096): join contacts and keep only
   // messaging_status='eligible' (LITERAL, not a bind). This gates the group
   // dimension the same way buildSegmentAudienceClause gates the segment side, so
@@ -118,24 +132,19 @@ function buildGroupMembershipClause(
   // (migration 0218, lib/contact-groups/line-type-gate.ts) is subtracted here
   // for the same reason, wrapped so the EXCEPT stays local to this clause.
   return drizzleSql`
-    SELECT gm_out.contact_id FROM (
-      SELECT ccg.contact_id
+    SELECT gm_out.contact_id${lsOut} FROM (
+      SELECT ccg.contact_id${lsIn}
       FROM contact_contact_groups ccg
       INNER JOIN contacts c
         ON c.id = ccg.contact_id
         AND c.org_id = ${orgId}::uuid
-        AND c.messaging_status = 'eligible'${
-          chipStatuses
-            ? drizzleSql`
-        AND c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chipStatuses))})`
-            : drizzleSql``
-        }
+        AND c.messaging_status = 'eligible'${chipFilter}
       WHERE ccg.org_id = ${orgId}::uuid
         AND ccg.contact_group_id = ANY(${drizzleSql.raw(
           "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
         )})
       EXCEPT
-      ${lineTypeBlockedContactsSql(orgId)}
+      ${lineTypeBlockedContactsSql(orgId, withLifecycleStatus)}
     ) gm_out
   `;
 }
@@ -1554,6 +1563,13 @@ export type PreviewMembershipInput = Pick<
 
 async function buildPreviewMembership(
   input: PreviewMembershipInput,
+  // Every branch also carries a `lifecycle_status` column, read off the
+  // contacts join each branch already makes (group: `c`, segment / exclude:
+  // `elig_c`, both org-scoped). It is a property of the contact, so every row
+  // of one contact_id carries the same value and the caller can take min()
+  // through its GROUP BY instead of re-joining contacts per candidate.
+  // Required so each caller decides; false ⇒ byte-identical to before.
+  withLifecycleStatus: boolean,
   // Task 2 T3: narrow the membership to contacts whose lifecycle status is one
   // of these chips. Valid because EVERY chip-dependent preview number requires
   // the chip (is_eligible / qualifies / inCohort all carry it), so a contact
@@ -1608,20 +1624,33 @@ async function buildPreviewMembership(
   // (count(distinct …) ignores NULLs).
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) =>
-      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+      buildSegmentAudienceClause(
+        id,
+        orgId,
+        restrictUniverse,
+        withLifecycleStatus,
+      ),
     ),
   );
+  const lsCol = withLifecycleStatus
+    ? drizzleSql`, lifecycle_status`
+    : drizzleSql``;
+  // The group BRANCH carries the column; groupClause itself stays the bare
+  // contact_id set it must be as the restrictUniverse above.
+  const groupBranchClause = withLifecycleStatus
+    ? buildGroupMembershipClause(orgId, contactGroupIds, narrowToChips, true)
+    : groupClause;
   const segmentBranches = perSegmentClauses.map(
     (clause, i) => drizzleSql`
-      SELECT contact_id, ${i}::int AS segment_ord, false::boolean AS from_group, false::boolean AS from_exclude_segment
+      SELECT contact_id, ${i}::int AS segment_ord, false::boolean AS from_group, false::boolean AS from_exclude_segment${lsCol}
       FROM (${clause}) seg_inner
     `,
   );
-  const groupBranches = groupClause
+  const groupBranches = groupBranchClause
     ? [
         drizzleSql`
-          SELECT contact_id, null::int AS segment_ord, true::boolean AS from_group, false::boolean AS from_exclude_segment
-          FROM (${groupClause}) grp_inner
+          SELECT contact_id, null::int AS segment_ord, true::boolean AS from_group, false::boolean AS from_exclude_segment${lsCol}
+          FROM (${groupBranchClause}) grp_inner
         `,
       ]
     : [];
@@ -1634,12 +1663,13 @@ async function buildPreviewMembership(
         orgId,
         chipUniverse ??
           (contactGroupIds.length > 0 ? groupClause! : undefined),
+        withLifecycleStatus,
       ),
     ),
   );
   const excludeBranches = perExcludeClauses.map(
     (clause) => drizzleSql`
-      SELECT contact_id, null::int AS segment_ord, false::boolean AS from_group, true::boolean AS from_exclude_segment
+      SELECT contact_id, null::int AS segment_ord, false::boolean AS from_group, true::boolean AS from_exclude_segment${lsCol}
       FROM (${clause}) exc_inner
     `,
   );
@@ -2018,13 +2048,17 @@ export async function previewAudience(
     ? drizzleSql`, pc.carrier_norm`
     : drizzleSql``;
   const { unionedWithSources, fromSegmentExpr, positiveExpr } =
-    await buildPreviewMembership({
-      orgId,
-      segmentIds,
-      excludeSegmentIds,
-      contactGroupIds,
-      carrierRejectedSuppression: input.carrierRejectedSuppression,
-    });
+    await buildPreviewMembership(
+      {
+        orgId,
+        segmentIds,
+        excludeSegmentIds,
+        contactGroupIds,
+        carrierRejectedSuppression: input.carrierRejectedSuppression,
+      },
+      // Out of scope here: this statement reads lifecycle via lc_set.
+      false,
+    );
 
   // Drip posture (G2/R14). Read once per call; false means the emitted
   // in-use CTE is byte-identical to pre-Phase-4.
@@ -2157,8 +2191,10 @@ export async function previewAudienceBase(
   // made combinePreviewParts refuse the pair as "lifecycle vs legacy".
   if (!hasSource) return { excluded_for_optout: 0 };
   const { orgId } = input;
+  // Lifecycle campaigns read lifecycle_status for the histogram; carry it
+  // from the branches rather than re-joining contacts in `flagged`.
   const { unionedWithSources, fromSegmentExpr, positiveExpr } =
-    await buildPreviewMembership(input);
+    await buildPreviewMembership(input, lifecycleRules);
   // The SAME suppressed fragment the full preview (and the send path) uses.
   const suppressed = lifecycleRules
     ? lifecycleExclusionLayers({ orgId, offerId: null }).find(
@@ -2181,7 +2217,13 @@ export async function previewAudienceBase(
         contact_id,
         count(distinct segment_ord) as segments_matched,
         bool_or(from_group) as from_group,
-        bool_or(from_exclude_segment) as from_exclude_segment
+        bool_or(from_exclude_segment) as from_exclude_segment${
+          suppressed
+            ? drizzleSql`,
+        -- One value per contact (every branch read it off the same row).
+        min(lifecycle_status) as lifecycle_status`
+            : drizzleSql``
+        }
       from unionized
       group by contact_id
     ),
@@ -2201,15 +2243,14 @@ export async function previewAudienceBase(
           suppressed
             ? drizzleSql`,
         (lx_suppressed.contact_id is not null) as is_suppressed,
-        c.lifecycle_status`
+        s.lifecycle_status`
             : drizzleSql``
         }
       from sources s
       left join oo_set on oo_set.contact_id = s.contact_id${
         suppressed
           ? drizzleSql`
-      left join lx_suppressed on lx_suppressed.contact_id = s.contact_id
-      left join contacts c on c.id = s.contact_id and c.org_id = ${orgId}::uuid`
+      left join lx_suppressed on lx_suppressed.contact_id = s.contact_id`
           : drizzleSql``
       }
     ),
@@ -2420,7 +2461,7 @@ async function previewAudienceNarrowed(
     ? drizzleSql`carrier_norm = ANY(${drizzleSql.raw(carrierArrayLiteral(expandCarrierSelection(carrierFilter)))})`
     : drizzleSql`true`;
   const { unionedWithSources, fromSegmentExpr, positiveExpr } =
-    await buildPreviewMembership(input, chips);
+    await buildPreviewMembership(input, true, chips);
   const dripPostureOn = await isDripPostureOn(orgId);
 
   const rows = (await (runner ?? db).transaction(async (tx) => {
@@ -2435,21 +2476,28 @@ async function previewAudienceNarrowed(
         s.segments_matched,
         s.from_group,
         s.from_exclude_segment,
-        c.lifecycle_status${hasCarrierFilter ? drizzleSql`,
+        s.lifecycle_status${hasCarrierFilter ? drizzleSql`,
         c.carrier_norm` : drizzleSql``}
       from (
         select
           contact_id,
           count(distinct segment_ord) as segments_matched,
           bool_or(from_group) as from_group,
-          bool_or(from_exclude_segment) as from_exclude_segment
+          bool_or(from_exclude_segment) as from_exclude_segment,
+          -- One value per contact (every branch read it off the same
+          -- org-scoped contacts row), so no per-candidate re-join for it.
+          min(lifecycle_status) as lifecycle_status
         from (${unionedWithSources}) u
         group by contact_id
-      ) s
+      ) s${
+        hasCarrierFilter
+          ? drizzleSql`
       join contacts c
         on c.id = s.contact_id
-        and c.org_id = ${orgId}::uuid
-        and c.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chips))})
+        and c.org_id = ${orgId}::uuid`
+          : drizzleSql``
+      }
+      where s.lifecycle_status = ANY(${drizzleSql.raw(chipStatusArrayLiteral(chips))})
     `;
     // Task 3 §9 item 4 (measurement only): "cte" keeps the candidates in a
     // MATERIALIZED CTE instead of a temp table + ANALYZE, which is the form a

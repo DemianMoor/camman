@@ -172,7 +172,7 @@ export async function runNightly(deps: NightlyDeps): Promise<NightlyResult> {
       NIGHTLY_INCOMPLETE_ALERT,
       `⚠️ Drip Daily results rollup: the nightly pass did not finish by 09:00 UTC. ` +
         `Pending (${res.pending.length}): ${res.pending.slice(0, 6).join("; ")}${res.pending.length > 6 ? "; …" : ""}. ` +
-        `It will not retry until 05:00 UTC tomorrow; today and yesterday still refresh every 15 min. ` +
+        `It will not retry until 05:00 UTC tomorrow; today (every 15 min) and yesterday (hourly) still refresh. ` +
         `Vercel logs: [drip-daily-rollup] nightly unit.`,
     );
   }

@@ -294,7 +294,11 @@ async function computeInTx(
             SELECT 1 FROM stage_sends ss
             WHERE ss.org_id = ${orgId}::uuid
               AND ss.status = 'sent'
-              AND ss.sent_at >= now() - interval '1 millisecond' * ${SEND_DEDUP_WINDOW_MS}
+              -- statement_timestamp(), not now(): now() is frozen at the START of
+              -- this transaction, before the temp table was built. The old
+              -- un-transacted query's now() was its own statement start; this
+              -- keeps that anchor.
+              AND ss.sent_at >= statement_timestamp() - interval '1 millisecond' * ${SEND_DEDUP_WINDOW_MS}
               AND ss.phone = r.phone_number
           )
         )::int AS dedup

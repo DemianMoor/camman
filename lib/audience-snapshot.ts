@@ -2513,7 +2513,13 @@ async function previewAudienceNarrowed(
     return await tx.execute(drizzleSql`
     with ${asCte ? drizzleSql`pv_cand as materialized (${candidatesSelect}),
     ` : drizzleSql``}iu_set as (${inUseSetBody(orgId, dripPostureOn)}
-    )${
+    ),
+    -- A hash-joined set, not a correlated EXISTS: flagged/qualified/eligible
+    -- are each referenced once, so Postgres inlines them and an EXISTS here
+    -- was copied into every FILTER in previewAggregateTail that reads
+    -- has_opt_out (~15 SubPlans × every candidate). Same set as
+    -- previewAudienceBase / previewAudience.
+    oo_set as (select distinct contact_id from opt_outs where org_id = ${orgId}::uuid)${
       offerExposureId != null
         ? drizzleSql`,
     oe_set as (
@@ -2528,10 +2534,7 @@ async function previewAudienceNarrowed(
         ${fromSegmentExpr} as from_segment,
         s.from_group,
         s.from_exclude_segment,
-        exists (
-          select 1 from opt_outs oo
-          where oo.org_id = ${orgId}::uuid and oo.contact_id = s.contact_id
-        ) as has_opt_out,
+        (oo_set.contact_id is not null) as has_opt_out,
         false as has_opt_in,
         false as has_clicker,
         (iu_set.contact_id is not null) as is_in_use_elsewhere,
@@ -2545,6 +2548,7 @@ async function previewAudienceNarrowed(
         s.lifecycle_status
         ${lifecycleFlagCols(setLayers)}${offerStatsCols}
       from pv_cand s
+      left join oo_set on oo_set.contact_id = s.contact_id
       left join iu_set on iu_set.contact_id = s.contact_id${
         offerExposureId != null
           ? drizzleSql`

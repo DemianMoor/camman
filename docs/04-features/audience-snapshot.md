@@ -1,6 +1,6 @@
 # Feature — Audience Snapshot (freeze-at-activation)
 
-_Last updated: 2026-11-06_
+_Last updated: 2026-11-13_
 
 ## 1. Purpose
 A campaign's audience is **computed and frozen** the moment it transitions `draft → active`, into `campaign_audience_pool`. The whole point: adding a contact to a referenced segment later does **not** retroactively expand a live campaign's reach. Drafts carry only the *recipe* (segment ids, group ids, filters, cap); the *contacts* are materialized once.
@@ -135,6 +135,7 @@ Red-proved with `>=` → `>`. ⚠️ T3's F23 "offer rules" case runs on a fixtu
   - membership is built with the chips applied **first**: the group branch is filtered by `lifecycle_status`, and the `is_not` universe is the chip set;
   - the candidates go into a `pv_cand` temp table, which is ANALYZEd;
   - flags are built under today's `flagged` column names, and the SAME `previewAggregateTail` runs.
+  - `has_opt_out` is a `left join oo_set` (`select distinct contact_id from opt_outs where org_id = …`), the same hash-joined set the base and the full preview use — **not** a correlated `EXISTS`. `flagged` → `qualified` → `eligible` are each referenced once, so Postgres inlines them and an `EXISTS` there was copied into every `FILTER` in `previewAggregateTail` that reads `has_opt_out` / `qualifies` / `is_eligible`: measured on prod 2026-11-13 (campaign 2104, 292,572 candidates) as 15 SubPlans × 292,572 index probes ≈ 9–10 s of an 11–12.5 s statement. Same rows either way; the snapshot and send-path SQL are untouched.
 - **Skips (each provably empty over chip candidates):** `suppressed`; `freeze_not_due` unless Freeze is selected; opt-in/clicker flags (legacy-only).
 - **Why it's valid:** every chip-dependent number already requires the chip (`is_eligible`, `qualifies`, lifecycle `inCohort`).
 - **Bars F23–F26** (`test-lifecycle-preview-breakdown`):

@@ -1,6 +1,6 @@
 # Feature — Group × Lifecycle report
 
-_Last updated: 2026-10-23 (Hot and Warm separate columns; order New · Hot · Warm · Cold · Freeze · Suppressed · Total)_
+_Last updated: 2026-11-13 (hourly refresh on its own cron; single-pass compute in one transaction; "Refresh now" is a POST under the cron's lease); 2026-10-23 (Hot and Warm separate columns; order New · Hot · Warm · Cold · Freeze · Suppressed · Total)_
 
 A read-only report for **sizing a daily campaign**: how many contacts each
 contact group can still be messaged today, split by lifecycle status. It is its own tab — **Reports → Group × Lifecycle**
@@ -45,7 +45,8 @@ Status comes from `contacts.lifecycle_status`, the indexed projection.
 does not carry — the freeze cadence and `last_sent_at`.
 
 ⚠️ **This is a sizing estimate, not the send-time decision.** The freeze fact
-here comes from a rollup the engagement job refreshes every 15 minutes, while
+here comes from `contact_engagement`, which the engagement job refreshes every
+15 minutes (and this table itself is recomputed hourly), while
 the send path re-checks freeze against `stage_sends` live (§3f). A send can
 therefore drop contacts this table counted. Sizing tolerates that; a guarantee
 would not, and the page says so.
@@ -75,15 +76,86 @@ appears the day it is created.
 ### It is read from a stored table (migration 0193)
 
 ⚠️ **The page does not compute any of this.** It used to, and waited **8.4–25.9 s
-(median 10,957 ms)** across two requests. The engagement job already runs every
-15 minutes over the same tables, so it computes the whole thing there and writes
-~126 rows to `group_lifecycle_rollup`; the page reads those in **~50 ms**.
+(median 10,957 ms)** across two requests. Since 2026-11-13 an **hourly** cron —
+[`/api/cron/refresh-group-lifecycle`](../../app/api/cron/refresh-group-lifecycle/route.ts)
+at **:13**, three minutes after the :10 engagement tick — computes the whole
+thing and writes ~126 rows to `group_lifecycle_rollup`; the page reads those in
+**~50 ms**. (From 0193 until 2026-11-13 the 15-minute engagement job recomputed
+it after every recount; the owner moved it to hourly.)
 
 | | median |
 | --- | ---: |
 | before — computing on read, both requests | **10,957 ms** |
 | after — reading the stored table | **50 ms** |
-| one refresh (what the job does every 15 min) | 7,077 ms |
+| one refresh (2026-09-28 measurement; ~30–43 s per half by 2026-11-13) | 7,077 ms |
+
+### One pass, one transaction (2026-11-13)
+
+Until 2026-11-13 a refresh ran **two** statements in parallel — the group grid
+and the cluster/distinct rows — that each re-derived the same per-contact flags
+(in use / blocked / opted out) over ~1M contacts, ~30–43 s each on production,
+each with its own `now()` and in-use set. It then ran `DELETE` and `INSERT` as
+two separate autocommitted statements, so a reader between them saw an **empty
+table**, and two overlapping writers (the cron and the button, seen 2026-11-13
+10:10) could collide on the primary key.
+
+Now [`refreshGroupLifecycleRollup`](../../lib/reporting/group-lifecycle-store.ts)
+takes the caller's transaction and
+[`computeGroupLifecycle`](../../lib/reporting/group-lifecycle.ts) does, inside it:
+
+1. `CREATE TEMP TABLE gl_flags ON COMMIT DROP` — one row per sendable contact
+   with its status and `avail` flag, computed **once**;
+2. `ANALYZE gl_flags` — real row counts for the planner;
+3. one statement deriving the group grid, the cluster rows and the distinct
+   total from it;
+4. `DELETE` + `INSERT` of the org's rows — **in the same transaction**.
+
+Readers see the old rows or the new rows, never neither. Every statement gets
+`SET LOCAL statement_timeout` = what is left of the caller's budget (never a
+session `SET` — the pooler leaks those), so a slow run ends in a 57014 the route
+reports, not a Vercel 504. `computed_at` is the INSERT's `statement_timestamp()`
+— when the numbers landed.
+
+⭐ **The stored rows are identical to the two-pass ones.**
+[scripts/test-group-lifecycle.ts](../../scripts/test-group-lifecycle.ts) PART M
+diffs the frozen two-pass compute
+([scripts/_legacy-group-lifecycle.ts](../../scripts/_legacy-group-lifecycle.ts))
+against the single pass — and against the rows the refresh actually stores —
+row by row, inside ONE `REPEATABLE READ` snapshot (`now()` and the in-use set
+cannot move between them), for the fixture org and every preview org with
+memberships. Bar K7 pins that a reader on another connection sees the old rows
+while a refresh is uncommitted.
+
+### "Refresh now"
+
+`POST /api/reports/group-lifecycle/refresh` (`contacts.stats`, the same grant
+the button needed before). It takes the **same per-org lease as the hourly
+cron** (`cron_locks` row `group-lifecycle-rollup:<org_id>`), so a click and the
+cron never compute at once:
+
+| Response | When | The page |
+| --- | --- | --- |
+| `200 { outcome: "recomputed", …table }` | lease free, last run ≥ 2 min old | shows the new numbers + "just recomputed" |
+| `200 { outcome: "reused", …table }` | a run finished < 2 min ago | shows that run; nothing recomputed |
+| `202 { outcome: "in_progress", computed_at }` | the cron or another click holds the lease | starts nothing; polls the cheap `GET` every 4 s until `computed_at` moves past the returned value (ceiling 5 min), then shows that run |
+| `504 { code: "statement_timeout" }` / `500` | the compute hit its 100 s budget / failed | toast + inline error; stored rows untouched (one transaction) |
+
+Route `maxDuration = 120`; the compute's statement budget is 100 s and the
+lease 3 min (a killed function's SQL runs until its timeout). The client keeps
+the button's in-flight state separate from the page load, disables the button
+while it runs, shows "Recomputing… N s" / "A refresh is already running —
+waiting for it… N s" next to it, and drops a response whose rest window
+(`days`) changed meanwhile. A bare platform 504 (no JSON body) is spelled out
+rather than shown as "Unexpected response from server".
+
+For a rest window other than 3 days the button simply re-reads the `GET`,
+which computes that window live and never stores it.
+
+⚠️ **`GET` is read-only.** The old `?refresh=1` write path is gone: a `GET` that
+writes is one any prefetch, crawler or API token can trigger.
+
+⚠️ **API tokens can read (`GET`) but not `POST` the refresh — owner decision
+pending.** One commented line in `OPERATOR_ROUTE_MAP` flips it.
 
 **Clusters and the distinct total are stored too**, not derived on read. Both
 are DISTINCT unions across groups and cannot be recovered by summing the group
@@ -101,10 +173,12 @@ result would leave the next page load showing a number for a question nobody
 asked, under a timestamp that looked fresh. The page therefore recomputes when
 the operator changes N, and says so while it does.
 
-The header shows **"as of HH:MM"** for a stored figure, **"computed just now"**
-after a refresh, and **"not computed yet"** before the job has ever run — a
-stored number and a live one are otherwise indistinguishable, and the
-difference is up to 15 minutes of sends.
+The header **always shows when**: "as of Nov 13, 2026 11:32 AM ET · 40 s ago",
+plus "— just recomputed", "— a recompute had just finished, so it was reused" or
+"— from the run that was already in progress" after the button, "— computed for
+N days, not stored" for another window, and "not computed yet" before the job
+has ever run. A stored number and a live one are otherwise indistinguishable,
+and the difference is up to an hour of sends.
 
 ### Why it is stored rather than tuned
 
@@ -132,15 +206,17 @@ It is within noise of free.
 | | |
 | --- | --- |
 | Page | `app/(protected)/reports/group-lifecycle/page.tsx` → **Reports → Group × Lifecycle** |
-| API | `GET /api/reports/group-lifecycle?days=N&refresh=1` (`contacts.stats`) — stored by default; `refresh=1` or any N ≠ 3 recomputes |
-| Stored table | `group_lifecycle_rollup` (migration 0193), written by the engagement job every 15 min |
+| API | `GET /api/reports/group-lifecycle?days=N` (`contacts.stats`) — stored for N = 3, computed live (never stored) for any other N; read-only |
+| Refresh | `POST /api/reports/group-lifecycle/refresh` (`contacts.stats`) — [route](../../app/api/reports/group-lifecycle/refresh/route.ts) |
+| Cron | [`/api/cron/refresh-group-lifecycle`](../../app/api/cron/refresh-group-lifecycle/route.ts), `13 * * * *`; heartbeat `contact-engagement-group-rollup` (2.5 h) |
+| Stored table | `group_lifecycle_rollup` (migration 0193), written hourly by the cron and on demand by the button |
 | Store layer | [lib/reporting/group-lifecycle-store.ts](../../lib/reporting/group-lifecycle-store.ts) |
-| Route map | `reports/group-lifecycle`, `GET` (also token-readable) |
+| Route map | `reports/group-lifecycle`, `GET` (also token-readable); `reports/group-lifecycle/refresh`, `POST` (not token-usable — owner decision pending) |
 | Query | [lib/reporting/group-lifecycle.ts](../../lib/reporting/group-lifecycle.ts) |
 | Cluster config | [lib/reporting/group-clusters.ts](../../lib/reporting/group-clusters.ts) |
 | Client shapes | [lib/reporting/group-lifecycle-types.ts](../../lib/reporting/group-lifecycle-types.ts) — split out only because the query module is `server-only` and the table needs the status list at runtime |
 | Table | [components/reports/group-lifecycle-table.tsx](../../components/reports/group-lifecycle-table.tsx) |
-| Bars | [scripts/test-group-lifecycle.ts](../../scripts/test-group-lifecycle.ts) (13) |
+| Bars | [scripts/test-group-lifecycle.ts](../../scripts/test-group-lifecycle.ts) (G/H/J/K/L + M identity, O lease, N wiring); frozen reference [scripts/_legacy-group-lifecycle.ts](../../scripts/_legacy-group-lifecycle.ts) |
 | Measurement | [scripts/measure-group-lifecycle.ts](../../scripts/measure-group-lifecycle.ts), read-only |
 
 It began as a section inside Audience Stats, moved to its own tab on

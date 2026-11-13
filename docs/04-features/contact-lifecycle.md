@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-11-03 (Telegram alert when the send-time re-check fails open); 2026-10-27 (offer limit default 5 → 2 for new campaigns); 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
+_Last updated: 2026-11-13 (Group × Lifecycle rollup heartbeat: hourly route, 2.5 h tolerance); 2026-11-03 (Telegram alert when the send-time re-check fails open); 2026-10-27 (offer limit default 5 → 2 for new campaigns); 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -972,12 +972,13 @@ step has succeeded for every org:
 | Heartbeat | Step | Tolerance | Watched by |
 |---|---|---|---|
 | `contact-engagement` | any recount (every 15 min) | 45 min | hourly `/api/cron/tracking-monitors` |
-| `contact-engagement-group-rollup` | Group × Lifecycle table (0193), every tick | 45 min | hourly `/api/cron/tracking-monitors` |
+| `contact-engagement-group-rollup` | Group × Lifecycle table (0193) — its own hourly route `/api/cron/refresh-group-lifecycle` since 2026-11-13 | 2.5 h | hourly `/api/cron/tracking-monitors` |
 | `contact-engagement-full` | nightly full recount | 50 h | the 15-minute run |
 | `contact-engagement-day-rollup` | Lifecycle day rollup (0192), nightly | 50 h | the 15-minute run |
 
 The recount heartbeats are stamped **right after the recount commits, before
-either rollup**; each rollup then stamps its own. A rollup alert therefore says
+the day rollup**; each rollup stamps its own (the group rollup on its own hourly
+route since 2026-11-13). A rollup alert therefore says
 "Contact statuses are unaffected" and names the stale report, and a recount
 alert means the statuses the send path reads really are stale. Neither job
 vouches for itself ([lib/engagement/monitor.ts](../../lib/engagement/monitor.ts)).

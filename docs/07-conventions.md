@@ -1,6 +1,6 @@
 # 07 — Conventions, Business Rules & Gotchas
 
-_Last updated: 2026-11-12 (a large, churning table that an index-only scan depends on gets its own autovacuum scale factors — 0239); 2026-11-11 (a heavy nightly pass must be resumable units in a bounded window, never retried every tick); 2026-11-10 (drip: the stamped number sends, not the stage's); 2026-11-05 (every FK into contacts leads an index — 0235); 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
+_Last updated: 2026-11-13 (a stored report's refresh is one transaction, and its on-demand button shares the cron's lease); 2026-11-12 (a large, churning table that an index-only scan depends on gets its own autovacuum scale factors — 0239); 2026-11-11 (a heavy nightly pass must be resumable units in a bounded window, never retried every tick); 2026-11-10 (drip: the stamped number sends, not the stage's); 2026-11-05 (every FK into contacts leads an index — 0235); 2026-11-05 (partner postbacks: template-referenced passthrough fields are required; 0233: the `from=` marker identifies our own postbacks; global-pixel setting per offer); 2026-11-04 (0232: report-only registration flag, kept apart from the lane flag); 2026-11-04 (0231 *_v2 report matviews: refreshed INSTEAD of the old names, never both); 2026-11-04 (offer slices sum to the stage; "—" only for rows with no sends of their own); 2026-11-04 (conversion_events.offer_id is reporting-only); 2026-11-03 (reversal postbacks reuse the original tid — standard conversion model); 2026-11-03 (landing-page recipient data is fetched by sub_id1, never put in a URL — 0230); 2026-11-03 (per-recipient URL params are appended at redirect time, fail-open); 2026-10-31 (partner postbacks rules; ledger re-check at send time, enqueue-failure alert)_
 
 
 ## ⭐ A large, churning table that a hot read depends on gets its own autovacuum thresholds (2026-11-12)
@@ -5042,3 +5042,19 @@ ingest, not afterwards from the stored row.
 ### A heavy nightly pass must be resumable units in a bounded window — never retried on every tick (2026-11-11)
 
 A once-a-night job hosted inside a frequent cron (`nightlyDue` = "not yet stamped today") is a trap when its stamp needs the WHOLE pass to succeed: the day it outgrows one run, every tick re-attempts it at full weight. The drip Daily results settle + reconcile did exactly that — cut off at the Vercel/statement limit on every 15-min tick from 05:01 UTC, it ran ~1,200 s of disk-bound DB time per hour through the working day and slowed campaign audience previews and stage creation (2026-11-11). Rules: split the pass into units with per-unit progress (`cron_locks.last_run_started_at` = attempt, `watermark` = done); stamp each phase as soon as its own units are done; stop starting units once a per-run budget is spent; start heavy units only inside a closed window with a retry spacing (that pair IS the retry cap); alert when the window closes unfinished, re-armed nightly. Reference: [lib/reporting/drip-daily-rollup-nightly.ts](../lib/reporting/drip-daily-rollup-nightly.ts). When the app is slow, check `cron_locks` stamps of nightly jobs before tuning the slow query: on a disk-bound DB the victim is rarely the cause.
+
+### A stored report's refresh is one transaction, and its button shares the cron's lease (2026-11-13)
+
+A table a report reads instead of computing (`group_lifecycle_rollup`, and any
+like it) is replaced with `DELETE` + `INSERT` **in one transaction** with the
+compute — never as two autocommitted statements. Between two autocommits a
+reader sees an empty table, and two overlapping writers collide on the primary
+key; both happened to the Group × Lifecycle table (2026-11-13 10:10, the cron
+and the button). Its on-demand "Refresh now" is a **POST** (a GET that writes
+can be triggered by a prefetch or a token), takes **the cron's own lease**, and
+when the lease is held starts nothing — the client waits for that run's
+`computed_at` instead of queueing a duplicate. A run that finished moments ago
+is returned, not repeated. Every statement of the compute gets
+`SET LOCAL statement_timeout` = what is left of a budget below the route's
+`maxDuration`, so a slow run returns a JSON error rather than a bare 504. See
+[group-lifecycle-report.md](04-features/group-lifecycle-report.md).

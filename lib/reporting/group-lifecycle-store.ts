@@ -3,10 +3,12 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
+import { withCronLease } from "@/lib/cron/lease";
 import { GROUP_CLUSTERS } from "@/lib/reporting/group-clusters";
 import {
-  getGroupLifecycleBreakdown,
-  getGroupLifecycleRollups,
+  computeGroupLifecycle,
+  spendBudget,
+  type GroupLifecycleComputed,
 } from "@/lib/reporting/group-lifecycle";
 import {
   DEFAULT_RECENT_DAYS,
@@ -19,9 +21,11 @@ import {
 // ── THE STORED GROUP × LIFECYCLE TABLE (migration 0193) ─────────────────────
 //
 // The report used to compute everything on read: the page issued two requests
-// and waited 15-36s for them. The engagement job already runs every 15 minutes
-// over the same tables, so it computes the whole thing there and stores ~126
-// rows; the page reads those.
+// and waited 15-36s for them. Now an HOURLY cron
+// (/api/cron/refresh-group-lifecycle, :13) computes the whole thing and stores
+// ~126 rows; the page reads those. The "Refresh now" button recomputes on
+// demand through refreshGroupLifecycleOnDemand below, under the SAME lease as
+// the cron, so the two can never run at once.
 //
 // ⚠️ WHY THIS IS STORED RATHER THAN TUNED. The cost is the availability
 // computation over contact_engagement plus the rollups' DISTINCT across ~1.1M
@@ -43,10 +47,41 @@ export interface StoredGroupLifecycle {
   recent_days: number;
   /** null when the job has never run for this org — the page says so. */
   computed_at: string | null;
-  /** true when these numbers were computed for this request, not read. */
+  /** true when these numbers were computed for this request (any N ≠ 3), not read. */
   live: boolean;
   computed_ms: number;
 }
+
+/** POST /api/reports/group-lifecycle/refresh — what the button gets back. */
+export type GroupLifecycleRefreshResult =
+  /** recomputed now, or a run finished < REUSE_WINDOW_MS ago and was reused */
+  | ({ outcome: "recomputed" | "reused" } & StoredGroupLifecycle)
+  /**
+   * Another run (the hourly cron, or another click) holds the lease. Nothing
+   * was started; the client polls the cheap GET until computed_at moves past
+   * this value.
+   */
+  | { outcome: "in_progress"; computed_at: string | null };
+
+/**
+ * One lease per org, shared by the hourly cron and the button. A cron_locks
+ * ROW (lib/cron/keyed-lease.ts), never an advisory lock — those are unsafe
+ * through the transaction pooler.
+ */
+export const groupLifecycleLeaseKey = (orgId: string) =>
+  `group-lifecycle-rollup:${orgId}`;
+
+/** A run that finished this recently is returned as-is instead of recomputed. */
+export const REUSE_WINDOW_MS = 2 * 60 * 1000;
+
+// The button's route has maxDuration = 120. The compute's statement budget sits
+// well under it so a slow run ends in a 57014 the route turns into a clear JSON
+// error, not a Vercel 504; the lease outlives both because a killed function's
+// SQL keeps running until its statement_timeout.
+export const ON_DEMAND_BUDGET_MS = 100_000;
+const ON_DEMAND_LEASE_MS = 3 * 60 * 1000;
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const emptyPairs = (): Record<GroupLifecycleStatus, StatusPair> =>
   Object.fromEntries(
@@ -58,53 +93,118 @@ const totalOf = (b: Record<GroupLifecycleStatus, StatusPair>): StatusPair => ({
   available: GROUP_LIFECYCLE_STATUSES.reduce((a, s) => a + b[s].available, 0),
 });
 
-type DbOrTx = Pick<typeof db, "execute">;
+export interface RollupRow {
+  row_kind: "group" | "cluster" | "all";
+  row_key: string;
+  status: GroupLifecycleStatus;
+  sendable: number;
+  available: number;
+}
 
 /**
- * Recompute the whole table and store it. Called by the engagement job every
- * 15 minutes, and by the page's "Refresh now" button.
- *
- * ⚠️ DELETE-then-INSERT for the org, in one transaction. An upsert cannot
- * remove a row that should no longer exist — an archived contact group, or a
- * (group, status) pair that has emptied — and those would sit in the table
- * forever, reported as real.
+ * The rows the store holds for one computed table: every active group, every
+ * cluster and the distinct total, each with EVERY status (zeros included).
+ * Pure — the identity bars diff exactly this list.
  */
-export async function refreshGroupLifecycleRollup(
-  dbc: DbOrTx,
-  opts: { orgId: string; recentDays?: number },
-): Promise<{ rows: number; durationMs: number; recentDays: number }> {
-  const started = Date.now();
-  const recentDays = opts.recentDays ?? DEFAULT_RECENT_DAYS;
-  const org = sql`${opts.orgId}::uuid`;
-
-  const [table, rollups] = await Promise.all([
-    getGroupLifecycleBreakdown({ orgId: opts.orgId, recentDays }),
-    getGroupLifecycleRollups({ orgId: opts.orgId, recentDays }),
-  ]);
-
-  const values: ReturnType<typeof sql>[] = [];
-  const push = (kind: string, key: string, r: GroupLifecycleRow) => {
+export function rollupRowsOf(t: GroupLifecycleComputed): RollupRow[] {
+  const out: RollupRow[] = [];
+  const push = (kind: RollupRow["row_kind"], key: string, r: GroupLifecycleRow) => {
     for (const st of GROUP_LIFECYCLE_STATUSES) {
       const p = r.by_status[st];
-      values.push(
-        sql`(${org}, ${kind}, ${key}, ${st}, ${p.sendable}, ${p.available}, ${recentDays}, now())`,
-      );
+      out.push({ row_kind: kind, row_key: key, status: st, sendable: p.sendable, available: p.available });
     }
   };
-  for (const g of table.groups) push("group", String(g.group_id), g);
-  for (const c of rollups.clusters) push("cluster", c.key, c);
-  push("all", "__all__", rollups.distinct_total);
+  for (const g of t.groups) push("group", String(g.group_id), g);
+  for (const c of t.clusters) push("cluster", c.key, c);
+  push("all", "__all__", t.distinct_total);
+  return out;
+}
 
-  await dbc.execute(
-    sql`DELETE FROM group_lifecycle_rollup WHERE org_id = ${org}`,
-  );
-  if (values.length > 0) {
-    await dbc.execute(sql`
+/**
+ * Recompute the whole table and store it, INSIDE the caller's transaction:
+ * the flags temp table, the derivation, the DELETE and the INSERT all commit
+ * together. Readers therefore see the old rows or the new rows, never an empty
+ * table between the two — and two writers serialize on the DELETE's row locks
+ * instead of colliding on the primary key.
+ *
+ * ⚠️ DELETE-then-INSERT, not upsert. An upsert cannot remove a row that should
+ * no longer exist — an archived contact group, or a (group, status) pair that
+ * has emptied — and those would sit in the table forever, reported as real.
+ *
+ * Callers: the hourly cron and refreshGroupLifecycleOnDemand, both under
+ * groupLifecycleLeaseKey(orgId).
+ */
+export async function refreshGroupLifecycleRollup(
+  tx: Tx,
+  opts: { orgId: string; deadline: number },
+): Promise<{ rows: number; durationMs: number }> {
+  const started = Date.now();
+  const org = sql`${opts.orgId}::uuid`;
+  const recentDays = DEFAULT_RECENT_DAYS;
+
+  const table = await computeGroupLifecycle(tx, {
+    orgId: opts.orgId,
+    recentDays,
+    deadline: opts.deadline,
+  });
+  const rows = rollupRowsOf(table);
+
+  await spendBudget(tx, opts.deadline);
+  await tx.execute(sql`DELETE FROM group_lifecycle_rollup WHERE org_id = ${org}`);
+  if (rows.length > 0) {
+    // statement_timestamp(), not now(): computed_at says when the numbers
+    // LANDED (as it did before, when the INSERT autocommitted after the
+    // compute), and it is one value for every row of the statement.
+    await tx.execute(sql`
       INSERT INTO group_lifecycle_rollup
         (org_id, row_kind, row_key, status, sendable, available, recent_days, computed_at)
-      VALUES ${sql.join(values, sql`, `)}`);
+      VALUES ${sql.join(
+        rows.map(
+          (r) =>
+            sql`(${org}, ${r.row_kind}, ${r.row_key}, ${r.status}, ${r.sendable}, ${r.available}, ${recentDays}, statement_timestamp())`,
+        ),
+        sql`, `,
+      )}`);
   }
-  return { rows: values.length, durationMs: Date.now() - started, recentDays };
+  return { rows: rows.length, durationMs: Date.now() - started };
+}
+
+/**
+ * The button. Never two recomputes at once, never a recompute that would
+ * repeat one that just finished:
+ *
+ *   - a run finished < REUSE_WINDOW_MS ago  → return it ("reused")
+ *   - the lease is held (cron or a click)   → start nothing ("in_progress");
+ *                                             the client waits for that run
+ *   - otherwise                             → recompute + store ("recomputed")
+ */
+export async function refreshGroupLifecycleOnDemand(opts: {
+  orgId: string;
+}): Promise<GroupLifecycleRefreshResult> {
+  const before = await readStoredGroupLifecycle({ orgId: opts.orgId });
+  if (
+    before.computed_at &&
+    Date.now() - new Date(before.computed_at).getTime() < REUSE_WINDOW_MS
+  ) {
+    return { outcome: "reused", ...before };
+  }
+
+  const started = Date.now();
+  const run = await withCronLease(
+    groupLifecycleLeaseKey(opts.orgId),
+    () =>
+      db.transaction((tx) =>
+        refreshGroupLifecycleRollup(tx, {
+          orgId: opts.orgId,
+          deadline: started + ON_DEMAND_BUDGET_MS,
+        }),
+      ),
+    ON_DEMAND_LEASE_MS,
+  );
+  if (!run.ran) return { outcome: "in_progress", computed_at: before.computed_at };
+
+  const after = await readStoredGroupLifecycle({ orgId: opts.orgId });
+  return { outcome: "recomputed", ...after, computed_ms: Date.now() - started };
 }
 
 /**
@@ -150,7 +250,7 @@ export async function readStoredGroupLifecycle(opts: {
   };
 }
 
-/** Shared shaping, so the stored and live paths return the same object. */
+/** Shapes stored rows into the same object the live path returns. */
 function shapeRows(
   stored: {
     row_kind: string;
@@ -218,43 +318,30 @@ function shapeRows(
 }
 
 /**
- * Compute now and return it, storing the result only when it answers the
- * question the store is for (N = 3). "Refresh now" and any other N both land
- * here; the difference is whether it is worth keeping.
+ * Any N other than the stored 3: computed for this request and NEVER written.
+ * The store answers for N = 3; writing an N = 7 result into it would leave the
+ * next page load showing a number for a question nobody asked, with a
+ * timestamp that looked fresh. Its own transaction only because the compute's
+ * temp table needs one; it commits nothing persistent.
  */
-export async function computeGroupLifecycleNow(opts: {
+export async function computeGroupLifecycleLive(opts: {
   orgId: string;
   recentDays: number;
+  budgetMs: number;
 }): Promise<StoredGroupLifecycle> {
   const started = Date.now();
-  const storeIt = opts.recentDays === DEFAULT_RECENT_DAYS;
-
-  if (storeIt) {
-    await refreshGroupLifecycleRollup(db, opts);
-    const read = await readStoredGroupLifecycle({ orgId: opts.orgId });
-    return { ...read, live: true, computed_ms: Date.now() - started };
-  }
-
-  // ⚠️ NOT WRITTEN. The store answers for N = 3; writing an N = 7 result into
-  // it would leave the next page load showing a number for a question nobody
-  // asked, with a timestamp that looked fresh.
-  const [table, rollups, meta] = await Promise.all([
-    getGroupLifecycleBreakdown({ orgId: opts.orgId, recentDays: opts.recentDays }),
-    getGroupLifecycleRollups({ orgId: opts.orgId, recentDays: opts.recentDays }),
-    db.execute(sql`
-      SELECT id::text AS id, contact_group_id AS code, name
-      FROM contact_groups
-      WHERE org_id = ${opts.orgId}::uuid AND archived_at IS NULL
-      ORDER BY name`) as unknown as Promise<
-      { id: string; code: string; name: string }[]
-    >,
-  ]);
-  void meta;
+  const t = await db.transaction((tx) =>
+    computeGroupLifecycle(tx, {
+      orgId: opts.orgId,
+      recentDays: opts.recentDays,
+      deadline: started + opts.budgetMs,
+    }),
+  );
   return {
-    groups: table.groups,
-    clusters: rollups.clusters,
-    distinct_total: rollups.distinct_total,
-    recent_days: opts.recentDays,
+    groups: t.groups,
+    clusters: t.clusters,
+    distinct_total: t.distinct_total,
+    recent_days: t.recent_days,
     computed_at: new Date().toISOString(),
     live: true,
     computed_ms: Date.now() - started,

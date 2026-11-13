@@ -15,6 +15,7 @@ export const ENGAGEMENT_GROUP_ROLLUP_STALE_ALERT = "contact-engagement-group-rol
 export const ENGAGEMENT_DAY_ROLLUP_STALE_ALERT = "contact-engagement-day-rollup-stale";
 
 const ROUTE_HINT = "Check /api/cron/refresh-contact-engagement in Vercel.";
+const GROUP_ROLLUP_ROUTE_HINT = "Check /api/cron/refresh-group-lifecycle in Vercel.";
 const STATUS_IMPACT =
   "Freeze cadence, suppression and the lifecycle chips read statuses this job " +
   "maintains, and they go stale while it is down.";
@@ -25,8 +26,8 @@ const ROLLUP_IMPACT = "Contact statuses are unaffected (the recount has its own 
 
 type Step = { expectation: HeartbeatExpectation; alertKey: string; text: (breach: string) => string };
 
-// Each watcher checks a recount and the rollup that runs after it in the same
-// route. The recount comes FIRST: its status is what the function returns.
+// Each watcher checks a recount and the rollup that reads its statuses (the
+// group rollup runs on its own hourly route since 2026-11-13). The recount comes FIRST: its status is what the function returns.
 const STEPS: Record<"incremental" | "full", Step[]> = {
   incremental: [
     {
@@ -38,7 +39,7 @@ const STEPS: Record<"incremental" | "full", Step[]> = {
       expectation: HEARTBEAT_JOBS.contactEngagementGroupRollup,
       alertKey: ENGAGEMENT_GROUP_ROLLUP_STALE_ALERT,
       text: (b) =>
-        `⚠️ Contact lifecycle: ${b} ${ROLLUP_IMPACT} the Group × Lifecycle report shows old numbers until it runs. ${ROUTE_HINT}`,
+        `⚠️ Contact lifecycle: ${b} ${ROLLUP_IMPACT} the Group × Lifecycle report shows old numbers until it runs. ${GROUP_ROLLUP_ROUTE_HINT}`,
     },
   ],
   full: [

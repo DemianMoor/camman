@@ -6,7 +6,6 @@ import { withCronLease } from "@/lib/cron/lease";
 import {
   ENGAGEMENT_DAY_ROLLUP_JOB,
   ENGAGEMENT_FULL_JOB,
-  ENGAGEMENT_GROUP_ROLLUP_JOB,
   ENGAGEMENT_JOB,
   ENGAGEMENT_LEASE,
   ENGAGEMENT_REEVAL_JOB,
@@ -22,15 +21,12 @@ import {
 } from "@/lib/engagement/refresh";
 import { orgsWithEngineOn } from "@/lib/engagement/settings";
 import { recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
-import { refreshGroupLifecycleRollup } from "@/lib/reporting/group-lifecycle-store";
 import { refreshLifecycleDayRollup } from "@/lib/reporting/lifecycle-rollup";
 
 // Maintains contact_engagement (migration 0187) — see lib/engagement/refresh.ts.
 //
 //   every 15 min at :10/:25/:40/:55   incremental (after propagate-clickers at :08/:23/…,
 //                                     so a click scored this tick is already human)
-//                                     + the Group x Lifecycle table (0193), which
-//                                     the report reads instead of computing it
 //   ?mode=full at 06:35 UTC           full recount (02:35 ET, outside the send windows)
 //                                     + the Lifecycle day rollup (migration 0192),
 //                                     a 14-day rolling recompute so late clicks,
@@ -45,10 +41,13 @@ import { refreshLifecycleDayRollup } from "@/lib/reporting/lifecycle-rollup";
 // touched set would be slower than recounting the org, and a long outage is
 // exactly when drift is likeliest.
 //
-// Three steps, three heartbeats, each stamped the moment its step succeeded
+// The Group x Lifecycle table (0193) is NOT refreshed here any more: since
+// 2026-11-13 it has its own hourly route, /api/cron/refresh-group-lifecycle.
+//
+// Two steps, each with its own heartbeat, stamped the moment its step succeeded
 // for EVERY org (a failing org ages that step's heartbeat and the watcher names
-// it): the recount (contact-engagement / -full / -reeval), then the Group x
-// Lifecycle rollup, then — nightly — the Lifecycle day rollup. Until 2026-10-21
+// it): the recount (contact-engagement / -full / -reeval), then — nightly — the
+// Lifecycle day rollup. Until 2026-10-21
 // the recount heartbeats were stamped after BOTH rollups, so the nightly run
 // killed at the old 300 s limit inside the day rollup (Oct 20 + 21) reported
 // the recount — which had committed — as 50 h stale. Status is never computed
@@ -136,7 +135,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         }
       }
 
-      // Stamp the recount heartbeats NOW, before either rollup: the statuses the
+      // Stamp the recount heartbeats NOW, before the day rollup: the statuses the
       // send path reads are committed, and a rollup that fails or runs the
       // function out of time must not make them look stale.
       const ok = results.every((r) => !r.error);
@@ -147,30 +146,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         if (evaluateAll || mode === "full") await recordHeartbeat(db, ENGAGEMENT_REEVAL_JOB);
       }
 
-      // Rollups run only for orgs whose recount committed, and each stamps its
-      // own heartbeat only when it succeeded for every org — so an org whose
-      // recount failed withholds the rollup heartbeats too.
+      // The day rollup runs only for orgs whose recount committed, and stamps
+      // its own heartbeat only when it succeeded for every org — so an org whose
+      // recount failed withholds the rollup heartbeat too.
       const recounted = results.filter((r) => !r.error).map((r) => r.org_id);
-      let groupOk = ok;
       let dayOk = ok && mode === "full";
       for (const org_id of recounted) {
-        // The Group x Lifecycle table (migration 0193), EVERY tick. It is what
-        // the report reads instead of computing 15-36s of joins on page load,
-        // so it has to keep pace with the 15-minute job rather than the nightly
-        // one. Outside the refresh transaction: a reporting query must never be
-        // able to roll back contact_engagement, which the send path reads.
-        try {
-          const gl = await refreshGroupLifecycleRollup(db, { orgId: org_id });
-          console.info("[contact-engagement] group lifecycle rollup", gl);
-        } catch (err) {
-          groupOk = false;
-          console.error("[contact-engagement] group lifecycle rollup failed", {
-            org_id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-        // ⚠️ NIGHTLY ONLY, and OUTSIDE the refresh transaction, for the same
-        // reason. A failure withholds only this rollup's own heartbeat.
+        // ⚠️ NIGHTLY ONLY, and OUTSIDE the refresh transaction: a reporting
+        // query must never be able to roll back contact_engagement, which the
+        // send path reads. A failure withholds only this rollup's own heartbeat.
         if (mode === "full") {
           try {
             const roll = await refreshLifecycleDayRollup(db, { orgId: org_id });
@@ -184,11 +168,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           }
         }
       }
-      if (groupOk) await recordHeartbeat(db, ENGAGEMENT_GROUP_ROLLUP_JOB);
       if (dayOk) await recordHeartbeat(db, ENGAGEMENT_DAY_ROLLUP_JOB);
       // Watch the nightly recount from the frequent job, never from itself.
       if (mode === "incremental") await watchEngagementHeartbeat(db, "full");
-      return { ok, engine: "on" as const, mode, evaluateAll, groupRollupOk: groupOk, dayRollupOk: dayOk, results };
+      return { ok, engine: "on" as const, mode, evaluateAll, dayRollupOk: dayOk, results };
     },
     LEASE_MS,
   );

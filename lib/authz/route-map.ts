@@ -237,6 +237,7 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   "cron/partner-postbacks": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/propagate-clickers": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-contact-engagement": null, // cron / webhook / import machinery -- no operator session reaches these
+  "cron/refresh-group-lifecycle": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-audience-pools": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-creative-lifetime": null, // cron / webhook / import machinery -- no operator session reaches these
   "cron/refresh-fresh-counts": null, // cron / webhook / import machinery -- no operator session reaches these
@@ -393,6 +394,11 @@ export const OPERATOR_ROUTE_MAP: Record<string, OperatorAccess> = {
   // Lifecycle cohort report (PR 5). GET only, like its siblings.
   "reports/lifecycle": { methods: ["GET"], token: ["GET"] },
   "reports/group-lifecycle": { methods: ["GET"], token: ["GET"] },
+  // "Refresh now" (2026-11-13): recomputes + stores the table under the hourly
+  // cron's lease. Operators may press it (they could before, via the GET).
+  // ⚠️ API TOKENS: OWNER DECISION PENDING. Not granted to tokens for now —
+  // to grant it, change the line below to { methods: ["POST"], token: ["POST"] }.
+  "reports/group-lifecycle/refresh": { methods: ["POST"] },
   // Landing Page Results (/reports/landing-pages, 1amdve282rw): per-page results
   // for one offer. GET only (the file exports no writer). Shipped unclassified in
   // #390, which 403'd the operator from a nav item it can see. No `token`: API

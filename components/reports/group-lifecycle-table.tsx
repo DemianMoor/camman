@@ -1,23 +1,130 @@
 "use client";
 
-import { Download, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Download, Loader2, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatCampaignDateTime } from "@/lib/campaign-timezone";
-import { useApiCall } from "@/lib/hooks/use-api-call";
+import { useApiCall, type ApiResult } from "@/lib/hooks/use-api-call";
 import {
+  DEFAULT_RECENT_DAYS,
   GROUP_LIFECYCLE_COLUMNS,
   columnPair,
   type GroupLifecycleRow,
 } from "@/lib/reporting/group-lifecycle-types";
-import type { StoredGroupLifecycle } from "@/lib/reporting/group-lifecycle-store";
+import type {
+  GroupLifecycleRefreshResult,
+  StoredGroupLifecycle,
+} from "@/lib/reporting/group-lifecycle-store";
 import { cn } from "@/lib/utils";
 
 const n = (v: number) => v.toLocaleString();
+
+// While another run holds the lease, poll the cheap stored read this often…
+const POLL_MS = 4_000;
+// …for at most this long. The hourly cron's per-org budget is 240 s.
+const WAIT_CEILING_MS = 5 * 60 * 1000;
+
+type Outcome = "recomputed" | "reused" | "waited";
+type Phase = { phase: "idle" } | { phase: "running" | "waiting"; startedAt: number };
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function ago(fromMs: number, nowMs: number): string {
+  const s = Math.max(0, Math.round((nowMs - fromMs) / 1000));
+  if (s < 60) return `${s} s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  return `${Math.round(m / 60)} h ago`;
+}
+
+/** A failed call as one sentence the operator can act on. */
+function failureMessage(res: Extract<ApiResult<unknown>, { ok: false }>): string {
+  // A bare platform 504 has no JSON body, so useApiCall can only say
+  // "Unexpected response from server". Our own timeout carries a code.
+  if (res.status === 504 && res.code !== "statement_timeout") {
+    return "The server timed out before the recompute answered (HTTP 504). If it was still running, the stored numbers will update when it finishes — reload in a minute.";
+  }
+  return res.error;
+}
+
+// Owns its own clock, so the once-a-second tick re-renders this line and not
+// the whole table.
+function RefreshStatus({
+  data,
+  outcome,
+  phase,
+  loading,
+  days,
+}: {
+  data: StoredGroupLifecycle | null;
+  outcome: Outcome | null;
+  phase: Phase;
+  loading: boolean;
+  days: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (phase.phase !== "idle") {
+    const elapsed = Math.round((now - phase.startedAt) / 1000);
+    return (
+      <span
+        className="flex items-center gap-1.5 text-xs font-medium text-foreground"
+        role="status"
+      >
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        {phase.phase === "running"
+          ? `Recomputing… ${elapsed} s`
+          : `A refresh is already running — waiting for it… ${elapsed} s`}
+      </span>
+    );
+  }
+  if (loading) {
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground" role="status">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        {days === DEFAULT_RECENT_DAYS
+          ? "Loading…"
+          : `Computing the ${days}-day figure — the slow path, it is not stored…`}
+      </span>
+    );
+  }
+  if (!data) return null;
+  // ⚠️ Always says WHEN. A stored figure and a just-computed one look
+  // identical otherwise, and the difference is up to an hour of sends.
+  if (!data.computed_at) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        not computed yet — press Refresh now
+      </span>
+    );
+  }
+  const at = new Date(data.computed_at).getTime();
+  const tag =
+    outcome === "recomputed"
+      ? "just recomputed"
+      : outcome === "reused"
+        ? "a recompute had just finished, so it was reused"
+        : outcome === "waited"
+          ? "from the run that was already in progress"
+          : data.live
+            ? `computed for ${days} days, not stored`
+            : null;
+  return (
+    <span className="text-xs text-muted-foreground" title={data.computed_at}>
+      as of {formatCampaignDateTime(data.computed_at)} · {ago(at, now)}
+      {tag ? ` — ${tag}` : ""}
+    </span>
+  );
+}
 
 // Hoisted to module scope: a component declared inside the render body is a
 // new type on every render, so React unmounts and remounts the whole table.
@@ -62,11 +169,12 @@ function Row({ r, indent }: { r: GroupLifecycleRow; indent?: boolean }) {
 /**
  * Contact group × lifecycle, for sizing a daily campaign.
  *
- * ⚠️ TWO REQUESTS, DELIBERATELY. The per-group grid is inside the 2s bar
- * (median 1,812ms on production); the cluster unions and the distinct footer
- * need DISTINCT contacts across ~1.1M membership rows and cost ~6.3s. Loading
- * them together would put the whole screen behind the slower half, so the grid
- * renders first and the rollups fill in beneath it.
+ * The page load reads the STORED table (~126 rows, written hourly by
+ * /api/cron/refresh-group-lifecycle). "Refresh now" POSTs to
+ * /api/reports/group-lifecycle/refresh, which shares the cron's lease: it
+ * recomputes, reuses a run that finished < 2 min ago, or — when a run is
+ * already going — starts nothing and this component polls the stored read
+ * until that run's computed_at lands.
  */
 export function GroupLifecycleTable({
   onlyGroupId = null,
@@ -74,47 +182,142 @@ export function GroupLifecycleTable({
   /** Contact-group detail page: show just this group's row, no rollups. */
   onlyGroupId?: number | null;
 }) {
-  const [days, setDays] = useState(3);
+  const [days, setDays] = useState(DEFAULT_RECENT_DAYS);
   const [data, setData] = useState<StoredGroupLifecycle | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const api = useApiCall<StoredGroupLifecycle>();
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<Phase>({ phase: "idle" });
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+  // Separate instances, so the button's in-flight state is not the page load's
+  // (useApiCall's isLoading is per instance).
+  // Destructured: the effect below depends on the stable execute, never on the
+  // hook's return object (a fresh reference every render).
+  const { execute: loadExecute, isLoading: loading } =
+    useApiCall<StoredGroupLifecycle>();
+  const post = useApiCall<GroupLifecycleRefreshResult>();
+  const poll = useApiCall<StoredGroupLifecycle>();
 
-  // ⚠️ ONE REQUEST NOW, and it reads a STORED table. The page used to issue two
-  // that computed everything, and waited 15-36s for them. The engagement job
-  // writes the table every 15 minutes; this reads ~126 rows.
-  //
-  // Changing N is NOT the stored question (the store answers for N = 3), so it
-  // recomputes — which is slow on purpose and visible as such.
+  // The CURRENT window, read by async work that started under an older one:
+  // a response for a window the operator has since changed is dropped.
+  const daysRef = useRef(days);
+  const alive = useRef(true);
   useEffect(() => {
+    daysRef.current = days;
+  }, [days]);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  // ⚠️ The default load READS the stored table. Changing N is NOT the stored
+  // question (the store answers for N = 3), so it recomputes — slow on purpose
+  // and visible as such.
+  useEffect(() => {
+    let stale = false;
     void (async () => {
-      const res = await api.execute(
+      const res = await loadExecute(
         `/api/reports/group-lifecycle?days=${days}`,
       );
+      if (stale) return;
       if (res.ok) {
         setData(res.data);
-        setError(null);
+        setLoadError(null);
       } else {
         setData(null);
-        setError(res.error);
+        setLoadError(failureMessage(res));
       }
     })();
-  }, [api.execute, days]);
+    return () => {
+      stale = true;
+    };
+  }, [loadExecute, days]);
+
+  /** Poll the stored read until computed_at moves past `prev`. */
+  const waitForRun = async (
+    prev: string | null,
+  ): Promise<
+    | { kind: "done"; data: StoredGroupLifecycle }
+    | { kind: "error"; message: string }
+    | { kind: "timeout" }
+    | { kind: "cancelled" }
+  > => {
+    const until = Date.now() + WAIT_CEILING_MS;
+    while (Date.now() < until) {
+      await sleep(POLL_MS);
+      if (!alive.current || daysRef.current !== DEFAULT_RECENT_DAYS) {
+        return { kind: "cancelled" };
+      }
+      const r = await poll.execute(
+        `/api/reports/group-lifecycle?days=${DEFAULT_RECENT_DAYS}`,
+      );
+      if (!r.ok) return { kind: "error", message: failureMessage(r) };
+      if (r.data.computed_at && r.data.computed_at !== prev) {
+        return { kind: "done", data: r.data };
+      }
+    }
+    return { kind: "timeout" };
+  };
 
   const refresh = async () => {
-    setRefreshing(true);
+    if (phase.phase !== "idle") return; // never two at once from this tab
+    const forDays = days;
+    const startedAt = Date.now();
+    const current = () => alive.current && daysRef.current === forDays;
+    const fail = (message: string) => {
+      setRefreshError(message);
+      toast.error(message);
+    };
+    setRefreshError(null);
+    setPhase({ phase: "running", startedAt });
     try {
-      const res = await api.execute(
-        `/api/reports/group-lifecycle?days=${days}&refresh=1`,
-      );
-      if (res.ok) {
+      // Only N = 3 is stored. Any other window is recomputed by the read route
+      // and never written, so "refresh" there is simply reading it again.
+      if (forDays !== DEFAULT_RECENT_DAYS) {
+        const res = await poll.execute(
+          `/api/reports/group-lifecycle?days=${forDays}`,
+        );
+        if (!current()) return;
+        if (!res.ok) return fail(failureMessage(res));
         setData(res.data);
-        setError(null);
-      } else {
-        setError(res.error);
+        setOutcome("recomputed");
+        toast.success(`Recomputed the ${forDays}-day figure`);
+        return;
       }
+
+      const res = await post.execute("/api/reports/group-lifecycle/refresh", {
+        method: "POST",
+      });
+      if (!current()) return;
+      if (!res.ok) return fail(failureMessage(res));
+
+      if (res.data.outcome === "in_progress") {
+        setPhase({ phase: "waiting", startedAt });
+        const w = await waitForRun(res.data.computed_at);
+        if (!current() || w.kind === "cancelled") return;
+        if (w.kind === "error") return fail(w.message);
+        if (w.kind === "timeout") {
+          return fail(
+            `A refresh was already running and has not finished after ${WAIT_CEILING_MS / 60_000} minutes. The numbers shown are unchanged — reload the page later.`,
+          );
+        }
+        setData(w.data);
+        setOutcome("waited");
+        toast.success("Updated from the refresh that was already running");
+        return;
+      }
+
+      const { outcome: o, ...table } = res.data;
+      setData(table);
+      setOutcome(o);
+      toast.success(
+        o === "reused"
+          ? "Already fresh — a recompute finished under 2 minutes ago"
+          : `Recomputed in ${Math.round((Date.now() - startedAt) / 1000)} s`,
+      );
     } finally {
-      setRefreshing(false);
+      setPhase({ phase: "idle" });
     }
   };
 
@@ -183,7 +386,11 @@ export function GroupLifecycleTable({
             value={days}
             onChange={(e) => {
               const v = Number(e.target.value);
-              if (Number.isFinite(v) && v >= 1 && v <= 90) setDays(Math.floor(v));
+              if (Number.isFinite(v) && v >= 1 && v <= 90) {
+                setDays(Math.floor(v));
+                setOutcome(null);
+                setRefreshError(null);
+              }
             }}
             className="w-28"
           />
@@ -192,28 +399,23 @@ export function GroupLifecycleTable({
           Available today excludes anyone messaged inside this window.
         </span>
         <div className="ml-auto flex items-center gap-2 pb-1">
-          {/* ⚠️ Says WHICH number is on screen. A stored figure and a
-              just-computed one look identical otherwise, and the difference is
-              up to 15 minutes of sends. */}
-          {data ? (
-            <span className="text-xs text-muted-foreground">
-              {data.live
-                ? "computed just now"
-                : data.computed_at
-                  ? `as of ${formatCampaignDateTime(data.computed_at)}`
-                  : "not computed yet — press Refresh now"}
-            </span>
-          ) : null}
+          <RefreshStatus
+            data={data}
+            outcome={outcome}
+            phase={phase}
+            loading={loading}
+            days={days}
+          />
           <Button
             variant="outline"
             size="sm"
             onClick={() => void refresh()}
-            disabled={refreshing || api.isLoading}
+            disabled={phase.phase !== "idle" || loading}
           >
             <RefreshCw
-              className={cn("mr-2 h-4 w-4", refreshing && "animate-spin")}
+              className={cn("mr-2 h-4 w-4", phase.phase !== "idle" && "animate-spin")}
             />
-            Refresh now
+            {phase.phase === "idle" ? "Refresh now" : "Refreshing…"}
           </Button>
           <Button variant="outline" size="sm" onClick={csv} disabled={!data}>
             <Download className="mr-2 h-4 w-4" />
@@ -222,7 +424,12 @@ export function GroupLifecycleTable({
         </div>
       </div>
 
-      {error ? <p className="text-sm text-destructive">{error}</p> : null}
+      {loadError ? <p className="text-sm text-destructive">{loadError}</p> : null}
+      {refreshError ? (
+        <p className="text-sm text-destructive" role="alert">
+          Refresh failed: {refreshError}
+        </p>
+      ) : null}
 
       <Card>
         <CardContent className="p-0">
@@ -259,14 +466,6 @@ export function GroupLifecycleTable({
         </CardContent>
       </Card>
 
-      {api.isLoading ? (
-        <p className="text-xs text-muted-foreground">
-          {days === 3 && !refreshing
-            ? "Loading…"
-            : "Recomputing — this is the slow path, a few seconds…"}
-        </p>
-      ) : null}
-
       <div className="grid gap-1 text-xs text-muted-foreground">
         <p>
           Each cell is{" "}
@@ -296,11 +495,13 @@ export function GroupLifecycleTable({
         ) : null}
         <p>
           <span className="font-medium">
-            These numbers are computed every 15 minutes
+            These numbers are recomputed every hour
           </span>{" "}
-          by the engagement job and read from a stored table, which is why the
-          page loads immediately. <em>Refresh now</em> recomputes them; changing
-          the rest window also recomputes, because only the {3}-day figure is
+          (at :13) and read from a stored table, which is why the page loads
+          immediately. <em>Refresh now</em> recomputes them — unless a recompute
+          finished in the last 2 minutes, which it shows instead, or one is
+          already running, which it waits for. Changing the rest window also
+          recomputes, because only the {DEFAULT_RECENT_DAYS}-day figure is
           stored.
         </p>
         <p>

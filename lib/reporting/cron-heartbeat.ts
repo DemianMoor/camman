@@ -236,14 +236,17 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
     first_run_grace_hours: 48, // 2x the nightly interval
     label: "Contact lifecycle full recount (nightly)",
   },
-  // The two read-side rollups the same route runs after the recount commits.
-  // Watched alongside their recount (group with the 15-min one, day with the
-  // nightly one) but on their own heartbeats, so the alert names the step.
+  // The two read-side rollups. Watched alongside their recount (group with the
+  // 15-min one, day with the nightly one) but on their own heartbeats, so the
+  // alert names the step. The group rollup runs HOURLY on its own route since
+  // 2026-11-13 (/api/cron/refresh-group-lifecycle at :13): 2.5 h tolerates two
+  // missed runs, so a single skip (a deploy, a click holding the lease) is
+  // silent and the old 0.75 h would have paged every hour.
   contactEngagementGroupRollup: {
     job_name: "contact-engagement-group-rollup",
-    max_age_hours: 0.75,
-    first_run_grace_hours: 0.5,
-    label: "Contact lifecycle Group × Lifecycle rollup (every 15 min)",
+    max_age_hours: 2.5,
+    first_run_grace_hours: 2, // 2x the hourly interval
+    label: "Group × Lifecycle rollup (hourly)",
   },
   contactEngagementDayRollup: {
     job_name: "contact-engagement-day-rollup",

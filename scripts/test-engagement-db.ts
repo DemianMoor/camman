@@ -768,11 +768,11 @@ async function main() {
           s2?.stale === true && s3?.stale === true && sent.length === 1, `sent=${sent.length}`);
       }
       {
-        // C3: recount fresh, Group x Lifecycle rollup 2 h old (> 0.75 h).
+        // C3: recount fresh, Group x Lifecycle rollup 3 h old (> 2.5 h — hourly since 2026-11-13).
         await db.execute(sql`
           INSERT INTO cron_locks (job_name, watermark) VALUES
             ('contact-engagement', now()),
-            ('contact-engagement-group-rollup', now() - interval '2 hours')
+            ('contact-engagement-group-rollup', now() - interval '3 hours')
           ON CONFLICT (job_name) DO UPDATE SET watermark = EXCLUDED.watermark`);
         const before = sent.length;
         const s4 = await watchEngagementHeartbeat(db, "incremental", { send });

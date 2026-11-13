@@ -157,6 +157,10 @@
       "schedule": "35 6 * * *"
     },
     {
+      "path": "/api/cron/refresh-group-lifecycle",
+      "schedule": "13 * * * *"
+    },
+    {
       "path": "/api/cron/texted-rule-trial",
       "schedule": "20 5 * * *"
     },

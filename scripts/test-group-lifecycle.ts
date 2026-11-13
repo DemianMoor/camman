@@ -14,8 +14,19 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 // design, because "how big is this group" is a different question. Both bars
 // are needed — either alone is satisfied by a wrong implementation.
 //
-// Run: DATABASE_URL="$(grep '^DATABASE_URL=' C:/AFF/camman/.env.demo | cut -d= -f2-)" \
+// ⭐ M IS THE BAR FOR THE 2026-11-13 SINGLE-PASS REWRITE: for the fixture org
+// and every org on the preview DB with memberships, the frozen two-pass compute
+// (scripts/_legacy-group-lifecycle.ts) and the new one — and the rows the new
+// refresh actually stores — are diffed row by row inside ONE REPEATABLE READ
+// snapshot (so now() and the in-use set cannot move between them), then rolled
+// back. O pins the button's lease semantics (reuse / in progress / recompute);
+// N pins the wiring (GET writes nothing, the engagement cron no longer refreshes
+// the table, the hourly cron is scheduled, tokens cannot POST the refresh).
+//
+// Run: DATABASE_URL="$(grep '^DATABASE_URL=' D:/AFF/camman/.env.demo | cut -d= -f2-)" \
 //        npx tsx --conditions=react-server scripts/test-group-lifecycle.ts
+
+import { readFileSync } from "node:fs";
 
 import { sql, type SQL } from "drizzle-orm";
 
@@ -32,9 +43,24 @@ async function main() {
   const { fictionalPhones, refuseIfPhonesInUse } =
     await import("./_fictional-phones");
   const { db } = await import("@/db/client");
-  const { getGroupLifecycleBreakdown, getGroupLifecycleRollups } =
-    await import("@/lib/reporting/group-lifecycle");
+  const { computeGroupLifecycle } = await import("@/lib/reporting/group-lifecycle");
+  const {
+    refreshGroupLifecycleRollup,
+    readStoredGroupLifecycle,
+    refreshGroupLifecycleOnDemand,
+    groupLifecycleLeaseKey,
+    rollupRowsOf,
+  } = await import("@/lib/reporting/group-lifecycle-store");
+  const { legacyGroupLifecycleRows } = await import("./_legacy-group-lifecycle");
   const { GROUP_CLUSTERS } = await import("@/lib/reporting/group-clusters");
+  const compute = (orgId: string, recentDays: number) =>
+    db.transaction((tx) =>
+      computeGroupLifecycle(tx, { orgId, recentDays, deadline: Date.now() + 60_000 }),
+    );
+  const refreshStored = (orgId: string) =>
+    db.transaction((tx) =>
+      refreshGroupLifecycleRollup(tx, { orgId, deadline: Date.now() + 60_000 }),
+    );
   console.log(`Target DB: ${requirePreviewDb().label}\n`);
 
   const one = async <T>(q: SQL): Promise<T> =>
@@ -159,8 +185,8 @@ async function main() {
     await eng(c7, "freeze", 2, 14);
     await eng(c8, "cold", 1, 14);
 
-    const t = await getGroupLifecycleBreakdown({ orgId, recentDays: 3 });
-    const r = await getGroupLifecycleRollups({ orgId, recentDays: 3 });
+    const t = await compute(orgId, 3);
+    const r = t; // grid, clusters and distinct total come from ONE pass now
     const row = (gid: number) => t.groups.find((g) => g.group_id === gid)!;
     const A = row(gA);
     const B = row(gB);
@@ -187,7 +213,7 @@ async function main() {
       OUT.by_status.cold.sendable === 1 && OUT.by_status.cold.available === 0,
       `outside-group cold ${OUT.by_status.cold.available}/${OUT.by_status.cold.sendable} at N=3`,
     );
-    const wide = await getGroupLifecycleBreakdown({ orgId, recentDays: 1 });
+    const wide = await compute(orgId, 1);
     const OUT1 = wide.groups.find((g) => g.group_id === gOut)!;
     bar(
       "G5 …and N is what decides it: at N=1 the same contact IS available",
@@ -242,9 +268,7 @@ async function main() {
     );
     // ── PART K — the stored table (migration 0193) ─────────────────────────
     console.log("\nPART K — the stored table");
-    const { refreshGroupLifecycleRollup, readStoredGroupLifecycle } =
-      await import("@/lib/reporting/group-lifecycle-store");
-    const written = await refreshGroupLifecycleRollup(db, { orgId, recentDays: 3 });
+    const written = await refreshStored(orgId);
     const stored = await readStoredGroupLifecycle({ orgId });
     const sA = stored.groups.find((g) => g.group_id === gA)!;
     bar(
@@ -274,7 +298,7 @@ async function main() {
     // leaves an archived group's row in the table, reported as real forever.
     await db.execute(sql`
       UPDATE contact_groups SET archived_at = now() WHERE id = ${gOut}`);
-    await refreshGroupLifecycleRollup(db, { orgId, recentDays: 3 });
+    await refreshStored(orgId);
     const after = await readStoredGroupLifecycle({ orgId });
     const leftover = (await all<{ n: string }>(sql`
       SELECT count(*)::text AS n FROM group_lifecycle_rollup
@@ -289,6 +313,168 @@ async function main() {
       "K6 the stored read is fast — it reads rows, not joins",
       after.computed_ms < 500,
       `${after.computed_ms} ms`,
+    );
+
+    // K7: the refresh is ONE transaction, so a reader on another connection
+    // sees the old rows while it runs — never the empty table that the old
+    // autocommitted DELETE-then-INSERT exposed between its two statements.
+    {
+      const before = Number((await one<{ n: string }>(sql`
+        SELECT count(*)::text AS n FROM group_lifecycle_rollup WHERE org_id = ${org}`)).n);
+      let seenMid = -1;
+      await db.transaction(async (tx) => {
+        await refreshGroupLifecycleRollup(tx, { orgId, deadline: Date.now() + 60_000 });
+        // `db` is the pool: a different connection, outside this transaction.
+        seenMid = Number((await one<{ n: string }>(sql`
+          SELECT count(*)::text AS n FROM group_lifecycle_rollup WHERE org_id = ${org}`)).n);
+      });
+      bar(
+        "K7 ⭐ a reader during a refresh sees the old rows, not an empty table",
+        before > 0 && seenMid === before,
+        `before ${before}, seen mid-refresh from another connection ${seenMid}`,
+      );
+    }
+
+    // ── PART M — identity with the frozen two-pass compute ──────────────────
+    console.log("\nPART M — single pass == the frozen two-pass compute, one snapshot");
+    const realOrgs = (await all<{ id: string; name: string }>(sql`
+      SELECT o.id::text AS id, o.name FROM organizations o
+      WHERE EXISTS (SELECT 1 FROM contact_contact_groups g WHERE g.org_id = o.id)
+        AND o.id <> ${org}
+      ORDER BY o.name`));
+    class Rollback extends Error {}
+    const key = (r: { row_kind: string; row_key: string; status: string }) =>
+      `${r.row_kind}|${r.row_key}|${r.status}`;
+    for (const o of [{ id: orgId, name: "fixture" }, ...realOrgs]) {
+      let legacy: Awaited<ReturnType<typeof legacyGroupLifecycleRows>> = [];
+      let fresh: ReturnType<typeof rollupRowsOf> = [];
+      let stored: { row_kind: string; row_key: string; status: string; sendable: number; available: number }[] = [];
+      let nowStable = false;
+      const ms = { legacy: 0, single: 0 };
+      try {
+        await db.transaction(
+          async (tx) => {
+            const [n0] = (await tx.execute(sql`SELECT now()::text AS t`)) as unknown as { t: string }[];
+            let t0 = Date.now();
+            legacy = await legacyGroupLifecycleRows(tx, o.id, 3);
+            ms.legacy = Date.now() - t0;
+            t0 = Date.now();
+            fresh = rollupRowsOf(
+              await computeGroupLifecycle(tx, { orgId: o.id, recentDays: 3, deadline: Date.now() + 60_000 }),
+            );
+            ms.single = Date.now() - t0;
+            // …and what the refresh actually WRITES, read back in the same snapshot.
+            await refreshGroupLifecycleRollup(tx, { orgId: o.id, deadline: Date.now() + 60_000 });
+            stored = (await tx.execute(sql`
+              SELECT row_kind, row_key, status, sendable, available
+              FROM group_lifecycle_rollup WHERE org_id = ${o.id}::uuid`)) as unknown as typeof stored;
+            const [n1] = (await tx.execute(sql`SELECT now()::text AS t`)) as unknown as { t: string }[];
+            nowStable = n0.t === n1.t;
+            throw new Rollback();
+          },
+          { isolationLevel: "repeatable read" },
+        );
+      } catch (e) {
+        if (!(e instanceof Rollback)) throw e;
+      }
+      const lm = new Map(legacy.map((r) => [key(r), r]));
+      const sm = new Map(stored.map((r) => [key(r), r]));
+      const cell = (a?: { sendable: number; available: number }, b?: { sendable: number; available: number }) =>
+        !!a && !!b && Number(a.sendable) === Number(b.sendable) && Number(a.available) === Number(b.available);
+      const freshDiff =
+        legacy.length !== fresh.length ||
+        fresh.some((r, i) => key(r) !== key(legacy[i]) || !cell(r, legacy[i]));
+      const storedDiffs = [...lm.keys()].filter((k) => !cell(lm.get(k), sm.get(k))).length +
+        [...sm.keys()].filter((k) => !lm.has(k)).length;
+      const nonTrivial = legacy.some((r) => r.sendable > 0);
+      bar(
+        `M1 ⭐ ${o.name}: single pass == two-pass, row for row and in order`,
+        !freshDiff && nonTrivial,
+        `${legacy.length} legacy rows vs ${fresh.length} single-pass rows; any sendable > 0: ${nonTrivial}; legacy ${ms.legacy} ms, single ${ms.single} ms`,
+      );
+      bar(
+        `M2 ⭐ ${o.name}: the rows the refresh STORES == the two-pass rows`,
+        storedDiffs === 0 && stored.length === legacy.length,
+        `${stored.length} stored vs ${legacy.length} legacy, ${storedDiffs} differing`,
+      );
+      bar(`M3 ${o.name}: now() did not move inside the snapshot`, nowStable);
+    }
+
+    // ── PART O — the button: reuse, in progress, recompute ──────────────────
+    console.log("\nPART O — on-demand refresh and the shared lease");
+    const lease = groupLifecycleLeaseKey(orgId);
+    try {
+      const o1 = await refreshGroupLifecycleOnDemand({ orgId });
+      bar(
+        "O1 ⭐ a run that finished < 2 min ago is REUSED, not recomputed",
+        o1.outcome === "reused",
+        `outcome=${o1.outcome}`,
+      );
+      // Age the stored run past the reuse window, then hold the lease as the
+      // cron would.
+      await db.execute(sql`
+        UPDATE group_lifecycle_rollup SET computed_at = computed_at - interval '5 minutes'
+        WHERE org_id = ${org}`);
+      const aged = (await readStoredGroupLifecycle({ orgId })).computed_at;
+      await db.execute(sql`
+        INSERT INTO cron_locks (job_name, lease_until) VALUES (${lease}, now() + interval '1 minute')
+        ON CONFLICT (job_name) DO UPDATE SET lease_until = EXCLUDED.lease_until`);
+      const o2 = await refreshGroupLifecycleOnDemand({ orgId });
+      const afterHeld = (await readStoredGroupLifecycle({ orgId })).computed_at;
+      bar(
+        "O2 ⭐ while the lease is held, nothing starts: in_progress + the current computed_at",
+        o2.outcome === "in_progress" && o2.computed_at === aged && afterHeld === aged,
+        `outcome=${o2.outcome}, returned ${o2.computed_at}, stored ${afterHeld}`,
+      );
+      await db.execute(sql`UPDATE cron_locks SET lease_until = NULL WHERE job_name = ${lease}`);
+      const o3 = await refreshGroupLifecycleOnDemand({ orgId });
+      const leaseAfter = (await one<{ lease_until: string | null }>(sql`
+        SELECT lease_until::text AS lease_until FROM cron_locks WHERE job_name = ${lease}`)).lease_until;
+      bar(
+        "O3 ⭐ lease free + stale ⇒ recomputed, computed_at advances, lease released",
+        o3.outcome === "recomputed" &&
+          o3.computed_at !== null && o3.computed_at !== aged && leaseAfter === null,
+        `outcome=${o3.outcome}, computed_at ${aged} → ${o3.outcome === "in_progress" ? "-" : o3.computed_at}, lease_until=${leaseAfter}`,
+      );
+      bar(
+        "O4 the recomputed table is the same table",
+        o3.outcome === "recomputed" &&
+          JSON.stringify(o3.distinct_total.by_status) === JSON.stringify(after.distinct_total.by_status),
+      );
+    } finally {
+      await db.execute(sql`DELETE FROM cron_locks WHERE job_name = ${lease}`);
+    }
+
+    // ── PART N — the wiring ─────────────────────────────────────────────────
+    console.log("\nPART N — wiring");
+    const src = (f: string) => readFileSync(f, "utf8");
+    const stripComments = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const getRoute = stripComments(src("app/api/reports/group-lifecycle/route.ts"));
+    bar(
+      "N1 the GET route writes nothing (no refresh path, no store writer)",
+      !/refresh\s*=|searchParams\.get\("refresh"\)|refreshGroupLifecycle/.test(getRoute) &&
+        !/export async function POST/.test(getRoute),
+    );
+    bar(
+      "N2 the engagement cron no longer refreshes the table",
+      !src("app/api/cron/refresh-contact-engagement/route.ts").includes("refreshGroupLifecycleRollup"),
+    );
+    bar(
+      "N3 the hourly cron is scheduled at :13",
+      /"path": "\/api\/cron\/refresh-group-lifecycle",\s*"schedule": "13 \* \* \* \*"/.test(src("vercel.json")),
+    );
+    const { OPERATOR_ROUTE_MAP } = await import("@/lib/authz/route-map");
+    const refreshAccess = OPERATOR_ROUTE_MAP["reports/group-lifecycle/refresh"];
+    bar(
+      "N4 operators may POST the refresh; API tokens may not (owner decision pending)",
+      !!refreshAccess && refreshAccess.methods.includes("POST") && !refreshAccess.token?.length &&
+        JSON.stringify(OPERATOR_ROUTE_MAP["reports/group-lifecycle"]?.token) === '["GET"]',
+      JSON.stringify(refreshAccess),
+    );
+    const { HEARTBEAT_JOBS } = await import("@/lib/reporting/cron-heartbeat");
+    bar(
+      "N5 the rollup heartbeat tolerates two missed hourly runs",
+      HEARTBEAT_JOBS.contactEngagementGroupRollup.max_age_hours === 2.5,
     );
 
     // ── PART L — the displayed columns ──────────────────────────────────────

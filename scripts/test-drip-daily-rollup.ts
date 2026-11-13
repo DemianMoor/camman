@@ -6,6 +6,8 @@ import { db } from "@/db/client";
 import { dailyMoney, displayedRoi } from "@/lib/reporting/drip-daily-money";
 import { addEtDays } from "@/lib/reporting/delivery-rollup";
 import {
+  ALL_COUNTERS,
+  BASES,
   diffDripDailyRollup,
   histogramMedian,
   LATENCY_EDGES_SEC,
@@ -239,6 +241,47 @@ async function dbBars() {
       // S6: a send with NO journey at all (D1) → NULL partner, counted as a follow-up.
       const c6 = await contact();
       await send({ c: c6, stage: A, atZ: "13T16:00:00", phone: phoneTxr, cost: "0.0100" });
+
+      // ── I: tier A now refreshes TODAY ALONE when yesterday is not due
+      // (lib/reporting/drip-daily-rollup-fresh.ts, 2026-11-13). Per-day refreshes must
+      // write the old two-day call's rows, from empty and over existing rows after
+      // source changes (update + insert + delete). ──────────────────────────────
+      const snap = async () => JSON.stringify(await tx.execute(sql`
+        SELECT basis, campaign_id, stage_id, partner_key_id, day_et::text AS d,
+               ${sql.raw(ALL_COUNTERS.map((c) => `${c}::text AS ${c}`).join(", "))}, latency_hist::text AS h
+        FROM drip_daily_rollup WHERE org_id = ${org}::uuid ORDER BY 1, 2, 3 NULLS FIRST, 4 NULLS FIRST, 5`));
+      const twoDay = async () => { for (const b of BASES) await refreshDripDailyRollup(tx, org, b, { from: D1, to: D2 }); };
+      const perDay = async (first: string, second: string) => {
+        for (const b of BASES) {
+          await refreshDripDailyRollup(tx, org, b, { from: first, to: first });
+          await refreshDripDailyRollup(tx, org, b, { from: second, to: second });
+        }
+      };
+      await tx.execute(sql`SAVEPOINT i1`);
+      await twoDay();
+      const oldRows = await snap();
+      await tx.execute(sql`ROLLBACK TO SAVEPOINT i1`);
+      await perDay(D1, D2);
+      const newRows = await snap();
+      await tx.execute(sql`ROLLBACK TO SAVEPOINT i1`);
+      await perDay(D2, D1);
+      const newRows2 = await snap();
+      bar("I1 from empty: per-day refreshes (either order) write exactly the old two-day call's rows",
+        oldRows === newRows && oldRows === newRows2 && JSON.parse(oldRows).length === 16, `${JSON.parse(oldRows).length} rows`);
+      await tx.execute(sql`ROLLBACK TO SAVEPOINT i1`);
+      await twoDay();
+      await tx.execute(sql`UPDATE textrequest_dlr_events SET status = 'delivered' WHERE matched_stage_send_id = ${S4.ss}::uuid`);
+      await click(S1.link, "14T07:00:00", "human");
+      await tx.execute(sql`DELETE FROM stage_sends WHERE id = ${S5.ss}::uuid`);
+      await tx.execute(sql`SAVEPOINT i2`);
+      await twoDay();
+      const oldRows3 = await snap();
+      await tx.execute(sql`ROLLBACK TO SAVEPOINT i2`);
+      await perDay(D2, D1);
+      const newRows3 = await snap();
+      bar("I2 over existing rows after an update, an insert and a delete: per-day == two-day",
+        oldRows3 === newRows3 && oldRows3 !== oldRows, `${JSON.parse(newRows3).length} rows`);
+      await tx.execute(sql`ROLLBACK TO SAVEPOINT i1`);
 
       // ── run ───────────────────────────────────────────────────────────────
       const range = { from: D1, to: D2 };

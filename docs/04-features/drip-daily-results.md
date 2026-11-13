@@ -1,6 +1,6 @@
 # Drip — Daily results
 
-_Last updated: 2026-11-12 (reconcile range wording fixed to days 14–20; cohort-click drift source documented); 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-11-13 (fresh tier: today every run, yesterday hourly + first run after ET midnight); 2026-11-12 (reconcile range wording fixed to days 14–20; cohort-click drift source documented); 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
@@ -62,9 +62,24 @@ caller must therefore pass a transaction.
 
 | tier | scope | when | cost (prod, 2026-10-12) |
 |---|---|---|---|
-| fresh | today + yesterday, both bases | every run | ~4.5 s warm, ~1M buffer hits, ~0 disk |
+| fresh | today + yesterday, both bases | today every run; yesterday when its last refresh is ≥ 60 min old and on the first run after ET midnight | ~4.5 s warm, ~1M buffer hits, ~0 disk |
 | settle | days **2–13** back (with fresh = the last 14 ET days), in **3-day units** per basis (8 units) | nightly, units only inside **[05:00, 09:00) UTC** | cold receipts ~830 MB per 3 days (in the quiet slot on purpose) |
 | reconcile | the frozen days **14–20** back, in **2-day units** per basis (8 units): stored vs fresh, one REPEATABLE READ snapshot per unit | same window, after the settle units | latched alert `drip-daily-rollup-drift` on any diff |
+
+**Fresh tier cadence (2026-11-13).** Recomputing both days every 15 min cost
+236–331 s of DB time per hour in the afternoon (statements of 15–59 s) on a disk at its
+IOPS ceiling. [lib/reporting/drip-daily-rollup-fresh.ts](../../lib/reporting/drip-daily-rollup-fresh.ts):
+**today** refreshes on every run; **yesterday** only when its last refresh is ≥ 60 min
+old (2 min slack for cron start jitter) and **always on the first run after ET
+midnight**. State is one `cron_locks` row, `drip-daily-rollup:yesterday:<ET day>`
+(watermark = last refresh of that day as yesterday, for every org); the day is in the
+key, so after midnight there is no row and yesterday is due. It is stamped only when
+every org's refresh succeeded, so a failure retries on the next tick; older days' rows
+are deleted. Yesterday due ⇒ the same two-day call as before; otherwise today alone
+(identical rows — bars I1/I2 in `scripts/test-drip-daily-rollup.ts`). Cells are
+computed by the same SQL. The run's JSON adds `yesterday_refreshed`. Yesterday's
+cells can be up to ~1 h older than the "as of HH:MM ET" note (the heartbeat is
+stamped every run). Test: `scripts/test-drip-daily-rollup-cadence.ts`.
 
 **Nightly units (2026-11-11).** Until 2026-11-11 the settle and reconcile ran as ONE
 pass, stamped only if the whole pass succeeded. When drip volume grew it stopped
@@ -113,7 +128,7 @@ audience previews and stage creation. Now ([lib/reporting/drip-daily-rollup-nigh
 - `/api/cron/drip-monitors` alerts when the refresh heartbeat (`drip-daily-rollup`) goes stale.
 - The refresh run alerts when its nightly stamps go stale (`drip-daily-rollup-settle`, `drip-daily-rollup-reconcile`, ~2 missed nights) — the backstop behind the 09:00 UTC alert above.
 
-The fresh heartbeat is stamped when tier A refreshed every org cleanly, whatever the nightly units do. Tests: `scripts/test-drip-daily-rollup.ts` (pure unit planning + cell maths), `scripts/test-drip-daily-rollup-nightly.ts` (orchestration: budget, retry cap, independent stamps, alerts).
+The fresh heartbeat is stamped when tier A refreshed every org cleanly, whatever the nightly units do. Tests: `scripts/test-drip-daily-rollup.ts` (pure unit planning + cell maths + per-day == two-day identity), `scripts/test-drip-daily-rollup-nightly.ts` (orchestration: budget, retry cap, independent stamps, alerts), `scripts/test-drip-daily-rollup-cadence.ts` (fresh-tier cadence).
 
 ## 4. Backfill and reconciliation
 

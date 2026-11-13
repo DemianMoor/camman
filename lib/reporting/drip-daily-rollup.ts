@@ -50,9 +50,11 @@ export const DRIP_DAILY_ROLLUP_SETTLE_JOB = "drip-daily-rollup-settle";
 export const DRIP_DAILY_ROLLUP_RECONCILE_JOB = "drip-daily-rollup-reconcile";
 
 /**
- * Tier A: today + yesterday (a cohort keeps taking follow-ups for ~24 h), every
- * run (every 15 min). Measured warm on prod 2026-10-12: ~4.5 s for both bases, ~1M
- * buffer hits, ~0 disk reads.
+ * Tier A: today + yesterday (a cohort keeps taking follow-ups for ~24 h). Since
+ * 2026-11-13 today refreshes every run, yesterday hourly and on the first run after
+ * ET midnight — see lib/reporting/drip-daily-rollup-fresh.ts.
+ * Measured warm on prod 2026-10-12: ~4.5 s for both bases, ~1M buffer hits, ~0 disk
+ * reads (by 2026-11 statements of 15–59 s in the afternoon).
  */
 export const FRESH_DAYS = 2;
 /**
@@ -505,7 +507,7 @@ export async function refreshDripDailyRollup(
   };
 }
 
-/** Tier A, recomputed on EVERY run: today + yesterday (ET). Pure. */
+/** Tier A's two days: yesterday (from) + today (to), ET. Pure. */
 export function freshRange(now: Date): EtDayRange {
   const today = formatInCampaignTimezone(now, "yyyy-MM-dd");
   return { from: addEtDays(today, -(FRESH_DAYS - 1)), to: today };

@@ -6,13 +6,12 @@ import { clearAlert, notifyOnTransition } from "@/lib/alerts/alert-state";
 import { withCronLease } from "@/lib/cron/lease";
 import { checkHeartbeats, HEARTBEAT_JOBS, recordHeartbeat } from "@/lib/reporting/cron-heartbeat";
 import {
-  BASES,
   diffDripDailyRollup,
   DRIP_DAILY_ROLLUP_JOB,
   freshRange,
   refreshDripDailyRollup,
-  type RefreshResult,
 } from "@/lib/reporting/drip-daily-rollup";
+import { runFreshTier } from "@/lib/reporting/drip-daily-rollup-fresh";
 import { runNightly } from "@/lib/reporting/drip-daily-rollup-nightly";
 
 // Refreshes drip_daily_rollup (migration 0208) — the ONLY writer besides the
@@ -20,7 +19,9 @@ import { runNightly } from "@/lib/reporting/drip-daily-rollup-nightly";
 //
 // Every run (every 15 min, :01/:16/:31/:46 — clear of the heavy :29 audience-pools
 // job):
-//   1. Tier A — today + yesterday (ET), both bases, every org. Its heartbeat is
+//   1. Tier A — today (every run) + yesterday (when its last refresh is ≥ 60 min
+//      old, and always on the first run after ET midnight), both bases, every org
+//      (lib/reporting/drip-daily-rollup-fresh.ts, 2026-11-13). Its heartbeat is
 //      stamped whenever tier A succeeds, whatever the nightly part does.
 //   2. The nightly settle (days 2–13 back) and reconcile (frozen days 14–20 back)
 //      as small units, only inside [05:00, 09:00) UTC, until the run's budget is
@@ -46,7 +47,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     "drip-daily-rollup-run",
     async () => {
       const runStartedMs = Date.now();
-      const range = freshRange(new Date());
+      const now = new Date();
+      const range = freshRange(now);
       const orgIds = (
         (await db.execute(sql`SELECT DISTINCT org_id FROM campaigns WHERE type = 'drip'`)) as unknown as {
           org_id: string;
@@ -54,25 +56,16 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       ).map((r) => r.org_id);
 
       // 1. Tier A. One org's failure must not stop the rest; it withholds the heartbeat.
-      const fresh: { org_id: string; error?: string; refreshed?: RefreshResult[] }[] = [];
-      for (const org_id of orgIds) {
-        try {
-          const refreshed: RefreshResult[] = [];
-          for (const basis of BASES) {
-            refreshed.push(
-              await db.transaction(async (tx) => {
-                await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
-                return refreshDripDailyRollup(tx, org_id, basis, range);
-              }),
-            );
-          }
-          fresh.push({ org_id, refreshed });
-        } catch (err) {
-          const error = err instanceof Error ? err.message : String(err);
-          console.error("[drip-daily-rollup] refresh failed", { org_id, error });
-          fresh.push({ org_id, error });
-        }
-      }
+      const { yesterday_refreshed, orgs: fresh } = await runFreshTier({
+        db,
+        orgIds,
+        now,
+        refresh: (orgId, basis, unitRange) =>
+          db.transaction(async (tx) => {
+            await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
+            return refreshDripDailyRollup(tx, orgId, basis, unitRange);
+          }),
+      });
       const freshOk = fresh.every((r) => !r.error);
       if (freshOk) await recordHeartbeat(db, DRIP_DAILY_ROLLUP_JOB);
 
@@ -119,7 +112,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       }
 
       const ok = freshOk && nightly.failed.length === 0;
-      return { range, ok, fresh, nightly, ms: Date.now() - runStartedMs };
+      return { range, yesterday_refreshed, ok, fresh, nightly, ms: Date.now() - runStartedMs };
     },
     LEASE_MS,
   );

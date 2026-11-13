@@ -171,6 +171,17 @@ async function main() {
     bar("G1 group side: strict group's voip + unknown leave a campaign selecting another group", g1 === 3, `got ${g1}, want 3`);
     const s1 = await segSet();
     bar("G2 segment side: same set (mobile, toll_free, the un-grouped voip)", s1 === "mobile,toll_free,voip", s1);
+    // The campaign source omits the gate inside the segment/group clauses and
+    // applies it ONCE at the top (excludeLineTypeBlocked). Segment-only and
+    // segment ∩ group must still drop exactly the same contacts.
+    const campaignCount = async (segmentIds: number[], contactGroupIds: number[]) => (await previewAudience({
+      carrierRejectedSuppression: false, // legacy test: predates carrier-rejection suppression (toggle off)
+      orgId, lifecycleRules: false, segmentIds, contactGroupIds, filters,
+    })).total_matching;
+    const g7seg = await campaignCount([seg], []);
+    const g7both = await campaignCount([seg], [open]);
+    bar("G7 campaign source gates once at the top: segment-only and segment ∩ group both drop voip + unknown",
+      g7seg === 3 && g7both === 3, `segment ${g7seg}, segment∩group ${g7both}, want 3/3`);
 
     // Drip routing, strict group still both-off.
     const events = await all<{ id: string; contact_id: string }>(sql`

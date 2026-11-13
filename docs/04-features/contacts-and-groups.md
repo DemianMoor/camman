@@ -1,6 +1,6 @@
 # Feature — Contacts, Contact Groups, Opt-outs/ins & Clickers
 
-_Last updated: 2026-10-26 (Upload contacts + group Add contacts import contact_attributes CSV columns, fill-empty only)_
+_Last updated: 2026-11-12 (campaign audience applies the line-type gate once at the top of the source); 2026-10-26 (Upload contacts + group Add contacts import contact_attributes CSV columns, fill-empty only)_
 
 ## 1. Purpose
 The central phone registry and the suppression/engagement records attached to it. Contacts are the atomic audience unit (scaling to millions); contact groups are tags; opt-outs/ins and clickers are the status signals that audience filters and segment rules read.
@@ -94,8 +94,8 @@ Unchecking one blocks that group's contacts of that `contacts.line_type`:
   An archived group blocks nothing.
 - **Selection time only** (owner ruling 2026-10-20, "only block new sends"). Applied where the
   landline stop is applied: `gateEligible()` in [lib/segment-rules-eval.ts](../../lib/segment-rules-eval.ts)
-  (segment side) and `buildGroupMembershipClause()` in [lib/audience-snapshot.ts](../../lib/audience-snapshot.ts)
-  (group side) — so preview, draft stage counts, lanes, the activation snapshot, the segment page
+  for segment pages, and — for the campaign audience — once at the top of the combined segment/group
+  source (`excludeLineTypeBlocked`, in [lib/audience-snapshot.ts](../../lib/audience-snapshot.ts)) — so preview, draft stage counts, lanes, the activation snapshot, the segment page
   and its CSV export all drop them — and as the drip routing global rule `line_type` (permanent ⇒
   the lead is marked unroutable, like an opt-out). **Not** in `lib/sends/eligibility.ts`: queued
   sends, frozen audience pools and drip follow-ups already in flight still go out.

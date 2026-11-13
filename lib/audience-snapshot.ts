@@ -4,7 +4,7 @@ import { sql as drizzleSql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 
 import { db } from "@/db/client";
-import { lineTypeBlockedContactsSql } from "@/lib/contact-groups/line-type-gate";
+import { excludeLineTypeBlocked } from "@/lib/contact-groups/line-type-gate";
 import { inUseSetBody, isDripPostureOn } from "@/lib/drip/in-use";
 import { isStatementTimeout } from "@/lib/db/statement-timeout";
 
@@ -24,7 +24,7 @@ import {
 import { stageRecipientsSql } from "./sends/recipients";
 import { excludeCarrierRejected } from "./carrier-rejection/eligibility";
 import { splitBucketMatch } from "./sends/split-bucket";
-import { buildSegmentAudienceClause } from "./segment-rules-eval";
+import { buildSegmentAudienceClauseForCampaignSource } from "./segment-rules-eval";
 import { LIFECYCLE_CHIP_STATUSES, OFFER_COOLDOWN_DAYS_DEFAULT } from "./validators/campaigns";
 
 // Compose the audience-source set (contact_ids, before status filters /
@@ -86,7 +86,7 @@ async function buildExcludeSegmentUnion(
   if (excludeSegmentIds.length === 0) return null;
   const clauses = await Promise.all(
     excludeSegmentIds.map((id) =>
-      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+      buildSegmentAudienceClauseForCampaignSource(id, orgId, restrictUniverse, false), // snapshot/draft source: contact_id only
     ),
   );
   const branches = clauses.map(
@@ -121,31 +121,32 @@ function buildGroupMembershipClause(
   const lsIn = withLifecycleStatus
     ? drizzleSql`, c.lifecycle_status`
     : drizzleSql``;
-  const lsOut = withLifecycleStatus
-    ? drizzleSql`, gm_out.lifecycle_status`
-    : drizzleSql``;
   // Landline hard stop (migration 0096): join contacts and keep only
   // messaging_status='eligible' (LITERAL, not a bind). This gates the group
   // dimension the same way buildSegmentAudienceClause gates the segment side, so
   // every consumer (snapshot, preview, draft counts) sees a landline-free audience
-  // regardless of how it composes the two dimensions. The group line-type gate
-  // (migration 0218, lib/contact-groups/line-type-gate.ts) is subtracted here
-  // for the same reason, wrapped so the EXCEPT stays local to this clause.
+  // regardless of how it composes the two dimensions.
+  //
+  // ⚠️ The group line-type gate (migration 0218) is NOT applied here: every
+  // caller applies excludeLineTypeBlocked ONCE at the top of the combined source
+  // (buildAudienceSourceSql, computeStageAudienceCountForDraft,
+  // buildPreviewMembership). A new caller must do the same.
+  //
+  // DISTINCT: the EXCEPT that used to sit here also deduplicated, and a
+  // group-only campaign uses this clause as its whole source — a contact in two
+  // selected groups must stay ONE candidate. With withLifecycleStatus the extra
+  // column is a function of the contact, so DISTINCT still yields one row each.
   return drizzleSql`
-    SELECT gm_out.contact_id${lsOut} FROM (
-      SELECT ccg.contact_id${lsIn}
-      FROM contact_contact_groups ccg
-      INNER JOIN contacts c
-        ON c.id = ccg.contact_id
-        AND c.org_id = ${orgId}::uuid
-        AND c.messaging_status = 'eligible'${chipFilter}
-      WHERE ccg.org_id = ${orgId}::uuid
-        AND ccg.contact_group_id = ANY(${drizzleSql.raw(
-          "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
-        )})
-      EXCEPT
-      ${lineTypeBlockedContactsSql(orgId, withLifecycleStatus)}
-    ) gm_out
+    SELECT DISTINCT ccg.contact_id${lsIn}
+    FROM contact_contact_groups ccg
+    INNER JOIN contacts c
+      ON c.id = ccg.contact_id
+      AND c.org_id = ${orgId}::uuid
+      AND c.messaging_status = 'eligible'${chipFilter}
+    WHERE ccg.org_id = ${orgId}::uuid
+      AND ccg.contact_group_id = ANY(${drizzleSql.raw(
+        "ARRAY[" + contactGroupIds.join(",") + "]::int[]",
+      )})
   `;
 }
 
@@ -620,7 +621,7 @@ async function buildAudienceSourceSql(
   const restrictUniverse = bothSides ? groupClause! : undefined;
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) =>
-      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+      buildSegmentAudienceClauseForCampaignSource(id, orgId, restrictUniverse, false), // snapshot/draft source: contact_id only
     ),
   );
   const segmentBranches = perSegmentClauses.map(
@@ -635,8 +636,13 @@ async function buildAudienceSourceSql(
     hasGroup ? groupClause! : undefined,
   );
 
+  // Line-type gate applied ONCE here, over the combined source (the inner
+  // segment/group clauses omit it) — see excludeLineTypeBlocked.
   return excludeCarrierRejected(
-    buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
+    excludeLineTypeBlocked(
+      buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
+      orgId,
+    ),
     orgId,
     input.carrierRejectedSuppression,
   );
@@ -1013,7 +1019,7 @@ export async function computeStageAudienceCountForDraft(
   const restrictUniverse = bothSides ? groupClause! : undefined;
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) =>
-      buildSegmentAudienceClause(id, orgId, restrictUniverse),
+      buildSegmentAudienceClauseForCampaignSource(id, orgId, restrictUniverse, false), // snapshot/draft source: contact_id only
     ),
   );
   const segmentBranches = perSegmentClauses.map(
@@ -1027,7 +1033,11 @@ export async function computeStageAudienceCountForDraft(
   );
   const source = applyCarrierFilter(
     excludeCarrierRejected(
-      buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
+      // Line-type gate once, over the combined source — mirrors buildAudienceSourceSql.
+      excludeLineTypeBlocked(
+        buildAudienceSourceClause(segmentBranches, groupClause, excludeUnion),
+        orgId,
+      ),
       orgId,
       campaign.carrierRejectedSuppression,
     ),
@@ -1624,7 +1634,7 @@ async function buildPreviewMembership(
   // (count(distinct …) ignores NULLs).
   const perSegmentClauses = await Promise.all(
     segmentIds.map((id) =>
-      buildSegmentAudienceClause(
+      buildSegmentAudienceClauseForCampaignSource(
         id,
         orgId,
         restrictUniverse,
@@ -1658,7 +1668,7 @@ async function buildPreviewMembership(
   // when a group is present (final ⊆ group). Tagged from_exclude_segment=true.
   const perExcludeClauses = await Promise.all(
     excludeSegmentIds.map((id) =>
-      buildSegmentAudienceClause(
+      buildSegmentAudienceClauseForCampaignSource(
         id,
         orgId,
         chipUniverse ??
@@ -1678,11 +1688,16 @@ async function buildPreviewMembership(
     ...groupBranches,
     ...excludeBranches,
   ];
-  // Carrier-rejected contacts leave every branch here, before any count — the
-  // same removal buildAudienceSourceSql makes for the snapshot.
+  // Carrier-rejected and line-type-blocked contacts leave every branch here,
+  // before any count — the same removals buildAudienceSourceSql makes for the
+  // snapshot. Dropping every row of a blocked contact from the UNION ALL equals
+  // dropping it from each branch, so per-source counts are unchanged.
   const unionedWithSources = excludeCarrierRejected(
-    allBranches.reduce((acc, branch, i) =>
-      i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
+    excludeLineTypeBlocked(
+      allBranches.reduce((acc, branch, i) =>
+        i === 0 ? branch : drizzleSql`${acc} UNION ALL ${branch}`,
+      ),
+      orgId,
     ),
     orgId,
     input.carrierRejectedSuppression,

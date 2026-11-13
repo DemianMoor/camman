@@ -2,23 +2,31 @@ import { sql } from "drizzle-orm";
 
 import type { db } from "@/db/client";
 import { isCarrierRejectionSuppressionOn } from "@/lib/carrier-rejection/eligibility";
+import { isTagRulesRefusal } from "@/lib/messages/render";
+import type { TagKey } from "@/lib/messages/tags";
+import { carrierPolicyClause, type CarrierPolicy } from "@/lib/sends/carrier-policy";
+import { resolveSendsPerSecond } from "@/lib/sends/circuit-breakers";
 import { SEND_DEDUP_WINDOW_MS } from "@/lib/sends/dedup-window";
 import {
+  buildStageEligibilityExclusions,
+  LIFECYCLE_EXCLUSION_KEYS,
   ZERO_LIFECYCLE_EXCLUSIONS,
   type LifecycleExclusionCounts,
 } from "@/lib/sends/eligibility";
-import {
-  preflightStageSend,
-  type PreflightBlocker,
-} from "@/lib/sends/preflight";
+import type { PreflightBlocker } from "@/lib/sends/preflight";
+import { hasResolvableCredential } from "@/lib/sends/provider-credential";
 import { computeStageReconciliation } from "@/lib/sends/reconcile";
 import {
   stageRecipientsSql,
+  type StageEligibilityOverlay,
   type StageRecipientFilters,
 } from "@/lib/sends/recipients";
+import {
+  countMissingByTag,
+  countingTagRules,
+  loadStageTagRules,
+} from "@/lib/sends/tag-rules";
 import { OFFER_COOLDOWN_DAYS_DEFAULT } from "@/lib/validators/campaigns";
-import { loadStageCountingTagRules } from "@/lib/sends/tag-rules";
-import type { TagKey } from "@/lib/messages/tags";
 
 export type DbOrTx =
   typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -26,23 +34,57 @@ export type DbOrTx =
 // ─── P5/P6: preflight breakdown ─────────────────────────────────────────────
 //
 // A stage's resolved send picture, computed ~15 min BEFORE it materializes, for
-// the Telegram preflight digest (P5) and the /sends/autopilot view (P6). It layers
-// three sources so we don't re-implement anything:
-//   • preflightStageSend  → the live materialized_audience (the recipient set the
-//     kickoff WILL create, post opt-out/filter/split/content-dedup/lane), the
-//     structural blockers, and the drain-time estimate.
-//   • computeStageReconciliation → the per-cause exclusion buckets off the frozen
-//     pool (opt-out, stage-filter, split, content/offer dedup). It does NOT apply
-//     the behavioral-lane overlay, so its `qualified` is the pre-lane audience.
-//   • Two NET-NEW numbers:
-//       - lane = qualified − materialized_audience (only for lane children; the
-//         contacts dropped by tier/aliveness). Non-lane stages → 0.
-//       - dedup_1h_predicted = of the materialized set, how many phones already
-//         have a `status='sent'` row org-wide within the send-dedup window, i.e.
-//         would be marked `skipped_duplicate` at dispatch. This is the smoke-test
-//         nuance: it makes a stage whose audience is ~100% dedup-skipped visible
-//         BEFORE it fires. Inherently an ESTIMATE (the window slides and the drain
-//         also dedups intra-batch), so predicted_sends is "≈".
+// the Telegram preflight digest (P5) and the /sends/autopilot view (P6).
+//
+// ⭐ THE RECIPIENT SET IS BUILT ONCE (2026-11-13). This used to evaluate the
+// stage's full eligibility up to four times per stage — preflightStageSend's
+// recipient count (+ its unused per-reason lifecycle split), the dedup
+// prediction, and the carrier breakdown's WITH- and WITHOUT-policy queries —
+// each a 50–90 s statement on production against a disk at its IOPS ceiling.
+// Now, inside ONE transaction with its own `SET LOCAL statement_timeout = 60s`:
+//
+//   • preflight_recipients (TEMP, ON COMMIT DROP, ANALYZEd — §10b: a set-op
+//     relation must be materialized before the planner can cost joins on it) =
+//     stageRecipientsSql WITHOUT the carrier policy, plus `passes_carrier` = the
+//     SAME carrierPolicyClause evaluated per row. The policy is a pure per-row
+//     WHERE on qualified and the split bucket hashes contact_id only, so
+//       recipients(with policy) = { r ∈ preflight_recipients : passes_carrier }
+//     exactly. From it come materialized_audience, dedup_1h_predicted and the
+//     per-carrier exclusions — one eligibility evaluation instead of four.
+//   • computeStageReconciliation — UNCHANGED, still its own pass over the frozen
+//     pool: its buckets attribute the PRE-overlay pool (no lane, no carrier
+//     policy) to the first layer that caught each contact, a different relation
+//     from the recipient set, so nothing in it can be read off the temp table.
+//   • missing_by_tag — still counted over the PRE-eligibility base (it reports
+//     who lacks a tag, i.e. who the missing_tag_data layer would remove), which
+//     the post-eligibility temp table by definition no longer contains. Runs only
+//     for a tag-requiring stage, exactly as in preflightStageSend.
+//   • blockers + drain estimate — the same cheap checks preflightStageSend runs,
+//     restated in stageBlockers below in the SAME order (the array is persisted).
+//
+// preflightStageSend, stageRecipientsSql and computeStageReconciliation are NOT
+// changed: they are shared with kickoff / the stage send panel. Every number this
+// persists is identical to the pre-2026-11-13 implementation for the same stage
+// in the same snapshot — held by scripts/test-preflight-breakdown-once.ts against
+// a frozen copy of that implementation (scripts/_legacy-preflight-breakdown.ts).
+//
+// The two NET-NEW numbers:
+//   - lane = qualified − materialized_audience (only for lane children; the
+//     contacts dropped by tier/aliveness). Non-lane stages → 0.
+//   - dedup_1h_predicted = of the materialized set, how many phones already
+//     have a `status='sent'` row org-wide within the send-dedup window, i.e.
+//     would be marked `skipped_duplicate` at dispatch. This is the smoke-test
+//     nuance: it makes a stage whose audience is ~100% dedup-skipped visible
+//     BEFORE it fires. Inherently an ESTIMATE (the window slides and the drain
+//     also dedups intra-batch), so predicted_sends is "≈".
+//
+// BEST-EFFORT: a timeout (57014) or any other failure throws out of here and
+// the cron skips the stage for this tick, retrying on the next one. Nothing here
+// writes outside the temp table; it never gates or alters a send.
+
+/** Per-statement cap for the preflight's own transaction. SET LOCAL only — a
+ *  session SET leaks onto shared backends through the transaction pooler. */
+export const PREFLIGHT_STATEMENT_TIMEOUT = "60s";
 
 export interface PreflightBreakdown {
   computed_at: string; // ISO
@@ -79,17 +121,13 @@ export interface PreflightBreakdown {
   };
 }
 
-interface CfgRow {
-  include_no_status: boolean;
-  include_clickers: boolean;
-  exclude_clickers: boolean;
-  split_index: number | null;
-  split_total: number | null;
-  behavioral_tier: number | null;
-  parent_stage_id: number | null;
-  // 0174: split-group source set. NULL for legacy lanes / ordinary stages.
-  source_stage_ids: number[] | null;
-  split_group_id: string | null;
+// The stage row preflightStageSend reads (same SELECT, same joins), so the
+// recipient set and the blockers are built from exactly its inputs.
+interface StageRow {
+  link_mode: string;
+  brand_id: number | null;
+  campaign_tracking_id: string | null;
+  creative_text: string | null;
   creative_id: number | null;
   offer_id: number | null;
   exclude_prior_offer_contacts: boolean;
@@ -97,11 +135,50 @@ interface CfgRow {
   offer_rules_enabled: boolean;
   offer_cooldown_days: number;
   offer_limit_times: number;
+  stage_tracking_id: string | null;
+  sms_provider_id: number | null;
   provider_phone_id: number | null;
+  supports_api_send: boolean | null;
+  provider_sends_enabled: boolean | null;
+  include_no_status: boolean;
+  include_clickers: boolean;
+  exclude_clickers: boolean;
+  split_index: number | null;
+  split_total: number | null;
+  behavioral_tier: number | null;
+  parent_stage_id: number | null;
+  source_stage_ids: number[] | null;
+  split_group_id: string | null;
+  sender_max_sends_per_second: number | null;
   allow_unknown_carrier: boolean | null;
 }
 
 export async function computePreflightBreakdown(
+  dbc: DbOrTx,
+  ids: { orgId: string; campaignId: number; stageId: number },
+): Promise<PreflightBreakdown> {
+  // One transaction per stage: the temp table needs it, and SET LOCAL scopes the
+  // 60 s cap to this work alone. When the caller already holds a transaction
+  // (the test bars), drizzle opens a SAVEPOINT instead — a failure rolls back to
+  // it (undoing the SET LOCAL and the temp table); on success the temp table is
+  // dropped in computeInTx and the timeout restored below, so the caller's
+  // transaction is left as it was.
+  return (dbc as typeof db).transaction(async (tx) => {
+    const prev = (await tx.execute(
+      sql`SELECT current_setting('statement_timeout') AS v`,
+    )) as unknown as { v: string }[];
+    await tx.execute(
+      sql.raw(`SET LOCAL statement_timeout = '${PREFLIGHT_STATEMENT_TIMEOUT}'`),
+    );
+    const out = await computeInTx(tx, ids);
+    await tx.execute(
+      sql`SELECT set_config('statement_timeout', ${prev[0]?.v ?? "0"}, true)`,
+    );
+    return out;
+  });
+}
+
+async function computeInTx(
   dbc: DbOrTx,
   {
     orgId,
@@ -109,29 +186,203 @@ export async function computePreflightBreakdown(
     stageId,
   }: { orgId: string; campaignId: number; stageId: number },
 ): Promise<PreflightBreakdown> {
-  // 1. Live audience + blockers + drain estimate (the authoritative send picture).
-  const pf = await preflightStageSend(dbc, { orgId, campaignId, stageId });
-  const materialized = pf.recipient_count;
+  // 1. The stage row — preflightStageSend's SELECT, verbatim.
+  const rows = (await dbc.execute(sql`
+    SELECT
+      c.link_mode         AS link_mode,
+      c.brand_id          AS brand_id,
+      c.tracking_id       AS campaign_tracking_id,
+      cr.text             AS creative_text,
+      s.creative_id       AS creative_id,
+      c.offer_id          AS offer_id,
+      c.exclude_prior_offer_contacts AS exclude_prior_offer_contacts,
+      c.lifecycle_rules AS lifecycle_rules,
+      c.offer_rules_enabled,
+      c.offer_cooldown_days,
+      c.offer_limit_times,
+      s.tracking_id       AS stage_tracking_id,
+      s.sms_provider_id   AS sms_provider_id,
+      s.provider_phone_id AS provider_phone_id,
+      p.supports_api_send AS supports_api_send,
+      p.sends_enabled     AS provider_sends_enabled,
+      s.include_no_status AS include_no_status,
+      s.include_clickers  AS include_clickers,
+      s.exclude_clickers  AS exclude_clickers,
+      s.split_index       AS split_index,
+      s.split_total       AS split_total,
+      s.behavioral_tier   AS behavioral_tier,
+      s.parent_stage_id   AS parent_stage_id,
+      sg.source_stage_ids AS source_stage_ids,
+      s.split_group_id AS split_group_id,
+      pp.max_sends_per_second AS sender_max_sends_per_second,
+      pp.allow_unknown_carrier AS allow_unknown_carrier
+    FROM campaigns c
+    JOIN campaign_stages s ON s.id = ${stageId} AND s.campaign_id = c.id
+    LEFT JOIN creatives cr ON cr.id = s.creative_id
+    LEFT JOIN sms_providers p ON p.id = s.sms_provider_id AND p.org_id = ${orgId}
+    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id AND pp.org_id = ${orgId}
+    LEFT JOIN campaign_stage_split_groups sg ON sg.id = s.split_group_id
+    WHERE c.id = ${campaignId} AND c.org_id = ${orgId}
+    LIMIT 1
+  `)) as unknown as StageRow[];
+  const row = rows[0];
+  const mode: "manual" | "tracked" =
+    row?.link_mode === "tracked" ? "tracked" : "manual";
 
-  // 2. Stage config for the reconciliation filters + the dedup predictor's set.
+  // Defaults = preflightStageSend's not-found result (no recipients, blocker
+  // no_creative); the breakdown then finds no stage either and returns `empty`.
+  let materialized = 0;
+  let dedup1h = 0;
+  const carrierExcluded: Record<string, number> = {};
+  let missingByTag: Partial<Record<TagKey, number>> = {};
+  let blockers: PreflightBlocker[] = ["no_creative"];
+  let senderRate: number | null = null;
+  let estimatedDrainSeconds: number | null = null;
+
+  if (row) {
+    const rawTagRules = await loadStageTagRules(dbc, { orgId, stageId });
+    const tagRules = countingTagRules(rawTagRules);
+    const carrierRejectedSuppression = await isCarrierRejectionSuppressionOn(orgId);
+
+    const filters: StageRecipientFilters = {
+      includeNoStatus: row.include_no_status,
+      includeClickers: row.include_clickers,
+      excludeClickers: row.exclude_clickers,
+      splitIndex: row.split_index ?? null,
+      splitTotal: row.split_total ?? null,
+      behavioralTier: row.behavioral_tier ?? null,
+      parentStageId: row.parent_stage_id ?? null,
+      sourceStageIds: row.source_stage_ids ?? null,
+      splitGroupId: row.split_group_id ?? null,
+      laneStageId: stageId,
+    };
+    const eligibility: StageEligibilityOverlay = {
+      creativeId: row.creative_id ?? null,
+      offerId: row.offer_id ?? null,
+      excludePriorOffer: row.exclude_prior_offer_contacts,
+      lifecycleRules: row.lifecycle_rules === true,
+      offerRulesEnabled: row.offer_rules_enabled === true,
+      offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
+      offerLimitTimes: Number(row.offer_limit_times ?? 5),
+      tagRules,
+      carrierRejectedSuppression,
+    };
+    // Q4: the same carrier policy kickoff enforces.
+    const carrierPolicy: CarrierPolicy = {
+      providerPhoneId: row.provider_phone_id,
+      allowUnknownCarrier: row.allow_unknown_carrier !== false,
+    };
+
+    // 2. THE recipient set, once. Unrestricted by the carrier policy so the
+    //    per-carrier exclusions come off the same rows; `passes_carrier` is the
+    //    policy's own clause (coalesce = WHERE semantics: NULL drops the row).
+    await dbc.execute(sql`
+      CREATE TEMP TABLE preflight_recipients ON COMMIT DROP AS
+      SELECT u.contact_id, u.phone_number, u.carrier_norm,
+             coalesce((${carrierPolicyClause(carrierPolicy, orgId, sql`u.carrier_norm`)}), false) AS passes_carrier
+      FROM (${stageRecipientsSql({ campaignId, orgId, filters, eligibility })}) u
+    `);
+    await dbc.execute(sql`ANALYZE preflight_recipients`);
+
+    // 3. Recipient count + predicted 1-hour phone dedup (the SAME window
+    //    constant the drain enforces), in one read of the materialized set.
+    const cnt = (await dbc.execute(sql`
+      SELECT
+        count(*) FILTER (WHERE r.passes_carrier)::int AS n,
+        count(*) FILTER (
+          WHERE r.passes_carrier AND EXISTS (
+            SELECT 1 FROM stage_sends ss
+            WHERE ss.org_id = ${orgId}::uuid
+              AND ss.status = 'sent'
+              -- statement_timestamp(), not now(): now() is frozen at the START of
+              -- this transaction, before the temp table was built. The old
+              -- un-transacted query's now() was its own statement start; this
+              -- keeps that anchor.
+              AND ss.sent_at >= statement_timestamp() - interval '1 millisecond' * ${SEND_DEDUP_WINDOW_MS}
+              AND ss.phone = r.phone_number
+          )
+        )::int AS dedup
+      FROM preflight_recipients r
+    `)) as unknown as { n: number; dedup: number }[];
+    materialized = Number(cnt[0]?.n ?? 0);
+    dedup1h = Number(cnt[0]?.dedup ?? 0);
+
+    // 4. Q4 per-carrier exclusions: contacts that pass every other gate but are
+    //    dropped by THIS NUMBER's carrier policy, per carrier. Skipped when the
+    //    stage has no sending number (the clause is then a literal TRUE).
+    if (carrierPolicy.providerPhoneId != null) {
+      const rowsC = (await dbc.execute(sql`
+        SELECT carrier_norm, count(*)::int AS n
+        FROM preflight_recipients
+        WHERE NOT passes_carrier
+        GROUP BY carrier_norm
+        ORDER BY count(*) DESC
+      `)) as unknown as { carrier_norm: string | null; n: number }[];
+      for (const r of rowsC) {
+        // A NULL carrier is reported under its own label rather than dropped —
+        // an unlabelled exclusion is the kind an operator never notices.
+        carrierExcluded[r.carrier_norm ?? "(no carrier)"] = Number(r.n);
+      }
+    }
+    // Done with the set. Dropped now rather than left to ON COMMIT DROP so a
+    // caller that runs several stages inside one outer transaction (the bars)
+    // can create it again.
+    await dbc.execute(sql`DROP TABLE preflight_recipients`);
+
+    // 5. P4: per required tag, who lacks it — over the PRE-eligibility base
+    //    (with the carrier policy), as preflightStageSend counts it, behind the
+    //    same guard (only when the stage has a lifecycle/tag layer).
+    const lcLayers = buildStageEligibilityExclusions({
+      orgId,
+      currentCampaignId: campaignId,
+      currentCreativeId: row.creative_id ?? null,
+      currentOfferId: row.offer_id ?? null,
+      excludePriorOffer: row.exclude_prior_offer_contacts,
+      lifecycleRules: row.lifecycle_rules === true,
+      offerRulesEnabled: row.offer_rules_enabled === true,
+      offerCooldownDays: Number(row.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
+      offerLimitTimes: Number(row.offer_limit_times ?? 5),
+      tagRules,
+      carrierRejectedSuppression,
+    }).filter((l) =>
+      (LIFECYCLE_EXCLUSION_KEYS as readonly string[]).includes(l.key),
+    );
+    if (lcLayers.length > 0) {
+      missingByTag = await countMissingByTag(
+        dbc,
+        stageRecipientsSql({ campaignId, orgId, filters, carrierPolicy }),
+        tagRules,
+      );
+    }
+
+    // 6. Structural blockers + drain estimate.
+    blockers = await stageBlockers(dbc, orgId, row, mode, materialized, rawTagRules);
+    if (mode === "tracked" && row.provider_phone_id != null) {
+      senderRate = resolveSendsPerSecond(row.sender_max_sends_per_second);
+      if (materialized > 0) estimatedDrainSeconds = Math.ceil(materialized / senderRate);
+    }
+  }
+
+  // 7. Stage config for the reconciliation filters.
   const cfgRows = (await dbc.execute(sql`
     SELECT s.include_no_status, s.include_clickers, s.exclude_clickers,
-           s.split_index, s.split_total, s.behavioral_tier, s.parent_stage_id,
-           (SELECT g.source_stage_ids FROM campaign_stage_split_groups g
-             WHERE g.id = s.split_group_id) AS source_stage_ids,
-           s.creative_id, c.offer_id, c.exclude_prior_offer_contacts, c.lifecycle_rules,
-           c.offer_rules_enabled, c.offer_cooldown_days, c.offer_limit_times,
-           s.provider_phone_id, pp.allow_unknown_carrier
+           s.split_index, s.split_total, s.behavioral_tier
     FROM campaign_stages s JOIN campaigns c ON c.id = s.campaign_id
-    LEFT JOIN provider_phones pp ON pp.id = s.provider_phone_id
     WHERE s.id = ${stageId} AND c.id = ${campaignId} AND c.org_id = ${orgId}::uuid
     LIMIT 1
-  `)) as unknown as CfgRow[];
+  `)) as unknown as {
+    include_no_status: boolean;
+    include_clickers: boolean;
+    exclude_clickers: boolean;
+    split_index: number | null;
+    split_total: number | null;
+    behavioral_tier: number | null;
+  }[];
   const cfg = cfgRows[0];
 
   const empty: PreflightBreakdown = {
     computed_at: new Date().toISOString(),
-    mode: pf.mode,
+    mode,
     pool_total: 0,
     materialized_audience: materialized,
     predicted_sends: materialized,
@@ -145,153 +396,46 @@ export async function computePreflightBreakdown(
       dedup_1h_predicted: 0,
       carrier: {},
     },
-    missing_by_tag: pf.missing_by_tag,
-    estimated_drain_seconds: pf.estimated_drain_seconds,
-    sender_sends_per_second: pf.sender_sends_per_second,
-    blockers: pf.blockers,
+    missing_by_tag: missingByTag,
+    estimated_drain_seconds: estimatedDrainSeconds,
+    sender_sends_per_second: senderRate,
+    blockers,
     red: {
       no_audience: materialized === 0,
       all_dedup_predicted: false,
-      has_blocker: pf.blockers.length > 0,
+      has_blocker: blockers.length > 0,
     },
   };
-  if (!cfg) return empty;
+  if (!cfg || !row) return empty;
 
-  // Q4: the same carrier policy kickoff enforces. Every recipient query in this
-  // breakdown must use it, or the numbers describe an audience the send will
-  // not produce.
-  const carrierPolicy = {
-    providerPhoneId: cfg.provider_phone_id,
-    allowUnknownCarrier: cfg.allow_unknown_carrier !== false,
-  };
-
-  const filters: StageRecipientFilters = {
-    includeNoStatus: cfg.include_no_status,
-    includeClickers: cfg.include_clickers,
-    excludeClickers: cfg.exclude_clickers,
-    splitIndex: cfg.split_index ?? null,
-    splitTotal: cfg.split_total ?? null,
-  };
-  const eligibility = {
-    creativeId: cfg.creative_id ?? null,
-    offerId: cfg.offer_id ?? null,
-    excludePriorOffer: cfg.exclude_prior_offer_contacts,
-    lifecycleRules: cfg.lifecycle_rules === true,
-    offerRulesEnabled: cfg.offer_rules_enabled === true,
-    offerCooldownDays: Number(cfg.offer_cooldown_days ?? OFFER_COOLDOWN_DAYS_DEFAULT),
-    offerLimitTimes: Number(cfg.offer_limit_times ?? 5),
-    // P4: same rules as preflight/kickoff (NO_TAG_RULES ⇒ no layer).
-    tagRules: await loadStageCountingTagRules(dbc, { orgId, stageId }),
-    carrierRejectedSuppression: await isCarrierRejectionSuppressionOn(orgId),
-  };
-
-  // 3. Per-cause exclusion buckets off the frozen pool (opt-out/filter/split/dedup).
-  //    reconcile does NOT apply the lane overlay, so its `qualified` is pre-lane.
+  // 8. Per-cause exclusion buckets off the frozen pool (opt-out/filter/split/
+  //    dedup + lifecycle layers). A different relation from the recipient set
+  //    (pre-lane, pre-carrier-policy pool attribution), so computed as before.
   const recon = await computeStageReconciliation(dbc, {
     campaignId,
     orgId,
     stageId,
-    filters,
+    filters: {
+      includeNoStatus: cfg.include_no_status,
+      includeClickers: cfg.include_clickers,
+      excludeClickers: cfg.exclude_clickers,
+      splitIndex: cfg.split_index ?? null,
+      splitTotal: cfg.split_total ?? null,
+    },
   });
 
-  // 4. Lane exclusion = contacts that passed everything but failed the tier/aliveness
-  //    overlay. Only meaningful for lane children; for non-lane stages, qualified
-  //    and materialized should match, so we don't attribute any drift to "lane".
+  // 9. Lane exclusion = contacts that passed everything but failed the tier/
+  //    aliveness overlay. Only meaningful for lane children; for non-lane stages
+  //    qualified and materialized should match, so no drift is called "lane".
   const laneExcluded =
     cfg.behavioral_tier != null
       ? Math.max(0, recon.qualified - materialized)
       : 0;
-
-  // 5. Predicted 1-hour phone dedup: of the materialized recipient set, how many
-  //    phones already have a 'sent' row org-wide within the dedup window. Uses the
-  //    SAME window constant the drain enforces, so the estimate tracks reality.
-  const dedupRows = (await dbc.execute(sql`
-    SELECT count(*)::int AS n FROM (
-      ${stageRecipientsSql({
-        campaignId,
-        orgId,
-        filters: {
-          ...filters,
-          behavioralTier: cfg.behavioral_tier ?? null,
-          parentStageId: cfg.parent_stage_id ?? null,
-          sourceStageIds: cfg.source_stage_ids ?? null,
-          splitGroupId: cfg.split_group_id ?? null,
-          laneStageId: stageId,
-        },
-        eligibility,
-        carrierPolicy,
-      })}
-    ) r
-    WHERE EXISTS (
-      SELECT 1 FROM stage_sends ss
-      WHERE ss.org_id = ${orgId}::uuid
-        AND ss.status = 'sent'
-        AND ss.sent_at >= now() - interval '1 millisecond' * ${SEND_DEDUP_WINDOW_MS}
-        AND ss.phone = r.phone_number
-    )
-  `)) as unknown as { n: number }[];
-  const dedup1h = Number(dedupRows[0]?.n ?? 0);
   const predicted = Math.max(0, materialized - dedup1h);
-
-  // 6. Q4 per-carrier exclusions: contacts that pass every other gate but are
-  //    dropped by THIS NUMBER's carrier policy. Computed as the difference
-  //    between the recipient query WITHOUT the policy and WITH it, grouped by
-  //    carrier — so the figure is exactly "who this number may not text",
-  //    attributable per carrier rather than as one opaque total.
-  //
-  //    Skipped entirely when the stage has no sending number, and cheap when
-  //    the policy is empty (the WITHOUT/WITH queries are then identical and the
-  //    anti-join finds nothing).
-  const carrierExcluded: Record<string, number> = {};
-  if (carrierPolicy.providerPhoneId != null) {
-    const rows = (await dbc.execute(sql`
-      SELECT carrier_norm, count(*)::int AS n FROM (
-        ${stageRecipientsSql({
-          campaignId,
-          orgId,
-          filters: {
-            ...filters,
-            behavioralTier: cfg.behavioral_tier ?? null,
-            parentStageId: cfg.parent_stage_id ?? null,
-            sourceStageIds: cfg.source_stage_ids ?? null,
-            splitGroupId: cfg.split_group_id ?? null,
-            laneStageId: stageId,
-          },
-          eligibility,
-        })}
-      ) unrestricted
-      WHERE NOT EXISTS (
-        SELECT 1 FROM (
-          ${stageRecipientsSql({
-            campaignId,
-            orgId,
-            filters: {
-              ...filters,
-              behavioralTier: cfg.behavioral_tier ?? null,
-              parentStageId: cfg.parent_stage_id ?? null,
-              sourceStageIds: cfg.source_stage_ids ?? null,
-              splitGroupId: cfg.split_group_id ?? null,
-              laneStageId: stageId,
-            },
-            eligibility,
-            carrierPolicy,
-          })}
-        ) restricted
-        WHERE restricted.contact_id = unrestricted.contact_id
-      )
-      GROUP BY carrier_norm
-      ORDER BY count(*) DESC
-    `)) as unknown as { carrier_norm: string | null; n: number }[];
-    for (const r of rows) {
-      // A NULL carrier is reported under its own label rather than dropped —
-      // an unlabelled exclusion is the kind an operator never notices.
-      carrierExcluded[r.carrier_norm ?? "(no carrier)"] = Number(r.n);
-    }
-  }
 
   return {
     computed_at: new Date().toISOString(),
-    mode: pf.mode,
+    mode,
     pool_total: recon.pool_total,
     materialized_audience: materialized,
     predicted_sends: predicted,
@@ -307,14 +451,57 @@ export async function computePreflightBreakdown(
       dedup_1h_predicted: dedup1h,
       carrier: carrierExcluded,
     },
-    missing_by_tag: pf.missing_by_tag,
-    estimated_drain_seconds: pf.estimated_drain_seconds,
-    sender_sends_per_second: pf.sender_sends_per_second,
-    blockers: pf.blockers,
+    missing_by_tag: missingByTag,
+    estimated_drain_seconds: estimatedDrainSeconds,
+    sender_sends_per_second: senderRate,
+    blockers,
     red: {
       no_audience: materialized === 0,
       all_dedup_predicted: materialized > 0 && predicted === 0,
-      has_blocker: pf.blockers.length > 0,
+      has_blocker: blockers.length > 0,
     },
   };
+}
+
+// preflightStageSend's blocker checks, in its order (the array is persisted and
+// compared). ⚠️ A blocker added there must be added here — the equality bar
+// (scripts/test-preflight-breakdown-once.ts) compares the two on fixtures and
+// source-guards that every blocker literal in preflight.ts appears here.
+async function stageBlockers(
+  dbc: DbOrTx,
+  orgId: string,
+  row: StageRow,
+  mode: "manual" | "tracked",
+  recipientCount: number,
+  rawTagRules: Awaited<ReturnType<typeof loadStageTagRules>>,
+): Promise<PreflightBlocker[]> {
+  const blockers: PreflightBlocker[] = [];
+  if (!row.creative_text) blockers.push("no_creative");
+  if (!(recipientCount > 0)) blockers.push("no_recipients");
+  // segment_ceiling_exceeded / multi_segment_not_allowed / missing_brand
+  if (isTagRulesRefusal(rawTagRules)) blockers.push(rawTagRules.refused);
+  if (mode !== "tracked") return blockers;
+
+  if (!(row.stage_tracking_id && row.campaign_tracking_id)) blockers.push("stage_not_ready");
+  const hasProvider = row.sms_provider_id != null;
+  if (!hasProvider) blockers.push("no_provider");
+  if (!(hasProvider && row.supports_api_send === true)) blockers.push("provider_not_api_capable");
+  if (!(hasProvider && row.provider_sends_enabled === true)) blockers.push("provider_sends_disabled");
+  if (row.provider_phone_id == null) blockers.push("no_sender_number");
+  const hasCred = hasProvider
+    ? await hasResolvableCredential(dbc, {
+        orgId,
+        providerId: row.sms_provider_id!,
+        brandId: row.brand_id,
+        providerPhoneId: row.provider_phone_id,
+      })
+    : false;
+  if (!hasCred) blockers.push("no_credentials");
+  const sd = (await dbc.execute(sql`
+    SELECT 1 AS ok FROM short_domains
+    WHERE org_id = ${orgId} AND brand_id = ${row.brand_id} AND status = 'active'
+    LIMIT 1
+  `)) as unknown as { ok: number }[];
+  if (sd.length === 0) blockers.push("no_short_domain");
+  return blockers;
 }

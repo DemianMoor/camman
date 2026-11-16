@@ -39,7 +39,6 @@ const SORT_COLUMNS = {
   created_at: creatives.created_at,
   status: creatives.status,
   text: creatives.text,
-  quality: creatives.quality,
   sequence_placement: creatives.sequence_placement,
   funnel_stage: creatives.funnel_stage,
   // Sorts by the per-row column directly. Unscored rows (NULL) bubble to
@@ -215,6 +214,15 @@ export async function GET(req: NextRequest) {
        }
   )`;
 
+  // 0240: the creative's brand name. A correlated lookup on brands' primary
+  // key (a handful of rows per org) — cheaper to keep than a join that both
+  // the metrics and the plain query would have to carry. Raw `creatives.`
+  // reference on purpose: drizzle renders ${creatives.brand_id} unqualified
+  // inside a subquery, which would bind to brands.brand_id (none) or worse.
+  const brandNameSql = drizzleSql<string | null>`(
+    SELECT b.name FROM brands b WHERE b.id = creatives.brand_id AND b.org_id = ${orgId}
+  )`;
+
   const sortBy = params.sortBy ?? "created_at";
   const sortDirSql = params.sortDir === "asc" ? "ASC" : "DESC";
   const orderFn = params.sortDir === "asc" ? asc : desc;
@@ -228,6 +236,12 @@ export async function GET(req: NextRequest) {
   if (includeMetrics && sortBy in RATIO_SQL) {
     orderByClause = [
       drizzleSql`${RATIO_SQL[sortBy as keyof typeof RATIO_SQL]} ${drizzleSql.raw(sortDirSql)} NULLS LAST`,
+      asc(creatives.id),
+    ];
+  } else if (sortBy === "brand") {
+    // Unassigned creatives (no brand yet) sort to the end either way.
+    orderByClause = [
+      drizzleSql`${brandNameSql} ${drizzleSql.raw(sortDirSql)} NULLS LAST`,
       asc(creatives.id),
     ];
   } else if (sortBy === "used_campaigns") {
@@ -258,7 +272,8 @@ export async function GET(req: NextRequest) {
     slug: creatives.slug,
     org_id: creatives.org_id,
     text: creatives.text,
-    quality: creatives.quality,
+    brand_id: creatives.brand_id,
+    brand_name: brandNameSql.as("brand_name"),
     sequence_placement: creatives.sequence_placement,
     funnel_stage: creatives.funnel_stage,
     applies_to_all_offers: creatives.applies_to_all_offers,
@@ -523,7 +538,8 @@ export async function GET(req: NextRequest) {
       slug: r.slug,
       org_id: r.org_id,
       text: r.text,
-      quality: r.quality,
+      brand_id: r.brand_id,
+      brand_name: r.brand_name,
       sequence_placement: r.sequence_placement,
       funnel_stage: r.funnel_stage,
       applies_to_all_offers: r.applies_to_all_offers,

@@ -101,6 +101,10 @@ export type Permission =
   | "creatives.update"
   | "creatives.archive"
   | "creatives.restore"
+  // 0240: move an existing creative to another brand. Admin+ only — a
+  // creative may be used only under its own brand, so reassigning it changes
+  // which campaigns can pick it. Copy-to-brand needs only creatives.create.
+  | "creatives.reassign_brand"
   | "campaigns.view"
   | "campaigns.create"
   | "campaigns.update"
@@ -425,6 +429,7 @@ const adminPerms: ReadonlySet<Permission> = new Set([
   "provider_credentials.manage",
   "partner_keys.manage",
   "brands.landing.update",
+  "creatives.reassign_brand",
 ]);
 
 const ownerPerms: ReadonlySet<Permission> = new Set([

@@ -9,6 +9,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { brandBelongsToOrg } from "@/lib/creatives/brand";
 import { notifyGuardrail } from "@/lib/guardrails/notify";
 import { checkCreativeBody } from "@/lib/guardrails/url-allowlist";
 import { generateCreativeSlug } from "@/lib/creative-helpers";
@@ -66,6 +67,13 @@ export async function POST(req: NextRequest) {
     : handleSingle(json, orgId, user.id);
 }
 
+async function verifyBrand(orgId: string, brandId: number) {
+  if (await brandBelongsToOrg(orgId, brandId)) return null;
+  return apiError(400, "brand_id doesn't belong to your organization", API_ERROR_CODES.VALIDATION, {
+    field: "brand_id",
+  });
+}
+
 // Verify every offer id belongs to the org. Returns null on success, or
 // an apiError response on first mismatch.
 async function verifyOffers(orgId: string, offerIds: number[]) {
@@ -120,6 +128,8 @@ async function handleSingle(json: unknown, orgId: string, actorUserId: string) {
   }
 
 
+  const brandErr = await verifyBrand(orgId, input.brand_id);
+  if (brandErr) return brandErr;
   const offerErr = await verifyOffers(orgId, input.offer_ids);
   if (offerErr) return offerErr;
 
@@ -134,7 +144,7 @@ async function handleSingle(json: unknown, orgId: string, actorUserId: string) {
             text: input.text,
             creative_id: nullIfEmpty(input.creative_id),
             slug,
-            quality: input.quality,
+            brand_id: input.brand_id,
             sequence_placement: input.sequence_placement,
             funnel_stage: input.funnel_stage,
             applies_to_all_offers: input.applies_to_all_offers,
@@ -228,6 +238,8 @@ async function handleBulk(json: unknown, orgId: string, actorUserId: string) {
     );
   }
 
+  const brandErr = await verifyBrand(orgId, input.brand_id);
+  if (brandErr) return brandErr;
   const offerErr = await verifyOffers(orgId, input.offer_ids);
   if (offerErr) return offerErr;
 
@@ -250,7 +262,7 @@ async function handleBulk(json: unknown, orgId: string, actorUserId: string) {
                 text: row.text,
                 creative_id: nullIfEmpty(row.creative_id),
                 slug,
-                quality: input.quality,
+                brand_id: input.brand_id,
                 sequence_placement: input.sequence_placement,
                 funnel_stage: input.funnel_stage,
                 applies_to_all_offers: input.applies_to_all_offers,
@@ -327,7 +339,7 @@ async function loadCreativeWithOffers(id: number) {
       slug: creatives.slug,
       org_id: creatives.org_id,
       text: creatives.text,
-      quality: creatives.quality,
+      brand_id: creatives.brand_id,
       sequence_placement: creatives.sequence_placement,
       funnel_stage: creatives.funnel_stage,
       applies_to_all_offers: creatives.applies_to_all_offers,

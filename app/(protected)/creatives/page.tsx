@@ -73,6 +73,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MultiSelectPicker } from "@/components/multi-select-picker";
 import { OfferPicker } from "@/components/offers/offer-picker";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { toastApiError } from "@/lib/api/toast-error";
 import { calculateSmsSegments } from "@/lib/creative-helpers";
@@ -82,10 +89,8 @@ import { cn } from "@/lib/utils";
 import { NO_OWN_SENDS_NOTE } from "@/lib/reporting/offer-split-display";
 import {
   FUNNEL_STAGE_VALUES,
-  QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
   type CreativeFunnelStage,
-  type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
 
@@ -103,7 +108,9 @@ type Creative = {
   slug: string;
   org_id: string;
   text: string;
-  quality: CreativeQuality;
+  // 0240: the ONE brand this creative belongs to; null until mapped.
+  brand_id: number | null;
+  brand_name: string | null;
   sequence_placement: CreativeSequencePlacement;
   funnel_stage: CreativeFunnelStage;
   applies_to_all_offers: boolean;
@@ -197,7 +204,8 @@ type OfferListResponse = { data: OfferInfo[] };
 type Filters = {
   search: string;
   offer_id: number | null;
-  qualities: CreativeQuality[];
+  // Single-select brand filter: a brand id, "none" (no brand yet), or null (any).
+  brand_id: number | "none" | null;
   sequences: CreativeSequencePlacement[];
   funnelStages: CreativeFunnelStage[];
   showArchived: boolean;
@@ -242,7 +250,7 @@ type Filters = {
 const DEFAULT_FILTERS: Filters = {
   search: "",
   offer_id: null,
-  qualities: [],
+  brand_id: null,
   sequences: [],
   funnelStages: [],
   showArchived: false,
@@ -255,12 +263,8 @@ const DEFAULT_FILTERS: Filters = {
 
 const SEARCH_DEBOUNCE_MS = 300;
 
-const QUALITY_LABEL: Record<CreativeQuality, string> = {
-  high: "High",
-  average: "Average",
-  poor: "Poor",
-  unknown: "Unknown",
-};
+type BrandOption = { id: number; name: string; status: string };
+const ANY_BRAND = "__any__";
 
 const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   warmup: "WarmUp",
@@ -503,7 +507,7 @@ export default function CreativesPage() {
   const filtersAreDefault =
     filters.search === DEFAULT_FILTERS.search &&
     filters.offer_id === DEFAULT_FILTERS.offer_id &&
-    filters.qualities.length === 0 &&
+    (filters.brand_id ?? null) === null &&
     filters.sequences.length === 0 &&
     filters.funnelStages.length === 0 &&
     filters.showArchived === DEFAULT_FILTERS.showArchived;
@@ -525,7 +529,7 @@ export default function CreativesPage() {
   const updateApi = useApiCall<Creative>();
   const archiveApi = useApiCall<Creative>();
   const restoreApi = useApiCall<Creative>();
-  const duplicateApi = useApiCall<Creative>();
+  const duplicateApi = useApiCall<Creative & { dropped_offer_ids?: number[] }>();
   const offersApi = useApiCall<OfferListResponse>();
   const idsApi = useApiCall<{ ids: number[]; truncated: boolean }>();
   const bulkUpdateApi = useApiCall<{ updated: number }>();
@@ -553,6 +557,17 @@ export default function CreativesPage() {
     })();
   }, [offersApi.execute]);
 
+  // Brands for the filter and the Copy-to-brand dialog (archived included so a
+  // creative still on an archived brand can be filtered to).
+  const brandsApi = useApiCall<{ data: BrandOption[] }>();
+  const [brands, setBrands] = useState<BrandOption[]>([]);
+  useEffect(() => {
+    (async () => {
+      const r = await brandsApi.execute("/api/brands/list?pageSize=100&showArchived=true&sortBy=name&sortDir=asc");
+      if (r.ok) setBrands(r.data.data);
+    })();
+  }, [brandsApi.execute]);
+
   useEffect(() => {
     let cancelled = false;
     setFetchError(null);
@@ -564,8 +579,7 @@ export default function CreativesPage() {
     });
     if (filters.search) sp.set("search", filters.search);
     if (filters.offer_id !== null) sp.set("offer_id", String(filters.offer_id));
-    if (filters.qualities.length > 0)
-      sp.set("quality", filters.qualities.join(","));
+    if (filters.brand_id != null) sp.set("brand_id", String(filters.brand_id));
     if (filters.sequences.length > 0)
       sp.set("sequence_placement", filters.sequences.join(","));
     if (filters.funnelStages.length > 0)
@@ -595,7 +609,7 @@ export default function CreativesPage() {
     filters.sortDir,
     filters.search,
     filters.offer_id,
-    filters.qualities,
+    filters.brand_id,
     filters.sequences,
     filters.funnelStages,
     filters.showArchived,
@@ -639,7 +653,7 @@ export default function CreativesPage() {
   }, [
     filters.search,
     filters.offer_id,
-    filters.qualities,
+    filters.brand_id,
     filters.sequences,
     filters.showArchived,
   ]);
@@ -659,8 +673,7 @@ export default function CreativesPage() {
     const sp = new URLSearchParams();
     if (filters.search) sp.set("search", filters.search);
     if (filters.offer_id !== null) sp.set("offer_id", String(filters.offer_id));
-    if (filters.qualities.length > 0)
-      sp.set("quality", filters.qualities.join(","));
+    if (filters.brand_id != null) sp.set("brand_id", String(filters.brand_id));
     if (filters.sequences.length > 0)
       sp.set("sequence_placement", filters.sequences.join(","));
     if (filters.funnelStages.length > 0)
@@ -670,7 +683,7 @@ export default function CreativesPage() {
   }, [
     filters.search,
     filters.offer_id,
-    filters.qualities,
+    filters.brand_id,
     filters.sequences,
     filters.funnelStages,
     filters.showArchived,
@@ -768,7 +781,9 @@ export default function CreativesPage() {
     const body = {
       text: values.text,
       creative_id: values.creative_id || undefined,
-      quality: values.quality,
+      // Echoing the stored brand is fine; a CHANGE is admin/owner only (the
+      // form locks the select for everyone else, the PATCH re-checks).
+      ...(values.brand_id != null ? { brand_id: values.brand_id } : {}),
       sequence_placement: values.sequence_placement,
       funnel_stage: values.funnel_stage,
       applies_to_all_offers: values.applies_to_all_offers,
@@ -811,18 +826,38 @@ export default function CreativesPage() {
     refetch();
   }
 
-  async function handleDuplicate(creative: Creative) {
+  // "Copy to brand" (0240): the existing duplicate route with a required
+  // brand_id. The copy keeps only the offers allowed under that brand; the
+  // server refuses when none are.
+  const [copying, setCopying] = useState<Creative | null>(null);
+  const [copyBrandId, setCopyBrandId] = useState<number | null>(null);
+  function openCopy(creative: Creative) {
+    setCopying(creative);
+    setCopyBrandId(creative.brand_id);
+  }
+  async function handleCopy() {
+    if (!copying || copyBrandId == null) return;
     const result = await duplicateApi.execute(
-      `/api/creatives/${creative.id}/duplicate`,
-      { method: "POST" },
+      `/api/creatives/${copying.id}/duplicate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brand_id: copyBrandId }),
+      },
     );
     if (!result.ok) {
-      toastApiError(result, "Couldn't duplicate creative");
+      toastApiError(result, "Couldn't copy creative");
       return;
     }
-    toast.success("Creative duplicated");
+    const dropped = result.data.dropped_offer_ids?.length ?? 0;
+    const brandName = brands.find((b) => b.id === copyBrandId)?.name ?? "the brand";
+    toast.success(
+      `Copied to ${brandName}` +
+        (dropped > 0 ? ` — ${dropped} offer${dropped === 1 ? "" : "s"} not assigned to ${brandName} left off` : ""),
+    );
+    setCopying(null);
     refetch();
-    setEditing(result.data);
+    setEditing({ ...result.data, brand_name: brandName });
   }
 
   const columns = useMemo<ColumnDef<Creative>[]>(() => {
@@ -894,6 +929,19 @@ export default function CreativesPage() {
         header: "Spam Score",
         enableSorting: true,
         cell: ({ row }) => <SpamScoreCell creative={row.original} />,
+      },
+      {
+        id: "brand",
+        header: "Brand",
+        enableSorting: true,
+        cell: ({ row }) =>
+          row.original.brand_name ? (
+            <span className="text-sm">{row.original.brand_name}</span>
+          ) : (
+            <span className="text-xs text-muted-foreground" title="No brand yet — can't be picked on a stage until it has one">
+              No brand
+            </span>
+          ),
       },
       {
         id: "offers",
@@ -1177,8 +1225,8 @@ export default function CreativesPage() {
                     </DropdownMenuItem>
                   ) : null}
                   {showDup ? (
-                    <DropdownMenuItem onSelect={() => handleDuplicate(c)}>
-                      <DuplicateIcon className="size-4" aria-hidden /> Duplicate
+                    <DropdownMenuItem onSelect={() => openCopy(c)}>
+                      <DuplicateIcon className="size-4" aria-hidden /> Copy to brand…
                     </DropdownMenuItem>
                   ) : null}
                   {showArchive ? (
@@ -1257,16 +1305,6 @@ export default function CreativesPage() {
   const selectedOfferName =
     offers.find((o) => o.id === filters.offer_id)?.name ?? null;
 
-  function toggleQuality(q: CreativeQuality) {
-    const set = new Set(filters.qualities);
-    if (set.has(q)) set.delete(q);
-    else set.add(q);
-    updateFilters({
-      qualities: Array.from(set) as CreativeQuality[],
-      page: 0,
-    });
-  }
-
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
@@ -1308,26 +1346,29 @@ export default function CreativesPage() {
           placeholder="Any offer"
           className="w-[240px] [&>button]:h-9"
         />
-        <div className="flex flex-wrap items-center gap-1.5">
-          {QUALITY_VALUES.map((q) => {
-            const active = filters.qualities.includes(q);
-            return (
-              <button
-                key={q}
-                type="button"
-                onClick={() => toggleQuality(q)}
-                className={cn(
-                  "rounded-full border px-2.5 py-0.5 text-xs capitalize transition-colors",
-                  active
-                    ? "border-foreground bg-foreground text-background"
-                    : "border-border bg-background text-muted-foreground hover:bg-muted",
-                )}
-              >
-                {QUALITY_LABEL[q]}
-              </button>
-            );
-          })}
-        </div>
+        <Select
+          value={filters.brand_id == null ? ANY_BRAND : String(filters.brand_id)}
+          onValueChange={(v) =>
+            updateFilters({
+              brand_id: v === ANY_BRAND ? null : v === "none" ? "none" : Number(v),
+              page: 0,
+            })
+          }
+        >
+          <SelectTrigger className="h-9 w-[180px]" aria-label="Brand">
+            <SelectValue placeholder="Any brand" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ANY_BRAND}>Any brand</SelectItem>
+            {brands.map((b) => (
+              <SelectItem key={b.id} value={String(b.id)}>
+                {b.name}
+                {b.status !== "active" ? " (archived)" : ""}
+              </SelectItem>
+            ))}
+            <SelectItem value="none">No brand yet</SelectItem>
+          </SelectContent>
+        </Select>
         <MultiSelectPicker
           className="w-[200px]"
           options={SEQUENCE_PLACEMENT_VALUES.map((s) => ({
@@ -1542,7 +1583,7 @@ export default function CreativesPage() {
         <DialogHeader>
           <DialogTitle>New creatives</DialogTitle>
           <DialogDescription>
-            Add one or more SMS messages with shared offer + quality + sequence
+            Add one or more SMS messages with shared brand + offer + sequence
             settings.
           </DialogDescription>
         </DialogHeader>
@@ -1551,6 +1592,61 @@ export default function CreativesPage() {
           onCancel={() => setCreateOpen(false)}
           isSubmitting={bulkCreateApi.isLoading}
         />
+      </FormDialog>
+
+      <FormDialog
+        open={copying !== null}
+        onOpenChange={(open) => {
+          if (!open) setCopying(null);
+        }}
+        className="sm:max-w-md"
+      >
+        <DialogHeader>
+          <DialogTitle>Copy to brand</DialogTitle>
+          <DialogDescription>
+            A creative can only be used in campaigns of its own brand. The copy is a
+            new creative: new ID, no stats, and unproven for guardrails. It keeps only
+            the offers assigned to the brand you pick.
+          </DialogDescription>
+        </DialogHeader>
+        {copying ? (
+          <div className="grid gap-4">
+            <p className="line-clamp-3 rounded-md border bg-muted/40 px-3 py-2 text-sm">{copying.text}</p>
+            <div className="grid gap-1.5">
+              <Label htmlFor="copy-brand">
+                Brand
+                <span aria-hidden className="text-destructive ml-0.5">*</span>
+              </Label>
+              <Select
+                value={copyBrandId != null ? String(copyBrandId) : ""}
+                onValueChange={(v) => setCopyBrandId(Number(v))}
+                disabled={duplicateApi.isLoading}
+              >
+                <SelectTrigger id="copy-brand">
+                  <SelectValue placeholder="Select a brand…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {brands
+                    .filter((b) => b.status === "active")
+                    .map((b) => (
+                      <SelectItem key={b.id} value={String(b.id)}>
+                        {b.name}
+                        {b.id === copying.brand_id ? " (current)" : ""}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setCopying(null)} disabled={duplicateApi.isLoading}>
+                Cancel
+              </Button>
+              <Button onClick={handleCopy} disabled={copyBrandId == null || duplicateApi.isLoading}>
+                {duplicateApi.isLoading ? "Copying…" : "Copy"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </FormDialog>
 
       <FormDialog
@@ -1574,7 +1670,7 @@ export default function CreativesPage() {
             initialValues={{
               text: editing.text,
               creative_id: editing.creative_id ?? "",
-              quality: editing.quality,
+              brand_id: editing.brand_id,
               sequence_placement: editing.sequence_placement,
               funnel_stage: editing.funnel_stage,
               applies_to_all_offers: editing.applies_to_all_offers,

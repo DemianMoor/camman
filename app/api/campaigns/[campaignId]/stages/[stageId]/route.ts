@@ -13,6 +13,7 @@ import { checkDripStageWindow } from "@/lib/api/drip-stage-window-guard";
 import { checkFollowupTierSupported } from "@/lib/api/followup-tier-guard";
 import { apiError, requireApiMembership } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { checkStageCreativeBrand } from "@/lib/creatives/brand";
 import { checkPhoneBrandMatch, pairIsChanging } from "@/lib/api/brand-number-guard";
 import { checkStageLandingPage, LANDING_PAGE_INVALID_CODE } from "@/lib/api/landing-page-guard";
 import { logCampaignEvent } from "@/lib/campaign-events";
@@ -508,6 +509,19 @@ export async function PATCH(
       reason: creativeLock.reason,
       field: "creative_id",
     });
+  }
+  // 0240: brand check ONLY when the creative actually changes. A form that
+  // echoes the stored creative_id is not a pick, so a saved stage whose
+  // creative is of another brand (allowed — stages keep their creative) can
+  // still be edited and keeps sending.
+  if (creativeChanging && input.creative_id != null) {
+    const brandRefusal = await checkStageCreativeBrand({ orgId, campaignId: cid, creativeId: input.creative_id });
+    if (brandRefusal) {
+      return apiError(400, brandRefusal.message, API_ERROR_CODES.VALIDATION, {
+        reason: brandRefusal.reason,
+        field: "creative_id",
+      });
+    }
   }
   if (urlParamsChanging && formatLocked) {
     return apiError(

@@ -21,13 +21,9 @@ import { renderWorstCase, type MessageShape } from "@/lib/messages/render";
 import { cn } from "@/lib/utils";
 import type {
   CreativeFunnelStage,
-  CreativeQuality,
   CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
-import {
-  FUNNEL_STAGE_VALUES,
-  QUALITY_VALUES,
-} from "@/lib/validators/creatives";
+import { FUNNEL_STAGE_VALUES } from "@/lib/validators/creatives";
 
 // What the picker needs from a creative. Superset of the stage form's own
 // Creative type so the chosen one can be merged straight back into its state.
@@ -36,7 +32,8 @@ export type PickerCreative = {
   slug: string;
   text: string;
   status: string;
-  quality: CreativeQuality;
+  brand_id: number | null;
+  brand_name: string | null;
   funnel_stage: CreativeFunnelStage;
   sequence_placement: CreativeSequencePlacement;
   spam_score: number | null;
@@ -91,13 +88,6 @@ const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   unknown: "Unknown",
 };
 
-const QUALITY_LABEL: Record<CreativeQuality, string> = {
-  high: "High",
-  average: "Average",
-  poor: "Poor",
-  unknown: "Unknown",
-};
-
 const FUNNEL_STAGE_LABEL: Record<CreativeFunnelStage, string> = {
   start: "Start",
   clicked: "Clicked",
@@ -105,11 +95,6 @@ const FUNNEL_STAGE_LABEL: Record<CreativeFunnelStage, string> = {
   ignored: "Ignored",
   unknown: "Unknown",
 };
-
-const QUALITY_FILTER_OPTIONS = QUALITY_VALUES.map((v) => ({
-  id: v,
-  label: QUALITY_LABEL[v],
-}));
 
 const FUNNEL_STAGE_FILTER_OPTIONS = FUNNEL_STAGE_VALUES.map((v) => ({
   id: v,
@@ -171,6 +156,10 @@ export interface CreativePickerDialogProps {
   // Campaign context: the offer is pre-selected (and locked on) in the offers
   // panel; brand + link state drive the SMS preview.
   campaignOffer: { id: number; name: string } | null;
+  // 0240: the list shows ONLY creatives of the campaign's brand (the stage
+  // save re-checks server-side). null = the campaign has no brand yet, so
+  // nothing can be picked.
+  campaignBrandId: number | null;
   brandName: string;
   // The RESOLVED opt-out footer (resolveOptOutFooter), never the raw stage
   // field — otherwise the picker previews a body that does not ship.
@@ -190,6 +179,7 @@ export function CreativePickerDialog({
   open,
   onOpenChange,
   campaignOffer,
+  campaignBrandId,
   brandName,
   stopText,
   shape,
@@ -203,7 +193,6 @@ export function CreativePickerDialog({
 
   const [search, setSearch] = useState("");
   const [sequences, setSequences] = useState<CreativeSequencePlacement[]>([]);
-  const [qualities, setQualities] = useState<CreativeQuality[]>([]);
   const [funnelStages, setFunnelStages] = useState<CreativeFunnelStage[]>([]);
   const [offers, setOffers] = useState<OfferOption[]>([]);
   // Extra offers (beyond the campaign's) the operator checked to widen the list.
@@ -249,6 +238,9 @@ export function CreativePickerDialog({
   // rapidly switching filters. setState lands inside the async callback.
   useEffect(() => {
     let cancelled = false;
+    // No campaign brand ⇒ no creative is pickable; skip the fetch entirely
+    // (render the reason instead of an empty list).
+    if (campaignBrandId === null) return;
     (async () => {
       // 500 = the endpoint's cap. Previously this asked for 200 while
       // parseListParams silently clamped to 100, so an org with more eligible
@@ -259,6 +251,7 @@ export function CreativePickerDialog({
         sortBy: "epc",
         sortDir: "desc",
         include_all_offers: includeAllOffers ? "true" : "false",
+        brand_id: String(campaignBrandId),
       });
       if (offerIds.length > 0) sp.set("offer_ids", offerIds.join(","));
       // The metrics describe the campaign's offer only — the extra offers just
@@ -274,17 +267,15 @@ export function CreativePickerDialog({
     return () => {
       cancelled = true;
     };
-  }, [creativesApi.execute, offerIds, includeAllOffers, campaignOfferId]);
+  }, [creativesApi.execute, offerIds, includeAllOffers, campaignOfferId, campaignBrandId]);
 
-  // Client-side search (text/slug) + sequence/quality/funnel filter over the
+  // Client-side search (text/slug) + sequence/funnel filter over the
   // fetched set. The server already ranked by EPC desc; filtering preserves
   // that order.
   const visibleCreatives = useMemo(() => {
     const q = search.trim().toLowerCase();
     return creatives.filter((c) => {
       if (sequences.length > 0 && !sequences.includes(c.sequence_placement))
-        return false;
-      if (qualities.length > 0 && !qualities.includes(c.quality))
         return false;
       if (funnelStages.length > 0 && !funnelStages.includes(c.funnel_stage))
         return false;
@@ -294,7 +285,7 @@ export function CreativePickerDialog({
       }
       return true;
     });
-  }, [creatives, search, sequences, qualities, funnelStages]);
+  }, [creatives, search, sequences, funnelStages]);
 
   const activeCreative = useMemo(
     () => creatives.find((c) => c.id === activeId) ?? null,
@@ -373,6 +364,7 @@ export function CreativePickerDialog({
                     <tr>
                       <th className="w-14 px-2 py-2 text-left font-medium">Spam</th>
                       <th className="px-2 py-2 text-left font-medium">Creative</th>
+                      <th className="w-20 px-2 py-2 text-left font-medium">Brand</th>
                       <th className="w-16 px-2 py-2 text-left font-medium">Seq</th>
                       {/* SORTED BY THIS COLUMN — named so the basis is visible.
                           The picker decides what gets sent next and recency
@@ -404,16 +396,22 @@ export function CreativePickerDialog({
                     {/* Spinner only on the first load (no rows yet). On a
                         refetch (offer / ALL change) we keep the current rows
                         visible so the list doesn't flash empty. */}
-                    {creativesApi.isLoading && creatives.length === 0 ? (
+                    {campaignBrandId === null ? (
                       <tr>
-                        <td colSpan={7} className="py-10 text-center text-muted-foreground">
+                        <td colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                          Set the campaign&apos;s brand first — a creative can only be used under its own brand.
+                        </td>
+                      </tr>
+                    ) : creativesApi.isLoading && creatives.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="py-10 text-center text-muted-foreground">
                           <Loader2 className="mx-auto size-4 animate-spin" />
                         </td>
                       </tr>
                     ) : visibleCreatives.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
-                          No matching creatives.
+                        <td colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                          No matching creatives for this brand.
                         </td>
                       </tr>
                     ) : (
@@ -444,6 +442,9 @@ export function CreativePickerDialog({
                               <div className="truncate font-mono text-[10px] text-muted-foreground">
                                 {c.slug}
                               </div>
+                            </td>
+                            <td className="truncate px-2 py-1.5 align-top text-xs" title={c.brand_name ?? ""}>
+                              {c.brand_name}
                             </td>
                             <td className="px-2 py-1.5 align-top">
                               <Badge variant="outline" className="font-mono text-[10px]">
@@ -509,20 +510,6 @@ export function CreativePickerDialog({
                 placeholder="Any sequence position"
                 selectedLabel={(n) => `${n} position${n === 1 ? "" : "s"}`}
                 searchPlaceholder="Filter positions…"
-              />
-            </div>
-
-            <div>
-              <div className="mb-1.5 text-xs font-medium text-muted-foreground">
-                Quality
-              </div>
-              <MultiSelectPicker
-                options={QUALITY_FILTER_OPTIONS}
-                value={qualities}
-                onChange={(next) => setQualities(next as CreativeQuality[])}
-                placeholder="Any quality"
-                selectedLabel={(n) => `${n} quality level${n === 1 ? "" : "s"}`}
-                searchPlaceholder="Filter quality…"
               />
             </div>
 

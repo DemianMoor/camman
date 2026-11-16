@@ -12,6 +12,7 @@ import {
   affiliate_networks,
   brands,
   creatives,
+  offer_brands,
   offers,
 } from "../db/schema";
 import { calculateSmsSegments } from "../lib/creative-helpers";
@@ -151,10 +152,11 @@ async function main() {
           network_id: network.id,
           payout_model: "cpa",
           payout_cpa: 10,
+          brand_ids: [brand.id],
         }),
       });
-      check(`seed: offer ${label} 201`, r.status === 201);
       const o = (await r.json()) as { id: number };
+      check(`seed: offer ${label} 201`, r.status === 201, `got ${r.status} ${JSON.stringify(o)}`);
       createdOfferIds.push(o.id);
       return o;
     }
@@ -167,6 +169,7 @@ async function main() {
     const c1R = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Single-offer creative",
         offer_ids: [offer1.id],
       }),
@@ -178,10 +181,11 @@ async function main() {
       status: string;
       offers: { id: number }[];
       applies_to_all_offers: boolean;
-      quality: string;
+      brand_id: number | null;
       sequence_placement: string;
     };
     createdCreativeIds.push(c1.id);
+    check("brand_id stored", c1.brand_id === brand.id, `got ${c1.brand_id}`);
     check("slug present", /^[a-z0-9]{6}$/.test(c1.slug), `got ${c1.slug}`);
     check("status defaults to 'active'", c1.status === "active");
     check(
@@ -195,6 +199,7 @@ async function main() {
     const c2R = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Multi-offer creative",
         offer_ids: [offer1.id, offer2.id, offer3.id],
       }),
@@ -213,6 +218,7 @@ async function main() {
     const c3R = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Org-wide creative",
         applies_to_all_offers: true,
       }),
@@ -232,6 +238,7 @@ async function main() {
     const c4R = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Orphan",
         offer_ids: [],
         applies_to_all_offers: false,
@@ -246,13 +253,13 @@ async function main() {
     );
 
     // ============ [5] Bulk create ============
-    console.log("\n[5] Bulk create — 3 creatives, shared offer + quality + sequence");
+    console.log("\n[5] Bulk create — 3 creatives, shared brand + offer + sequence");
     const bulkR = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         creatives: [{ text: "Bulk A" }, { text: "Bulk B" }, { text: "Bulk C" }],
         offer_ids: [offer1.id],
-        quality: "high",
         sequence_placement: "1st",
       }),
     });
@@ -261,7 +268,7 @@ async function main() {
       created: Array<{
         id: number;
         offers: { id: number }[];
-        quality: string;
+        brand_id: number | null;
         sequence_placement: string;
         text: string;
       }>;
@@ -275,8 +282,8 @@ async function main() {
       ),
     );
     check(
-      "each has quality='high'",
-      bulk.created.every((c) => c.quality === "high"),
+      "each has the shared brand",
+      bulk.created.every((c) => c.brand_id === brand.id),
     );
     check(
       "each has sequence_placement='1st'",
@@ -294,6 +301,7 @@ async function main() {
     const over = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         creatives: Array.from({ length: 51 }, (_, i) => ({ text: `r${i}` })),
         offer_ids: [offer1.id],
       }),
@@ -310,6 +318,7 @@ async function main() {
     const rollR = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         creatives: [
           { text: "Valid row 1" },
           { text: "" }, // invalid — empty
@@ -333,6 +342,7 @@ async function main() {
     const c8R = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Replace-semantics target",
         offer_ids: [offer1.id, offer2.id],
       }),
@@ -357,6 +367,7 @@ async function main() {
     const c9R = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Toggle target",
         offer_ids: [offer1.id],
       }),
@@ -401,6 +412,7 @@ async function main() {
     const cOffer2OnlyR = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Offer2-only creative",
         offer_ids: [offer2.id],
       }),
@@ -428,22 +440,21 @@ async function main() {
       !pickIds.has(cOffer2Only.id),
     );
 
-    // ============ [11] Quality + sequence defaults ============
-    console.log("\n[11] Defaults — POST without quality/sequence → 'unknown'");
+    // ============ [11] Sequence default ============
+    console.log("\n[11] Defaults — POST without sequence → 'unknown'");
     const cDefR = await apiFetch("/api/creatives", {
       method: "POST",
       body: JSON.stringify({
+        brand_id: brand.id,
         text: "Default-meta creative",
         offer_ids: [offer1.id],
       }),
     });
     const cDef = (await cDefR.json()) as {
       id: number;
-      quality: string;
       sequence_placement: string;
     };
     createdCreativeIds.push(cDef.id);
-    check("quality defaults to 'unknown'", cDef.quality === "unknown");
     check(
       "sequence_placement defaults to 'unknown'",
       cDef.sequence_placement === "unknown",
@@ -481,23 +492,96 @@ async function main() {
     const restored = (await resR.json()) as { status: string };
     check("restore sets status back to 'active'", restored.status === "active");
 
-    // ============ [13] Duplicate copies junction ============
-    console.log("\n[13] Duplicate copies junction offers");
+    // ============ [13] Copy to brand (0240) ============
+    // The duplicate route takes a REQUIRED brand_id and keeps only the source
+    // offers that brand may run (offer_brands). c2 has offers A, B, C; only C is
+    // assigned to brand 2.
+    console.log("\n[13] Copy to brand");
+    const brand2R = await apiFetch("/api/brands", {
+      method: "POST",
+      body: JSON.stringify({ name: "Creative Probe 2", brand_id: `CR-PROBE2-${unique}` }),
+    });
+    check("seed: brand 2 201", brand2R.status === 201);
+    const brand2 = (await brand2R.json()) as { id: number; org_id: string };
+    createdBrandIds.push(brand2.id);
+    await db.insert(offer_brands).values({ org_id: brand2.org_id, offer_id: offer3.id, brand_id: brand2.id });
+
+    const noBrandDupR = await apiFetch(`/api/creatives/${c2.id}/duplicate`, { method: "POST", body: JSON.stringify({}) });
+    check("copy without brand_id → 400", noBrandDupR.status === 400, `got ${noBrandDupR.status}`);
+
     const dupR = await apiFetch(`/api/creatives/${c2.id}/duplicate`, {
       method: "POST",
+      body: JSON.stringify({ brand_id: brand2.id }),
     });
-    check("duplicate 201", dupR.status === 201);
+    check("copy to brand 2 → 201", dupR.status === 201, `got ${dupR.status}`);
     const dup = (await dupR.json()) as {
       id: number;
       slug: string;
+      brand_id: number | null;
       offers: { id: number }[];
+      dropped_offer_ids: number[];
     };
     createdCreativeIds.push(dup.id);
-    check("dup has different id + slug", dup.id !== c2.id && dup.slug !== c2.slug);
+    check("copy has different id + slug", dup.id !== c2.id && dup.slug !== c2.slug);
+    check("copy belongs to brand 2", dup.brand_id === brand2.id, `got ${dup.brand_id}`);
     check(
-      "dup has same offer associations as source (3 offers)",
-      dup.offers.length === 3,
+      "copy keeps only the offer allowed under brand 2 (C)",
+      dup.offers.length === 1 && dup.offers[0].id === offer3.id,
+      `got ${JSON.stringify(dup.offers.map((o) => o.id))}`,
     );
+    check(
+      "response names the dropped offers (A, B)",
+      [...dup.dropped_offer_ids].sort((a, b) => a - b).join(",") ===
+        [offer1.id, offer2.id].sort((a, b) => a - b).join(","),
+      `got ${JSON.stringify(dup.dropped_offer_ids)}`,
+    );
+
+    const refuseR = await apiFetch(`/api/creatives/${c1.id}/duplicate`, {
+      method: "POST",
+      body: JSON.stringify({ brand_id: brand2.id }),
+    });
+    const refuse = (await refuseR.json()) as { details?: { reason?: string } };
+    check(
+      "copy where no offer is allowed under the brand → 400 no_offer_allowed_under_brand",
+      refuseR.status === 400 && refuse.details?.reason === "no_offer_allowed_under_brand",
+      `got ${refuseR.status} ${JSON.stringify(refuse)}`,
+    );
+
+    const sameBrandR = await apiFetch(`/api/creatives/${c2.id}/duplicate`, {
+      method: "POST",
+      body: JSON.stringify({ brand_id: brand.id }),
+    });
+    const sameBrand = (await sameBrandR.json()) as { id: number; offers: { id: number }[] };
+    createdCreativeIds.push(sameBrand.id);
+    check("copy to the same brand keeps all 3 offers", sameBrandR.status === 201 && sameBrand.offers.length === 3);
+
+    // ============ [14] Brand reassignment (admin/owner) + list filter ============
+    console.log("\n[14] Brand reassignment + list brand filter");
+    const echoR = await apiFetch(`/api/creatives/${cDef.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ brand_id: brand.id, funnel_stage: "start" }),
+    });
+    check("PATCH echoing the stored brand → 200", echoR.status === 200, `got ${echoR.status}`);
+    const moveR = await apiFetch(`/api/creatives/${cDef.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ brand_id: brand2.id }),
+    });
+    const moved = (await moveR.json()) as { brand_id: number | null };
+    check(
+      "owner PATCH moving the creative to brand 2 → 200 and stored",
+      moveR.status === 200 && moved.brand_id === brand2.id,
+      `got ${moveR.status} brand ${moved.brand_id}`,
+    );
+    const listR = await apiFetch(`/api/creatives/list?brand_id=${brand2.id}&include_metrics=false&pageSize=100`);
+    const list = (await listR.json()) as { data: { id: number; brand_name: string | null }[] };
+    check(
+      "list brand filter returns only brand-2 creatives, with brand_name",
+      list.data.some((c) => c.id === cDef.id && c.brand_name === "Creative Probe 2") &&
+        list.data.every((c) => c.id !== c1.id),
+      `got ${JSON.stringify(list.data.map((c) => c.id))}`,
+    );
+    const sortR = await apiFetch(`/api/creatives/list?sortBy=brand&sortDir=asc&include_metrics=false&pageSize=500&showArchived=true`);
+    check("list sortBy=brand → 200", sortR.status === 200, `got ${sortR.status}`);
   } finally {
     console.log("\nCleanup");
     try {

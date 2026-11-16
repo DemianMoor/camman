@@ -14,7 +14,7 @@ import { creativeBulkUpdateSchema } from "@/lib/validators/creatives";
 
 // Apply one set of metadata changes to many creatives in a single
 // transaction. Fields:
-//   quality / sequence_placement — scalar metadata, requires creatives.update
+//   sequence_placement / funnel_stage — scalar metadata, requires creatives.update
 //   status                       — bulk archive/restore, requires the
 //                                  corresponding archive/restore permission
 //   add_offer_ids                — ADDITIVE offer assignment (union); never
@@ -50,7 +50,6 @@ export async function POST(req: NextRequest) {
 
   const addOffers = input.add_offer_ids ?? [];
   const needsUpdate =
-    input.quality !== undefined ||
     input.sequence_placement !== undefined ||
     input.funnel_stage !== undefined ||
     addOffers.length > 0;
@@ -102,7 +101,6 @@ export async function POST(req: NextRequest) {
   try {
     await db.transaction(async (tx) => {
       const scalar: Record<string, unknown> = {};
-      if (input.quality !== undefined) scalar.quality = input.quality;
       if (input.sequence_placement !== undefined)
         scalar.sequence_placement = input.sequence_placement;
       if (input.funnel_stage !== undefined)

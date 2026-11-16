@@ -95,7 +95,8 @@ export async function forkCreative(opts: {
         org_id: opts.orgId,
         slug: newSlug,
         text: opts.newText,
-        quality: source.quality,
+        // A new version of the same creative stays on the same brand (0240).
+        brand_id: source.brand_id,
         sequence_placement: source.sequence_placement,
         funnel_stage: source.funnel_stage,
         applies_to_all_offers: source.applies_to_all_offers,

@@ -45,10 +45,8 @@ import { MAX_SEGMENTS } from "@/lib/sends/segments";
 import { cn } from "@/lib/utils";
 import {
   FUNNEL_STAGE_VALUES,
-  QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
   type CreativeFunnelStage,
-  type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
 
@@ -72,7 +70,10 @@ const formSchema = z.object({
       z.literal(""),
     ])
     .optional(),
-  quality: z.enum(QUALITY_VALUES),
+  // 0240: one brand per creative. Nullable in the form only because an
+  // existing creative may not have one yet (unresolved backfill rows); create
+  // refuses an empty value in handleFormSubmit, and the API requires it.
+  brand_id: z.number().int().positive().nullable(),
   sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES),
   funnel_stage: z.enum(FUNNEL_STAGE_VALUES),
   applies_to_all_offers: z.boolean(),
@@ -88,12 +89,7 @@ export type OfferInfo = {
   status: string;
 };
 
-const QUALITY_LABEL: Record<CreativeQuality, string> = {
-  high: "High",
-  average: "Average",
-  poor: "Poor",
-  unknown: "Unknown",
-};
+type BrandInfo = { id: number; name: string; status: string };
 
 const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   warmup: "WarmUp",
@@ -131,6 +127,9 @@ export interface CreativeFormProps {
   onSubmit: (values: CreativeFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
+  // Pins the brand (create mode) — the stage form's inline creator passes the
+  // campaign's brand, since a creative may only be used under its own brand.
+  lockedBrand?: { id: number; name: string } | null;
 }
 
 export function CreativeForm({
@@ -141,6 +140,7 @@ export function CreativeForm({
   onSubmit,
   onCancel,
   isSubmitting,
+  lockedBrand,
 }: CreativeFormProps) {
   const isEdit = mode === "edit";
   // allow_multi_segment is an Owner-only compliance setting: the creative PATCH
@@ -148,6 +148,12 @@ export function CreativeForm({
   // those roles so the form cannot offer a change the server will reject.
   const { can } = useAuth();
   const canEditCompliance = can("compliance.manage");
+  // Moving an existing creative to another brand is admin/owner only; the
+  // PATCH refuses it otherwise (brand_reassign_locked). Create is open to
+  // anyone who can create. A pinned brand (inline creator) is never editable.
+  const brandEditable = !lockedBrand && (!isEdit || can("creatives.reassign_brand"));
+  const brandsApi = useApiCall<{ data: BrandInfo[] }>();
+  const [brands, setBrands] = useState<BrandInfo[]>([]);
   // P4 tag picker / worst case / unknown-tag hints: behind the message-formats UI flag.
   const formatsUi = messageFormatsUiEnabled();
   const textRef = useRef<HTMLTextAreaElement | null>(null);
@@ -165,12 +171,20 @@ export function CreativeForm({
     })();
   }, [offersApi.execute]);
 
+  useEffect(() => {
+    if (lockedBrand) return;
+    (async () => {
+      const r = await brandsApi.execute("/api/brands/list?pageSize=100&sortBy=name&sortDir=asc");
+      if (r.ok) setBrands(r.data.data);
+    })();
+  }, [brandsApi.execute, lockedBrand]);
+
   const form = useForm<CreativeFormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       text: initialValues?.text ?? "",
       creative_id: initialValues?.creative_id ?? "",
-      quality: initialValues?.quality ?? "unknown",
+      brand_id: lockedBrand?.id ?? initialValues?.brand_id ?? null,
       sequence_placement: initialValues?.sequence_placement ?? "unknown",
       funnel_stage: initialValues?.funnel_stage ?? "unknown",
       applies_to_all_offers: initialValues?.applies_to_all_offers ?? false,
@@ -210,6 +224,10 @@ export function CreativeForm({
     // Surface the "must have at least one association" rule before the API
     // would (the validator enforces it server-side too). When applies_to_all
     // is on the offer list is allowed to be empty.
+    if (!isEdit && values.brand_id == null) {
+      form.setError("brand_id", { message: "Brand is required" });
+      return;
+    }
     if (!values.applies_to_all_offers && values.offer_ids.length === 0) {
       form.setError("offer_ids", {
         message: "Must apply to at least one offer (or select 'All offers').",
@@ -457,31 +475,46 @@ export function CreativeForm({
         <div className="grid grid-cols-2 gap-3">
           <FormField
             control={form.control}
-            name="quality"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel required>Quality</FormLabel>
-                <Select
-                  value={field.value}
-                  onValueChange={field.onChange}
-                  disabled={isSubmitting}
-                >
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    {QUALITY_VALUES.map((q) => (
-                      <SelectItem key={q} value={q}>
-                        {QUALITY_LABEL[q]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
+            name="brand_id"
+            render={({ field }) => {
+              // Archived brands stay listed only when this creative already holds one.
+              const options = brands.filter((b) => b.status === "active" || b.id === field.value);
+              return (
+                <FormItem>
+                  <FormLabel required>Brand</FormLabel>
+                  {lockedBrand ? (
+                    <Input value={lockedBrand.name} disabled readOnly />
+                  ) : (
+                    <Select
+                      value={field.value != null ? String(field.value) : ""}
+                      onValueChange={(v) => field.onChange(Number(v))}
+                      disabled={isSubmitting || !brandEditable}
+                    >
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder={isEdit && field.value == null ? "No brand yet" : "Select a brand…"} />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {options.map((b) => (
+                          <SelectItem key={b.id} value={String(b.id)}>
+                            {b.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <FormDescription>
+                    {lockedBrand
+                      ? "The campaign's brand — a creative can only be used under its own brand."
+                      : isEdit && !brandEditable
+                        ? "Only an admin or owner can move a creative to another brand. Use “Copy to brand” instead."
+                        : "The creative can only be used in campaigns of this brand."}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              );
+            }}
           />
           <FormField
             control={form.control}

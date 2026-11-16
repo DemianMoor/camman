@@ -18,6 +18,7 @@ import {
   requireApiMembership,
 } from "@/lib/api/helpers";
 import { API_ERROR_CODES } from "@/lib/api/error-codes";
+import { checkStageCreativeBrand } from "@/lib/creatives/brand";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { loadBrandLandingPairs } from "@/lib/api/brand-landing-pairs";
 import {
@@ -623,6 +624,16 @@ export async function POST(
         API_ERROR_CODES.VALIDATION,
         { field: "creative_id" },
       );
+    }
+    // 0240: a creative may be picked only on a stage of its own brand's
+    // campaign. Checked HERE (and in PATCH when the creative changes) — never
+    // at send time, never on stage/campaign duplicate, split or lanes.
+    const brandRefusal = await checkStageCreativeBrand({ orgId, campaignId: cid, creativeId: input.creative_id });
+    if (brandRefusal) {
+      return apiError(400, brandRefusal.message, API_ERROR_CODES.VALIDATION, {
+        reason: brandRefusal.reason,
+        field: "creative_id",
+      });
     }
   }
   if (input.sms_provider_id != null) {

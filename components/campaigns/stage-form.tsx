@@ -1262,7 +1262,7 @@ export function StageForm({
   }
 
   async function handleCreateInlineCreative(values: CreativeFormValues) {
-    if (!campaign.offer?.id) return;
+    if (!campaign.offer?.id || !campaign.brand?.id) return;
     const result = await createCreativeApi.execute("/api/creatives", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1272,7 +1272,9 @@ export function StageForm({
           values.creative_id && values.creative_id !== ""
             ? values.creative_id
             : undefined,
-        quality: values.quality,
+        // 0240: a creative made from a stage belongs to the campaign's brand —
+        // the only brand it could be used under here.
+        brand_id: campaign.brand.id,
         sequence_placement: values.sequence_placement,
         // Was missing: the dialog's Funnel stage choice was silently dropped
         // and every inline-created creative saved as "unknown".
@@ -2505,6 +2507,7 @@ export function StageForm({
             ? { id: campaign.offer.id, name: campaign.offer.name }
             : null
         }
+        campaignBrandId={campaign.brand?.id ?? null}
         brandName={brandName}
         stopText={resolvedFooter.text}
         shape={shape}
@@ -2512,7 +2515,7 @@ export function StageForm({
         selectedCreativeId={watchedCreativeId}
         onSelect={handleCreativeSelected}
         onCreateNew={
-          campaign.offer?.id
+          campaign.offer?.id && campaign.brand?.id
             ? () => {
                 setPickerOpen(false);
                 setNewCreativeOpen(true);
@@ -2543,10 +2546,10 @@ export function StageForm({
         </DialogHeader>
         <CreativeForm
           mode="create"
+          lockedBrand={campaign.brand ? { id: campaign.brand.id, name: campaign.brand.name } : null}
           initialValues={{
             text: "",
             creative_id: "",
-            quality: "unknown",
             sequence_placement: "unknown",
             applies_to_all_offers: false,
             offer_ids: campaign.offer?.id ? [campaign.offer.id] : [],

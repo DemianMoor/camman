@@ -11,7 +11,7 @@ import { can } from "@/lib/permissions";
 //
 // Counts only: group NAMES and integers. The rollup never holds a contact id or
 // a phone number (lib/audience/pools.ts), so there is nothing to strip here.
-// Serves an HOURLY rollup and says so: computed_at + stale_seconds on every
+// Serves a 3-HOURLY rollup (every 3 h since 2026-11-17; hourly before) and says so: computed_at + stale_seconds on every
 // response, 503 rather than zeros before the first run.
 //
 // The counts are PLANNING figures — "roughly how many can I still mail for
@@ -65,14 +65,14 @@ export async function GET(req: NextRequest) {
     case "rollup_not_ready":
       return apiError(
         503,
-        "Audience pools have not been computed yet. The refresh runs hourly.",
+        "Audience pools have not been computed yet. The refresh runs every 3 hours.",
         API_ERROR_CODES.INTERNAL,
         { reason: "rollup_not_ready" },
       );
     case "offer_not_in_rollup_yet":
       return apiError(
         503,
-        "This offer first sent after the last refresh. It appears within the hour.",
+        "This offer first sent after the last refresh. It appears within 3 hours.",
         API_ERROR_CODES.INTERNAL,
         { reason: "offer_not_in_rollup_yet" },
       );

@@ -7,6 +7,7 @@ import {
   ENGAGEMENT_DAY_ROLLUP_JOB,
   ENGAGEMENT_FULL_JOB,
   ENGAGEMENT_GROUP_ROLLUP_JOB,
+  groupLifecycleRollupDue,
   ENGAGEMENT_JOB,
   ENGAGEMENT_LEASE,
   ENGAGEMENT_REEVAL_JOB,
@@ -29,7 +30,8 @@ import { refreshLifecycleDayRollup } from "@/lib/reporting/lifecycle-rollup";
 //
 //   every 15 min at :10/:25/:40/:55   incremental (after propagate-clickers at :08/:23/…,
 //                                     so a click scored this tick is already human)
-//                                     + the Group x Lifecycle table (0193), which
+//                                     + HOURLY (the :10 tick only, since 2026-11-17)
+//                                     the Group x Lifecycle table (0193), which
 //                                     the report reads instead of computing it
 //   ?mode=full at 06:35 UTC           full recount (02:35 ET, outside the send windows)
 //                                     + the Lifecycle day rollup (migration 0192),
@@ -73,6 +75,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
   const requested: RefreshMode =
     req.nextUrl.searchParams.get("mode") === "full" ? "full" : "incremental";
+  const tickAt = new Date(); // the cron tick, before the recount's own duration
 
   const outcome = await withCronLease(
     ENGAGEMENT_LEASE,
@@ -151,23 +154,26 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // own heartbeat only when it succeeded for every org — so an org whose
       // recount failed withholds the rollup heartbeats too.
       const recounted = results.filter((r) => !r.error).map((r) => r.org_id);
-      let groupOk = ok;
+      const groupDue = groupLifecycleRollupDue(tickAt, mode);
+      let groupOk = ok && groupDue;
       let dayOk = ok && mode === "full";
       for (const org_id of recounted) {
-        // The Group x Lifecycle table (migration 0193), EVERY tick. It is what
-        // the report reads instead of computing 15-36s of joins on page load,
-        // so it has to keep pace with the 15-minute job rather than the nightly
-        // one. Outside the refresh transaction: a reporting query must never be
-        // able to roll back contact_engagement, which the send path reads.
-        try {
-          const gl = await refreshGroupLifecycleRollup(db, { orgId: org_id });
-          console.info("[contact-engagement] group lifecycle rollup", gl);
-        } catch (err) {
-          groupOk = false;
-          console.error("[contact-engagement] group lifecycle rollup failed", {
-            org_id,
-            error: err instanceof Error ? err.message : String(err),
-          });
+        // The Group x Lifecycle table (migration 0193), HOURLY (the :10 tick) and
+        // nightly — see groupLifecycleRollupDue for why it is no longer every
+        // tick. It is what the report reads instead of computing 15-36s of joins
+        // on page load. Outside the refresh transaction: a reporting query must
+        // never be able to roll back contact_engagement, which the send path reads.
+        if (groupDue) {
+          try {
+            const gl = await refreshGroupLifecycleRollup(db, { orgId: org_id });
+            console.info("[contact-engagement] group lifecycle rollup", gl);
+          } catch (err) {
+            groupOk = false;
+            console.error("[contact-engagement] group lifecycle rollup failed", {
+              org_id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         // ⚠️ NIGHTLY ONLY, and OUTSIDE the refresh transaction, for the same
         // reason. A failure withholds only this rollup's own heartbeat.

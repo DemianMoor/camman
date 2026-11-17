@@ -24,11 +24,17 @@ const at = (iso: string) => new Date(iso);
 
 function pure() {
   console.log("Pure:");
-  const now = at("2026-11-13T21:01:00Z");
+  const now = at("2026-11-14T03:01:00Z"); // 22:01 ET — outside the working day
   const ago = (min: number, sec = 0) => new Date(now.getTime() - (min * 60 + sec) * 1000);
   bar("P1 never refreshed as yesterday (the ET rollover) → due", yesterdayDue(now, null));
   bar("P2 15 / 45 min ago → not due", !yesterdayDue(now, ago(15)) && !yesterdayDue(now, ago(45)));
   bar("P3 60 min ago → due; 59:58 (cron start jitter) → still due", yesterdayDue(now, ago(60)) && yesterdayDue(now, ago(59, 58)));
+  // 2026-11-17: no hourly yesterday pass in the ET working day [08:00, 22:00).
+  const day = (iso: string, minAgo: number) => yesterdayDue(at(iso), new Date(at(iso).getTime() - minAgo * 60_000));
+  bar("P4 08:01 / 16:01 / 21:59 ET, 3 h since the last pass → not due",
+    !day("2026-11-13T13:01:00Z", 180) && !day("2026-11-13T21:01:00Z", 180) && !day("2026-11-14T02:59:00Z", 180));
+  bar("P5 07:59 ET, 3 h since → due", day("2026-11-13T12:59:00Z", 180));
+  bar("P6 daytime but never stamped (missing row) → still due", yesterdayDue(at("2026-11-13T16:01:00Z"), null));
 }
 
 async function dbBars() {
@@ -62,8 +68,10 @@ async function dbBars() {
       t = await tick(iso);
       bar(`W2 ${iso.slice(11, 16)} UTC: today only`, t.calls === TODAY && !t.res.yesterday_refreshed, t.calls);
     }
-    t = await tick("2026-11-13T21:00:58Z"); // the 16:01 tick, started 2 s early
-    bar("W3 an hour later (start jitter −2 s): yesterday again", t.calls === both("2026-11-12", "2026-11-13"), t.calls);
+    t = await tick("2026-11-13T21:00:58Z"); // the 16:01 ET tick, started 2 s early
+    bar("W3 an hour later but inside the ET working day: today only (2026-11-17)", t.calls === TODAY && !t.res.yesterday_refreshed, t.calls);
+    t = await tick("2026-11-14T03:01:00Z"); // 22:01 ET — the working day is over
+    bar("W3b 22:01 ET: yesterday again", t.calls === both("2026-11-12", "2026-11-13"), t.calls);
     t = await tick("2026-11-14T04:46:00Z");
     bar("W4 23:46 ET: yesterday (last refreshed hours ago)", t.calls === both("2026-11-12", "2026-11-13"), t.calls);
     t = await tick("2026-11-14T05:01:00Z");

@@ -61,6 +61,15 @@ export function campaignDayBoundsUtc(now: Date = new Date()): {
   return { start, end };
 }
 
+// The ET working day, [08:00, 22:00): when operators build campaigns and the
+// audience snapshot needs the database's cache. Heavy reporting refreshes that
+// can wait run outside it (owner ruling 2026-11-17, after campaign create hit
+// the 60 s limit while rollups evicted the snapshot's tables).
+export function isCampaignDaytime(now: Date): boolean {
+  const hour = Number(formatInTimeZone(now, CAMPAIGN_TIMEZONE, "H"));
+  return hour >= 8 && hour < 22;
+}
+
 // Convert a UTC instant to the "yyyy-MM-ddTHH:mm" string the datetime-local
 // input expects, expressed in the campaign timezone.
 export function utcToCampaignLocalInput(

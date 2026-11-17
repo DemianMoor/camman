@@ -55,7 +55,19 @@ export const ENGAGEMENT_FULL_JOB = "contact-engagement-full"; // heartbeat: a su
 // until 2026-10-21 one heartbeat covered all three, stamped after the last
 // rollup, so a run killed in the (read-side) day rollup reported the recount
 // itself as 50 h stale.
-export const ENGAGEMENT_GROUP_ROLLUP_JOB = "contact-engagement-group-rollup"; // heartbeat: Group x Lifecycle table (0193), every tick
+export const ENGAGEMENT_GROUP_ROLLUP_JOB = "contact-engagement-group-rollup"; // heartbeat: Group x Lifecycle table (0193), hourly + nightly
+
+/**
+ * Does this engagement tick also rebuild the Group x Lifecycle table? HOURLY — only
+ * the :10 tick (minute < 20 tolerates a late start) — plus the nightly full run.
+ * Until 2026-11-17 it ran every 15-min tick: 2 statements × ~45 s reading
+ * campaign_audience_pool, contact_contact_groups and contact_engagement — the
+ * snapshot's own tables — 4,649 s of DB time in 13 h and the cache eviction behind
+ * campaign create hitting the 60 s limit (owner ruling). Pure.
+ */
+export function groupLifecycleRollupDue(now: Date, mode: "full" | "incremental"): boolean {
+  return mode === "full" || now.getUTCMinutes() < 20;
+}
 export const ENGAGEMENT_DAY_ROLLUP_JOB = "contact-engagement-day-rollup"; // heartbeat: Lifecycle day rollup (0192), nightly
 /** cron_locks watermark: the last run that evaluated EVERY stored row (a full recount, or one honouring a threshold change). */
 export const ENGAGEMENT_REEVAL_JOB = "contact-engagement-reeval";

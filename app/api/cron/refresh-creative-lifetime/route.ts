@@ -16,6 +16,11 @@ import { refreshCreativeLifetime } from "@/lib/reporting/creative-lifetime";
 //     (lib/creatives/ctr-rollup.ts). One stage_sends pass (11.5s measured on
 //     prod 2026-09-14).
 //
+// The CTR snapshot refreshes ONCE A DAY, on the 05:14 UTC tick (01:14 ET) —
+// it was a 60–94 s hourly read of stage_sends during the working day, and
+// 7d / 30d / all-time CTR barely moves within a day (owner ruling 2026-11-17).
+// The lifetime snapshot stays hourly.
+//
 // Read-only against the report tables; writes one operator_rollups row per org
 // per key. Hourly at :14 — off every */5 minute and off refresh-fresh-counts
 // (:11/:41) and refresh-audience-pools (:29/:59).
@@ -26,6 +31,11 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const LEASE_MS = 6 * 60 * 1000;
+
+/** The CTR snapshot runs on the 05:xx UTC tick only. Pure. */
+function creativeCtrDue(now: Date): boolean {
+  return now.getUTCHours() === 5;
+}
 
 type OrgResult = {
   org_id: string;
@@ -46,6 +56,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const outcome = await withCronLease(
     "refresh-creative-lifetime",
     async () => {
+      const ctrDue = creativeCtrDue(new Date());
       const orgRows = (await db.execute(
         sql`SELECT id AS org_id FROM public.organizations`,
       )) as unknown as { org_id: string }[];
@@ -60,11 +71,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           result.error = err instanceof Error ? err.message : String(err);
           console.error("[creative-lifetime] refresh failed", { org_id, error: result.error });
         }
-        try {
-          result.ctr_duration_ms = (await refreshCreativeCtr(org_id)).durationMs;
-        } catch (err) {
-          result.ctr_error = err instanceof Error ? err.message : String(err);
-          console.error("[creative-ctr] refresh failed", { org_id, error: result.ctr_error });
+        if (ctrDue) {
+          try {
+            result.ctr_duration_ms = (await refreshCreativeCtr(org_id)).durationMs;
+          } catch (err) {
+            result.ctr_error = err instanceof Error ? err.message : String(err);
+            console.error("[creative-ctr] refresh failed", { org_id, error: result.ctr_error });
+          }
         }
         results.push(result);
       }

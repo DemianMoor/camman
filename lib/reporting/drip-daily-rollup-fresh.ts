@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 
+import { isCampaignDaytime } from "@/lib/campaign-timezone";
 import type { EtDayRange } from "@/lib/reporting/delivery-rollup";
 import {
   BASES,
@@ -19,7 +20,9 @@ import {
 // IOPS ceiling). Now:
 //   - today refreshes on every run;
 //   - yesterday refreshes when its last refresh is ≥ 60 min old, and ALWAYS on the
-//     first run after the ET midnight rollover (yesterday just stopped being today).
+//     first run after the ET midnight rollover (yesterday just stopped being today);
+//   - since 2026-11-17, the hourly yesterday pass is skipped during the ET working
+//     day [08:00, 22:00) — only the rollover pass (or a missing stamp) runs then.
 //
 // State: ONE cron_locks row, `drip-daily-rollup:yesterday:<ET day>`, watermark =
 // when that day was last refreshed AS yesterday, for every org. The day is in the
@@ -36,9 +39,16 @@ export const YESTERDAY_REFRESH_INTERVAL_MS = 60 * 60 * 1000;
  */
 const TICK_SLACK_MS = 2 * 60 * 1000;
 
-/** Is yesterday due? `lastRefreshAt` = when THIS ET day was last refreshed as yesterday (null = never ⇒ rollover). Pure. */
+/**
+ * Is yesterday due? `lastRefreshAt` = when THIS ET day was last refreshed as yesterday
+ * (null = never ⇒ rollover, always due). Otherwise hourly, but never during the ET
+ * working day [08:00, 22:00) — the yesterday pass was the 90 s hourly read on
+ * stage_sends while operators built campaigns (owner ruling 2026-11-17). Pure.
+ */
 export function yesterdayDue(now: Date, lastRefreshAt: Date | null): boolean {
-  return lastRefreshAt === null || now.getTime() - lastRefreshAt.getTime() >= YESTERDAY_REFRESH_INTERVAL_MS - TICK_SLACK_MS;
+  if (lastRefreshAt === null) return true;
+  if (isCampaignDaytime(now)) return false;
+  return now.getTime() - lastRefreshAt.getTime() >= YESTERDAY_REFRESH_INTERVAL_MS - TICK_SLACK_MS;
 }
 
 export interface FreshOrgResult {

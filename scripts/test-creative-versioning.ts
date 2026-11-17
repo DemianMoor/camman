@@ -41,9 +41,17 @@ async function main() {
   const ORIGINAL = "Original body {link}";
   const EDITED = "Edited body {link}";
 
+  const [brand] = (await db.execute(sql`
+    SELECT id FROM brands WHERE org_id = ${org.id}::uuid ORDER BY id LIMIT 1
+  `)) as unknown as { id: number }[];
+  if (!brand) {
+    bad("organization has no brand — EMPTY scope (creatives.brand_id is NOT NULL since 0241)");
+    process.exit(1);
+  }
+
   const [seed] = await db
     .insert(creatives)
-    .values({ org_id: org.id, slug, text: ORIGINAL, status: "active" })
+    .values({ org_id: org.id, brand_id: brand.id, slug, text: ORIGINAL, status: "active" })
     .returning({ id: creatives.id, slug: creatives.slug });
   console.log(`  scope: seeded creative ${seed.id} (${seed.slug})`);
 

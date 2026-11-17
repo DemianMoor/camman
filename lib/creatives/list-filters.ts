@@ -4,7 +4,6 @@ import {
   exists,
   ilike,
   inArray,
-  isNull,
   or,
   sql as drizzleSql,
   type SQL,
@@ -44,8 +43,8 @@ export function buildCreativeListWhere(opts: {
 }): SQL {
   const { orgId, search, showArchived, searchParams: sp } = opts;
 
-  // 0240: single-select brand filter. A brand id, or "none" for creatives that
-  // have no brand yet (the backfill leaves unresolved ones NULL until mapped).
+  // 0240: single-select brand filter (a brand id). Every creative has a brand
+  // since 0241 (NOT NULL).
   const brandFilter = sp.get("brand_id");
   const sequenceFilter = splitFilter(
     sp.get("sequence_placement"),
@@ -88,9 +87,7 @@ export function buildCreativeListWhere(opts: {
     conditions.push(drizzleSql`${creatives.status} <> 'archived'`);
   }
 
-  if (brandFilter === "none") {
-    conditions.push(isNull(creatives.brand_id));
-  } else if (brandFilter !== null && /^\d+$/.test(brandFilter)) {
+  if (brandFilter !== null && /^\d+$/.test(brandFilter)) {
     conditions.push(eq(creatives.brand_id, Number(brandFilter)));
   }
   if (sequenceFilter.length > 0) {

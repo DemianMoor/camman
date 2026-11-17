@@ -61,8 +61,10 @@ const tally = (n: number) => ({ n, pending_n: 0, revenue: 0, pending_revenue: 0 
 
 async function insertCreative(tx: Exec, text: string): Promise<number> {
   const rows = (await tx.execute(sql`
-    INSERT INTO creatives (org_id, slug, text, status)
-    VALUES (${ORG_ID}::uuid, ${`${PROBE}-${text}`}, ${`fixture ${text}`}, ${"active"})
+    INSERT INTO creatives (org_id, slug, text, status, brand_id)
+    VALUES (${ORG_ID}::uuid, ${`${PROBE}-${text}`}, ${`fixture ${text}`}, ${"active"},
+            -- creatives.brand_id is NOT NULL (0241); the demo org has brands. Rolled back with the rest.
+            (SELECT id FROM brands WHERE org_id = ${ORG_ID}::uuid ORDER BY id LIMIT 1))
     RETURNING id
   `)) as unknown as { id: number }[];
   return Number(rows[0].id);

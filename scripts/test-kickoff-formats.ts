@@ -59,7 +59,7 @@ async function main() {
 
       async function mkCase(n: number, text: string, shape: { formatId?: number; custom?: string }) {
         const cre = await one<{ id: number }>(sql`
-          INSERT INTO creatives (slug, org_id, text, status) VALUES (${"kfmt-cre-" + sfx + "-" + n}, ${orgId}, ${text}, 'active')
+          INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"kfmt-cre-" + sfx + "-" + n}, ${orgId}, ${text}, 'active', ${brand.id})
           RETURNING id`);
         const trackingId = `9_99_kfmt_${sfx}_s${n}`;
         const stage = await one<{ id: number }>(sql`
@@ -130,7 +130,7 @@ ${r6.url}`, JSON.stringify({ rBrand, r6 }));
         INSERT INTO campaigns (org_id, slug, name, status, link_mode, tracking_id)
         VALUES (${orgId}, ${"kfmt-nb-" + sfx}, ${"kfmt-nb"}, 'active', 'tracked', ${"9_99_kfmtnb_" + sfx}) RETURNING id`);
       const nbCre = await one<{ id: number }>(sql`
-        INSERT INTO creatives (slug, org_id, text, status) VALUES (${"kfmt-nb-" + sfx}, ${orgId}, ${"{brand} says hi"}, 'active') RETURNING id`);
+        INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"kfmt-nb-" + sfx}, ${orgId}, ${"{brand} says hi"}, 'active', ${brand.id}) RETURNING id`);
       const nbStage = await one<{ id: number }>(sql`
         INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, sms_provider_id, provider_phone_id, send_approved, stop_text, scheduled_at)
         VALUES (${orgId}, ${noBrand.id}, 1, ${nbCre.id}, ${prov.id}, ${phone.id}, true, ${"STOP"}, now()) RETURNING id`);

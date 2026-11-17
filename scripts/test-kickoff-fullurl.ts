@@ -65,7 +65,7 @@ async function main() {
         INSERT INTO provider_phones (org_id, provider_id, brand_id, phone_number, status, cost_per_sms, credential_id)
         VALUES (${orgId}, ${prov.id}, ${brand.id}, ${"+1999" + sfx.slice(-7)}, 'active', 0, ${cred.id})
         RETURNING id`);
-      const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${"ku-cre-" + sfx}, ${orgId}, ${"hi {link}"}, 'active') RETURNING id`);
+      const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"ku-cre-" + sfx}, ${orgId}, ${"hi {link}"}, 'active', ${brand.id}) RETURNING id`);
       const camp = await one<{ id: number }>(sql`
         INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id, tracking_id)
         VALUES (${orgId}, ${"ku-camp-" + sfx}, ${"k"}, 'active', 'tracked', ${brand.id}, ${"9_99_061626_1"}) RETURNING id`);

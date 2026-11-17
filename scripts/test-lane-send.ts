@@ -127,8 +127,8 @@ async function main() {
     )[0].id;
     const creativeId = (
       (await db.execute(sql`
-        INSERT INTO creatives (org_id, slug, text, status)
-        VALUES (${orgId}::uuid, ${`ls-cr-${unique}`}, ${"Hello from {brand}"}, ${"active"})
+        INSERT INTO creatives (org_id, slug, text, status, brand_id)
+        VALUES (${orgId}::uuid, ${`ls-cr-${unique}`}, ${"Hello from {brand}"}, ${"active"}, ${brandId}::int)
         RETURNING id
       `)) as unknown as { id: number }[]
     )[0].id;

@@ -45,7 +45,7 @@ async function main() {
 
       async function mkStage(opts: { n: number; providerId: number; providerPhoneId: number | null }) {
         const cre = await one<{ id: number }>(sql`
-          INSERT INTO creatives (slug, org_id, text, status) VALUES (${"nosend-cre-" + sfx + "-" + opts.n}, ${orgId}, ${"Hi"}, 'active') RETURNING id`);
+          INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"nosend-cre-" + sfx + "-" + opts.n}, ${orgId}, ${"Hi"}, 'active', ${brand.id}) RETURNING id`);
         const trackingId = `9_99_nosend_${sfx}_s${opts.n}`;
         const camp = await one<{ id: number }>(sql`
           INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id, tracking_id)

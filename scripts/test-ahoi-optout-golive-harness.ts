@@ -154,7 +154,7 @@ async function main() {
         INSERT INTO provider_phones (org_id, provider_id, phone_number) VALUES (${orgId}, ${ahoiProv.id}, ${"+1900" + sfx}) RETURNING id`);
 
       const cre = await one<{ id: number }>(sql`
-        INSERT INTO creatives (slug, org_id, text, status) VALUES (${"golive-cre-" + sfx}, ${orgId}, ${"Hi"}, 'active') RETURNING id`);
+        INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"golive-cre-" + sfx}, ${orgId}, ${"Hi"}, 'active', ${brand.id}) RETURNING id`);
       const trackingId = `9_99_golive_${sfx}_s1`;
       const camp = await one<{ id: number }>(sql`
         INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id, tracking_id)

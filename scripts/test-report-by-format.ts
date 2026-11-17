@@ -28,7 +28,9 @@ async function main() {
   try {
     orgId = (await one<{ id: string }>(sql`INSERT INTO organizations (name) VALUES (${"P6 by-format " + tag}) RETURNING id`)).id;
     await db.execute(sql`SELECT ensure_message_formats(${orgId}::uuid)`);
-    const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${tag}, ${orgId}, 'Hi', 'active') RETURNING id`);
+    // creatives.brand_id is NOT NULL (0241): fixture brand for this org.
+    const fxBrand = await one<{ id: number }>(sql`INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}, ${"b-" + tag}, 'P4 fixture brand') RETURNING id`);
+    const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${tag}, ${orgId}, 'Hi', 'active', ${fxBrand.id}) RETURNING id`);
     const camp = await one<{ id: number }>(sql`
       INSERT INTO campaigns (org_id, slug, name, status, link_mode) VALUES (${orgId}, ${tag}, 'P6', 'active', 'manual') RETURNING id`);
     // T1 stage: the BEFORE INSERT trigger stamps the org default (T1).
@@ -55,7 +57,12 @@ async function main() {
     bar("F4 counted clickers: report total == Overview total", report.totals.counted_clickers === ov.clickers.periodTotal,
       `${report.totals.counted_clickers} vs ${ov.clickers.periodTotal}`);
   } finally {
-    if (orgId) await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
+    if (orgId) {
+      // Creatives before the org: an org cascade could reach the brand before the creatives that RESTRICT on it.
+      await db.execute(sql`DELETE FROM campaign_stages WHERE org_id = ${orgId}::uuid`);
+      await db.execute(sql`DELETE FROM creatives WHERE org_id = ${orgId}::uuid`);
+      await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
+    }
     const left = orgId ? await one<{ n: number }>(sql`SELECT count(*)::int AS n FROM campaign_stages WHERE org_id = ${orgId}::uuid`) : { n: 0 };
     console.log(`  (teardown: ${left.n} fixture stages left)`);
     await pgConn.end({ timeout: 5 });

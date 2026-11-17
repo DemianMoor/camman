@@ -54,7 +54,7 @@ async function main() {
         VALUES (${orgId}, ${prov[0].id}, NULL, ${"key"})
       `);
       const cre = (await tx.execute(sql`
-        INSERT INTO creatives (slug, org_id, text, status) VALUES (${"gs-cre-" + sfx}, ${orgId}, ${"hi"}, 'active') RETURNING id
+        INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"gs-cre-" + sfx}, ${orgId}, ${"hi"}, 'active', ${brand[0].id}) RETURNING id
       `)) as unknown as { id: number }[];
       const camp = (await tx.execute(sql`
         INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id)

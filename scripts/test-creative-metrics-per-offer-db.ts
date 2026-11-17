@@ -62,8 +62,10 @@ async function main() {
           RETURNING id`);
       const creative = (tag: string) =>
         one(tx, sql`
-          INSERT INTO creatives (org_id, slug, text, status)
-          VALUES (${ORG_ID}::uuid, ${`${PROBE}-${tag}`}, ${`fixture ${tag}`}, 'active')
+          INSERT INTO creatives (org_id, slug, text, status, brand_id)
+          VALUES (${ORG_ID}::uuid, ${`${PROBE}-${tag}`}, ${`fixture ${tag}`}, 'active',
+                  -- creatives.brand_id is NOT NULL (0241); the demo org has brands. Rolled back with the rest.
+                  (SELECT id FROM brands WHERE org_id = ${ORG_ID}::uuid ORDER BY id LIMIT 1))
           RETURNING id`);
       const contact = (n: number) =>
         tx.execute(sql`

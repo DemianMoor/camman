@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Loader2, Lock, Users } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -406,6 +406,34 @@ function Inner({
     audience_snapshot_count: number;
   }>();
   const dripConfigApi = useApiCall<{ ok: boolean }>();
+  // ⚠️ DOUBLE-SUBMIT GUARD (2026-11-17). useApiCall clears isLoading the moment
+  // the response lands — before router.push has left the page — and after a
+  // timeout, so the buttons re-enabled and a second click created a second
+  // campaign (or queued behind the first one's transaction). `createLock` is
+  // taken synchronously on the click (Enter / Cmd+Enter included) and released
+  // only on failure; on success it stays held until we navigate away.
+  // `createKey` is minted once per form session and sent on every create, so
+  // a retry after a timeout returns the campaign the first click made.
+  const createLock = useRef(false);
+  const [createHeld, setCreateHeld] = useState<"draft" | "activate" | null>(null);
+  const [createKey] = useState(() => crypto.randomUUID());
+  async function withCreateLock(
+    kind: "draft" | "activate",
+    run: () => Promise<boolean>,
+  ): Promise<void> {
+    if (createLock.current) return;
+    createLock.current = true;
+    setCreateHeld(kind);
+    let navigating = false;
+    try {
+      navigating = await run();
+    } finally {
+      if (!navigating) {
+        createLock.current = false;
+        setCreateHeld(null);
+      }
+    }
+  }
   const updateApi = useApiCall<{ id: number }>();
 
   // Campaign type, chosen at CREATE only (Drip Phase 4). Lives HERE, in the
@@ -496,39 +524,52 @@ function Inner({
   }
 
   async function handleCreateDraft(values: CampaignFormValues) {
-    const blocked = dripBlockedReason();
-    if (blocked) {
-      toast.error(blocked);
-      return;
-    }
-    const result = await createApi.execute("/api/campaigns", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildCreateBody(values, true, campaignType)),
+    await withCreateLock("draft", async () => {
+      const blocked = dripBlockedReason();
+      if (blocked) {
+        toast.error(blocked);
+        return false;
+      }
+      const result = await createApi.execute("/api/campaigns", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...buildCreateBody(values, true, campaignType),
+          idempotency_key: createKey,
+        }),
+      });
+      if (!result.ok) {
+        toastApiError(result, "Couldn't save draft");
+        return false;
+      }
+      if (campaignType === "drip") await persistDripConfig(result.data.id);
+      toast.success("Draft saved");
+      router.push(`/campaigns/${result.data.id}`);
+      return true;
     });
-    if (!result.ok) {
-      toastApiError(result, "Couldn't save draft");
-      return;
-    }
-    if (campaignType === "drip") await persistDripConfig(result.data.id);
-    toast.success("Draft saved");
-    router.push(`/campaigns/${result.data.id}`);
   }
 
   async function handleCreateActivate(values: CampaignFormValues) {
+    await withCreateLock("activate", () => createActivate(values));
+  }
+
+  async function createActivate(values: CampaignFormValues): Promise<boolean> {
     const blocked = dripBlockedReason();
     if (blocked) {
       toast.error(blocked);
-      return;
+      return false;
     }
     const result = await activateApi.execute("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildCreateBody(values, false, campaignType)),
+      body: JSON.stringify({
+        ...buildCreateBody(values, false, campaignType),
+        idempotency_key: createKey,
+      }),
     });
     if (!result.ok) {
       toastApiError(result, "Couldn't activate campaign");
-      return;
+      return false;
     }
     if (campaignType === "drip") {
       await persistDripConfig(result.data.id);
@@ -542,6 +583,7 @@ function Inner({
       toast.success(`Campaign activated — ${count} contacts in audience pool`);
     }
     router.push(`/campaigns/${result.data.id}`);
+    return true;
   }
 
   async function handleEditSubmit(values: CampaignFormValues) {
@@ -592,8 +634,10 @@ function Inner({
     // what the campaign was created under, and the engine's posture today
     // cannot change that.
     lifecycleRules,
-    isSubmittingDraft: createApi.isLoading,
-    isSubmittingActivate: isEdit ? updateApi.isLoading : activateApi.isLoading,
+    isSubmittingDraft: createApi.isLoading || createHeld === "draft",
+    isSubmittingActivate: isEdit
+      ? updateApi.isLoading
+      : activateApi.isLoading || createHeld === "activate",
   });
 
   const {

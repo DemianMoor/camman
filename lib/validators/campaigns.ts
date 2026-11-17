@@ -160,6 +160,12 @@ const campaignCreateBaseSchema = z.object({
     .nullable()
     .optional(),
   save_as_draft: z.boolean().default(false),
+  // One per form session (the editor mints it on mount and reuses it on every
+  // retry). A repeat POST with the same key returns the campaign the first one
+  // created, or 409 create_in_progress while that first request is still
+  // running — never a second campaign. Optional: API callers without one keep
+  // today's behaviour.
+  idempotency_key: z.string().uuid().optional(),
 });
 
 // Drafts: a scratchpad — every field is optional. Activations (the launch

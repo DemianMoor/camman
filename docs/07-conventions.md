@@ -4628,6 +4628,10 @@ URL with nothing to explain it. The control is disabled on sandbox keys and says
 why. **When a server-side filter decides whether an action can possibly work, the
 UI states that filter — it does not let the operator discover it from a 404.**
 
+## A long-running create carries an idempotency key (2026-11-17)
+
+`POST /api/campaigns` can run up to 60 s (the launch path snapshots the audience). Mint the key once per form session on the client and reuse it on every retry; on the server take `pg_try_advisory_xact_lock` on it at the top of the transaction — answer 409 `create_in_progress`, never queue — and return the already-committed row on a repeat. A disabled button alone is not enough: `useApiCall` clears `isLoading` on the response, before `router.push` leaves the page, and after a timeout. See [campaigns-stages-creatives.md §6](04-features/campaigns-stages-creatives.md).
+
 ## Campaign duplicate: every column is copied or named as not copied (2026-10-02, card 869fb60y2)
 
 `POST /api/campaigns/[campaignId]/duplicate` builds its insert field by field. A column it doesn't name silently takes its default: a 200, a success toast and the wrong data. It happened to `type` (R25), then to `exclude_prior_offer_contacts`, `offer_rules_enabled`, `offer_cooldown_days`, `offer_limit_times`, `lifecycle_rules`, `link_mode` (a duplicated tracked campaign came back manual) and `default_provider_phone_id`.

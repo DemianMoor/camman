@@ -24,7 +24,7 @@ import { loadLifecycleSettings } from "@/lib/engagement/settings-io";
 import { checkPhoneBrandMatch } from "@/lib/api/brand-number-guard";
 import { isOfferAssignedToBrand } from "@/lib/api/offer-brands";
 import { snapshotAudience } from "@/lib/audience-snapshot";
-import { logCampaignEvent } from "@/lib/campaign-events";
+import { logCampaignEvent, type DbOrTx } from "@/lib/campaign-events";
 import { generateCampaignSlug } from "@/lib/campaign-helpers";
 import { brandHasActiveShortDomain } from "@/lib/links/tracked-eligibility";
 import { can } from "@/lib/permissions";
@@ -72,6 +72,14 @@ export async function POST(req: NextRequest) {
   }
   const input = parsed.data;
   const saveAsDraft = input.save_as_draft === true;
+  // Duplicate-submit guard (2026-11-17). A repeat of a create that already
+  // committed returns that campaign; see findCampaignByCreateKey and the
+  // advisory lock at the top of the transaction for the in-flight case.
+  const createKey = input.idempotency_key ?? null;
+  if (createKey) {
+    const existing = await findCampaignByCreateKey(db, orgId, createKey);
+    if (existing) return NextResponse.json(existing, { status: 200 });
+  }
   // ⚠️ DIRECTION (R13): only a POSITIVE read of 'drip' takes the new path. An
   // absent or unknown type keeps today's behaviour, so a regular campaign still
   // cannot launch to an empty audience.
@@ -293,6 +301,23 @@ export async function POST(req: NextRequest) {
   for (let attempt = 0; attempt < SLUG_RETRY_LIMIT; attempt++) {
     try {
       const result = await db.transaction(async (tx) => {
+        // ⚠️ IN-FLIGHT DUPLICATE: the first POST with this key holds this lock
+        // for its whole transaction (snapshot included). The repeat must not
+        // queue behind it — that is how a double submit waited 31 s on
+        // campaign_tracking_counters and then timed out (2026-11-17) — so it
+        // TRIES the lock and answers 409 at once. Once it holds the lock, the
+        // first request has finished: committed ⇒ return its campaign;
+        // rolled back ⇒ nothing was created and this one proceeds.
+        if (createKey) {
+          const [lock] = (await tx.execute(drizzleSql`
+            SELECT pg_try_advisory_xact_lock(
+              hashtextextended(${`campaign-create:${orgId}:${createKey}`}, 0)
+            ) AS ok
+          `)) as unknown as { ok: boolean }[];
+          if (!lock?.ok) throw new CreateInProgressError();
+          const existing = await findCampaignByCreateKey(tx, orgId, createKey);
+          if (existing) throw new ReplayedCreateError(existing);
+        }
         const slug = generateCampaignSlug();
 
         // ── THE LIFECYCLE SWITCH (PR 4c Task 6) ──────────────────────────
@@ -428,7 +453,7 @@ export async function POST(req: NextRequest) {
             actorUserId: user.id,
             eventType: "campaign_created",
             summary: `Created and activated drip campaign “${updated.name}”; audience arrives as leads, nothing frozen`,
-            metadata: { status: "active", audience_count: 0, type: "drip" },
+            metadata: { status: "active", audience_count: 0, type: "drip", ...keyMeta(createKey) },
           });
           return { ...updated, tracking_id: trackingId };
         }
@@ -484,7 +509,7 @@ export async function POST(req: NextRequest) {
             actorUserId: user.id,
             eventType: "campaign_created",
             summary: `Created and activated campaign “${updated.name}”`,
-            metadata: { status: "active", audience_count: snap.count },
+            metadata: { status: "active", audience_count: snap.count, ...keyMeta(createKey) },
           });
           return updated;
         }
@@ -495,12 +520,23 @@ export async function POST(req: NextRequest) {
           actorUserId: user.id,
           eventType: "campaign_created",
           summary: `Created campaign “${inserted.name}” as draft`,
-          metadata: { status: "draft" },
+          metadata: { status: "draft", ...keyMeta(createKey) },
         });
         return { ...inserted, tracking_id: trackingId };
       });
       return NextResponse.json(result, { status: 201 });
     } catch (err) {
+      if (err instanceof ReplayedCreateError) {
+        return NextResponse.json(err.campaign, { status: 200 });
+      }
+      if (err instanceof CreateInProgressError) {
+        return apiError(
+          409,
+          "This campaign is still being created from your earlier click. Wait a few seconds and press the button again — it won't create a second campaign.",
+          API_ERROR_CODES.CONFLICT,
+          { reason: "create_in_progress" },
+        );
+      }
       if (err instanceof EmptyAudienceError) {
         return apiError(
           400,
@@ -527,4 +563,48 @@ class EmptyAudienceError extends Error {
     super("empty audience");
     this.name = "EmptyAudienceError";
   }
+}
+
+class CreateInProgressError extends Error {
+  constructor() {
+    super("create in progress");
+    this.name = "CreateInProgressError";
+  }
+}
+
+class ReplayedCreateError extends Error {
+  constructor(readonly campaign: typeof campaigns.$inferSelect) {
+    super("replayed create");
+    this.name = "ReplayedCreateError";
+  }
+}
+
+const keyMeta = (key: string | null) => (key ? { idempotency_key: key } : {});
+
+// The campaign an earlier POST with this idempotency key created, if it
+// committed. The key lives in that create's campaign_created event (no schema
+// change); campaign_events is small (~19K rows on prod, 2026-11-17) and the
+// 1-day bound keeps the scan to recent events.
+async function findCampaignByCreateKey(
+  dbc: DbOrTx,
+  orgId: string,
+  key: string,
+): Promise<typeof campaigns.$inferSelect | null> {
+  const [row] = await dbc
+    .select()
+    .from(campaigns)
+    .where(
+      and(
+        eq(campaigns.org_id, orgId),
+        drizzleSql`${campaigns.id} IN (
+          SELECT e.campaign_id FROM campaign_events e
+          WHERE e.org_id = ${orgId}::uuid
+            AND e.event_type = 'campaign_created'
+            AND e.metadata->>'idempotency_key' = ${key}
+            AND e.created_at > now() - interval '1 day'
+        )`,
+      ),
+    )
+    .limit(1);
+  return row ?? null;
 }

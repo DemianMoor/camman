@@ -150,6 +150,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production backfill; writes only inside one transaction that rolls back unless --apply, run attended after owner go",
   },
   {
+    file: "apply-creative-brand-mapping.ts",
+    why: "owner-gated production write of the owner's creatives.brand_id mapping (ClickUp 1amdve2d47v P3); dry run default inside one BEGIN READ ONLY transaction (withReadOnlyDb), writes only behind --apply + --sha256 of the approved CSV, one transaction, only rows whose brand_id IS NULL, rolls back unless every row reads back",
+  },
+  {
     file: "backfill-creative-brand.ts",
     why: "owner-gated production backfill of creatives.brand_id (migration 0240, ClickUp 1amdve2d47v); dry run default inside one BEGIN READ ONLY transaction (withReadOnlyDb), writes only behind --apply, one transaction, only rows whose brand_id IS NULL, rolls back if campaign_stages changes",
   },

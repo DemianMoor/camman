@@ -28,7 +28,7 @@ const bar = (name: string, ok: boolean, detail = "") => {
 
 async function main() {
   if (!BASE || /camman\.vercel\.app$/.test(new URL(BASE).host)) {
-    console.error("Set BASE_URL to a PR preview (never the production alias).");
+    console.error("BASE_URL must be a PR preview (never the production alias).");
     process.exit(1);
   }
   console.log(`target ${BASE} · DB ${requirePreviewDb().label}`);

@@ -49,7 +49,6 @@ export interface CaptureTxrDlrOpts {
   providerId: number;
   method: string;
   query: Record<string, string>;
-  headers: Record<string, string>;
   rawBody: string | null;
   stageSendId: string | null; // from the ?ss= query param
   parsed: TxrStatusCallback;
@@ -58,13 +57,17 @@ export interface CaptureTxrDlrOpts {
 // Shared INSERT for both capture entry points below, so the column list can
 // never drift between the webhook and poll channels. `conflict` is appended
 // verbatim (empty for the webhook path, an ON CONFLICT DO NOTHING for the poll).
+// ⚠️ `headers` is always '{}' since 2026-11-17. The webhook used to store every
+// request header (~2.7 KB/row — 24 GB of the table's 29.5 GB, read by nothing),
+// and the set Vercel forwards can echo the request path, which carries the
+// webhook token. The column stays (the poll path always wrote '{}').
 function insertTxrDlrEvent(dbc: DbOrTx, o: CaptureTxrDlrOpts, conflict: ReturnType<typeof sql>) {
   return dbc.execute(sql`
     INSERT INTO textrequest_dlr_events
       (org_id, credential_id, provider_id, method, query, headers, raw_body,
        message_id, status, error_code, stage_send_id)
     VALUES (${o.orgId}, ${o.credentialId}, ${o.providerId}, ${o.method},
-            ${JSON.stringify(o.query)}::jsonb, ${JSON.stringify(o.headers)}::jsonb, ${o.rawBody},
+            ${JSON.stringify(o.query)}::jsonb, '{}'::jsonb, ${o.rawBody},
             ${o.parsed.messageId}, ${o.parsed.status}, ${o.parsed.errorCode},
             ${o.stageSendId ? sql`${o.stageSendId}::uuid` : sql`NULL`})
     ${conflict}

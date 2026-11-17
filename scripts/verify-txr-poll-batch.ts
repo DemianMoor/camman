@@ -86,7 +86,7 @@ async function main() {
       for (const r of rows) {
         const captured = await captureTxrPollDlrEvent(tx, {
           orgId: t.org_id, credentialId: t.credential_id, providerId: t.provider_id, method: "poll",
-          query, headers: {}, rawBody: r.rawBody, stageSendId: null,
+          query, rawBody: r.rawBody, stageSendId: null,
           parsed: { messageId: r.messageId, status: r.status, errorCode: r.errorCode },
         });
         if (!captured) { perRowCounts.dupe++; continue; }

@@ -10,7 +10,6 @@ import {
 } from "@/lib/sends/textrequest-dlr";
 import { recordTxrDlrOptOut } from "@/lib/sends/textrequest-dlr-optout";
 import {
-  headersToObject,
   queryToObject,
   resolveTextrequestCredential,
 } from "@/lib/sends/textrequest-webhook-shared";
@@ -47,7 +46,6 @@ export async function POST(
   }
 
   const query = queryToObject(req);
-  const headers = headersToObject(req);
   // Only trust a well-formed UUID from ?ss= (guards the ::uuid cast downstream).
   const stageSendId = query.ss && UUID_RE.test(query.ss) ? query.ss : null;
   const parsed = parseTxrStatusCallback(rawBody || null);
@@ -58,7 +56,6 @@ export async function POST(
     providerId: cred.provider_id,
     method: req.method,
     query,
-    headers,
     rawBody: rawBody || null,
     stageSendId,
     parsed,

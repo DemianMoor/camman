@@ -22,7 +22,6 @@ import {
 import { parseTxrUtcTimestamp } from "@/lib/sends/textrequest-messages-poll";
 import { recordTxrDlrOptOut } from "@/lib/sends/textrequest-dlr-optout";
 import {
-  headersToObject,
   queryToObject,
   resolveTextrequestCredential,
 } from "@/lib/sends/textrequest-webhook-shared";
@@ -80,7 +79,6 @@ export async function POST(
         providerId: cred.provider_id,
         method: req.method,
         query,
-        headers: headersToObject(req),
         rawBody: rawBody || null,
         stageSendId: null,
         parsed,

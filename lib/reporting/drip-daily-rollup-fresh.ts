@@ -51,6 +51,17 @@ export function yesterdayDue(now: Date, lastRefreshAt: Date | null): boolean {
   return now.getTime() - lastRefreshAt.getTime() >= YESTERDAY_REFRESH_INTERVAL_MS - TICK_SLACK_MS;
 }
 
+/**
+ * Does this 15-min tick run tier A at all? Outside the ET working day, every tick.
+ * Inside [08:00, 22:00) ET, HOURLY — only the :01 tick (minute < 15 tolerates a late
+ * start). The today pass grows with the day's sends (16 s at 12:00 ET → 85 s at
+ * 18:00 ET on 2026-11-16, every 15 min) and read stage_sends while operators built
+ * campaigns (owner ruling 2026-11-17). Pure.
+ */
+export function freshTierDue(now: Date): boolean {
+  return !isCampaignDaytime(now) || now.getUTCMinutes() < 15;
+}
+
 export interface FreshOrgResult {
   org_id: string;
   error?: string;

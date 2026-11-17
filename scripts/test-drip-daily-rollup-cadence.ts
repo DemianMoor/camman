@@ -6,7 +6,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { BASES, type RefreshResult } from "@/lib/reporting/drip-daily-rollup";
-import { runFreshTier, YESTERDAY_STAMP_PREFIX, yesterdayDue } from "@/lib/reporting/drip-daily-rollup-fresh";
+import { freshTierDue, runFreshTier, YESTERDAY_STAMP_PREFIX, yesterdayDue } from "@/lib/reporting/drip-daily-rollup-fresh";
 
 // Tier A cadence of the drip Daily results rollup (lib/reporting/drip-daily-rollup-fresh.ts)
 // on the PREVIEW DB: today every run; yesterday when its last refresh is ≥ 60 min
@@ -35,6 +35,11 @@ function pure() {
     !day("2026-11-13T13:01:00Z", 180) && !day("2026-11-13T21:01:00Z", 180) && !day("2026-11-14T02:59:00Z", 180));
   bar("P5 07:59 ET, 3 h since → due", day("2026-11-13T12:59:00Z", 180));
   bar("P6 daytime but never stamped (missing row) → still due", yesterdayDue(at("2026-11-13T16:01:00Z"), null));
+  // 2026-11-17: tier A itself runs hourly (the :01 tick) in the ET working day.
+  const due = (iso: string) => freshTierDue(at(iso));
+  bar("P7 11:01 / 11:03 ET (late start) → tier A runs", due("2026-11-13T16:01:00Z") && due("2026-11-13T16:03:00Z"));
+  bar("P8 11:16 / 11:31 / 11:46 ET → skipped", !due("2026-11-13T16:16:00Z") && !due("2026-11-13T16:31:00Z") && !due("2026-11-13T16:46:00Z"));
+  bar("P9 22:16 / 03:31 / 07:46 ET → every tick", due("2026-11-14T03:16:00Z") && due("2026-11-13T08:31:00Z") && due("2026-11-13T12:46:00Z"));
 }
 
 async function dbBars() {

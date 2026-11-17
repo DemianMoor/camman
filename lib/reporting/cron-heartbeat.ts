@@ -202,9 +202,9 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
   // for itself through the same stamp).
   dripDailyRollup: {
     job_name: "drip-daily-rollup",
-    max_age_hours: 1, // every 15 min; 1 h is ~3 missed runs
-    first_run_grace_hours: 0.5, // 2x the 15-min interval
-    label: "Drip Daily results rollup refresh (every 15 min)",
+    max_age_hours: 2, // hourly in the ET working day since 2026-11-17 (15 min at night); ~1 missed hour
+    first_run_grace_hours: 0.5,
+    label: "Drip Daily results rollup refresh (hourly 08–22 ET, every 15 min otherwise)",
   },
   dripDailyRollupSettle: {
     job_name: "drip-daily-rollup-settle",

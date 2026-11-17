@@ -11,7 +11,7 @@ import {
   freshRange,
   refreshDripDailyRollup,
 } from "@/lib/reporting/drip-daily-rollup";
-import { runFreshTier } from "@/lib/reporting/drip-daily-rollup-fresh";
+import { freshTierDue, runFreshTier } from "@/lib/reporting/drip-daily-rollup-fresh";
 import { runNightly } from "@/lib/reporting/drip-daily-rollup-nightly";
 
 // Refreshes drip_daily_rollup (migration 0208) — the ONLY writer besides the
@@ -19,7 +19,8 @@ import { runNightly } from "@/lib/reporting/drip-daily-rollup-nightly";
 //
 // Every run (every 15 min, :01/:16/:31/:46 — clear of the heavy :29 audience-pools
 // job):
-//   1. Tier A — today (every run) + yesterday (when its last refresh is ≥ 60 min
+//   1. Tier A — HOURLY (the :01 tick) inside the ET working day [08:00, 22:00)
+//      since 2026-11-17, every run outside it (freshTierDue) — today + yesterday (when its last refresh is ≥ 60 min
 //      old, and always on the first run after ET midnight), both bases, every org
 //      (lib/reporting/drip-daily-rollup-fresh.ts, 2026-11-13). Its heartbeat is
 //      stamped whenever tier A succeeds, whatever the nightly part does.
@@ -55,19 +56,24 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         }[]
       ).map((r) => r.org_id);
 
-      // 1. Tier A. One org's failure must not stop the rest; it withholds the heartbeat.
-      const { yesterday_refreshed, orgs: fresh } = await runFreshTier({
-        db,
-        orgIds,
-        now,
-        refresh: (orgId, basis, unitRange) =>
-          db.transaction(async (tx) => {
-            await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
-            return refreshDripDailyRollup(tx, orgId, basis, unitRange);
-          }),
-      });
+      // 1. Tier A — every tick at night, hourly (the :01 tick) in the ET working
+      // day (freshTierDue). One org's failure must not stop the rest; it withholds
+      // the heartbeat. A skipped tick stamps nothing.
+      const freshDue = freshTierDue(now);
+      const { yesterday_refreshed, orgs: fresh } = freshDue
+        ? await runFreshTier({
+            db,
+            orgIds,
+            now,
+            refresh: (orgId, basis, unitRange) =>
+              db.transaction(async (tx) => {
+                await tx.execute(sql`SET LOCAL statement_timeout = '240s'`);
+                return refreshDripDailyRollup(tx, orgId, basis, unitRange);
+              }),
+          })
+        : { yesterday_refreshed: false, orgs: [] };
       const freshOk = fresh.every((r) => !r.error);
-      if (freshOk) await recordHeartbeat(db, DRIP_DAILY_ROLLUP_JOB);
+      if (freshDue && freshOk) await recordHeartbeat(db, DRIP_DAILY_ROLLUP_JOB);
 
       // 2. Nightly units (no-op outside the window).
       const nightly = await runNightly({
@@ -112,7 +118,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       }
 
       const ok = freshOk && nightly.failed.length === 0;
-      return { range, yesterday_refreshed, ok, fresh, nightly, ms: Date.now() - runStartedMs };
+      return { range, fresh_due: freshDue, yesterday_refreshed, ok, fresh, nightly, ms: Date.now() - runStartedMs };
     },
     LEASE_MS,
   );

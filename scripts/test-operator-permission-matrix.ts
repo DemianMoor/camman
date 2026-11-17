@@ -455,14 +455,19 @@ const PHASE2_ADDITIONS: Record<string, Permission[]> = {
   // "brands.landing.update" (migration 0212) is admin+ ONLY: a brand's landing
   // host/path re-points every future minted link. Manager and operator must NOT
   // hold it — the freeze above proves they don't.
+  // "creatives.reassign_brand" (migration 0240, card 1amdve2d47v) is admin+ ONLY
+  // for the same reason: moving a creative to another brand changes which
+  // campaigns may pick it. Copy-to-brand rides on creatives.create.
   admin: [
     "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import", "lifecycle.configure",
     "brands.landing.update", "message_formats.view", "message_formats.manage", "stages.custom_message",
+    "creatives.reassign_brand",
   ],
   owner: [
     "contacts.stats", "contacts.export", "campaigns.export", "campaigns.import",
     "compliance.manage", "deletion.approve", "audit.view", "lifecycle.configure",
     "brands.landing.update", "message_formats.view", "message_formats.manage", "stages.custom_message",
+    "creatives.reassign_brand",
   ],
 };
 

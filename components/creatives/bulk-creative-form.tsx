@@ -25,10 +25,8 @@ import { cn } from "@/lib/utils";
 import {
   BULK_CREATE_MAX,
   FUNNEL_STAGE_VALUES,
-  QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
   type CreativeFunnelStage,
-  type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
 
@@ -44,7 +42,7 @@ type Row = {
 export interface BulkCreativeFormSubmit {
   applies_to_all_offers: boolean;
   offer_ids: number[];
-  quality: CreativeQuality;
+  brand_id: number;
   sequence_placement: CreativeSequencePlacement;
   funnel_stage: CreativeFunnelStage;
   creatives: Array<{ text: string }>;
@@ -56,12 +54,7 @@ export interface BulkCreativeFormProps {
   isSubmitting?: boolean;
 }
 
-const QUALITY_LABEL: Record<CreativeQuality, string> = {
-  high: "High",
-  average: "Average",
-  poor: "Poor",
-  unknown: "Unknown",
-};
+type BrandInfo = { id: number; name: string; status: string };
 const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   warmup: "WarmUp",
   "1st": "1st",
@@ -86,7 +79,7 @@ function newRow(): Row {
   return { id: nextRowId++, text: "" };
 }
 
-// Bulk-create dialog. Shared offer/quality/sequence at the top; the row
+// Bulk-create dialog. Shared brand/offer/sequence at the top; the row
 // list grows up to BULK_CREATE_MAX. Each row enforces non-empty text;
 // shared section enforces the at-least-one-offer rule. Server-side the
 // whole batch goes through in one transaction.
@@ -100,7 +93,10 @@ export function BulkCreativeForm({
 
   const [appliesToAll, setAppliesToAll] = useState(false);
   const [offerIds, setOfferIds] = useState<number[]>([]);
-  const [quality, setQuality] = useState<CreativeQuality>("unknown");
+  const brandsApi = useApiCall<{ data: BrandInfo[] }>();
+  const [brands, setBrands] = useState<BrandInfo[]>([]);
+  const [brandId, setBrandId] = useState<number | null>(null);
+  const [brandError, setBrandError] = useState<string | null>(null);
   const [sequence, setSequence] =
     useState<CreativeSequencePlacement>("unknown");
   const [funnelStage, setFunnelStage] =
@@ -118,6 +114,13 @@ export function BulkCreativeForm({
       if (r.ok) setOffers(r.data.data.filter((o) => o.status === "active"));
     })();
   }, [offersApi.execute]);
+
+  useEffect(() => {
+    (async () => {
+      const r = await brandsApi.execute("/api/brands/list?pageSize=100&sortBy=name&sortDir=asc");
+      if (r.ok) setBrands(r.data.data.filter((b) => b.status === "active"));
+    })();
+  }, [brandsApi.execute]);
 
   function addRow() {
     if (rows.length >= BULK_CREATE_MAX) return;
@@ -170,17 +173,19 @@ export function BulkCreativeForm({
         "Must apply to at least one offer (or select 'All offers').",
       );
     }
+    setBrandError(brandId == null ? "Brand is required" : null);
     setRowErrors(nextRowErrors);
     if (
       Object.keys(nextRowErrors).length > 0 ||
-      (!appliesToAll && offerIds.length === 0)
+      (!appliesToAll && offerIds.length === 0) ||
+      brandId == null
     )
       return;
 
     await onSubmit({
       applies_to_all_offers: appliesToAll,
       offer_ids: appliesToAll ? offerIds : offerIds,
-      quality,
+      brand_id: brandId,
       sequence_placement: sequence,
       funnel_stage: funnelStage,
       creatives: rows.map((r) => ({ text: r.text })),
@@ -252,23 +257,30 @@ export function BulkCreativeForm({
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label>Quality</Label>
+              <Label>
+                Brand
+                <span aria-hidden className="text-destructive ml-0.5">*</span>
+              </Label>
               <Select
-                value={quality}
-                onValueChange={(v) => setQuality(v as CreativeQuality)}
+                value={brandId != null ? String(brandId) : ""}
+                onValueChange={(v) => {
+                  setBrandId(Number(v));
+                  setBrandError(null);
+                }}
                 disabled={isSubmitting}
               >
                 <SelectTrigger>
-                  <SelectValue />
+                  <SelectValue placeholder="Select a brand…" />
                 </SelectTrigger>
                 <SelectContent>
-                  {QUALITY_VALUES.map((q) => (
-                    <SelectItem key={q} value={q}>
-                      {QUALITY_LABEL[q]}
+                  {brands.map((b) => (
+                    <SelectItem key={b.id} value={String(b.id)}>
+                      {b.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {brandError ? <p className="text-xs text-destructive">{brandError}</p> : null}
             </div>
             <div>
               <Label>Sequence placement</Label>

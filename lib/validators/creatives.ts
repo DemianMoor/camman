@@ -8,14 +8,6 @@ const BULK_MAX_ROWS = 50;
 export const CREATIVE_STATUSES = ["active", "archived"] as const;
 export type CreativeStatus = (typeof CREATIVE_STATUSES)[number];
 
-export const QUALITY_VALUES = [
-  "high",
-  "average",
-  "poor",
-  "unknown",
-] as const;
-export type CreativeQuality = (typeof QUALITY_VALUES)[number];
-
 export const SEQUENCE_PLACEMENT_VALUES = [
   "warmup",
   "1st",
@@ -30,7 +22,7 @@ export const SEQUENCE_PLACEMENT_VALUES = [
 export type CreativeSequencePlacement =
   (typeof SEQUENCE_PLACEMENT_VALUES)[number];
 
-// Manual funnel-stage metadata. Like `quality`, this is user-managed and
+// Manual funnel-stage metadata. Like `sequence_placement`, this is user-managed and
 // not enforced anywhere else in the system. Ordered funnel-first with
 // 'unknown' last (the default).
 export const FUNNEL_STAGE_VALUES = [
@@ -68,7 +60,8 @@ export const creativeCreateSchema = z
       .min(1, "Message text is required")
       .max(TEXT_MAX, `Message text must be at most ${TEXT_MAX} characters`),
     creative_id: creativeIdField,
-    quality: z.enum(QUALITY_VALUES).default("unknown"),
+    // 0240: each creative belongs to exactly ONE brand. Required on create.
+    brand_id: z.number({ error: "Brand is required" }).int().positive("Brand is required"),
     sequence_placement: z
       .enum(SEQUENCE_PLACEMENT_VALUES)
       .default("unknown"),
@@ -90,7 +83,9 @@ export const creativeUpdateSchema = z
   .object({
     text: z.string().min(1).max(TEXT_MAX).optional(),
     creative_id: creativeIdField,
-    quality: z.enum(QUALITY_VALUES).optional(),
+    // Reassigning a brand is admin/owner only (`creatives.reassign_brand`);
+    // the route checks the permission when the value actually changes.
+    brand_id: z.number().int().positive().optional(),
     sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES).optional(),
     funnel_stage: z.enum(FUNNEL_STAGE_VALUES).optional(),
     applies_to_all_offers: z.boolean().optional(),
@@ -101,14 +96,14 @@ export const creativeUpdateSchema = z
     message: "At least one field must be provided",
   });
 
-// Bulk create. Shared offer association + quality + sequence applies to
+// Bulk create. Shared brand + offer association + sequence applies to
 // every row in the batch; only `text` (and optional `creative_id`) varies
 // per row. Cap at BULK_MAX_ROWS to prevent transaction abuse.
 export const creativeBulkCreateSchema = z
   .object({
     applies_to_all_offers: z.boolean().default(false),
     offer_ids: z.array(z.number().int().positive()).default([]),
-    quality: z.enum(QUALITY_VALUES).default("unknown"),
+    brand_id: z.number({ error: "Brand is required" }).int().positive("Brand is required"),
     sequence_placement: z
       .enum(SEQUENCE_PLACEMENT_VALUES)
       .default("unknown"),
@@ -142,7 +137,6 @@ export const creativeBulkUpdateSchema = z
       .array(z.number().int().positive())
       .min(1, "Select at least one creative")
       .max(BULK_EDIT_MAX_IDS, `At most ${BULK_EDIT_MAX_IDS} creatives per request`),
-    quality: z.enum(QUALITY_VALUES).optional(),
     sequence_placement: z.enum(SEQUENCE_PLACEMENT_VALUES).optional(),
     funnel_stage: z.enum(FUNNEL_STAGE_VALUES).optional(),
     status: z.enum(CREATIVE_STATUSES).optional(),
@@ -153,7 +147,6 @@ export const creativeBulkUpdateSchema = z
   })
   .refine(
     (d) =>
-      d.quality !== undefined ||
       d.sequence_placement !== undefined ||
       d.funnel_stage !== undefined ||
       d.status !== undefined ||

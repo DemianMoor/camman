@@ -4,6 +4,7 @@ import {
   exists,
   ilike,
   inArray,
+  isNull,
   or,
   sql as drizzleSql,
   type SQL,
@@ -14,12 +15,10 @@ import { creative_offers, creatives } from "@/db/schema";
 import {
   CREATIVE_STATUSES,
   FUNNEL_STAGE_VALUES,
-  QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
 } from "@/lib/validators/creatives";
 
 const VALID_STATUSES = new Set<string>(CREATIVE_STATUSES);
-const VALID_QUALITIES = new Set<string>(QUALITY_VALUES);
 const VALID_SEQUENCES = new Set<string>(SEQUENCE_PLACEMENT_VALUES);
 const VALID_FUNNEL_STAGES = new Set<string>(FUNNEL_STAGE_VALUES);
 
@@ -45,7 +44,9 @@ export function buildCreativeListWhere(opts: {
 }): SQL {
   const { orgId, search, showArchived, searchParams: sp } = opts;
 
-  const qualityFilter = splitFilter(sp.get("quality"), VALID_QUALITIES);
+  // 0240: single-select brand filter. A brand id, or "none" for creatives that
+  // have no brand yet (the backfill leaves unresolved ones NULL until mapped).
+  const brandFilter = sp.get("brand_id");
   const sequenceFilter = splitFilter(
     sp.get("sequence_placement"),
     VALID_SEQUENCES,
@@ -87,8 +88,10 @@ export function buildCreativeListWhere(opts: {
     conditions.push(drizzleSql`${creatives.status} <> 'archived'`);
   }
 
-  if (qualityFilter.length > 0) {
-    conditions.push(inArray(creatives.quality, qualityFilter));
+  if (brandFilter === "none") {
+    conditions.push(isNull(creatives.brand_id));
+  } else if (brandFilter !== null && /^\d+$/.test(brandFilter)) {
+    conditions.push(eq(creatives.brand_id, Number(brandFilter)));
   }
   if (sequenceFilter.length > 0) {
     conditions.push(inArray(creatives.sequence_placement, sequenceFilter));

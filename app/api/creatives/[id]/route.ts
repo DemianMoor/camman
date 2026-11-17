@@ -13,6 +13,7 @@ import {
   creativeHasSends,
   forkCreative,
 } from "@/lib/guardrails/creative-versioning";
+import { brandBelongsToOrg } from "@/lib/creatives/brand";
 import { notifyGuardrail } from "@/lib/guardrails/notify";
 import { checkCreativeBody } from "@/lib/guardrails/url-allowlist";
 import { can } from "@/lib/permissions";
@@ -79,7 +80,7 @@ export async function GET(
       slug: creatives.slug,
       org_id: creatives.org_id,
       text: creatives.text,
-      quality: creatives.quality,
+      brand_id: creatives.brand_id,
       sequence_placement: creatives.sequence_placement,
       funnel_stage: creatives.funnel_stage,
       applies_to_all_offers: creatives.applies_to_all_offers,
@@ -267,6 +268,7 @@ export async function PATCH(
       text: creatives.text,
       status: creatives.status,
       applies_to_all_offers: creatives.applies_to_all_offers,
+      brand_id: creatives.brand_id,
     })
     .from(creatives)
     .where(and(eq(creatives.id, creativeId), eq(creatives.org_id, orgId)))
@@ -283,6 +285,27 @@ export async function PATCH(
       API_ERROR_CODES.CONFLICT,
       { reason: "archived" },
     );
+  }
+
+  // ── Brand reassignment (0240) ────────────────────────────────────────────
+  // A creative may be used only under its own brand, so moving it changes
+  // which campaigns can pick it: admin/owner only. An echo of the stored value
+  // (the edit form always sends it) is not a change and is never refused.
+  // Stages that already hold this creative are untouched either way.
+  if (input.brand_id !== undefined && input.brand_id !== current[0].brand_id) {
+    if (!can(role, "creatives.reassign_brand")) {
+      return apiError(
+        403,
+        "Only an admin or owner can move a creative to another brand. Use \"Copy to brand\" instead.",
+        API_ERROR_CODES.FORBIDDEN,
+        { reason: "brand_reassign_locked", field: "brand_id" },
+      );
+    }
+    if (!(await brandBelongsToOrg(orgId, input.brand_id))) {
+      return apiError(400, "brand_id doesn't belong to your organization", API_ERROR_CODES.VALIDATION, {
+        field: "brand_id",
+      });
+    }
   }
 
   // Verify any new offer_ids belong to the org.
@@ -390,7 +413,7 @@ export async function PATCH(
   }
 
   // Re-score whenever text actually changed. Same-text PATCHes are
-  // common (quality/sequence updates) — skip the score call for those
+  // common (sequence / funnel-stage updates) — skip the score call for those
   // since the cached score is still accurate.
   const textChanged =
     typeof input.text === "string" && input.text !== current[0].text;

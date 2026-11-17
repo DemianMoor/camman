@@ -14,15 +14,12 @@ import {
 } from "@/components/ui/select";
 import {
   FUNNEL_STAGE_VALUES,
-  QUALITY_VALUES,
   SEQUENCE_PLACEMENT_VALUES,
   type CreativeFunnelStage,
-  type CreativeQuality,
   type CreativeSequencePlacement,
 } from "@/lib/validators/creatives";
 
 export interface BulkEditPayload {
-  quality?: CreativeQuality;
   sequence_placement?: CreativeSequencePlacement;
   funnel_stage?: CreativeFunnelStage;
   status?: "active" | "archived";
@@ -50,13 +47,6 @@ export interface BulkEditFormProps {
 
 // Sentinel for "leave this field as-is". A real enum value means "apply".
 const UNCHANGED = "__unchanged__";
-
-const QUALITY_LABEL: Record<CreativeQuality, string> = {
-  high: "High",
-  average: "Average",
-  poor: "Poor",
-  unknown: "Unknown",
-};
 
 const SEQUENCE_LABEL: Record<CreativeSequencePlacement, string> = {
   warmup: "WarmUp",
@@ -88,7 +78,6 @@ export function BulkEditForm({
   onCancel,
   isSubmitting,
 }: BulkEditFormProps) {
-  const [quality, setQuality] = useState<string>(UNCHANGED);
   const [sequence, setSequence] = useState<string>(UNCHANGED);
   const [funnelStage, setFunnelStage] = useState<string>(UNCHANGED);
   const [status, setStatus] = useState<string>(UNCHANGED);
@@ -99,8 +88,6 @@ export function BulkEditForm({
   const canChangeStatus = canArchive || canRestore;
 
   const payload: BulkEditPayload = {};
-  if (canEditMeta && quality !== UNCHANGED)
-    payload.quality = quality as CreativeQuality;
   if (canEditMeta && sequence !== UNCHANGED)
     payload.sequence_placement = sequence as CreativeSequencePlacement;
   if (canEditMeta && funnelStage !== UNCHANGED)
@@ -131,25 +118,6 @@ export function BulkEditForm({
         selected creative{selectedCount === 1 ? "" : "s"}. Leave a field on
         &ldquo;No change&rdquo; to skip it.
       </p>
-
-      {canEditMeta ? (
-        <div className="grid gap-2">
-          <Label htmlFor="bulk-quality">Quality</Label>
-          <Select value={quality} onValueChange={setQuality}>
-            <SelectTrigger id="bulk-quality">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={UNCHANGED}>No change</SelectItem>
-              {QUALITY_VALUES.map((q) => (
-                <SelectItem key={q} value={q}>
-                  {QUALITY_LABEL[q]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      ) : null}
 
       {canEditMeta ? (
         <div className="grid gap-2">

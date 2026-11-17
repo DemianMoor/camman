@@ -272,6 +272,17 @@ When a task says read-only, it constrains **what may change**, not which tool is
 
 Learned the expensive way (2026-09-27). A production verification pass clicked **Add rule** on segment 237 purely to reach the rule-type picker, which created a real rule and changed that segment's audience until it was removed. The revert was verified three ways — the segment back to its 2 original rules, `max(segment_rules.id)` unchanged, and zero rules created in the window — and the same list was then obtained by opening an existing rule's dropdown and pressing Escape, which is what should have happened first.
 
+### 11d. Local servers: one at a time, killed right after
+
+The owner's PC has 16 GB of RAM and crashes when `next dev` runs locally.
+
+- **Never run more than one server at a time.** That means `next dev`, `next start`, or any other long-running node server, in any worktree.
+- **Before starting a server, verify the previous one is stopped.** Check for node processes and for a listener on the port, and show the result.
+- **Kill the server as soon as the tests finish,** then verify it's gone. On Windows, TaskStop doesn't kill the process; use `taskkill //PID <pid> //T //F`.
+- **Prefer running HTTP suites against the PR's Vercel preview deployment** (`NEXT_PUBLIC_SITE_URL=<camman preview URL> node scripts/with-preview-env.mjs npx tsx …`). Start a local server only when the owner agrees.
+
+Learned 2026-11-17: a local `next dev` used for the P2 creative-brand suites took the PC down mid-run.
+
 ## 12. What This Project Is NOT (yet)
 
 To keep scope tight, the following are explicitly OUT of scope for v1. Do not build them, do not stub them, do not "prepare for" them in ways that complicate v1 code:

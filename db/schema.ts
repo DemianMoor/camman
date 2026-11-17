@@ -1849,8 +1849,13 @@ export type MessageFormat = typeof message_formats.$inferSelect;
 
 // Creatives: SMS copy templates. Many-to-many with offers via the
 // creative_offers junction (or applies_to_all_offers=true for an
-// org-wide creative). No direct provider/brand association — those live
-// at the stage level. Status is just active|archived; no state machine.
+// org-wide creative). Provider lives at the stage level. Status is just
+// active|archived; no state machine.
+//
+// brand_id (0240): each creative belongs to exactly ONE brand. NULLABLE until
+// the backfill's unresolved rows are mapped by the owner (P3); NOT NULL lands
+// in P4. Read by the stage picker / stage-save check (P2) — NEVER by the send
+// path: a stage already saved keeps its creative regardless of brand.
 export const creatives = pgTable(
   "creatives",
   {
@@ -1861,6 +1866,9 @@ export const creatives = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
+    brand_id: integer("brand_id").references(() => brands.id, {
+      onDelete: "restrict",
+    }),
     quality: text("quality").notNull().default("unknown"),
     sequence_placement: text("sequence_placement").notNull().default("unknown"),
     funnel_stage: text("funnel_stage").notNull().default("unknown"),
@@ -1897,6 +1905,7 @@ export const creatives = pgTable(
   (table) => [
     index("creatives_org_id_idx").on(table.org_id),
     index("creatives_status_idx").on(table.status),
+    index("creatives_org_brand_idx").on(table.org_id, table.brand_id),
     check(
       "creatives_status_check",
       sql`${table.status} IN ('active', 'archived')`,

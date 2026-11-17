@@ -150,6 +150,10 @@ const EXCLUSIONS: ReadonlyArray<{
     why: "one-shot production backfill; writes only inside one transaction that rolls back unless --apply, run attended after owner go",
   },
   {
+    file: "backfill-creative-brand.ts",
+    why: "owner-gated production backfill of creatives.brand_id (migration 0240, ClickUp 1amdve2d47v); dry run default inside one BEGIN READ ONLY transaction (withReadOnlyDb), writes only behind --apply, one transaction, only rows whose brand_id IS NULL, rolls back if campaign_stages changes",
+  },
+  {
     file: "backfill-creative-spam-scores.ts",
     why: "one-shot production backfill of creatives.spam_score",
   },

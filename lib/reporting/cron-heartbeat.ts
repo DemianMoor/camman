@@ -241,9 +241,9 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
   // nightly one) but on their own heartbeats, so the alert names the step.
   contactEngagementGroupRollup: {
     job_name: "contact-engagement-group-rollup",
-    max_age_hours: 0.75,
-    first_run_grace_hours: 0.5,
-    label: "Contact lifecycle Group × Lifecycle rollup (every 15 min)",
+    max_age_hours: 3, // hourly since 2026-11-17 (the :10 tick); ~2 missed runs
+    first_run_grace_hours: 2,
+    label: "Contact lifecycle Group × Lifecycle rollup (hourly)",
   },
   contactEngagementDayRollup: {
     job_name: "contact-engagement-day-rollup",

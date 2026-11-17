@@ -992,7 +992,7 @@ export default function CreativesPage() {
             <MetricCell
               value={m.ctr}
               format={formatPercent}
-              title={`${numberFmt.format(m.ctr_clickers)} clickers / ${numberFmt.format(m.sent)} sent (30d, refreshed hourly)`}
+              title={`${numberFmt.format(m.ctr_clickers)} clickers / ${numberFmt.format(m.sent)} sent (30d, refreshed daily)`}
             />
           );
         },

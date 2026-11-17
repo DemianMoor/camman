@@ -5,7 +5,7 @@ import type { DbOrTx } from "@/lib/audience/pools";
 import { TRACKING_GAP_MATURITY_HOURS } from "@/lib/reporting/tracking-gap-rules";
 
 // Per-creative CTR — clickers ÷ messages sent — over the last 7 days,
-// the last 30 days and all time. Stored in operator_rollups and refreshed hourly
+// the last 30 days and all time. Stored in operator_rollups and refreshed DAILY (05:14 UTC; hourly until 2026-11-17)
 // by /api/cron/refresh-creative-lifetime; read by lib/creatives/metrics-cache.ts
 // for the creatives list and the stage creative picker.
 //

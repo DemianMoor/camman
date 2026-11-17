@@ -1,6 +1,6 @@
 # Drip — Daily results
 
-_Last updated: 2026-11-13 (fresh tier: today every run, yesterday hourly + first run after ET midnight); 2026-11-12 (reconcile range wording fixed to days 14–20; cohort-click drift source documented); 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
+_Last updated: 2026-11-17 (the hourly yesterday pass is skipped during the ET working day 08:00–22:00); 2026-11-13 (fresh tier: today every run, yesterday hourly + first run after ET midnight); 2026-11-12 (reconcile range wording fixed to days 14–20; cohort-click drift source documented); 2026-11-11 (nightly settle/reconcile split into units in a 05:00–09:00 UTC window; same-morning alert); 2026-11-05 (columns renamed Leads → Signups, Lead revenue → Signup revenue); 2026-11-04 (0232: Signups + Signup revenue columns, Signups chart line); 2026-10-13 (PR 5: chart view); 2026-10-13 (PR 4: API + table view behind the flag); 2026-10-12 (PR 3: the rollup job, backfill and reconciliation)_
 
 Day-by-day performance of one drip campaign, as a table or a chart, on the drip
 campaign detail page. Design and owner rulings:
@@ -71,7 +71,11 @@ caller must therefore pass a transaction.
 IOPS ceiling. [lib/reporting/drip-daily-rollup-fresh.ts](../../lib/reporting/drip-daily-rollup-fresh.ts):
 **today** refreshes on every run; **yesterday** only when its last refresh is ≥ 60 min
 old (2 min slack for cron start jitter) and **always on the first run after ET
-midnight**. State is one `cron_locks` row, `drip-daily-rollup:yesterday:<ET day>`
+midnight**. **Since 2026-11-17 the hourly yesterday pass never runs during the ET
+working day [08:00, 22:00)** (`isCampaignDaytime`) — it was a ~90 s cohort read every
+hour while operators built campaigns; the rollover pass and a missing stamp still run.
+⚠️ The TODAY pass grows with the day's sends (16 s at 12:00 ET → 85 s at 18:00 ET on
+2026-11-16, every 15 min) and is unchanged. State is one `cron_locks` row, `drip-daily-rollup:yesterday:<ET day>`
 (watermark = last refresh of that day as yesterday, for every org); the day is in the
 key, so after midnight there is no row and yesterday is due. It is stamped only when
 every org's refresh succeeded, so a failure retries on the next tick; older days' rows

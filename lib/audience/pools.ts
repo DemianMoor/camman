@@ -21,7 +21,8 @@ import { purchasedSendIds } from "@/lib/sale-attribution";
 // decision asks ("when did this person last hear from us"), and it is why this
 // rollup reads stage_sends, which fresh-counts deliberately avoids.
 //
-// ⚠️ REFRESHED HOURLY (`29 * * * *`), cut from every 30 minutes on 2026-09-23.
+// ⚠️ REFRESHED EVERY 3 HOURS (`29 */3 * * *`) since 2026-11-17; hourly from 2026-09-23,
+// every 30 minutes before that.
 // At 48 runs/day this was the platform's largest scheduled reader: 41.0 s and
 // 2.02 GB per run, ~97 GB/day, measured on live ticks (queryid watched 89 -> 92
 // calls). Halving the cadence halves that; what makes it 2 GB at all is the

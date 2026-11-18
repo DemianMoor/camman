@@ -12,12 +12,18 @@ export async function makeFixture() {
   const sfx = String(Date.now()).slice(-7);
   const orgId = (await one<{ id: string }>(
     sql`INSERT INTO organizations (name) VALUES (${`${MARKER} ${sfx}`}) RETURNING id`)).id;
+  // creatives.brand_id is NOT NULL (0241): fixture brand for this org.
+  const brandId = (await one<{ id: number }>(
+    sql`INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}::uuid, ${`hc-b-${sfx}`}, 'Hourly-cap fixture') RETURNING id`)).id;
   async function teardown(): Promise<number> {
     const name = (await one<{ name: string } | undefined>(
       sql`SELECT name FROM organizations WHERE id = ${orgId}::uuid`))?.name ?? "";
     if (!name.includes(MARKER)) throw new Error(`REFUSING TEARDOWN: org ${orgId} lacks the marker`);
     await db.execute(sql`DELETE FROM drip_journeys WHERE org_id = ${orgId}::uuid`);
     await db.execute(sql`DELETE FROM lead_events WHERE org_id = ${orgId}::uuid`);
+    // Creatives before the org: an org cascade could reach the brand before the creatives that RESTRICT on it.
+    await db.execute(sql`DELETE FROM campaign_stages WHERE org_id = ${orgId}::uuid`);
+    await db.execute(sql`DELETE FROM creatives WHERE org_id = ${orgId}::uuid`);
     await db.execute(sql`DELETE FROM organizations WHERE id = ${orgId}::uuid`);
     const left = await one<{ n: string }>(sql`
       SELECT ((SELECT count(*) FROM organizations WHERE id = ${orgId}::uuid)
@@ -50,8 +56,8 @@ export async function makeFixture() {
                 ${opts.priority ?? 100}, ${opts.dailyCap ?? null})`);
       const creativeId = withCreative
         ? (await one<{ id: number }>(sql`
-            INSERT INTO creatives (org_id, slug, text, status)
-            VALUES (${orgId}::uuid, ${`hc-cr-${sfx}-${tag}`}, 'Hi from the hourly-cap test', 'active') RETURNING id`)).id
+            INSERT INTO creatives (org_id, slug, text, status, brand_id)
+            VALUES (${orgId}::uuid, ${`hc-cr-${sfx}-${tag}`}, 'Hi from the hourly-cap test', 'active', ${brandId}) RETURNING id`)).id
         : null;
       await db.execute(sql`
         INSERT INTO campaign_stages (org_id, campaign_id, stage_number, drip_active, window_start_min, window_end_min, creative_id)

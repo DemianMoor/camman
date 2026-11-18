@@ -73,7 +73,7 @@ async function kickoff() {
       const SHORT = "https://ex.co/abc";
       let n = 0;
       const mk = async (creativeText: string, stopText: string, names: (string | undefined)[]) => {
-        const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${"k4c-" + sfx + n}, ${orgId}, ${creativeText}, 'active') RETURNING id`);
+        const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"k4c-" + sfx + n}, ${orgId}, ${creativeText}, 'active', ${brand.id}) RETURNING id`);
         const camp = await one<{ id: number }>(sql`
           INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id) VALUES (${orgId}, ${"k4-" + sfx + n}, 'k4', 'active', 'manual', ${brand.id}) RETURNING id`);
         const st = await one<{ id: number }>(sql`

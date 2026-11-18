@@ -1866,10 +1866,10 @@ export const creatives = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     text: text("text").notNull(),
-    brand_id: integer("brand_id").references(() => brands.id, {
-      onDelete: "restrict",
-    }),
-    quality: text("quality").notNull().default("unknown"),
+    // Migration 0241: required (one brand per creative); quality dropped.
+    brand_id: integer("brand_id")
+      .notNull()
+      .references(() => brands.id, { onDelete: "restrict" }),
     sequence_placement: text("sequence_placement").notNull().default("unknown"),
     funnel_stage: text("funnel_stage").notNull().default("unknown"),
     applies_to_all_offers: boolean("applies_to_all_offers")
@@ -1909,10 +1909,6 @@ export const creatives = pgTable(
     check(
       "creatives_status_check",
       sql`${table.status} IN ('active', 'archived')`,
-    ),
-    check(
-      "creatives_quality_check",
-      sql`${table.quality} IN ('high', 'average', 'poor', 'unknown')`,
     ),
     check(
       "creatives_sequence_placement_check",

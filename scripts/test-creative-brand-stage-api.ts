@@ -11,7 +11,6 @@ config({ path: resolve(process.cwd(), ".env.local") });
 //
 // Asserts the check runs ONLY when a creative is picked or changed on a stage:
 //   - stage POST with another brand's creative → 400 creative_brand_mismatch
-//   - stage POST with a creative that has no brand → 400 creative_brand_unassigned
 //   - stage PATCH switching to another brand's creative → 400
 //   - stage PATCH echoing a SAVED creative whose brand no longer matches → 200
 //     (saved stages keep their creative and keep sending — rule 4)
@@ -122,11 +121,6 @@ async function main() {
     const crA2 = await mkCreative(brandA, "Brand A creative 2");
     const crB = await mkCreative(brandB, "Brand B creative");
     check("seed: creatives 201", [crA, crA2, crB].every((c) => c.status === 201));
-    const [unbranded] = await db
-      .insert(creatives)
-      .values({ org_id: phone.org_id, text: "Unbranded", slug: `brp-${unique}`, status: "active" })
-      .returning({ id: creatives.id });
-    made.creatives.push(unbranded.id);
 
     console.log("\n[1] stage POST");
     const okR = await api(`/api/campaigns/${campaign}/stages`, { method: "POST", body: stageBody({ creative_id: crA.id }) });
@@ -134,8 +128,6 @@ async function main() {
     const stage = ((await okR.json()) as { id: number }).id;
     const misR = await api(`/api/campaigns/${campaign}/stages`, { method: "POST", body: stageBody({ creative_id: crB.id }) });
     check("another brand's creative → 400 creative_brand_mismatch", misR.status === 400 && (await reasonOf(misR)) === "creative_brand_mismatch", `got ${misR.status}`);
-    const unR = await api(`/api/campaigns/${campaign}/stages`, { method: "POST", body: stageBody({ creative_id: unbranded.id }) });
-    check("creative with no brand → 400 creative_brand_unassigned", unR.status === 400 && (await reasonOf(unR)) === "creative_brand_unassigned", `got ${unR.status}`);
     const noCrR = await api(`/api/campaigns/${campaign}/stages`, { method: "POST", body: stageBody({}) });
     check("stage with no creative → 201 (no check)", noCrR.status === 201, `got ${noCrR.status}`);
 

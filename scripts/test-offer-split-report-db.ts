@@ -76,9 +76,12 @@ async function main() {
         INSERT INTO event_types (org_id, key, label, is_purchase, counts_revenue)
         VALUES (${org}::uuid, 'sale', 'Sale', true, true) RETURNING id`)
     ).id;
+    // creatives.brand_id is NOT NULL (0241): fixture brand for this org.
+    const fxBrand = (await one<{ id: number }>(sql`
+      INSERT INTO brands (org_id, brand_id, name) VALUES (${org}::uuid, ${`b-${tag}`}, 'P4 fixture brand') RETURNING id`)).id;
     const K = (
       await one<{ id: number }>(sql`
-        INSERT INTO creatives (org_id, slug, text, status) VALUES (${org}::uuid, ${`k-${tag}`}, 'fixture', 'active') RETURNING id`)
+        INSERT INTO creatives (org_id, slug, text, status, brand_id) VALUES (${org}::uuid, ${`k-${tag}`}, 'fixture', 'active', ${fxBrand}) RETURNING id`)
     ).id;
 
     const mkStage = async (

@@ -50,7 +50,7 @@ async function main() {
     bar("fixture: a padding gives L = 12", creativeText !== "");
 
     const mkCreative = async (text: string) => {
-      const c = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${"t3c-" + sfx + made.creatives.length}, ${orgId}, ${text}, 'active') RETURNING id`);
+      const c = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"t3c-" + sfx + made.creatives.length}, ${orgId}, ${text}, 'active', ${brand.id}) RETURNING id`);
       made.creatives.push(c.id);
       return c.id;
     };

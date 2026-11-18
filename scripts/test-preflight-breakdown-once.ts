@@ -110,7 +110,7 @@ async function main() {
           RETURNING id`)).id;
       const phoneOpen = await mkPhone(true);
       const creative = (await one<{ id: number }>(sql`
-        INSERT INTO creatives (slug, org_id, text, status) VALUES (${"pbx-c-" + tag}, ${orgId}, ${"Deal inside"}, 'active') RETURNING id`)).id;
+        INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"pbx-c-" + tag}, ${orgId}, ${"Deal inside"}, 'active', ${brand.id}) RETURNING id`)).id;
 
       let cSeq = 0;
       const mkContact = async (o: { carrier?: string; lifecycle?: string } = {}) => {
@@ -264,8 +264,8 @@ async function main() {
       console.log("F5 tag rules ({first_name}):");
       for (const mode of ["manual", "tracked"] as const) {
         const tagCreative = (await one<{ id: number }>(sql`
-          INSERT INTO creatives (slug, org_id, text, status)
-          VALUES (${"pbx-tc-" + mode + tag}, ${orgId}, ${"Hi {first_name} we have news"}, 'active') RETURNING id`)).id;
+          INSERT INTO creatives (slug, org_id, text, status, brand_id)
+          VALUES (${"pbx-tc-" + mode + tag}, ${orgId}, ${"Hi {first_name} we have news"}, 'active', ${brand.id}) RETURNING id`)).id;
         const camp = await mkCampaign({ mode });
         const cs = await many(4, camp);
         await tx.execute(sql`INSERT INTO contact_attributes (contact_id, org_id, first_name) VALUES (${cs[0].id}, ${orgId}, 'Mary')`);

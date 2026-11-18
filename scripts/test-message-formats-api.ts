@@ -76,10 +76,13 @@ async function main() {
   // materialized: stamps campaign_stages.materialized_at — the REGULAR format lock (spec R4, P4).
   async function fixture(orgId: string, type: "regular" | "drip", sent: boolean, materialized: boolean) {
     const sfx = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    // creatives.brand_id is NOT NULL (0241): fixture brand for this org.
+    const [fxBrand] = await sql<{ id: number }[]>`
+      INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}::uuid, ${"t216-b-" + sfx}, 'P4 fixture brand') RETURNING id`;
     const [cre] = await sql<{ id: number }[]>`
-      INSERT INTO creatives (slug, org_id, text, status) VALUES (${"t216-" + sfx}, ${orgId}::uuid, 'Hi there', 'active') RETURNING id`;
+      INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"t216-" + sfx}, ${orgId}::uuid, 'Hi there', 'active', ${fxBrand.id}) RETURNING id`;
     const [cre2] = await sql<{ id: number }[]>`
-      INSERT INTO creatives (slug, org_id, text, status) VALUES (${"t216b-" + sfx}, ${orgId}::uuid, 'Hello again', 'active') RETURNING id`;
+      INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"t216b-" + sfx}, ${orgId}::uuid, 'Hello again', 'active', ${fxBrand.id}) RETURNING id`;
     const [camp] = await sql<{ id: number }[]>`
       INSERT INTO campaigns (org_id, slug, name, status, type, link_mode)
       VALUES (${orgId}::uuid, ${"t216-" + sfx}, 't216', 'draft', ${type}, 'manual') RETURNING id`;
@@ -182,6 +185,8 @@ async function main() {
       if (r.orgId) {
         await sql`DELETE FROM stage_sends WHERE org_id = ${r.orgId}::uuid`;
         await sql`DELETE FROM campaigns WHERE org_id = ${r.orgId}::uuid`;
+        await sql`DELETE FROM creatives WHERE org_id = ${r.orgId}::uuid`;
+        await sql`DELETE FROM brands WHERE org_id = ${r.orgId}::uuid`;
         await sql`DELETE FROM org_members WHERE user_id = ${r.userId}::uuid`;
         const [{ n }] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM org_members WHERE org_id = ${r.orgId}::uuid`;
         if (n === 0) await sql`DELETE FROM organizations WHERE id = ${r.orgId}::uuid`;

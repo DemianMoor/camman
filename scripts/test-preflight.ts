@@ -45,9 +45,13 @@ async function main() {
       check("checks array populated for readiness UI", r1.checks.length >= 4, `got ${r1.checks.length}`);
 
       // Attach a creative → that blocker clears, others remain.
+      // creatives.brand_id is NOT NULL (0241): fixture brand for this org. Rolled back with the rest.
+      const fxBrand = ((await tx.execute(sql`
+        INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}, ${"pf-b-" + sfx}, ${"P4 fixture brand"}) RETURNING id
+      `)) as unknown as { id: number }[])[0].id;
       const cre = (await tx.execute(sql`
-        INSERT INTO creatives (slug, org_id, text, status)
-        VALUES (${"pf-cre-" + sfx}, ${orgId}, ${"hello"}, 'active') RETURNING id
+        INSERT INTO creatives (slug, org_id, text, status, brand_id)
+        VALUES (${"pf-cre-" + sfx}, ${orgId}, ${"hello"}, 'active', ${fxBrand}) RETURNING id
       `)) as unknown as { id: number }[];
       await tx.execute(sql`UPDATE campaign_stages SET creative_id = ${cre[0].id} WHERE id = ${stageId}`);
 

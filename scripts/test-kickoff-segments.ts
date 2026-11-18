@@ -53,8 +53,8 @@ async function main() {
       // test-kickoff-fullurl.ts) so kickoff doesn't need an offer/sales-page.
       async function mkCase(opts: { n: number; text: string; allowMultiSegment: boolean }) {
         const cre = await one<{ id: number }>(sql`
-          INSERT INTO creatives (slug, org_id, text, status, allow_multi_segment)
-          VALUES (${"kseg-cre-" + sfx + "-" + opts.n}, ${orgId}, ${opts.text}, 'active', ${opts.allowMultiSegment})
+          INSERT INTO creatives (slug, org_id, text, status, allow_multi_segment, brand_id)
+          VALUES (${"kseg-cre-" + sfx + "-" + opts.n}, ${orgId}, ${opts.text}, 'active', ${opts.allowMultiSegment}, ${brand.id})
           RETURNING id`);
         const trackingId = `9_99_kseg_${sfx}_s${opts.n}`;
         // Neutral host: a guidekn URL must match the fixture brand's landing host/path (0212 trigger),

@@ -43,7 +43,7 @@ async function main() {
           VALUES (${orgId}, ${"tagr-" + sfx + "-" + n}, ${"TAGR " + n}, 'active', 'drip', 'manual', ${brand.id}) RETURNING id`)).id;
         await tx.execute(sql`
           INSERT INTO drip_campaign_configs (campaign_id, org_id, interest_tag, priority) VALUES (${id}, ${orgId}, ${tag}, ${priority})`);
-        const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${"tagr-c-" + sfx + n}, ${orgId}, ${creativeText}, 'active') RETURNING id`);
+        const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"tagr-c-" + sfx + n}, ${orgId}, ${creativeText}, 'active', ${brand.id}) RETURNING id`);
         const st = await one<{ id: number }>(sql`
           INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, short_url, stop_text, drip_active)
           VALUES (${orgId}, ${id}, 1, ${cre.id}, ${SHORT}, ${STOP}, true) RETURNING id`);
@@ -74,7 +74,7 @@ async function main() {
       const p1 = await mkCampaign("p1", 1, tagged);
       const p2 = await mkCampaign("p2", 2, "Plain sale today");
       // R5 fixture: a follow-up child of P2 with a tagged creative.
-      const childCre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${"tagr-ch-" + sfx}, ${orgId}, 'Hey {first_name}, still there?', 'active') RETURNING id`);
+      const childCre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"tagr-ch-" + sfx}, ${orgId}, 'Hey {first_name}, still there?', 'active', ${brand.id}) RETURNING id`);
       await tx.execute(sql`
         INSERT INTO campaign_stages (org_id, campaign_id, stage_number, creative_id, short_url, stop_text, drip_active, parent_stage_id, behavioral_tier, drip_followup_minutes)
         VALUES (${orgId}, ${p2.id}, 2, ${childCre.id}, ${SHORT}, ${STOP}, true, ${p2.stageId}, 0, 60)`);

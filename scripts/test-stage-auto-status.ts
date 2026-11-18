@@ -114,7 +114,7 @@ async function main() {
     const brandId = ((await db.execute(sql`
       INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}::uuid, ${"tas-" + sfx}, 'TAS brand') RETURNING id`)) as unknown as { id: number }[])[0].id;
     const creativeId = ((await db.execute(sql`
-      INSERT INTO creatives (slug, org_id, text, status) VALUES (${"tas-" + sfx}, ${orgId}::uuid, 'Hi there', 'active') RETURNING id`)) as unknown as { id: number }[])[0].id;
+      INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"tas-" + sfx}, ${orgId}::uuid, 'Hi there', 'active', ${brandId}) RETURNING id`)) as unknown as { id: number }[])[0].id;
     const seed = { org_id: orgId, brand_id: brandId, creative_id: creativeId };
     const contacts = (await db.execute(sql`
       INSERT INTO contacts (org_id, phone_number)
@@ -306,6 +306,8 @@ async function main() {
     // The throwaway operator and its trigger-created org (single member by construction).
     if (fixtureOrgId != null) {
       await db.execute(sql`DELETE FROM org_members WHERE user_id = ${operatorId}::uuid`);
+      // Creatives before the org: an org cascade could reach the brand before the creatives that RESTRICT on it.
+      await db.execute(sql`DELETE FROM creatives WHERE org_id = ${fixtureOrgId}::uuid`);
       await db.execute(sql`DELETE FROM organizations WHERE id = ${fixtureOrgId}::uuid`);
     }
     await admin.auth.admin.deleteUser(operatorId);

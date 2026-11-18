@@ -150,7 +150,7 @@ async function dbTests() {
 
     // D6 a tagged creative renders the UPLOADED first name at materialization.
     const brand = await one<{ id: number }>(sql`INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}, ${"ua-" + sfx}, 'Acme') RETURNING id`);
-    const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status) VALUES (${"uac-" + sfx}, ${orgId}, 'Hi {first_name}, sale today', 'active') RETURNING id`);
+    const cre = await one<{ id: number }>(sql`INSERT INTO creatives (slug, org_id, text, status, brand_id) VALUES (${"uac-" + sfx}, ${orgId}, 'Hi {first_name}, sale today', 'active', ${brand.id}) RETURNING id`);
     const camp = await one<{ id: number }>(sql`
       INSERT INTO campaigns (org_id, slug, name, status, link_mode, brand_id) VALUES (${orgId}, ${"ua-" + sfx}, 'ua', 'active', 'manual', ${brand.id}) RETURNING id`);
     const st = await one<{ id: number }>(sql`

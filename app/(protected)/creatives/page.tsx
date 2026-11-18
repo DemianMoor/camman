@@ -204,8 +204,8 @@ type OfferListResponse = { data: OfferInfo[] };
 type Filters = {
   search: string;
   offer_id: number | null;
-  // Single-select brand filter: a brand id, "none" (no brand yet), or null (any).
-  brand_id: number | "none" | null;
+  // Single-select brand filter: a brand id, or null (any).
+  brand_id: number | null;
   sequences: CreativeSequencePlacement[];
   funnelStages: CreativeFunnelStage[];
   showArchived: boolean;
@@ -934,14 +934,7 @@ export default function CreativesPage() {
         id: "brand",
         header: "Brand",
         enableSorting: true,
-        cell: ({ row }) =>
-          row.original.brand_name ? (
-            <span className="text-sm">{row.original.brand_name}</span>
-          ) : (
-            <span className="text-xs text-muted-foreground" title="No brand yet — can't be picked on a stage until it has one">
-              No brand
-            </span>
-          ),
+        cell: ({ row }) => <span className="text-sm">{row.original.brand_name}</span>,
       },
       {
         id: "offers",
@@ -1350,7 +1343,7 @@ export default function CreativesPage() {
           value={filters.brand_id == null ? ANY_BRAND : String(filters.brand_id)}
           onValueChange={(v) =>
             updateFilters({
-              brand_id: v === ANY_BRAND ? null : v === "none" ? "none" : Number(v),
+              brand_id: v === ANY_BRAND ? null : Number(v),
               page: 0,
             })
           }
@@ -1366,7 +1359,6 @@ export default function CreativesPage() {
                 {b.status !== "active" ? " (archived)" : ""}
               </SelectItem>
             ))}
-            <SelectItem value="none">No brand yet</SelectItem>
           </SelectContent>
         </Select>
         <MultiSelectPicker

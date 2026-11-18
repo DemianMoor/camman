@@ -99,9 +99,13 @@ async function main() {
       providerA = provA[0].id;
       const providerB = provB[0].id;
 
+      // creatives.brand_id is NOT NULL (0241): fixture brand for this org. Rolled back with the rest.
+      const fxBrand = ((await tx.execute(sql`
+        INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}, ${"budget-b-" + sfx}, ${"P4 fixture brand"}) RETURNING id
+      `)) as unknown as { id: number }[])[0].id;
       const cre = (await tx.execute(sql`
-        INSERT INTO creatives (slug, org_id, text, status)
-        VALUES (${"budget-cre-" + sfx}, ${orgId}, ${"Budget test creative"}, 'active')
+        INSERT INTO creatives (slug, org_id, text, status, brand_id)
+        VALUES (${"budget-cre-" + sfx}, ${orgId}, ${"Budget test creative"}, 'active', ${fxBrand})
         RETURNING id
       `)) as unknown as { id: number }[];
       const creativeId = cre[0].id;

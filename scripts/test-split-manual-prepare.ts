@@ -63,8 +63,8 @@ async function main() {
       INSERT INTO brands (org_id, brand_id, name)
       VALUES (${orgId}::uuid, ${`SP-${unique}`}, ${`SplitPrep ${unique}`}) RETURNING id`)).id;
     const creativeId = (await one<{ id: number }>(sql`
-      INSERT INTO creatives (org_id, slug, text, status)
-      VALUES (${orgId}::uuid, ${`sp-cr-${unique}`}, ${"hi"}, ${"active"}) RETURNING id`)).id;
+      INSERT INTO creatives (org_id, slug, text, status, brand_id)
+      VALUES (${orgId}::uuid, ${`sp-cr-${unique}`}, ${"hi"}, ${"active"}, ${brandId}::int) RETURNING id`)).id;
     const campaignId = (await one<{ id: number }>(sql`
       INSERT INTO campaigns (org_id, slug, name, brand_id, link_mode, status, tracking_id)
       VALUES (${orgId}::uuid, ${`sp-${unique}`}, ${"SplitPrep Camp"}, ${brandId}::int,

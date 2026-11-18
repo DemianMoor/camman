@@ -1639,6 +1639,13 @@
       "when": 1797465600000,
       "tag": "0240_creatives_brand_id",
       "breakpoints": true
+    },
+    {
+      "idx": 234,
+      "version": "7",
+      "when": 1797552000000,
+      "tag": "0241_creatives_drop_quality_brand_not_null",
+      "breakpoints": true
     }
   ]
 }

@@ -125,10 +125,14 @@ async function main() {
       RETURNING id::text AS id
     `)) as unknown as { id: string }[];
     orgId = orgRows[0].id;
+    // creatives.brand_id is NOT NULL (0241): fixture brand for this org.
+    const fxBrand = ((await db.execute(sql`
+      INSERT INTO brands (org_id, brand_id, name) VALUES (${orgId}::uuid, ${`picker-b-${unique}`}, ${"P4 fixture brand"}) RETURNING id
+    `)) as unknown as { id: number }[])[0].id;
 
     const crRows = (await db.execute(sql`
-      INSERT INTO creatives (org_id, slug, text, status)
-      VALUES (${orgId}::uuid, ${`picker-cr-${unique}`}, ${"hello"}, ${"active"})
+      INSERT INTO creatives (org_id, slug, text, status, brand_id)
+      VALUES (${orgId}::uuid, ${`picker-cr-${unique}`}, ${"hello"}, ${"active"}, ${fxBrand})
       RETURNING id
     `)) as unknown as { id: number }[];
     creativeId = crRows[0].id;

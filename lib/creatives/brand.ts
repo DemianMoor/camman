@@ -26,7 +26,7 @@ export async function brandBelongsToOrg(orgId: string, brandId: number): Promise
 
 export interface StageCreativeBrandRefusal {
   message: string;
-  reason: "creative_brand_unassigned" | "campaign_brand_missing" | "creative_brand_mismatch";
+  reason: "campaign_brand_missing" | "creative_brand_mismatch";
 }
 
 /**
@@ -50,12 +50,6 @@ export async function checkStageCreativeBrand(opts: {
     .where(and(eq(creatives.id, opts.creativeId), eq(creatives.org_id, opts.orgId)))
     .limit(1);
   if (!row) return null; // org ownership is the caller's check
-  if (row.creative_brand_id == null) {
-    return {
-      reason: "creative_brand_unassigned",
-      message: "This creative has no brand yet, so it can't be used on a stage. Assign it a brand first.",
-    };
-  }
   if (row.campaign_brand_id == null) {
     return {
       reason: "campaign_brand_missing",

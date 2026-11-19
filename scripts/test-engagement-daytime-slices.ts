@@ -20,6 +20,11 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 //       and the resumed run starts from it
 //   S6  a daytime slice never escalates; the night path still does
 //   S7  a time-due-only contact (hot → warm by age) transitions in A as in B
+//   S10 a freeze contact whose clock is past 60 days with ≥ 2 in-freeze
+//       messages moves to suppressed in A as in B (status + lifecycle_status +
+//       the `suppressed` eligibility layer)
+//   S11 a send 10 min before the window start, committed after the previous
+//       run (inserted after S0), is caught through the 30-min overlap
 //   S8  lag > 60 pages once (latched), ≤ 60 clears
 //   S9  a normal burst (heartbeat 70 min old) is not stale; 100 min is
 //   R1  red-proof: the S1 comparator catches one corrupted value
@@ -72,7 +77,8 @@ async function main() {
   const ago = (ms: number) => new Date(T0.getTime() - ms);
   const tag = `sl-${Date.now()}`;
   const N_BURST = 30;
-  const phones = fictionalPhones(2 * (N_BURST + 6));
+  const PER_WORLD = N_BURST + 8;
+  const phones = fictionalPhones(2 * PER_WORLD);
   await refuseIfPhonesInUse(db, phones);
 
   type World = {
@@ -136,12 +142,17 @@ async function main() {
     for (let i = 0; i < N_BURST; i++) await contact(`b${i}`);
     for (let i = 0; i < 5; i++) await contact(`u${i}`);
     await contact("tdue");
+    await contact("sup");
+    await contact("late");
     for (let i = 0; i < 10; i++) for (let d = 0; d < 9; d++) await send(`b${i}`, (d % 3) as 0 | 1 | 2, at(20 + d)); // 9 → the burst makes 10: freeze
     for (let i = 10; i < 20; i++) for (let d = 0; d < 3; d++) await send(`b${i}`, (d % 2) as 0 | 1, at(12 + d)); // cold
     for (let i = 20; i < 25; i++) for (let d = 0; d < 4; d++) await send(`b${i}`, 1, at(15 + d)); // click in the burst → hot
     for (let i = 25; i < N_BURST; i++) for (let d = 0; d < 12; d++) await send(`b${i}`, (d % 3) as 0 | 1 | 2, at(40 + d)); // freeze
     for (let i = 0; i < 5; i++) for (let d = 0; d < 2 + i; d++) await send(`u${i}`, 0, at(30 + d)); // untouched
     const tdueSend = await send("tdue", 0, at(50));
+    for (let d = 0; d < 12; d++) await send("sup", (d % 3) as 0 | 1 | 2, at(120 - d)); // freeze long ago
+    for (const d of [70, 65]) await send("sup", 1, at(d)); // two in-freeze messages, the first 70 d ago
+    for (let d = 0; d < 3; d++) await send("late", 0, at(12 + d)); // cold
     await click("tdue", 0, tdueSend, at(40), at(40)); // 40 d ago ⇒ warm by age
 
     // S0: one full recount over the history, as of now.
@@ -153,12 +164,20 @@ async function main() {
     await db.execute(sql`UPDATE contact_engagement SET status = 'hot', time_due_at = ${iso(ago(60 * MIN))}::timestamptz
       WHERE contact_id = ${contacts.get("tdue")}::uuid`);
     await db.execute(sql`UPDATE contacts SET lifecycle_status = 'hot' WHERE id = ${contacts.get("tdue")}::uuid`);
+    // A freeze clock that started 100 days ago: the two later messages are in-freeze.
+    await db.execute(sql`UPDATE contact_engagement SET status = 'freeze', freeze_entered_at = ${iso(ago(100 * DAY))}::timestamptz
+      WHERE contact_id = ${contacts.get("sup")}::uuid`);
+    await db.execute(sql`UPDATE contacts SET lifecycle_status = 'freeze' WHERE id = ${contacts.get("sup")}::uuid`);
 
     // The burst: one contact per minute over the last 90 minutes, then 5 clicks.
     for (let i = 0; i < N_BURST; i++) {
       const id = await send(`b${i}`, (i % 3) as 0 | 1 | 2, ago((90 - i * 3) * MIN));
       if (i >= 20 && i < 25) await click(`b${i}`, (i % 3) as 0 | 1 | 2, id, ago((88 - i * 3) * MIN), ago((87 - i * 3) * MIN));
     }
+    await send("sup", 2, ago(10 * MIN)); // touched in the window ⇒ recounted ⇒ suppressed
+    // Sent 10 min before the window start (cursor0 = now − 95 min) but committed
+    // only now — what the 30-min overlap exists for.
+    await send("late", 1, ago(105 * MIN));
     return { orgId, contacts, O1, K1: K[0] };
   };
 
@@ -166,7 +185,7 @@ async function main() {
   let B: World | undefined;
   try {
     A = await buildWorld("A", 0);
-    B = await buildWorld("B", N_BURST + 6);
+    B = await buildWorld("B", PER_WORLD);
     const cursor0 = ago(95 * MIN);
 
     // ── Path A: daytime slices, killed after slice 2, then resumed ──────────
@@ -182,7 +201,7 @@ async function main() {
     const cur1 = await one<{ w: string }>(sql`SELECT watermark::text AS w FROM cron_locks WHERE job_name = ${engagementCursorJob(A.orgId)}`);
     const afterKill = cur1 ? new Date(cur1.w) : null;
     const run2 = await runDaytimeSlices({
-      orgId: A.orgId, cursor: afterKill ?? cursor0, overlapMinutes: 0, evaluateAll: false, maxTouched: 7,
+      orgId: A.orgId, cursor: afterKill ?? cursor0, overlapMinutes: 30, evaluateAll: false, maxTouched: 7,
     });
     bar("S5 a run killed after slice 2 left the cursor inside the window; the resumed run started there and caught up",
       killedAt === 1 && afterKill != null && afterKill > cursor0 && afterKill < T0 && run2.caughtUp,
@@ -267,6 +286,17 @@ async function main() {
     bar("S7 the time-due contact (hot, click 40 d ago, untouched by the burst) is warm in both",
       sa.get("tdue")?.status === "warm" && sb.get("tdue")?.status === "warm",
       `A=${sa.get("tdue")?.status} B=${sb.get("tdue")?.status}`);
+
+    bar("S10 the freeze contact past its 60-day clock is suppressed in both, and in the suppressed layer of both",
+      sa.get("sup")?.status === "suppressed" && sb.get("sup")?.status === "suppressed"
+        && sa.get("sup")?.lifecycle_status === "suppressed" && sb.get("sup")?.lifecycle_status === "suppressed"
+        && la.suppressed?.includes("sup") === true && lb.suppressed?.includes("sup") === true,
+      `A=${sa.get("sup")?.status}/${sa.get("sup")?.lifecycle_status} B=${sb.get("sup")?.status}/${sb.get("sup")?.lifecycle_status}`);
+    const lateTotal = async (w: World) =>
+      (await one<{ n: number }>(sql`SELECT msgs_total AS n FROM contact_engagement WHERE contact_id = ${w.contacts.get("late")}::uuid`)).n;
+    const [ltA, ltB] = [await lateTotal(A), await lateTotal(B)];
+    bar("S11 the send 10 min before the window start is counted in A (via the overlap) as in B",
+      Number(ltA) === 4 && Number(ltB) === 4, `msgs_total A=${ltA} B=${ltB}`);
 
     // ── S6: escalation ──────────────────────────────────────────────────────
     const dry = (daytimeSlice: { until: Date; evaluateTimeDue: boolean } | null) =>

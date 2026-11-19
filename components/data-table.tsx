@@ -75,6 +75,13 @@ export interface DataTableProps<T> {
    */
   freezeFirstColumn?: boolean;
   onRowClick?: (row: T) => void;
+  /**
+   * The row's page URL. When set, a middle-click (mouse wheel) on the row opens
+   * it in a new tab. OPT-IN: rows are not anchors, so the browser can't do this
+   * on its own. Middle-clicks on a link/button/menu inside the row are left to
+   * that element.
+   */
+  getRowHref?: (row: T) => string;
   /** Optional per-row className (e.g. an operational-status accent). */
   rowClassName?: (row: T) => string | undefined;
 }
@@ -98,6 +105,7 @@ export function DataTable<T>({
   sortCycle = "asc-desc-clear",
   freezeFirstColumn = false,
   onRowClick,
+  getRowHref,
   rowClassName,
 }: DataTableProps<T>) {
   const table = useReactTable({
@@ -201,6 +209,33 @@ export function DataTable<T>({
                   key={row.id}
                   onClick={
                     onRowClick ? () => onRowClick(row.original) : undefined
+                  }
+                  onMouseDown={
+                    getRowHref
+                      ? (e) => {
+                          // Suppress the browser's middle-button autoscroll.
+                          if (e.button === 1) e.preventDefault();
+                        }
+                      : undefined
+                  }
+                  onAuxClick={
+                    getRowHref
+                      ? (e) => {
+                          if (e.button !== 1) return;
+                          const target = e.target as HTMLElement;
+                          if (
+                            target.closest(
+                              "a, button, input, [role='menuitem'], [role='checkbox']",
+                            )
+                          )
+                            return;
+                          window.open(
+                            getRowHref(row.original),
+                            "_blank",
+                            "noopener",
+                          );
+                        }
+                      : undefined
                   }
                   className={cn(
                     onRowClick && "cursor-pointer hover:bg-muted/40",

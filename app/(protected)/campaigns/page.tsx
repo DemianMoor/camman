@@ -1198,6 +1198,7 @@ export default function CampaignsPage() {
               })
             }
             onRowClick={(c) => router.push(`/campaigns/${c.id}`)}
+            getRowHref={(c) => `/campaigns/${c.id}`}
           />
         </>
       )}

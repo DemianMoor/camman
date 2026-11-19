@@ -226,7 +226,13 @@ export const HEARTBEAT_JOBS: Record<string, HeartbeatExpectation> = {
   // anything.
   contactEngagement: {
     job_name: "contact-engagement",
-    max_age_hours: 0.75, // spec §5: page when the last success is > 45 min old
+    // 1.5 h since 2026-11-17 (was 0.75). The daytime path stamps this only when
+    // a tick ends CAUGHT UP, so a normal afternoon burst worked off over a few
+    // ticks leaves it unstamped for up to ~1 h. "Running but behind" is paged by
+    // the lag alert (> 60 min, lib/engagement/daytime-slices.ts); this one is for
+    // "not completing at all". PLACEHOLDER until the 2026-11-20 05:00 UTC
+    // measurements set it from the measured burst length.
+    max_age_hours: 1.5,
     first_run_grace_hours: 0.5, // 2x the 15-min interval
     label: "Contact lifecycle refresh (every 15 min)",
   },

@@ -13,6 +13,7 @@ import {
   ENGAGEMENT_REEVAL_JOB,
   FULL_FALLBACK_HOURS,
   INCREMENTAL_OVERLAP_MINUTES,
+  DAYTIME_RECOUNT,
   engagementCursorJob,
 } from "@/lib/engagement/constants";
 import { isCampaignDaytime } from "@/lib/campaign-timezone";
@@ -140,6 +141,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
               cursor: last,
               overlapMinutes: INCREMENTAL_OVERLAP_MINUTES,
               evaluateAll,
+              recount: DAYTIME_RECOUNT,
             });
             console.info("[contact-engagement] daytime slices", {
               org_id,

@@ -78,8 +78,14 @@ export interface RefreshOptions {
    *     tick, on the first slice).
    * null ⇒ today's behaviour: window up to asOf, escalation above maxTouched,
    * time-due always evaluated.
+   *
+   * `recount` picks how the slice reaches its contacts' sends:
+   *   · "per_contact" — one stage_sends_org_phone_sent_idx probe per contact
+   *     (today's incremental path; ~30 ms/contact cold, measured 2026-11-20);
+   *   · "set" — the nightly full-recount SQL restricted to the touched set:
+   *     ONE pass over stage_sends hash-joined to eng_touched by contact_id.
    */
-  daytimeSlice: { until: Date; evaluateTimeDue: boolean } | null;
+  daytimeSlice: { until: Date; evaluateTimeDue: boolean; recount: "per_contact" | "set" } | null;
 }
 
 /**
@@ -204,7 +210,9 @@ export async function refreshContactEngagement(
   // Incremental: one index probe per touched contact.
   const sendsFrom = full
     ? sql`FROM stage_sends ss`
-    : sql`FROM eng_touched t
+    : opts.daytimeSlice?.recount === "set"
+      ? sql`FROM eng_touched t JOIN stage_sends ss ON ss.contact_id = t.contact_id AND ss.org_id = ${org}`
+      : sql`FROM eng_touched t
           JOIN contacts c ON c.id = t.contact_id AND c.org_id = ${org}
           JOIN stage_sends ss ON ss.org_id = ${org} AND ss.phone = c.phone_number AND ss.contact_id = t.contact_id`;
 

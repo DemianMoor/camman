@@ -29,6 +29,8 @@ import "./_require-preview-db"; // second — refuses any target but the preview
 //   S9  a normal burst (heartbeat 70 min old) is not stale; 100 min is
 //   R1  red-proof: the S1 comparator catches one corrupted value
 //
+// RECOUNT=set runs path A with the set-based recount (one stage_sends pass over
+// the touched set) instead of per-contact probes; both must pass every bar.
 // Run: node scripts/with-preview-env.mjs npx tsx --conditions=react-server scripts/test-engagement-daytime-slices.ts
 
 import { sql, type SQL } from "drizzle-orm";
@@ -55,7 +57,8 @@ async function main() {
   const { lifecycleExclusionLayers, offerRuleLayers } = await import("@/lib/sends/eligibility");
   const { checkHeartbeats, HEARTBEAT_JOBS } = await import("@/lib/reporting/cron-heartbeat");
 
-  console.log(`Target DB: ${requirePreviewDb().label}\n`);
+  const RECOUNT: "per_contact" | "set" = process.env.RECOUNT === "set" ? "set" : "per_contact";
+  console.log(`Target DB: ${requirePreviewDb().label} · recount=${RECOUNT}\n`);
   const all = async <T>(q: SQL) => (await db.execute(q)) as unknown as T[];
   const one = async <T>(q: SQL) => (await all<T>(q))[0];
   const iso = (d: Date) => d.toISOString();
@@ -192,7 +195,7 @@ async function main() {
     let killedAt: number | null = null;
     try {
       await runDaytimeSlices({
-        orgId: A.orgId, cursor: cursor0, overlapMinutes: 30, evaluateAll: false, maxTouched: 7,
+        orgId: A.orgId, cursor: cursor0, overlapMinutes: 30, evaluateAll: false, recount: RECOUNT, maxTouched: 7,
         afterSlice: (i) => { if (i === 1) { killedAt = i; throw new Error("simulated kill"); } },
       });
     } catch (e) {
@@ -201,7 +204,7 @@ async function main() {
     const cur1 = await one<{ w: string }>(sql`SELECT watermark::text AS w FROM cron_locks WHERE job_name = ${engagementCursorJob(A.orgId)}`);
     const afterKill = cur1 ? new Date(cur1.w) : null;
     const run2 = await runDaytimeSlices({
-      orgId: A.orgId, cursor: afterKill ?? cursor0, overlapMinutes: 30, evaluateAll: false, maxTouched: 7,
+      orgId: A.orgId, cursor: afterKill ?? cursor0, overlapMinutes: 30, evaluateAll: false, recount: RECOUNT, maxTouched: 7,
     });
     bar("S5 a run killed after slice 2 left the cursor inside the window; the resumed run started there and caught up",
       killedAt === 1 && afterKill != null && afterKill > cursor0 && afterKill < T0 && run2.caughtUp,
@@ -299,7 +302,7 @@ async function main() {
       Number(ltA) === 4 && Number(ltB) === 4, `msgs_total A=${ltA} B=${ltB}`);
 
     // ── S6: escalation ──────────────────────────────────────────────────────
-    const dry = (daytimeSlice: { until: Date; evaluateTimeDue: boolean } | null) =>
+    const dry = (daytimeSlice: { until: Date; evaluateTimeDue: boolean; recount: "per_contact" | "set" } | null) =>
       db.transaction(async (tx) => {
         await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
         const r = await refreshContactEngagement(tx, B!.orgId, {
@@ -308,7 +311,7 @@ async function main() {
         return r;
       });
     const night = await dry(null);
-    const day = await dry({ until: new Date(), evaluateTimeDue: false });
+    const day = await dry({ until: new Date(), evaluateTimeDue: false, recount: RECOUNT });
     bar("S6 above maxTouched the night path escalates; a daytime slice never does",
       night.escalatedToFull === true && day.escalatedToFull === false && day.recounted > 3,
       `night escalated=${night.escalatedToFull} recounted=${night.recounted}; day escalated=${day.escalatedToFull} recounted=${day.recounted}`);

@@ -109,6 +109,12 @@ export const INCREMENTAL_MAX_TOUCHED = 20_000;
  */
 export const DAYTIME_SLICE_MAX_TOUCHED = 5_000;
 export const DAYTIME_BUDGET_MS = 540_000;
+/**
+ * How a daytime slice recounts: "per_contact" index probes or one "set" pass.
+ * Undecided until the set-based rehearsal (plan §9); per_contact measured
+ * ~30 ms/contact cold on 2026-11-20 (19K contacts ≈ 10 min).
+ */
+export const DAYTIME_RECOUNT: "per_contact" | "set" = "per_contact";
 /** Telegram page when a daytime tick ends further behind than this (owner, 2026-11-17). */
 export const DAYTIME_LAG_ALERT_MINUTES = 60;
 /** cron_locks row holding where this org's last committed slice ended. */

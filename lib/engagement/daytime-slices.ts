@@ -94,6 +94,8 @@ export async function runDaytimeSlices(opts: {
   cursor: Date;
   overlapMinutes: number;
   evaluateAll: boolean;
+  /** How each slice reaches its contacts' sends — see RefreshOptions.daytimeSlice. */
+  recount: "per_contact" | "set";
   /** Test seams. */
   maxTouched?: number;
   budgetMs?: number;
@@ -123,7 +125,7 @@ export async function runDaytimeSlices(opts: {
         // First slice only: the threshold re-evaluation (if requested) and the
         // time-due pass, so neither waits on a burst.
         evaluateAll: i === 0 && opts.evaluateAll,
-        daytimeSlice: { until, evaluateTimeDue: i === 0 },
+        daytimeSlice: { until, evaluateTimeDue: i === 0, recount: opts.recount },
         maxTouched: max,
       });
       // The cursor moves in the SAME transaction as the slice's writes.

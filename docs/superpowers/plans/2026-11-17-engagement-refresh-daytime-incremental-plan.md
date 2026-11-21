@@ -138,3 +138,37 @@ A single 40K-contact per-contact transaction is exactly what timed out on 09-23.
 - **Added — lag alert:** a Telegram alert when a daytime tick ends with `lag_minutes > 60`. It is latched, so one alert per episode, and it clears when a tick finishes caught up. This goes in Task 2, with a test bar: **S8**, lag 61 pages once; lag 59 and a caught-up tick page nothing.
 - **Added — no false page on a normal burst:** the `contact-engagement` heartbeat is stamped only when a tick ends caught up. So the watcher's max-age for it must be above the 60-minute lag alert, otherwise a normal burst pages twice. Task 2 sets it from Task 1's measured burst length and adds bar **S9**: a simulated 45-minute burst (three ticks behind, then caught up) pages neither the heartbeat watcher nor the lag alert.
 - **Post-deploy report:** the afternoon numbers (no `eng_*` statement over 30 s from 12:00 to 02:00 UTC, the largest `lag_minutes`, and contact_engagement heap hit over the day) against 11-17's **32.8%**.
+
+## 9. Window results 2026-11-21 and proposed values — AWAITING OWNER REVIEW
+
+Rehearsal: `scripts/measure-engagement-daytime-recount.ts`, production, 05:03–05:07 UTC. It was a dry run, rolled back, with a 240 s cap per statement and no timeout hit. Window: 2026-11-17 15:00–15:45 UTC, the same one as the per-contact run on 11-20.
+
+| Phase | Per-contact (11-20) | Set-based (11-21) |
+|---|---|---|
+| touched | — | 0.6 s |
+| clicks | 84–104 s | 114 s |
+| sends / facts | 339–385 s | 76 s |
+| offers | 104–149 s | 31 s |
+| thresholds + evaluate | — | 4.5 s |
+| **total** | **~10 min (~30 ms/contact)** | **245 s (12.5 ms/contact)** |
+
+19,605 contacts were recounted and 19,610 evaluated, with no escalation. The run left no server-side statement behind (checked in `pg_stat_activity`).
+
+The clicks phase uses the same SQL on both paths and is now the largest phase. The set-based pass removed most of the stage_sends and offers cost.
+
+**Proposed values (not yet applied in code):**
+
+1. **`DAYTIME_RECOUNT = "set"`.**
+2. **Daytime overlap of 2 minutes, down from 30.**
+   - Every path that marks a send as sent (scheduled cron, drain, approve-send, retry-failed) does it in one autocommit `UPDATE … sent_at = now()`. So the gap between `sent_at` and commit is that statement's own duration.
+   - From pgss since 07-13, that UPDATE's maximum is 4.4 s, so its p99 is at most 4.4 s. The click-scoring write's maximum is 0.2 s.
+   - The 2 minutes leaves a wide margin over that, plus the clock difference between Vercel and the database. Taking the slice end from the database's `now()` would remove the clock part; that is a small follow-up code change.
+3. **Slice size: keep 5,000.**
+   - At the measured 12.5 ms per contact, a slice takes about 60 s. That is well under the 600 s statement limit, and the 540 s budget covers roughly 40K contacts per tick.
+   - The worst 15-minute tick measured was 9,935 touched, plus up to about 2 minutes of overlap. That is roughly 15K contacts, about 190 s if the cost scales linearly. Linear scaling is not proven for the clicks phase.
+4. **Heartbeat watcher age: keep 1.5 h.** The worst measured tick catches up within a single run, so a normal burst never leaves the heartbeat unstamped across ticks.
+5. **Covering index: do not build now.**
+   - Estimated at 370–400 MB, for about 7.7M sent rows.
+   - It would only speed up the sends phase (76 s). It does nothing for clicks (114 s), the larger phase.
+   - If it is ever needed, the SQL is:
+     `CREATE INDEX CONCURRENTLY stage_sends_contact_sent_cover_idx ON stage_sends (contact_id, sent_at) INCLUDE (campaign_id) WHERE status = 'sent';`

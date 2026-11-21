@@ -174,10 +174,13 @@ async function main() {
   console.log("\nPART B — refreshContactEngagement over a throwaway org");
   const tag = `eng-${Date.now()}`;
   let orgId = "";
-  const run = (opts: Parameters<typeof refreshContactEngagement>[2]) =>
+  // Part B is the pre-2026-11-17 single-window job (night path): daytimeSlice is
+  // null on purpose. The daytime slice path has its own suite,
+  // scripts/test-engagement-daytime-slices.ts.
+  const run = (opts: Omit<Parameters<typeof refreshContactEngagement>[2], "daytimeSlice">) =>
     db.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL statement_timeout = '120s'`);
-      return refreshContactEngagement(tx, orgId, opts);
+      return refreshContactEngagement(tx, orgId, { ...opts, daytimeSlice: null });
     });
   try {
     orgId = (await one<{ id: string }>(sql`INSERT INTO organizations (name) VALUES (${`${MARKER} ${tag}`}) RETURNING id`)).id;
@@ -768,11 +771,11 @@ async function main() {
           s2?.stale === true && s3?.stale === true && sent.length === 1, `sent=${sent.length}`);
       }
       {
-        // C3: recount fresh, Group x Lifecycle rollup 2 h old (> 0.75 h).
+        // C3: recount fresh, Group x Lifecycle rollup 4 h old (> its 3 h tolerance since 2026-11-17).
         await db.execute(sql`
           INSERT INTO cron_locks (job_name, watermark) VALUES
             ('contact-engagement', now()),
-            ('contact-engagement-group-rollup', now() - interval '2 hours')
+            ('contact-engagement-group-rollup', now() - interval '4 hours')
           ON CONFLICT (job_name) DO UPDATE SET watermark = EXCLUDED.watermark`);
         const before = sent.length;
         const s4 = await watchEngagementHeartbeat(db, "incremental", { send });

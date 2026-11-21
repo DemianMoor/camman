@@ -13,7 +13,11 @@ import {
   ENGAGEMENT_REEVAL_JOB,
   FULL_FALLBACK_HOURS,
   INCREMENTAL_OVERLAP_MINUTES,
+  DAYTIME_RECOUNT,
+  engagementCursorJob,
 } from "@/lib/engagement/constants";
+import { isCampaignDaytime } from "@/lib/campaign-timezone";
+import { reportEngagementLag, runDaytimeSlices } from "@/lib/engagement/daytime-slices";
 import { watchEngagementHeartbeat } from "@/lib/engagement/monitor";
 import {
   reevaluationDue,
@@ -33,6 +37,12 @@ import { refreshLifecycleDayRollup } from "@/lib/reporting/lifecycle-rollup";
 //                                     + HOURLY (the :10 tick only, since 2026-11-17)
 //                                     the Group x Lifecycle table (0193), which
 //                                     the report reads instead of computing it
+//   08:00–22:00 ET (since 2026-11-17) the incremental tick NEVER recounts the whole
+//                                     org: lib/engagement/daytime-slices.ts cuts its
+//                                     window into slices of <= DAYTIME_SLICE_MAX_TOUCHED
+//                                     contacts, one transaction each, each advancing a
+//                                     per-org cursor. A burst is worked off over ticks;
+//                                     lag > 60 min pages. Outside those hours: unchanged.
 //   ?mode=full at 06:35 UTC           full recount (02:35 ET, outside the send windows)
 //                                     + the Lifecycle day rollup (migration 0192),
 //                                     a 14-day rolling recompute so late clicks,
@@ -85,16 +95,23 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         return { ok: true, engine: "off" as const, results: [] as OrgResult[] };
       }
 
+      // Where each org's window starts: its own cursor (written by every
+      // successful recount, per slice in the daytime path), else - the first
+      // tick after this deploy - the job heartbeat that served as the
+      // watermark before 2026-11-17.
       const hb = (await db.execute(sql`
-        SELECT watermark FROM cron_locks WHERE job_name = ${ENGAGEMENT_JOB}
-      `)) as unknown as { watermark: string | null }[];
-      const last = hb[0]?.watermark ? new Date(hb[0].watermark) : null;
-      const staleWatermark =
-        last == null || Date.now() - last.getTime() > FULL_FALLBACK_HOURS * 3_600_000;
-      const mode: RefreshMode = requested === "full" || staleWatermark ? "full" : "incremental";
-      const since = last
-        ? new Date(last.getTime() - INCREMENTAL_OVERLAP_MINUTES * 60_000)
-        : undefined;
+        SELECT job_name, watermark FROM cron_locks
+         WHERE job_name = ${ENGAGEMENT_JOB} OR job_name LIKE 'contact-engagement-cursor:%'
+      `)) as unknown as { job_name: string; watermark: string | null }[];
+      const legacy = hb.find((r) => r.job_name === ENGAGEMENT_JOB)?.watermark ?? null;
+      const cursorOf = (orgId: string): Date | null => {
+        const w = hb.find((r) => r.job_name === engagementCursorJob(orgId))?.watermark ?? legacy;
+        return w ? new Date(w) : null;
+      };
+      // ⚠️ No org-wide recount in the ET working day - not by request, not by
+      // escalation, not by the stale fallback (owner, 2026-11-17). The nightly
+      // ?mode=full run (06:35 UTC = 01:35/02:35 ET) is outside it by schedule.
+      const daytime = requested === "incremental" && isCampaignDaytime(tickAt);
 
       // A threshold edit moves neither the touched set nor time_due_at, so it
       // would otherwise reach a contact only when its next message or click
@@ -111,9 +128,54 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       );
 
       const results: OrgResult[] = [];
+      let mode: RefreshMode = requested;
+      let caughtUp = true;
       for (const org_id of orgs) {
         // One org's failure must not stop the rest; it withholds the heartbeat.
         const started = Date.now();
+        const last = cursorOf(org_id);
+        if (daytime && last != null) {
+          try {
+            const d = await runDaytimeSlices({
+              orgId: org_id,
+              cursor: last,
+              overlapMinutes: INCREMENTAL_OVERLAP_MINUTES,
+              evaluateAll,
+              recount: DAYTIME_RECOUNT,
+            });
+            console.info("[contact-engagement] daytime slices", {
+              org_id,
+              slices: d.slices,
+              slicesPlanned: d.slicesPlanned,
+              caughtUp: d.caughtUp,
+              lag_minutes: d.lagMinutes,
+              recounted: d.recounted,
+              maxSliceRecounted: d.maxSliceRecounted,
+              durationMs: Date.now() - started,
+            });
+            await reportEngagementLag(db, org_id, d.lagMinutes);
+            if (!d.caughtUp) caughtUp = false;
+            results.push({ org_id, mode: "incremental", recounted: d.recounted });
+          } catch (err) {
+            const error = err instanceof Error ? err.message : String(err);
+            console.error("[contact-engagement] daytime slice failed", { org_id, error });
+            // The committed slices moved the cursor; the lag is measured from it.
+            const [c] = (await db.execute(sql`
+              SELECT watermark FROM cron_locks WHERE job_name = ${engagementCursorJob(org_id)}
+            `)) as unknown as { watermark: string | null }[];
+            const at = c?.watermark ? new Date(c.watermark) : last;
+            await reportEngagementLag(db, org_id, Math.round((Date.now() - at.getTime()) / 60_000));
+            results.push({ org_id, error });
+          }
+          continue;
+        }
+        const staleWatermark =
+          last == null || Date.now() - last.getTime() > FULL_FALLBACK_HOURS * 3_600_000;
+        const orgMode: RefreshMode = requested === "full" || staleWatermark ? "full" : "incremental";
+        if (orgMode === "full") mode = "full";
+        const since = last
+          ? new Date(last.getTime() - INCREMENTAL_OVERLAP_MINUTES * 60_000)
+          : undefined;
         try {
           const r = await db.transaction(async (tx) => {
             // One budget for both modes: an incremental run ESCALATES to a full
@@ -122,8 +184,23 @@ async function handle(req: NextRequest): Promise<NextResponse> {
             // escalate. The lease, not the timeout, is what stops overlap.
             // 600 s: the full recount alone reached ~245 s against the old 270 s.
             await tx.execute(sql.raw("SET LOCAL statement_timeout = '600s'"));
-            return refreshContactEngagement(tx, org_id, { mode, dryRun: false, since, evaluateAll });
+            const res = await refreshContactEngagement(tx, org_id, {
+              mode: orgMode,
+              dryRun: false,
+              since,
+              evaluateAll,
+              // Outside the working day (or the very first run): today's single
+              // window, escalation allowed.
+              daytimeSlice: null,
+            });
+            // now() is the transaction start - at or before every row this run
+            // read, so the next window (minus the overlap) cannot skip one.
+            await tx.execute(sql`
+              INSERT INTO cron_locks (job_name, watermark) VALUES (${engagementCursorJob(org_id)}, now())
+              ON CONFLICT (job_name) DO UPDATE SET watermark = EXCLUDED.watermark`);
+            return res;
           });
+          await reportEngagementLag(db, org_id, 0);
           console.info("[contact-engagement] recount", {
             org_id,
             mode: r.mode,
@@ -143,7 +220,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // send path reads are committed, and a rollup that fails or runs the
       // function out of time must not make them look stale.
       const ok = results.every((r) => !r.error);
-      if (ok) {
+      // The recount heartbeat means "statuses are current": a daytime tick that
+      // ended behind does NOT stamp it (the lag alert speaks for that case).
+      if (ok && caughtUp) {
         await recordHeartbeat(db, ENGAGEMENT_JOB);
         if (mode === "full") await recordHeartbeat(db, ENGAGEMENT_FULL_JOB);
         // A full recount evaluates everyone too, so it satisfies any pending request.

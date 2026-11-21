@@ -69,6 +69,23 @@ export interface RefreshOptions {
    * are already stored, so this is the evaluate pass and nothing more.
    */
   evaluateAll?: boolean;
+  /**
+   * REQUIRED (CLAUDE.md §11b — it decides who is recounted and evaluated).
+   * Non-null ⇒ one slice of a daytime run (lib/engagement/daytime-slices.ts):
+   *   · the touched window is [since, until] instead of [since, asOf];
+   *   · it NEVER escalates to an org-wide recount, however big the slice;
+   *   · the time-due evaluation runs only when evaluateTimeDue is set (once per
+   *     tick, on the first slice).
+   * null ⇒ today's behaviour: window up to asOf, escalation above maxTouched,
+   * time-due always evaluated.
+   *
+   * `recount` picks how the slice reaches its contacts' sends:
+   *   · "per_contact" — one stage_sends_org_phone_sent_idx probe per contact
+   *     (today's incremental path; ~30 ms/contact cold, measured 2026-11-20);
+   *   · "set" — the nightly full-recount SQL restricted to the touched set:
+   *     ONE pass over stage_sends hash-joined to eng_touched by contact_id.
+   */
+  daytimeSlice: { until: Date; evaluateTimeDue: boolean; recount: "per_contact" | "set" } | null;
 }
 
 /**
@@ -133,6 +150,9 @@ export async function refreshContactEngagement(
   if (opts.mode === "incremental" && !opts.since) {
     throw new Error("refreshContactEngagement: an incremental run needs `since`");
   }
+  if (opts.daytimeSlice && opts.mode !== "incremental") {
+    throw new Error("refreshContactEngagement: a daytime slice is incremental by definition");
+  }
   const phaseMs: Record<string, number> = {};
   const phase = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
     const t = Date.now();
@@ -153,17 +173,23 @@ export async function refreshContactEngagement(
       await dbc.execute(sql`INSERT INTO eng_touched SELECT id FROM contacts WHERE org_id = ${org}`);
     } else {
       const since = sql`${opts.since!.toISOString()}::timestamptz`;
+      // A daytime slice reads only its own part of the window; the recount
+      // below still reads each touched contact's FULL history as of asOf.
+      const until = opts.daytimeSlice ? sql`${opts.daytimeSlice.until.toISOString()}::timestamptz` : asOf;
       await dbc.execute(sql`
         INSERT INTO eng_touched
         SELECT contact_id FROM stage_sends
-         WHERE sent_at >= ${since} AND sent_at <= ${asOf} AND status = 'sent' AND org_id = ${org}
+         WHERE sent_at >= ${since} AND sent_at <= ${until} AND status = 'sent' AND org_id = ${org}
         UNION
         SELECT l.contact_id FROM clicks ck JOIN links l ON l.id = ck.link_id
-         WHERE ${HUMAN_CLICK} AND ck.scored_at >= ${since} AND ck.scored_at <= ${asOf}
+         WHERE ${HUMAN_CLICK} AND ck.scored_at >= ${since} AND ck.scored_at <= ${until}
            AND ck.org_id = ${org}`);
     }
     await dbc.execute(sql`ANALYZE eng_touched`);
-    if (!full) {
+    // A daytime slice never escalates: it is bounded by construction (the slice
+    // planner sized it), and an org-wide pass in the ET working day is exactly
+    // what evicted the audience snapshot's working set on 2026-11-17.
+    if (!full && !opts.daytimeSlice) {
       // A send burst can put tens of thousands of contacts in one window, and
       // the incremental path costs an index probe per contact. Past
       // maxTouched the org-wide set-based pass is both cheaper and BOUNDED, so
@@ -184,7 +210,9 @@ export async function refreshContactEngagement(
   // Incremental: one index probe per touched contact.
   const sendsFrom = full
     ? sql`FROM stage_sends ss`
-    : sql`FROM eng_touched t
+    : opts.daytimeSlice?.recount === "set"
+      ? sql`FROM eng_touched t JOIN stage_sends ss ON ss.contact_id = t.contact_id AND ss.org_id = ${org}`
+      : sql`FROM eng_touched t
           JOIN contacts c ON c.id = t.contact_id AND c.org_id = ${org}
           JOIN stage_sends ss ON ss.org_id = ${org} AND ss.phone = c.phone_number AND ss.contact_id = t.contact_id`;
 
@@ -253,8 +281,10 @@ export async function refreshContactEngagement(
           ? sql``
           : opts.evaluateAll
             ? sql`UNION SELECT contact_id FROM contact_engagement WHERE org_id = ${org}`
-            : sql`UNION SELECT contact_id FROM contact_engagement
-                   WHERE org_id = ${org} AND time_due_at <= ${asOf}`
+            : opts.daytimeSlice && !opts.daytimeSlice.evaluateTimeDue
+              ? sql``
+              : sql`UNION SELECT contact_id FROM contact_engagement
+                     WHERE org_id = ${org} AND time_due_at <= ${asOf}`
       }`);
     await dbc.execute(sql`ANALYZE eng_set`);
     // A recounted contact takes the fresh facts; everyone else keeps their stored ones.

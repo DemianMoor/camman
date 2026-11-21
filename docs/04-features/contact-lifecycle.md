@@ -1,6 +1,6 @@
 # Feature — Contact lifecycle status
 
-_Last updated: 2026-11-17 (Group × Lifecycle rollup hourly — the `:10` tick + nightly; heartbeat tolerance 3 h); 2026-11-03 (Telegram alert when the send-time re-check fails open); 2026-10-27 (offer limit default 5 → 2 for new campaigns); 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
+_Last updated: 2026-11-19 (daytime incremental in time slices, never escalates to an org-wide recount in ET 08:00–22:00; lag > 60 min alert; recount heartbeat 1.5 h); 2026-11-17 (Group × Lifecycle rollup hourly — the `:10` tick + nightly; heartbeat tolerance 3 h); 2026-11-03 (Telegram alert when the send-time re-check fails open); 2026-10-27 (offer limit default 5 → 2 for new campaigns); 2026-10-23 (Hot and Warm separate campaign chips + preview By-status line; cohort report: Grand total, Purchases, ROI, Drip row, Warm 31–60 / 61–120, New clickers, Cost / new clicker, 0220; drip sends stamped; send-date basis footer; nightly recompute of changed older days)_
 
 **PR 1 through 4d shipped; PR 5 is open.** The statuses are computed and
 stored, the thresholds that decide them are editable (§8), every send records
@@ -890,6 +890,26 @@ runs inside the caller's transaction and stages everything through ANALYZEd
   2.5 h until a full recount was run by hand. The escalation bounds that, and
   the short fallback stops a stall outliving one send burst. The dead-man did
   its job: `contact-engagement-stale` fired 55 minutes in.
+- **⚠️ Never during the ET working day (since 2026-11-19).** Between 08:00 and
+  22:00 ET an incremental tick neither escalates nor takes the 3 h stale
+  fallback. [lib/engagement/daytime-slices.ts](../../lib/engagement/daytime-slices.ts)
+  cuts its window into **time slices** of at most `DAYTIME_SLICE_MAX_TOUCHED`
+  contacts (5,000, placeholder until the 2026-11-20 measurements), sized from
+  per-minute touched counts. Each slice is its own transaction (`daytimeSlice` on
+  `refreshContactEngagement`, a REQUIRED option) and advances the org's cursor
+  `cron_locks.contact-engagement-cursor:<org>` to the slice's end in that same
+  transaction. No new slice starts after 540 s; the rest is next tick's, from the
+  cursor, so a burst is worked off without redoing finished slices. The
+  time-due evaluation and a requested threshold re-evaluation run on the first
+  slice, so the budget can never starve them. Why: on 2026-11-16 and 11-17 every
+  afternoon tick escalated (45–312 s per `eng_facts` statement), reading all of
+  `stage_sends` and `clicks`; `contact_engagement` heap hit fell to 32.8% and the
+  campaign-create snapshot lost its cache. Bars:
+  `scripts/test-engagement-daytime-slices.ts` (S1–S9, R1) — the slice path and a
+  full recount produce identical send-path values (status, last_sent_at,
+  freeze_cadence_days, freeze clock, msgs_since_click, last_click_at,
+  time_due_at, contacts.lifecycle_status), identical `contact_offer_campaigns`
+  and identical eligibility layers.
 - Recounts always read a contact's **full** history, so an overlapping window is
   idempotent. Only rows whose values changed are written.
 - `dryRun` computes everything and skips every write.
@@ -971,7 +991,7 @@ step has succeeded for every org:
 
 | Heartbeat | Step | Tolerance | Watched by |
 |---|---|---|---|
-| `contact-engagement` | any recount (every 15 min) | 45 min | hourly `/api/cron/tracking-monitors` |
+| `contact-engagement` | a recount that ends caught up (every 15 min; a daytime tick still working off a burst does not stamp it) | 1.5 h (was 45 min until 2026-11-19; "behind" is paged separately by `contact-engagement-lag:<org>` at > 60 min) | hourly `/api/cron/tracking-monitors` |
 | `contact-engagement-group-rollup` | Group × Lifecycle table (0193), hourly (the `:10` tick) + nightly, since 2026-11-17 | 3 h | hourly `/api/cron/tracking-monitors` |
 | `contact-engagement-full` | nightly full recount | 50 h | the 15-minute run |
 | `contact-engagement-day-rollup` | Lifecycle day rollup (0192), nightly | 50 h | the 15-minute run |

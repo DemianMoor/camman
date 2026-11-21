@@ -89,6 +89,7 @@ async function main() {
           mode: "full",
           dryRun: true,
           initialReason: "backfill",
+          daytimeSlice: null, // a one-off full backfill, never a daytime slice
           withReport: true,
         });
         throw new RolledBack(r);
@@ -121,6 +122,7 @@ async function main() {
       mode: "full",
       dryRun: false,
       initialReason: "backfill",
+          daytimeSlice: null, // a one-off full backfill, never a daytime slice
       withReport: true,
     });
     const prev = (await tx.execute(sql`
